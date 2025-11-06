@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2020-09-06 09:50:55
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2020-09-06 10:02:27
+ * @LastEditTime: 2025-11-06 11:36:49
  * @FilePath: \go-wsc\connection.go
  * @Description: 连接管理逻辑
  *
@@ -109,6 +109,8 @@ func (wsc *Wsc) readMessages() {
 			wsc.closeAndRecConn()
 			return
 		}
+		// 处理消息时加锁
+		wsc.mu.Lock()
 		switch messageType {
 		case websocket.TextMessage:
 			if wsc.onTextMessageReceived != nil {
@@ -119,6 +121,7 @@ func (wsc *Wsc) readMessages() {
 				wsc.onBinaryMessageReceived(message)
 			}
 		}
+		wsc.mu.Unlock()
 	}
 }
 
@@ -136,8 +139,11 @@ func (wsc *Wsc) writeMessages() {
 			continue // 继续处理下一个消息
 		}
 
+		// 处理已发送消息时加锁
+		wsc.mu.Lock()
 		// 根据消息类型处理后续逻辑
 		wsc.handleSentMessage(wsMsg)
+		wsc.mu.Unlock()
 	}
 }
 
@@ -189,6 +195,8 @@ func (wsc *Wsc) CloseWithMsg(msg string) {
 
 // clean 清理资源
 func (wsc *Wsc) clean() {
+	wsc.mu.Lock()
+	defer wsc.mu.Unlock() // 确保在退出时解锁
 	if wsc.Closed() {
 		return
 	}

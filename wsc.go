@@ -10,9 +10,12 @@
  */
 package wsc
 
+import "sync"
+
 // Wsc 结构体表示 WebSocket 客户端
 // Wsc 结构体封装了 WebSocket 连接的管理及其相关操作
 type Wsc struct {
+	mu        sync.Mutex // 互斥锁
 	Config    *Config    // 配置信息，用于配置 WebSocket 客户端的参数
 	WebSocket *WebSocket // 底层 WebSocket 连接，负责实际的网络通信
 

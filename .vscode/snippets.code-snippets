@@ -1,0 +1,526 @@
+{
+    "init var": {
+        "prefix": "vv",
+        "body": [
+            "${2:varName} := ${1:value}"
+        ]
+    },
+    "Case default": {
+        "prefix": "def",
+        "body": [
+            "default:"
+        ]
+    },
+    "Close": {
+        "prefix": "cl",
+        "body": [
+            "close(${0:closable})"
+        ]
+    },
+    "Goroutine anonymous func": {
+        "prefix": "gofunc",
+        "body": [
+            "go func(){",
+            "  $0",
+            "}()"
+        ]
+    },
+    "Slice Remove": {
+        "prefix": "sr",
+        "body": [
+            "${1:slice} = append(${1:slice}[:${2:index}], ${1:slice}[${2:index}+1:]...)"
+        ]
+    },
+    "Defer anonymous func": {
+        "prefix": "defunc",
+        "body": [
+            "defer func() {",
+            "  $0",
+            "}()"
+        ]
+    },
+    "if ok": {
+        "prefix": "ifok",
+        "body": [
+            "if ${1:value}, ok := $2; ok {",
+            "  $0",
+            "}"
+        ]
+    },
+    "delete": {
+        "prefix": "del",
+        "body": [
+            "delete(${1:map}, \"${2:key}\")"
+        ]
+    },
+    "append": {
+        "prefix": "ap",
+        "body": [
+            "${1:slice} = append(${1:slice}, ${0:element})"
+        ]
+    },
+    "log.Printf": {
+        "prefix": "lo",
+        "body": [
+            "log.Printf(\"${1:%+v}\\n\", $0)"
+        ]
+    },
+    "log.Printf err": {
+        "prefix": "le",
+        "body": [
+            "log.Printf(\"${1:%+v}\\n\", err)"
+        ]
+    },
+    "log.Fatal": {
+        "prefix": "lf",
+        "body": [
+            "log.Fatal(${0:err})"
+        ]
+    },
+    "log.Fatalf": {
+        "prefix": "lff",
+        "body": [
+            "log.Fatalf(\"${1:%+v}\\n\", ${0:err})"
+        ]
+    },
+    "log.Errorf": {
+        "prefix": "lef",
+        "body": [
+            "log.Errorf(\"${1:%+v}\\n\", ${0:err})"
+        ]
+    },
+    "fmt.Sprintf": {
+        "prefix": "fms",
+        "body": [
+            "fmt.Sprintf(\"${1:%+v}\", $0)"
+        ]
+    },
+    "fmt.Errorf": {
+        "prefix": "fme",
+        "body": [
+            "fmt.Errorf(\"${1:%+v}\", ${0:err})"
+        ]
+    },
+    "ctx context.Context": {
+        "prefix": "ctx",
+        "body": [
+            "ctx context.Context",
+        ],
+    },
+    "if error": {
+        "prefix": "ier",
+        "body": [
+            "if err != nil {",
+            "  $0",
+            "}"
+        ]
+    },
+    "errors.Is()": {
+        "prefix": "is",
+        "body": [
+            "if errors.Is(err, ${1:exec.ErrNotFound}) {",
+            "  $0",
+            "}"
+        ]
+    },
+    "errors.As()": {
+        "prefix": "as",
+        "body": [
+            "var e ${1:*exec.Error}",
+            "if errors.As(err, &e) {",
+            "  $0",
+            "}"
+        ]
+    },
+    "Error with Stack": {
+        "prefix": "es",
+        "body": [
+            "errors.WithStack(err)"
+        ]
+    },
+    "Error with Message": {
+        "prefix": "em",
+        "body": [
+            "errors.WithMessage(err, ${0:message})"
+        ]
+    },
+    "Error with Messagef": {
+        "prefix": "emf",
+        "body": [
+            "errors.WithMessagef(err, ${1:format}, ${0:args})"
+        ]
+    },
+    "Return Nil": {
+        "prefix": "rn",
+        "body": [
+            "return nil"
+        ]
+    },
+    "Return Nil & err": {
+        "prefix": "rne",
+        "body": [
+            "return nil, err"
+        ]
+    },
+    "Return err": {
+        "prefix": "re",
+        "body": [
+            "return err"
+        ]
+    },
+    "Struct": {
+        "prefix": "st",
+        "body": [
+            "type ${1:structName} struct {",
+            "  $0",
+            "}"
+        ]
+    },
+    "Struct Field": {
+        "prefix": "sf",
+        "body": [
+            "${1:fieldName} ${2:string}"
+        ]
+    },
+    "Struct Tag": {
+        "prefix": "stt",
+        "body": [
+            "`${1:json}:\"${2:jsonFieldName}\"`"
+        ]
+    },
+    "Interface": {
+        "prefix": "inte",
+        "body": [
+            "type ${1:interfaceName} interface {",
+            "  $0",
+            "}"
+        ]
+    },
+    "sync.Mutex Lock and defer Unlock": {
+        "prefix": "lock",
+        "body": [
+            "${1:mu}.Lock()",
+            "defer ${1:mu}.Unlock()"
+        ]
+    },
+    "New Constructor Method": {
+        "prefix": "ne",
+        "body": [
+            "func New$1($2) *$1 {",
+            "  $3",
+            "  return &$1{",
+            "    $0",
+            "  }",
+            "}"
+        ]
+    },
+    "For Range": {
+        "prefix": "fr",
+        "body": [
+            "for _, ${1:v} := range ${2:values} {",
+            "  $0",
+            "}"
+        ]
+    },
+    "For Range Chan": {
+        "prefix": "frr",
+        "body": [
+            "for ${1:v} := range ${2:channel} {",
+            "  $0",
+            "}"
+        ]
+    },
+    "Non-blocking Channel Send": {
+        "prefix": "nb",
+        "body": [
+            "select {",
+            "case $1 <- $0:",
+            "default:",
+            "}"
+        ]
+    },
+    "Testify Assert Nil": {
+        "prefix": "anil",
+        "body": [
+            "assert.Nil(t, ${1:actual})",
+            "$0"
+        ]
+    },
+    "Testify Assert Not Nil": {
+        "prefix": "annil",
+        "body": [
+            "assert.NotNil(t, ${1:actual})",
+            "$0"
+        ]
+    },
+    "Testify Assert Equal": {
+        "prefix": "aeq",
+        "body": [
+            "assert.Equal(t, ${1:expected}, ${2:actual})",
+            "$0"
+        ]
+    },
+    "Testify Assert No Error": {
+        "prefix": "anerr",
+        "body": [
+            "assert.NoError(t, ${1:err})",
+            "$0"
+        ]
+    },
+    "Logrus import": {
+        "description": "logrus import snippet that 'overwrites' standard log lib",
+        "prefix": "logrus",
+        "body": [
+            "${1:log} \"github.com/sirupsen/logrus\"",
+            "$0"
+        ]
+    },
+    "HTTP Handler": {
+        "prefix": "hndl",
+        "body": [
+            "func ${1:handlerName}(w http.ResponseWriter, r *http.Request) {",
+            "  $0",
+            "}"
+        ]
+    },
+    "HTTP GET Request": {
+        "prefix": "httpget",
+        "body": [
+            "resp, err := http.Get(${1:url})",
+            "if err != nil {",
+            "  log.Fatalf(\"Failed to make GET request: %v\", err)",
+            "}",
+            "defer resp.Body.Close()",
+            "$0"
+        ]
+    },
+    "JSON Unmarshal": {
+        "prefix": "jsonum",
+        "body": [
+            "var ${1:variable} ${2:TypeName}",
+            "if err := json.Unmarshal(body, &${1:variable}); err != nil {",
+            "  log.Fatalf(\"Error unmarshalling JSON: %v\", err)",
+            "}",
+            "$0"
+        ]
+    },
+    "JSON Marshal": {
+        "prefix": "jsonm",
+        "body": [
+            "data, err := json.Marshal(${1:yourStruct})",
+            "if err != nil {",
+            "  log.Fatalf(\"Error marshalling JSON: %v\", err)",
+            "}",
+            "$0"
+        ]
+    },
+    "Channel Creation": {
+        "prefix": "chan",
+        "body": [
+            "${1:ch} := make(chan ${2:Type}, ${3:bufferSize})"
+        ]
+    },
+    "Select Statement": {
+        "prefix": "select",
+        "body": [
+            "select {",
+            "case ${1:msg} := <-${2:channel}:",
+            "  $0",
+            "default:",
+            "  $3",
+            "}"
+        ]
+    },
+    "Mutex Example": {
+        "prefix": "mutex",
+        "body": [
+            "var mu sync.Mutex",
+            "mu.Lock()",
+            "$0",
+            "mu.Unlock()"
+        ]
+    },
+    "Testify Assert True": {
+        "prefix": "atrue",
+        "body": [
+            "assert.True(t, ${1:condition})",
+            "$0"
+        ]
+    },
+    "Testify Assert False": {
+        "prefix": "afalse",
+        "body": [
+            "assert.False(t, ${1:condition})",
+            "$0"
+        ]
+    },
+    "Main Function": {
+        "prefix": "main",
+        "body": [
+            "func main() {",
+            "  $0",
+            "}"
+        ]
+    },
+    "For Loop": {
+        "prefix": "for",
+        "body": [
+            "for ${1:i} := 0; ${1:i} < ${2:n}; ${1:i}++ {",
+            "  $0",
+            "}"
+        ]
+    },
+    "Range over Map": {
+        "prefix": "formap",
+        "body": [
+            "for key, value := range ${1:myMap} {",
+            "  $0",
+            "}"
+        ]
+    },
+    "HTTP Server": {
+        "prefix": "httpserver",
+        "body": [
+          "package main",
+          "",
+          "import (",
+          "  \"fmt\"",
+          "  \"net/http\"",
+          ")",
+          "",
+          "func main() {",
+          "  http.HandleFunc(\"/${1:path}\", ${2:handler})",
+          "  fmt.Println(\"Server is running on :8080\")",
+          "  if err := http.ListenAndServe(":8080", nil); err != nil {",
+          "    log.Fatalf(\"Unable to start server: %v\", err)",
+          "  }",
+          "}"
+        ]
+      },
+    
+      "Custom HTTP Handler": {
+        "prefix": "customhndl",
+        "body": [
+          "type ${1:HandlerName} struct {",
+          "  // Add fields here",
+          "}",
+          "",
+          "func (h *${1:HandlerName}) ServeHTTP(w http.ResponseWriter, r *http.Request) {",
+          "  $0",
+          "}"
+        ]
+      },
+    
+      "Context with Timeout": {
+        "prefix": "context",
+        "body": [
+          "ctx, cancel := context.WithTimeout(context.Background(), ${1:duration})",
+          "defer cancel()",
+          "$0"
+        ]
+      },
+    
+      "Goroutine Example": {
+        "prefix": "goroutine",
+        "body": [
+          "go func() {",
+          "  $0",
+          "}()"
+        ]
+      },
+    
+      "Error Handling with Wrap": {
+        "prefix": "errwrap",
+        "body": [
+          "if err != nil {",
+          "  return fmt.Errorf(\"${1:context}: %w\", err)",
+          "}",
+          "$0"
+        ]
+      },
+    
+      "Struct Definition": {
+        "prefix": "struct",
+        "body": [
+          "type ${1:StructName} struct {",
+          "  ${2:FieldName} ${3:FieldType}",
+          "  $0",
+          "}"
+        ]
+      },
+    
+      "Interface Definition": {
+        "prefix": "interface",
+        "body": [
+          "type ${1:InterfaceName} interface {",
+          "  ${2:MethodName}(${3:paramType}) ${4:returnType}",
+          "}",
+          "$0"
+        ]
+      },
+    
+      "Read File": {
+        "prefix": "readfile",
+        "body": [
+          "data, err := os.ReadFile(${1:filePath})",
+          "if err != nil {",
+          "  log.Fatalf(\"Error reading file: %v\", err)",
+          "}",
+          "$0"
+        ]
+      },
+    
+      "Write File": {
+        "prefix": "writefile",
+        "body": [
+          "err := os.WriteFile(${1:filePath}, []byte(${2:data}), 0644)",
+          "if err != nil {",
+          "  log.Fatalf(\"Error writing file: %v\", err)",
+          "}",
+          "$0"
+        ]
+      },
+    
+      "Channel Select with Timeout": {
+        "prefix": "chanselect",
+        "body": [
+          "select {",
+          "case msg := <-${1:channel}:",
+          "  $0",
+          "case <-time.After(time.Duration(${2:timeout})):",
+          "  log.Println(\"Timeout\")",
+          "}"
+        ]
+      },
+    
+      "Using WaitGroup": {
+        "prefix": "wg",
+        "body": [
+          "var wg sync.WaitGroup",
+          "",
+          "wg.Add(1)",
+          "go func() {",
+          "  defer wg.Done()",
+          "  $0",
+          "}",
+          "",
+          "wg.Wait()"
+        ]
+      },
+    
+      "Testing Function": {
+        "prefix": "testfunc",
+        "body": [
+          "func Test${1:FunctionName}(t *testing.T) {",
+          "  // Arrange",
+          "  ${2:input} := ${3:value}",
+          "",
+          "  // Act",
+          "  result := ${4:functionName}(${2:input})",
+          "",
+          "  // Assert",
+          "  assert.Equal(t, ${5:expected}, result)",
+          "}"
+        ]
+      },
+}

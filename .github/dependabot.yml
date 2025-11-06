@@ -1,0 +1,65 @@
+version: 2
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/"
+    labels:
+      - "🤖 Dependencies"
+    schedule:
+      interval: "daily"
+    ignore:
+      - dependency-name: "github.com/disintegration/imaging"
+        versions: ["*"]
+      - dependency-name: "github.com/google/uuid"
+        versions: ["*"]
+      - dependency-name: "github.com/stretchr/testify"
+        versions: ["*"]
+      - dependency-name: "github.com/davecgh/go-spew"
+        versions: ["*"]
+      - dependency-name: "github.com/golang/freetype"
+        versions: ["*"]
+      - dependency-name: "github.com/kr/pretty"
+        versions: ["*"]
+      - dependency-name: "github.com/kr/text"
+        versions: ["*"]
+      - dependency-name: "github.com/pmezard/go-difflib"
+        versions: ["*"]
+      - dependency-name: "golang.org/x/image"
+        versions: ["*"]
+      - dependency-name: "gopkg.in/check.v1"
+        versions: ["*"]
+      - dependency-name: "github.com/bytedance/sonic"
+        versions: ["*"]
+      - dependency-name: "github.com/bytedance/sonic/loader"
+        versions: ["*"]
+      - dependency-name: "github.com/cloudwego/base64x"
+        versions: ["*"]
+      - dependency-name: "github.com/cloudwego/iasm"
+        versions: ["*"]
+      - dependency-name: "github.com/fogleman/gg"
+        versions: ["*"]
+      - dependency-name: "github.com/goccy/go-json"
+        versions: ["*"]
+      - dependency-name: "github.com/json-iterator/go"
+        versions: ["*"]
+      - dependency-name: "github.com/klauspost/cpuid/v2"
+        versions: ["*"]
+      - dependency-name: "github.com/modern-go/concurrent"
+        versions: ["*"]
+      - dependency-name: "github.com/modern-go/reflect2"
+        versions: ["*"]
+      - dependency-name: "github.com/twitchyliquid64/golang-asm"
+        versions: ["*"]
+      - dependency-name: "golang.org/x/arch"
+        versions: ["*"]
+      - dependency-name: "golang.org/x/crypto"
+        versions: ["*"]
+      - dependency-name: "golang.org/x/sys"
+        versions: ["*"]
+      - dependency-name: "gopkg.in/yaml.v3"
+        versions: ["*"]
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule: 
+      interval: daily
+    labels: 
+      - "🤖 Dependencies"

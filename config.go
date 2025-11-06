@@ -1,8 +1,8 @@
 /*
  * @Author: kamalyes 501893067@qq.com
- * @Date: 2020-09-06 09:50:55
+ * @Date: 2025-09-06 09:50:55
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2020-09-06 10:07:17
+ * @LastEditTime: 2025-09-06 10:07:17
  * @FilePath: \go-wsc\config.go
  * @Description: Config 结构体
  *

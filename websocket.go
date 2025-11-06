@@ -1,6 +1,6 @@
 /*
  * @Author: kamalyes 501893067@qq.com
- * @Date: 2020-09-06 09:50:55
+ * @Date: 2025-09-06 09:50:55
  * @LastEditors: kamalyes 501893067@qq.com
  * @LastEditTime: 2025-11-06 11:21:55
  * @FilePath: \go-wsc\websocket.go
@@ -28,6 +28,9 @@ type WebSocket struct {
 	connMu        *sync.RWMutex     // 连接状态锁
 	sendMu        *sync.Mutex       // 发送消息锁
 	sendChan      chan *wsMsg       // 发送消息缓冲池
+	sendChanMu    *sync.RWMutex     // 保护 sendChan 指针和关闭操作
+	sendChanClosed int32            // 发送通道关闭标记（原子）
+	sendChanOnce   sync.Once        // 只关闭一次
 }
 
 // NewWebSocket 创建一个新的 WebSocket 连接
@@ -39,6 +42,7 @@ func NewWebSocket(url string) *WebSocket {
 		isConnected:   false,
 		connMu:        &sync.RWMutex{},
 		sendMu:        &sync.Mutex{},
+		sendChanMu:    &sync.RWMutex{},
 		sendChan:      make(chan *wsMsg, 256), // 初始化发送消息缓冲池
 	}
 }

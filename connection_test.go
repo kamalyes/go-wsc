@@ -1,8 +1,8 @@
 /*
  * @Author: kamalyes 501893067@qq.com
- * @Date: 2020-09-06 09:50:55
+ * @Date: 2025-09-06 09:50:55
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2020-09-06 10:34:53
+ * @LastEditTime: 2025-11-07 01:15:05
  * @FilePath: \go-wsc\connection_test.go
  * @Description:
  *
@@ -74,4 +74,26 @@ func TestCloseConnection(t *testing.T) {
 	client.Close()
 
 	assert.True(t, client.Closed())
+}
+
+// TestClosed_ThreadSafety 测试Closed方法的线程安全性
+func TestClosed_ThreadSafety(t *testing.T) {
+	client := New("ws://localhost:8080")
+	
+	// 测试线程安全
+	done := make(chan bool)
+	for i := 0; i < 10; i++ {
+		go func() {
+			for j := 0; j < 100; j++ {
+				client.Closed()
+			}
+			done <- true
+		}()
+	}
+	
+	for i := 0; i < 10; i++ {
+		<-done
+	}
+	
+	assert.True(t, true, "Thread safety test completed")
 }

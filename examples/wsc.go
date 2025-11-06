@@ -1,8 +1,8 @@
 /*
  * @Author: kamalyes 501893067@qq.com
- * @Date: 2020-09-06 09:55:57
+ * @Date: 2025-09-06 09:55:57
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2020-09-06 10:59:57
+ * @LastEditTime: 2025-09-06 10:59:57
  * @FilePath: \go-wsc\examples\wsc.go
  * @Description:
  *

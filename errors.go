@@ -1,8 +1,8 @@
 /*
  * @Author: kamalyes 501893067@qq.com
- * @Date: 2020-09-06 09:50:55
+ * @Date: 2025-09-06 09:50:55
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2020-09-06 10:05:09
+ * @LastEditTime: 2025-09-06 10:05:09
  * @FilePath: \go-wsc\errors.go
  * @Description: 定义错误变量
  *

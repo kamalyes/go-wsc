@@ -1,8 +1,8 @@
 /*
  * @Author: kamalyes 501893067@qq.com
- * @Date: 2020-09-06 09:50:55
+ * @Date: 2025-09-06 09:50:55
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2020-09-06 10:00:51
+ * @LastEditTime: 2025-09-06 10:00:51
  * @FilePath: \go-wsc\message.go
  * @Description: 消息处理逻辑
  *
@@ -11,6 +11,7 @@
 package wsc
 
 import (
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -27,7 +28,12 @@ func (wsc *Wsc) SendTextMessage(message string) error {
 	if wsc.Closed() {
 		return ErrClose
 	}
-	// 将消息放入发送缓冲区
+	// 读锁保护 sendChan 指针与关闭标志一致性
+	wsc.WebSocket.sendChanMu.RLock()
+	defer wsc.WebSocket.sendChanMu.RUnlock()
+	if atomic.LoadInt32(&wsc.WebSocket.sendChanClosed) == 1 {
+		return ErrClose
+	}
 	select {
 	case wsc.WebSocket.sendChan <- &wsMsg{
 		t:   websocket.TextMessage,
@@ -44,7 +50,12 @@ func (wsc *Wsc) SendBinaryMessage(data []byte) error {
 	if wsc.Closed() {
 		return ErrClose
 	}
-	// 将消息放入发送缓冲区
+	// 读锁保护 sendChan 指针与关闭标志一致性
+	wsc.WebSocket.sendChanMu.RLock()
+	defer wsc.WebSocket.sendChanMu.RUnlock()
+	if atomic.LoadInt32(&wsc.WebSocket.sendChanClosed) == 1 {
+		return ErrClose
+	}
 	select {
 	case wsc.WebSocket.sendChan <- &wsMsg{
 		t:   websocket.BinaryMessage,

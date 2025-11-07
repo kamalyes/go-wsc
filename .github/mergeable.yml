@@ -1,0 +1,22 @@
+version: 2
+mergeable:
+  - when: pull_request.*
+    validate:
+      - do: or
+        validate:
+          - do: disallow
+            files: 
+              - '.github/workflows/test.yml'
+            message: "Changes to test.yml workflow must be manually reviewed and merged."
+    pass:
+      - do: checks
+        status: success
+        payload:
+          title: Success
+          summary: Validation successful
+    fail:
+      - do: checks
+        status: failure
+        payload:
+          title: Error
+          summary: "❌ The test.yml workflow file cannot be modified by automation tools. Please review manually."

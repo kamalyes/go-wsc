@@ -20,6 +20,7 @@ type Config struct {
 	MaxRecTime        time.Duration // 最大重连时间
 	RecFactor         float64       // 重连因子
 	MessageBufferSize int           // 消息缓冲池大小
+	AutoReconnect     bool          // 是否自动重连
 }
 
 // NewDefaultConfig 创建默认配置
@@ -31,6 +32,7 @@ func NewDefaultConfig() *Config {
 		MaxRecTime:        60 * time.Second,
 		RecFactor:         1.5,
 		MessageBufferSize: 256,
+		AutoReconnect:     true,
 	}
 }
 
@@ -67,5 +69,11 @@ func (c *Config) WithRecFactor(factor float64) *Config {
 // WithMessageBufferSize 设置消息缓冲池大小并返回当前配置对象
 func (c *Config) WithMessageBufferSize(size int) *Config {
 	c.MessageBufferSize = size
+	return c
+}
+
+// WithAutoReconnect 设置自动重连开关
+func (c *Config) WithAutoReconnect(enabled bool) *Config {
+	c.AutoReconnect = enabled
 	return c
 }

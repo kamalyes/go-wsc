@@ -71,10 +71,17 @@ func (wsc *Wsc) SendBinaryMessage(data []byte) error {
 func (wsc *Wsc) send(messageType int, data []byte) error {
 	wsc.WebSocket.sendMu.Lock()
 	defer wsc.WebSocket.sendMu.Unlock()
-	if wsc.Closed() {
+	
+	// 使用读锁保护连接状态和 Conn 的访问
+	wsc.WebSocket.connMu.RLock()
+	if !wsc.WebSocket.isConnected {
+		wsc.WebSocket.connMu.RUnlock()
 		return ErrClose
 	}
+	conn := wsc.WebSocket.Conn
+	wsc.WebSocket.connMu.RUnlock()
+	
 	// 设置写超时
-	_ = wsc.WebSocket.Conn.SetWriteDeadline(time.Now().Add(wsc.Config.WriteWait))
-	return wsc.WebSocket.Conn.WriteMessage(messageType, data)
+	_ = conn.SetWriteDeadline(time.Now().Add(wsc.Config.WriteWait))
+	return conn.WriteMessage(messageType, data)
 }

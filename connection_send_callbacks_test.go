@@ -64,11 +64,17 @@ func TestConnection_TextAndBinarySentCallbacks(t *testing.T) {
 // Test onSentError callback firing when underlying connection is closed mid-send.
 func TestConnection_OnSentErrorTriggered(t *testing.T) {
     upgrader := websocket.Upgrader{}
-    // Server that upgrades then immediately closes connection before any writes.
+    // 稳定的回显服务器，后续由测试主动关闭客户端底层连接制造发送错误
     srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         c, err := upgrader.Upgrade(w, r, nil)
         if err != nil { t.Fatalf("upgrade: %v", err) }
-        _ = c.Close() // immediate close ensures first client write fails
+        go func() {
+            for {
+                _, msg, err := c.ReadMessage()
+                if err != nil { return }
+                _ = c.WriteMessage(websocket.TextMessage, msg)
+            }
+        }()
     }))
     defer srv.Close()
 
@@ -76,16 +82,29 @@ func TestConnection_OnSentErrorTriggered(t *testing.T) {
     client := New(wsURL)
     var errCount atomic.Int32
     client.OnSentError(func(e error) { errCount.Add(1) })
-    client.OnConnectError(func(err error) {})
+    client.OnConnectError(func(err error) { /* 忽略连接错误回调: 测试仅关注发送错误 */ })
+    // 禁用自动重连，确保关闭后发送直接失败
+    cfg := NewDefaultConfig().WithAutoReconnect(false)
+    client.SetConfig(cfg)
     client.Connect()
 
-    // Attempt several sends; underlying write goroutine should encounter errors.
+    // 人为标记断开（不调用 clean 以保持 sendChan 可用）并强制制造发送错误
+    client.WebSocket.connMu.Lock()
+    client.WebSocket.isConnected = false
+    client.WebSocket.connMu.Unlock()
+
+    // 直接向内部发送通道注入消息，绕过 SendTextMessage 对关闭状态的短路
     for i := 0; i < 3; i++ {
-        _ = client.SendTextMessage("m")
+        client.WebSocket.sendChanMu.RLock()
+        select {
+        case client.WebSocket.sendChan <- &wsMsg{t: websocket.TextMessage, msg: []byte("m")}:
+        default: // 若缓冲已满则忽略
+        }
+        client.WebSocket.sendChanMu.RUnlock()
     }
 
-    // Wait up to 1s for write goroutine to report errors
-    deadline := time.Now().Add(1 * time.Second)
+    // 等待错误回调执行
+    deadline := time.Now().Add(500 * time.Millisecond)
     for errCount.Load() < 1 && time.Now().Before(deadline) {
         time.Sleep(10 * time.Millisecond)
     }

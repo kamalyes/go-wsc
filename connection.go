@@ -109,11 +109,16 @@ func (wsc *Wsc) readMessages() {
 	for {
 		messageType, message, err := wsc.WebSocket.Conn.ReadMessage()
 		if err != nil {
-			// 异常断线重连
-		       if f := wsc.onDisconnected.Load(); f != nil {
-			       f.(func(error))(err)
-		       }
-			wsc.closeAndRecConn()
+			// 异常断线
+			if f := wsc.onDisconnected.Load(); f != nil {
+				f.(func(error))(err)
+			}
+			// 根据配置决定是否重连
+			if wsc.Config == nil || wsc.Config.AutoReconnect {
+				wsc.closeAndRecConn()
+			} else {
+				wsc.clean()
+			}
 			return
 		}
 		// 处理消息时加锁

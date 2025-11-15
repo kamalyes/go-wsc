@@ -138,6 +138,7 @@ graph TB
 ### 🔧 集成指南  
 
 - [🎯 TypeScript 前端集成](./docs/TypeScript_Integration.md) - React/Vue/Angular 示例
+- [☕ Java 客户端集成](./docs/Java_Client_Integration.md) - 企业级 Java 客户端实现
 - [📡 ACK 消息确认机制](./docs/ACK_Mechanism.md) - 可靠消息传输
 - [📊 性能优化指南](./docs/Performance_Guide.md) - 调优和监控
 

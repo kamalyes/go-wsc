@@ -16,3 +16,15 @@ require (
 	gopkg.in/check.v1 v1.0.0-20190902080502-41f04d3bba15 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+
+// 本地开发替换
+// replace github.com/kamalyes/go-wsc => ../go-wsc
+
+// replace github.com/kamalyes/go-cachex => ../go-cachex
+
+// replace github.com/kamalyes/go-config => ../go-config
+
+// replace github.com/kamalyes/go-logger => ../go-logger
+
+// replace github.com/kamalyes/go-toolbox => ../go-toolbox

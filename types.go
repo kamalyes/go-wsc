@@ -103,6 +103,7 @@ const (
 	MessageTypeSystem MessageType = "system" // 系统消息
 	MessageTypeNotice MessageType = "notice" // 通知消息
 	MessageTypeEvent  MessageType = "event"  // 事件消息
+	MessageTypeAck    MessageType = "ack"    // ACK确认消息
 )
 
 // String 实现Stringer接口
@@ -115,7 +116,7 @@ func (t MessageType) IsValid() bool {
 	switch t {
 	case MessageTypeText, MessageTypeImage, MessageTypeFile,
 		MessageTypeAudio, MessageTypeVideo, MessageTypeSystem,
-		MessageTypeNotice, MessageTypeEvent:
+		MessageTypeNotice, MessageTypeEvent, MessageTypeAck:
 		return true
 	default:
 		return false

@@ -16,6 +16,7 @@
 ### ✅ 1. 使用 atomic 替代 mutex 保护的统计
 
 **优化内容：**
+
 ```go
 // 之前：需要持有锁
 h.mutex.Lock()
@@ -31,6 +32,7 @@ h.messagesSent.Add(1)  // 原子操作，~10ns
 ### ✅ 2. 简化 handleBroadcast，减少内存分配
 
 **优化内容：**
+
 - 移除对象池（反而增加开销）
 - 点对点消息直接在锁内操作
 - 避免不必要的slice复制
@@ -40,6 +42,7 @@ h.messagesSent.Add(1)  // 原子操作，~10ns
 ### ✅ 3. 优化锁的使用策略
 
 **优化内容：**
+
 ```go
 // 点对点消息 - 最小锁范围
 h.mutex.RLock()
@@ -59,6 +62,7 @@ h.mutex.RUnlock()
 ### ✅ 4. Channel 关闭优化
 
 **优化内容：**
+
 ```go
 // 使用defer+recover安全关闭
 if client.SendChan != nil {
@@ -113,13 +117,15 @@ go test -race -run TestHubConcurrentOperations -timeout 30s
 
 ## atomic vs mutex 选择指南
 
-### 优先使用 atomic：
+### 优先使用 atomic
+
 - ✅ 简单计数器
 - ✅ 标志位
 - ✅ 高频更新的统计
 - ✅ 无复杂逻辑的读写
 
-### 必须使用 mutex：
+### 必须使用 mutex
+
 - ✅ 保护复杂数据结构
 - ✅ 多个相关字段的事务性操作
 - ✅ map/slice 的并发访问
@@ -129,6 +135,7 @@ go test -race -run TestHubConcurrentOperations -timeout 30s
 通过合理使用 `atomic` 和优化锁策略，Hub的性能提升了 **14-31%**，同时保持了代码简洁性和并发安全性。
 
 关键要点：
+
 1. **atomic 用于统计** - 消除锁竞争
 2. **最小化锁范围** - 只保护必要操作
 3. **避免过度优化** - 对象池并非总是更快

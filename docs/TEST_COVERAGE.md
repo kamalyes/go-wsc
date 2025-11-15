@@ -5,6 +5,7 @@
 ## 目标: 99%
 
 ### 最近更新
+
 - 提升了连接相关代码的并发安全性（`connection.go`），新增/调整发送回调测试，间接提高覆盖率。
 - 将固定时间等待改为循环轮询，减少竞态与随机失败（`connection_send_callbacks_test.go`）。
 - Race + Shuffle 组合测试现已稳定通过。
@@ -13,6 +14,7 @@
 ## 已完成的测试文件
 
 ### 1. dynamic_queue_test.go
+
 - ✅ TestSmartGrowth - 智能增长策略测试
 - ✅ TestAdaptiveShrink - 自适应缩容测试
 - ✅ TestGrowthComparison - 增长策略对比测试
@@ -25,6 +27,7 @@
 - ✅ TestDynamicQueue_ShrinkBoundaries - 缩容策略边界测试
 
 ### 2. dynamic_queue_benchmark_test.go
+
 - ✅ TestDynamicQueue_Basic - 基本操作测试
 - ✅ TestDynamicQueue_AutoExpand - 自动扩容测试
 - ✅ TestDynamicQueue_AutoShrink - 自动缩容测试
@@ -34,6 +37,7 @@
 - ✅ BenchmarkDynamicQueue_PushPop - PushPop性能测试
 
 ### 3. message_test.go (新增)
+
 - ✅ TestSendTextMessage - 发送文本消息
 - ✅ TestSendBinaryMessage - 发送二进制消息
 - ✅ TestSendMessage_WhenClosed - 关闭后发送测试
@@ -44,12 +48,14 @@
 - ✅ TestSendMessage_EmptyMessage - 空消息发送测试
 
 ### 4. errors_test.go (新增)
+
 - ✅ TestErrors - 错误定义测试
   - ErrClose错误测试
   - ErrBufferFull错误测试
   - 错误比较测试
 
 ### 5. wsc_test.go (增强)
+
 - ✅ TestWebSocketServer - WebSocket服务器测试
 - ✅ TestWebSocketServerConnectionError - 连接错误测试
 - ✅ TestWebSocketServerMessageEcho - 消息回显测试
@@ -59,6 +65,7 @@
 - ✅ TestWsc_Closed - 连接状态检查测试
 
 ### 6. config_test.go (已有)
+
 - ✅ TestNewDefaultConfig - 默认配置测试
 - ✅ TestConfigMethods - 配置方法测试
 - ✅ TestWithRequestHeader - 请求头配置测试
@@ -67,10 +74,12 @@
 - ✅ TestWithDialer - 拨号器配置测试
 
 ### 7. connection_test.go (已有)
+
 - ✅ TestNewWebSocket - 新建WebSocket测试
 - ✅ TestCloseConnection - 关闭连接测试
 
 ### 8. websocket_benchmark_test.go (已有)
+
 - ✅ 18+ 综合性能测试
 - ✅ 覆盖所有回调场景
 
@@ -91,24 +100,30 @@ assert.NotNil(t, obj, "对象不应为nil")
 ## 测试执行统计
 
 ### 单元测试
+
 ```bash
 go test -v ./...
 ```
+
 - 测试总数: 40+
 - 通过率: 100%
 - 执行时间: ~5-8秒
 
 ### 竞态检测
+
 ```bash
 go test -race ./...
 ```
+
 - ✅ 无竞态条件
 - 执行时间: ~8秒
 
 ### 性能测试
+
 ```bash
 go test -bench=. -benchmem
 ```
+
 - BenchmarkDynamicQueue_Push: 142.9 ns/op, 0 allocs/op
 - BenchmarkDynamicQueue_PushPop: 213.7 ns/op, 0 allocs/op
 - BenchmarkSmartGrowth: 353.6 ns/op, 0 allocs/op
@@ -118,6 +133,7 @@ go test -bench=. -benchmem
 要达到 99% 覆盖率，还需添加以下测试（当前剩余约 3–4%）：
 
 ### 1. connection.go（重连与异常路径）
+
 - [ ] 完整重连流程：模拟多次断线与指数退避重试
 - [ ] `handleSentMessage` 的 `CloseMessage` 分支显式验证（当前仅通过间接路径覆盖）
 - [ ] `readMessages` 的二进制/文本/错误路径细分断言（包括 onDisconnected 回调判定）
@@ -125,12 +141,14 @@ go test -bench=. -benchmem
 - [ ] `setupHandlers` 中 close/ping/pong handler 的回调链全覆盖（包含返回错误的情况）
 
 ### 2. websocket.go
+
 - [ ] WithDialer的深度测试
 - [ ] WithRequestHeader的边界测试
 - [ ] WithSendBufferSize的验证
 - [ ] WithCustomURL的URL解析测试
 
 ### 3. dynamic_queue.go
+
 - [ ] resize函数的所有路径
 - [ ] 极端容量情况（1, maxInt等）
 - [ ] 并发resize的竞态测试

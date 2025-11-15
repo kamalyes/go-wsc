@@ -1,27 +1,693 @@
-# Go WebSocket Client (go-wsc)
+# Go WebSocket Client (go-wsc) 🚀
 
-> `go-wsc` 是一个用于管理 WebSocket 连接的 Go 客户端库它封装了 WebSocket 连接的管理、消息发送和接收，并提供了灵活的配置选项以及回调函数，方便开发者在使用 WebSocket 时进行扩展和定制该库支持自动重连、消息缓冲和连接状态管理，旨在简化 WebSocket 的使用
-
-[![stable](https://img.shields.io/badge/stable-stable-green.svg)](https://github.com/kamalyes/go-wsc)
-[![license](https://img.shields.io/github/license/kamalyes/go-wsc)]()
-[![download](https://img.shields.io/github/downloads/kamalyes/go-wsc/total)]()
-[![release](https://img.shields.io/github/v/release/kamalyes/go-wsc)]()
-[![commit](https://img.shields.io/github/last-commit/kamalyes/go-wsc)]()
-[![issues](https://img.shields.io/github/issues/kamalyes/go-wsc)]()
-[![pull](https://img.shields.io/github/issues-pr/kamalyes/go-wsc)]()
-[![fork](https://img.shields.io/github/forks/kamalyes/go-wsc)]()
-[![star](https://img.shields.io/github/stars/kamalyes/go-wsc)]()
-[![go](https://img.shields.io/github/go-mod/go-version/kamalyes/go-wsc)]()
-[![size](https://img.shields.io/github/repo-size/kamalyes/go-wsc)]()
-[![contributors](https://img.shields.io/github/contributors/kamalyes/go-wsc)]()
-[![codecov](https://codecov.io/gh/kamalyes/go-wsc/branch/master/graph/badge.svg)](https://codecov.io/gh/kamalyes/go-wsc)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/kamalyes/go-wsc)](https://github.com/kamalyes/go-wsc)
+[![Release](https://img.shields.io/github/v/release/kamalyes/go-wsc)](https://github.com/kamalyes/go-wsc/releases)
 [![Go Report Card](https://goreportcard.com/badge/github.com/kamalyes/go-wsc)](https://goreportcard.com/report/github.com/kamalyes/go-wsc)
 [![Go Reference](https://pkg.go.dev/badge/github.com/kamalyes/go-wsc?status.svg)](https://pkg.go.dev/github.com/kamalyes/go-wsc?tab=doc)
-[![Sourcegraph](https://sourcegraph.com/github.com/kamalyes/go-wsc/-/badge.svg)](https://sourcegraph.com/github.com/kamalyes/go-wsc?badge)
+[![GitHub Issues](https://img.shields.io/github/issues/kamalyes/go-wsc)](https://github.com/kamalyes/go-wsc/issues)
+[![GitHub Stars](https://img.shields.io/github/stars/kamalyes/go-wsc)](https://github.com/kamalyes/go-wsc/stargazers)
+[![codecov](https://codecov.io/gh/kamalyes/go-wsc/branch/master/graph/badge.svg)](https://codecov.io/gh/kamalyes/go-wsc)
 
-## 特性
+**go-wsc** 是一个企业级 Go WebSocket 框架，专注于高性能实时通信。提供智能重连、消息确认(ACK)、连接池管理等关键特性，支持百万级并发连接。
+
+
+## 架构
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                       Hub (中心节点)                                  │
+│  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐         │
+│  │   WebSocket    │  │      SSE       │  │  统计信息      │         │
+│  │   客户端       │  │     连接       │  │  (原子操作)    │         │
+│  └────────────────┘  └────────────────┘  └────────────────┘         │
+│                                                                       │
+│  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐         │
+│  │  ACK 管理器    │  │  消息记录      │  │  离线处理      │         │
+│  │  (确认/重试)   │  │  (状态跟踪)    │  │  (数据持久化)  │         │
+│  └────────────────┘  └────────────────┘  └────────────────┘         │
+└─────────────────────────────────────────────────────────────────────┘
+           │                    │                    │
+     ┌─────┴─────┐       ┌──────┴──────┐      ┌────┴────┐
+     │   注册    │       │    广播     │      │  统计   │
+     │   注销    │       │    消息     │      │  查询   │
+     └───────────┘       └─────────────┘      └─────────┘
+           │                    │                    │
+    ┌──────┴──────┐      ┌──────┴──────┐     ┌──────┴──────┐
+    │  心跳检测   │      │   消息路由  │     │   监控指标  │
+    │  超时处理   │      │  点对点/组  │     │   统计数据  │
+    └─────────────┘      └─────────────┘     └─────────────┘
+                                │
+                    ┌───────────┴───────────┐
+                    │   消息发送流程         │
+                    │                       │
+                    │  1. 发送到 Hub        │
+                    │  2. ACK 确认等待      │
+                    │  3. 超时自动重试      │
+                    │  4. 记录发送状态      │
+                    │  5. 失败消息处理      │
+                    └───────────────────────┘
+```
+
+## ✨ 核心特性
+
+### 🎯 客户端功能
+
+- **🔄 智能重连**：支持指数退避策略的自动重连机制
+- **💬 多种消息类型**：文本消息、二进制消息、Ping/Pong 心跳
+- **🎭 事件回调**：完整的生命周期回调函数支持
+- **⚡ 高性能**：异步消息处理和可配置缓冲池
+- **🛡️ 可靠性**：连接状态管理和错误处理机制
+
+### 🏢 服务端 Hub 功能  
+
+- **🚀 极致性能**：支持每秒 720 万条消息处理
+- **🔀 多协议支持**：WebSocket 和 SSE (Server-Sent Events)
+- **💓 智能心跳**：自动心跳检测和连接超时处理
+- **🎯 消息路由**：点对点、群组广播、工单路由
+- **✅ ACK 确认**：消息送达确认和自动重试机制
+- **📝 记录系统**：完整的消息记录和失败重试管理
+
+## 📚 目录
+
+- [安装](#-安装)
+- [快速开始](#-快速开始)
+  - [客户端示例](#客户端示例)
+  - [TypeScript 客户端示例](#typescript-客户端示例)
+  - [服务端 Hub 示例](#服务端-hub-示例)
+- [高级用法](#-高级用法)
+- [API 文档](#-api-文档)
+- [性能基准](#-性能基准)
+- [测试](#-测试)
+- [优化建议](#-性能优化建议)
+- [贡献](#-贡献)
+- [许可证](#-许可证)
+
+## 📦 安装
+
+```bash
+go get github.com/kamalyes/go-wsc
+```
+
+**要求：** Go 1.20+
+
+## 🚀 快速开始
+
+### 客户端示例
+
+#### 基础连接
+
+```go
+package main
+
+import (
+    "fmt"
+    "log"
+    "time"
+    
+    "github.com/kamalyes/go-wsc"
+)
+
+func main() {
+    // 创建客户端
+    client := wsc.New("ws://localhost:8080/ws")
+    
+    // 设置回调函数
+    client.OnConnected(func() {
+        fmt.Println("✅ 连接成功")
+        // 发送消息
+        client.SendText("Hello, WebSocket!")
+    })
+    
+    client.OnTextMessageReceived(func(message string) {
+        fmt.Printf("📨 收到消息: %s\n", message)
+    })
+    
+    client.OnDisconnected(func(err error) {
+        fmt.Printf("❌ 连接断开: %v\n", err)
+    })
+    
+    // 开始连接
+    client.Connect()
+    
+    // 保持程序运行
+    time.Sleep(30 * time.Second)
+    client.Close()
+}
+```
+
+#### 高级配置示例
+
+```go
+package main
+
+import (
+    "log"
+    "time"
+    
+    "github.com/kamalyes/go-wsc"
+)
+
+func main() {
+    // 创建自定义配置
+    config := wsc.NewDefaultConfig().
+        WithWriteWait(15*time.Second).
+        WithMaxMessageSize(1024).
+        WithMessageBufferSize(512).
+        WithAutoReconnect(true).
+        WithMinRecTime(1*time.Second).
+        WithMaxRecTime(30*time.Second).
+        WithRecFactor(2.0)
+    
+    // 创建客户端并应用配置
+    client := wsc.New("ws://localhost:8080/ws")
+    client.SetConfig(config)
+    
+    // 设置完整的回调处理
+    setupCallbacks(client)
+    
+    // 连接
+    client.Connect()
+    
+    // 模拟业务逻辑
+    go func() {
+        ticker := time.NewTicker(5 * time.Second)
+        defer ticker.Stop()
+        
+        for {
+            select {
+            case <-ticker.C:
+                if !client.Closed() {
+                    client.SendText(fmt.Sprintf("心跳消息: %v", time.Now().Unix()))
+                }
+            }
+        }
+    }()
+    
+    // 优雅关闭
+    select {}
+}
+
+func setupCallbacks(client *wsc.Wsc) {
+    client.OnConnected(func() {
+        log.Println("✅ WebSocket 连接已建立")
+    })
+    
+    client.OnConnectError(func(err error) {
+        log.Printf("❌ 连接错误: %v", err)
+    })
+    
+    client.OnDisconnected(func(err error) {
+        log.Printf("⚠️ 连接断开: %v", err)
+    })
+    
+    client.OnClose(func(code int, text string) {
+        log.Printf("🔒 连接关闭: code=%d, text=%s", code, text)
+    })
+    
+    client.OnTextMessageReceived(func(message string) {
+        log.Printf("📨 收到文本消息: %s", message)
+    })
+    
+    client.OnBinaryMessageReceived(func(data []byte) {
+        log.Printf("📦 收到二进制消息: %d 字节", len(data))
+    })
+    
+    client.OnTextMessageSent(func(message string) {
+        log.Printf("📤 发送文本消息: %s", message)
+    })
+    
+    client.OnBinaryMessageSent(func(data []byte) {
+        log.Printf("📤 发送二进制消息: %d 字节", len(data))
+    })
+    
+    client.OnSentError(func(err error) {
+        log.Printf("❌ 发送错误: %v", err)
+    })
+    
+    client.OnPingReceived(func(data string) {
+        log.Printf("🏓 收到 Ping: %s", data)
+    })
+    
+    client.OnPongReceived(func(data string) {
+        log.Printf("🏓 收到 Pong: %s", data)
+    })
+}
+```
+
+### TypeScript 客户端示例
+
+基于 go-wsc 的高级 TypeScript WebSocket 客户端实现：
+
+```typescript
+/**
+ * 高级 WebSocket 客户端类
+ * 基于 go-wsc 设计理念的 TypeScript 实现
+ */
+class AdvancedWebSocketClient {
+    private ws: WebSocket | null = null;
+    private config: WSConfig;
+    private reconnectAttempts: number = 0;
+    private reconnectTimer: number | null = null;
+    private heartbeatTimer: number | null = null;
+    private messageQueue: Array<{data: any, type: 'text' | 'binary'}> = [];
+    private isConnecting: boolean = false;
+    
+    // 回调函数存储
+    private callbacks: {
+        [key: string]: Array<(...args: any[]) => void>;
+    } = {
+        connected: [],
+        disconnected: [],
+        connectError: [],
+        message: [],
+        binaryMessage: [],
+        messageSent: [],
+        sendError: [],
+        close: [],
+        ping: [],
+        pong: []
+    };
+    
+    constructor(private url: string, config: Partial<WSConfig> = {}) {
+        this.config = {
+            autoReconnect: true,
+            maxReconnectAttempts: 10,
+            reconnectInterval: 2000,
+            maxReconnectInterval: 30000,
+            reconnectBackoffFactor: 1.5,
+            heartbeatInterval: 30000,
+            messageBufferSize: 256,
+            maxMessageSize: 1024 * 1024, // 1MB
+            timeout: 10000,
+            protocols: [],
+            ...config
+        };
+    }
+    
+    /**
+     * 建立连接
+     */
+    public connect(): Promise<void> {
+        return new Promise((resolve, reject) => {
+            if (this.isConnecting || this.isConnected()) {
+                resolve();
+                return;
+            }
+            
+            this.isConnecting = true;
+            
+            try {
+                this.ws = new WebSocket(this.url, this.config.protocols);
+                this.setupEventHandlers(resolve, reject);
+                
+                // 连接超时处理
+                setTimeout(() => {
+                    if (this.isConnecting) {
+                        this.isConnecting = false;
+                        reject(new Error('连接超时'));
+                        this.ws?.close();
+                    }
+                }, this.config.timeout);
+                
+            } catch (error) {
+                this.isConnecting = false;
+                reject(error);
+            }
+        });
+    }
+    
+    /**
+     * 设置事件处理器
+     */
+    private setupEventHandlers(resolve: () => void, reject: (error: Error) => void): void {
+        if (!this.ws) return;
+        
+        this.ws.onopen = (event) => {
+            this.isConnecting = false;
+            this.reconnectAttempts = 0;
+            
+            console.log('✅ WebSocket 连接已建立');
+            this.emit('connected');
+            
+            // 开始心跳
+            this.startHeartbeat();
+            
+            // 发送队列中的消息
+            this.flushMessageQueue();
+            
+            resolve();
+        };
+        
+        this.ws.onmessage = (event) => {
+            try {
+                if (typeof event.data === 'string') {
+                    // 处理心跳响应
+                    if (event.data === 'pong') {
+                        this.emit('pong', event.data);
+                        return;
+                    }
+                    
+                    this.emit('message', event.data);
+                } else if (event.data instanceof ArrayBuffer) {
+                    this.emit('binaryMessage', new Uint8Array(event.data));
+                } else if (event.data instanceof Blob) {
+                    event.data.arrayBuffer().then(buffer => {
+                        this.emit('binaryMessage', new Uint8Array(buffer));
+                    });
+                }
+            } catch (error) {
+                console.error('处理消息时出错:', error);
+            }
+        };
+        
+        this.ws.onerror = (error) => {
+            console.error('❌ WebSocket 错误:', error);
+            this.isConnecting = false;
+            this.emit('connectError', new Error('WebSocket 连接错误'));
+            reject(new Error('WebSocket 连接错误'));
+        };
+        
+        this.ws.onclose = (event) => {
+            this.isConnecting = false;
+            this.stopHeartbeat();
+            
+            console.log(`🔒 WebSocket 连接关闭: code=${event.code}, reason=${event.reason}`);
+            this.emit('close', event.code, event.reason);
+            this.emit('disconnected', new Error(`连接关闭: ${event.reason}`));
+            
+            // 自动重连
+            if (this.config.autoReconnect && this.reconnectAttempts < this.config.maxReconnectAttempts) {
+                this.scheduleReconnect();
+            }
+        };
+    }
+    
+    /**
+     * 发送文本消息
+     */
+    public sendText(message: string): Promise<void> {
+        return new Promise((resolve, reject) => {
+            if (!this.isConnected()) {
+                if (this.config.autoReconnect && this.messageQueue.length < this.config.messageBufferSize) {
+                    this.messageQueue.push({ data: message, type: 'text' });
+                    resolve();
+                } else {
+                    reject(new Error('WebSocket 未连接且消息队列已满'));
+                }
+                return;
+            }
+            
+            try {
+                this.ws!.send(message);
+                this.emit('messageSent', message);
+                resolve();
+            } catch (error) {
+                this.emit('sendError', error);
+                reject(error);
+            }
+        });
+    }
+    
+    /**
+     * 发送二进制消息
+     */
+    public sendBinary(data: ArrayBuffer | Uint8Array): Promise<void> {
+        return new Promise((resolve, reject) => {
+            if (!this.isConnected()) {
+                if (this.config.autoReconnect && this.messageQueue.length < this.config.messageBufferSize) {
+                    this.messageQueue.push({ data, type: 'binary' });
+                    resolve();
+                } else {
+                    reject(new Error('WebSocket 未连接且消息队列已满'));
+                }
+                return;
+            }
+            
+            try {
+                this.ws!.send(data);
+                this.emit('messageSent', data);
+                resolve();
+            } catch (error) {
+                this.emit('sendError', error);
+                reject(error);
+            }
+        });
+    }
+    
+    /**
+     * 发送 JSON 消息
+     */
+    public sendJSON(obj: any): Promise<void> {
+        try {
+            const message = JSON.stringify(obj);
+            return this.sendText(message);
+        } catch (error) {
+            return Promise.reject(new Error(`JSON 序列化失败: ${error}`));
+        }
+    }
+    
+    /**
+     * 检查连接状态
+     */
+    public isConnected(): boolean {
+        return this.ws?.readyState === WebSocket.OPEN;
+    }
+    
+    /**
+     * 关闭连接
+     */
+    public close(code: number = 1000, reason: string = 'Normal closure'): void {
+        this.config.autoReconnect = false; // 停止自动重连
+        this.stopHeartbeat();
+        this.clearReconnectTimer();
+        
+        if (this.ws) {
+            this.ws.close(code, reason);
+            this.ws = null;
+        }
+    }
+    
+    // 事件监听方法
+    public on(event: string, callback: (...args: any[]) => void): this {
+        if (!this.callbacks[event]) {
+            this.callbacks[event] = [];
+        }
+        this.callbacks[event].push(callback);
+        return this;
+    }
+    
+    public off(event: string, callback?: (...args: any[]) => void): this {
+        if (!this.callbacks[event]) return this;
+        
+        if (callback) {
+            const index = this.callbacks[event].indexOf(callback);
+            if (index > -1) {
+                this.callbacks[event].splice(index, 1);
+            }
+        } else {
+            this.callbacks[event] = [];
+        }
+        return this;
+    }
+    
+    private emit(event: string, ...args: any[]): void {
+        if (this.callbacks[event]) {
+            this.callbacks[event].forEach(callback => {
+                try {
+                    callback(...args);
+                } catch (error) {
+                    console.error(`回调函数执行错误 (${event}):`, error);
+                }
+            });
+        }
+    }
+    
+    // 心跳机制
+    private startHeartbeat(): void {
+        this.stopHeartbeat();
+        
+        if (this.config.heartbeatInterval > 0) {
+            this.heartbeatTimer = window.setInterval(() => {
+                if (this.isConnected()) {
+                    this.sendText('ping').catch(error => {
+                        console.error('发送心跳失败:', error);
+                    });
+                }
+            }, this.config.heartbeatInterval);
+        }
+    }
+    
+    private stopHeartbeat(): void {
+        if (this.heartbeatTimer) {
+            clearInterval(this.heartbeatTimer);
+            this.heartbeatTimer = null;
+        }
+    }
+    
+    // 重连机制
+    private scheduleReconnect(): void {
+        this.clearReconnectTimer();
+        
+        const delay = Math.min(
+            this.config.reconnectInterval * Math.pow(this.config.reconnectBackoffFactor, this.reconnectAttempts),
+            this.config.maxReconnectInterval
+        );
+        
+        console.log(`🔄 将在 ${delay}ms 后尝试重连 (${this.reconnectAttempts + 1}/${this.config.maxReconnectAttempts})`);
+        
+        this.reconnectTimer = window.setTimeout(() => {
+            this.reconnectAttempts++;
+            this.connect().catch(error => {
+                console.error('重连失败:', error);
+            });
+        }, delay);
+    }
+    
+    private clearReconnectTimer(): void {
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
+    }
+    
+    // 消息队列处理
+    private flushMessageQueue(): void {
+        while (this.messageQueue.length > 0 && this.isConnected()) {
+            const { data, type } = this.messageQueue.shift()!;
+            
+            if (type === 'text') {
+                this.sendText(data).catch(error => {
+                    console.error('发送队列消息失败:', error);
+                });
+            } else {
+                this.sendBinary(data).catch(error => {
+                    console.error('发送队列消息失败:', error);
+                });
+            }
+        }
+    }
+}
+
+// 配置接口
+interface WSConfig {
+    autoReconnect: boolean;
+    maxReconnectAttempts: number;
+    reconnectInterval: number;
+    maxReconnectInterval: number;
+    reconnectBackoffFactor: number;
+    heartbeatInterval: number;
+    messageBufferSize: number;
+    maxMessageSize: number;
+    timeout: number;
+    protocols: string[];
+}
+
+// 使用示例
+const client = new AdvancedWebSocketClient('ws://localhost:8080/ws', {
+    autoReconnect: true,
+    maxReconnectAttempts: 5,
+    heartbeatInterval: 30000,
+    messageBufferSize: 512
+});
+
+// 设置事件监听器
+client
+    .on('connected', () => {
+        console.log('✅ 连接成功');
+        client.sendJSON({ type: 'auth', token: 'your-token' });
+    })
+    .on('message', (message: string) => {
+        console.log('📨 收到消息:', message);
+        
+        // 尝试解析 JSON
+        try {
+            const data = JSON.parse(message);
+            handleMessage(data);
+        } catch {
+            // 普通文本消息
+            console.log('文本消息:', message);
+        }
+    })
+    .on('disconnected', (error: Error) => {
+        console.warn('⚠️ 连接断开:', error.message);
+    })
+    .on('connectError', (error: Error) => {
+        console.error('❌ 连接错误:', error.message);
+    });
+
+// 连接
+client.connect()
+    .then(() => console.log('WebSocket 客户端启动成功'))
+    .catch(error => console.error('启动失败:', error));
+
+// 消息处理函数
+function handleMessage(data: any): void {
+    switch (data.type) {
+        case 'chat':
+            console.log(`💬 [${data.from}]: ${data.message}`);
+            break;
+        case 'notification':
+            console.log(`🔔 通知: ${data.content}`);
+            break;
+        case 'system':
+            console.log(`⚙️ 系统: ${data.message}`);
+            break;
+        default:
+            console.log('📦 未知消息类型:', data);
+    }
+}
+
+// 发送不同类型的消息
+setInterval(() => {
+    if (client.isConnected()) {
+        client.sendJSON({
+            type: 'heartbeat',
+            timestamp: Date.now()
+        });
+    }
+}, 60000);
+```
+
+### 服务端 Hub 示例
+
+```go
+package main
+
+import (
+    "log"
+    "net/http"
+    "time"
+    
+    "github.com/gin-gonic/gin"
+    "github.com/kamalyes/go-wsc"
+)
+
+func main() {
+    // 创建 Hub
+    hub := wsc.NewHub()
+    
+    // 启动 Hub
+    go hub.Run()
+    
+    // 创建 Gin 路由
+    r := gin.Default()
+    
+    // WebSocket 升级端点
+    r.GET("/ws", func(c *gin.Context) {
+        wsc.HandleWebSocket(hub, c.Writer, c.Request)
+    })
+    
+    // 启动服务器
+    log.Println("🚀 服务器启动在端口 :8080")
+    log.Fatal(http.ListenAndServe(":8080", r))
+}
+```
+
+## 📖 特性
 
 ### 客户端功能
+
 - **多种消息类型支持**：支持文本 (`TextMessage`) 和二进制 (`BinaryMessage`) 消息的发送与接收
 - **自动重连机制**：在连接断开时，自动重连，并支持自定义重连策略（如最小重连时间、最大重连时间和重连因子）
 - **连接状态管理**：提供简单的方法检查连接是否处于活动状态
@@ -30,6 +696,7 @@
 - **错误处理**：定义了一些常见的错误，方便用户进行错误处理
 
 ### 服务端 Hub 功能
+
 - **🚀 高性能**：使用原子操作和最小锁竞争优化
   - 客户端注册：~2,430 ns/op
   - 消息发送：~138 ns/op
@@ -54,7 +721,7 @@
 
 ## 开始使用
 
-建议需要 [Go](https://go.dev/) 版本 [1.20](https://go.dev/doc/devel/release#go1.20.0) 
+建议需要 [Go](https://go.dev/) 版本 [1.20](https://go.dev/doc/devel/release#go1.20.0)
 
 ### 获取
 
@@ -234,6 +901,7 @@ go test -race -run TestHub -timeout 30s
 ```
 
 **性能亮点：**
+
 - ✅ **41.1万** 次客户端注册/秒
 - ✅ **720万** 条消息/秒吞吐量
 - ✅ 使用原子操作实现无锁统计
@@ -295,6 +963,7 @@ hub := wsc.NewHub(config)
 ```
 
 **关键配置选项：**
+
 - `MessageBufferSize`: 控制并发消息吞吐量（默认：256）
 - `PendingQueueSize`: 待发送队列大小，队列满时缓存消息（默认：1024）
 - `HeartbeatInterval`: 连接健康检查频率（默认：30秒）
@@ -677,6 +1346,7 @@ go tool cover -func=coverage.out
 ```
 
 **测试覆盖：**
+
 - ✅ Hub 连接管理（注册、注销、并发操作）
 - ✅ 消息路由（点对点、广播、工单组）
 - ✅ ACK 确认机制（超时、重试、离线处理）
@@ -688,6 +1358,7 @@ go tool cover -func=coverage.out
 - ✅ 200+ 场景测试
 
 **测试统计：**
+
 - 总测试数：368 个
 - 通过率：100%
 - 覆盖率：95.6%
@@ -710,62 +1381,29 @@ go tool cover -func=coverage.out
 针对高并发场景，请考虑以下优化策略：
 
 ### 1. 使用原子操作
+
 - ✅ 统计使用 `atomic.Int64` 而不是互斥锁保护的计数器
 - ✅ 减少约 30% 的锁竞争
 
 ### 2. 优化锁策略
+
 - ✅ 最小化锁范围（晚获取，早释放）
 - ✅ 读多写少场景使用 RWMutex
 - ✅ 不同数据结构使用独立的锁
 
 ### 3. 通道缓冲区大小调优
+
 - 高吞吐量场景：增加 `MessageBufferSize` 到 512-1024
 - 低延迟场景：保持缓冲区较小（256 或更少）
 - 使用 Hub 统计监控通道饱和度
 
 ### 4. 避免过度优化
+
 - ❌ 对象池可能降低小对象性能
 - ❌ 预序列化仅在广播到大量客户端时有帮助
 - ✅ 优化前先进行性能分析
 
 详细分析请参见 [OPTIMIZATION.md](OPTIMIZATION.md) 和 [PERFORMANCE_RESULTS.md](PERFORMANCE_RESULTS.md)。
-
-## 架构
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                       Hub (中心节点)                                  │
-│  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐         │
-│  │   WebSocket    │  │      SSE       │  │  统计信息      │         │
-│  │   客户端       │  │     连接       │  │  (原子操作)    │         │
-│  └────────────────┘  └────────────────┘  └────────────────┘         │
-│                                                                       │
-│  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐         │
-│  │  ACK 管理器    │  │  消息记录      │  │  离线处理      │         │
-│  │  (确认/重试)   │  │  (状态跟踪)    │  │  (数据持久化)  │         │
-│  └────────────────┘  └────────────────┘  └────────────────┘         │
-└─────────────────────────────────────────────────────────────────────┘
-           │                    │                    │
-     ┌─────┴─────┐       ┌──────┴──────┐      ┌────┴────┐
-     │   注册    │       │    广播     │      │  统计   │
-     │   注销    │       │    消息     │      │  查询   │
-     └───────────┘       └─────────────┘      └─────────┘
-           │                    │                    │
-    ┌──────┴──────┐      ┌──────┴──────┐     ┌──────┴──────┐
-    │  心跳检测   │      │   消息路由  │     │   监控指标  │
-    │  超时处理   │      │  点对点/组  │     │   统计数据  │
-    └─────────────┘      └─────────────┘     └─────────────┘
-                                │
-                    ┌───────────┴───────────┐
-                    │   消息发送流程         │
-                    │                       │
-                    │  1. 发送到 Hub        │
-                    │  2. ACK 确认等待      │
-                    │  3. 超时自动重试      │
-                    │  4. 记录发送状态      │
-                    │  5. 失败消息处理      │
-                    └───────────────────────┘
-```
 
 ## 最佳实践
 
@@ -907,7 +1545,8 @@ go func(msg *wsc.HubMessage) {
 
 ### Q: ACK 确认和消息记录有什么区别？
 
-**A:** 
+**A:**
+
 - **ACK 确认**：实时的消息送达确认机制，用于确保消息被客户端接收。如果超时未收到确认，会自动重试。
 - **消息记录**：完整的消息发送历史记录，包括状态、失败原因、重试次数等。可用于审计、分析和后续重试。
 
@@ -916,6 +1555,7 @@ go func(msg *wsc.HubMessage) {
 ### Q: 如何处理大量离线消息？
 
 **A:**
+
 ```go
 // 1. 实现自定义离线处理器
 type DatabaseOfflineHandler struct {
@@ -939,13 +1579,15 @@ func onUserOnline(userID string) {
 
 ### Q: 消息记录会不会影响性能？
 
-**A:** 
+**A:**
 消息记录系统经过优化，对性能影响很小：
+
 - 使用内存存储，访问速度快
 - 异步写入，不阻塞消息发送
 - 自动清理过期记录，防止内存泄漏
 
 在高并发场景下（> 100万 msg/s），可以考虑：
+
 - 关闭消息记录（`EnableMessageRecord: false`）
 - 减少保留时间（`RecordRetention: 1 * time.Hour`）
 - 减少最大记录数（`MaxRecords: 5000`）
@@ -953,6 +1595,7 @@ func onUserOnline(userID string) {
 ### Q: 如何扩展到分布式部署？
 
 **A:**
+
 ```go
 // 1. 使用 Redis 作为分布式消息队列
 type RedisMessageBroker struct {

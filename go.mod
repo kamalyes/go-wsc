@@ -47,7 +47,7 @@ require (
 
 // replace github.com/kamalyes/go-cachex => ../go-cachex
 
-// replace github.com/kamalyes/go-config => ../go-config
+replace github.com/kamalyes/go-config => ../go-config
 
 // replace github.com/kamalyes/go-logger => ../go-logger
 

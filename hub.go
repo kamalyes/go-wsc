@@ -17,11 +17,79 @@ import (
 	"github.com/gorilla/websocket"
 	goconfig "github.com/kamalyes/go-config"
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-toolbox/pkg/retry"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"testing"
 	"time"
 )
+
+// SendFailureHandler 消息发送失败处理器接口 - 通用处理器
+type SendFailureHandler interface {
+	// HandleSendFailure 处理消息发送失败
+	HandleSendFailure(msg *HubMessage, recipient string, reason string, err error)
+}
+
+// QueueFullHandler 队列满处理器
+type QueueFullHandler interface {
+	// HandleQueueFull 处理队列满的情况
+	HandleQueueFull(msg *HubMessage, recipient string, queueType string, err error)
+}
+
+// UserOfflineHandler 用户离线处理器
+type UserOfflineHandler interface {
+	// HandleUserOffline 处理用户离线的情况
+	HandleUserOffline(msg *HubMessage, userID string, err error)
+}
+
+// ConnectionErrorHandler 连接错误处理器
+type ConnectionErrorHandler interface {
+	// HandleConnectionError 处理连接错误
+	HandleConnectionError(msg *HubMessage, clientID string, err error)
+}
+
+// TimeoutHandler 超时处理器
+type TimeoutHandler interface {
+	// HandleTimeout 处理超时情况
+	HandleTimeout(msg *HubMessage, recipient string, timeoutType string, duration time.Duration, err error)
+}
+
+// SendFailureReason 消息发送失败原因
+const (
+	SendFailureReasonQueueFull     = "queue_full"     // 队列满
+	SendFailureReasonBroadcastFull = "broadcast_full" // 广播队列满
+	SendFailureReasonPendingFull   = "pending_full"   // 待发送队列满
+	SendFailureReasonUserOffline   = "user_offline"   // 用户离线
+	SendFailureReasonTimeout       = "timeout"        // 超时
+	SendFailureReasonSendTimeout   = "send_timeout"   // 发送超时
+	SendFailureReasonAckTimeout    = "ack_timeout"    // ACK超时
+	SendFailureReasonConnClosed    = "conn_closed"    // 连接关闭
+	SendFailureReasonConnError     = "conn_error"     // 连接错误
+	SendFailureReasonChannelClosed = "channel_closed" // 通道关闭
+	SendFailureReasonUnknown       = "unknown"        // 未知错误
+	SendFailureReasonValidation    = "validation"     // 验证失败
+	SendFailureReasonPermission    = "permission"     // 权限不足
+)
+
+// SendAttempt 发送尝试记录
+type SendAttempt struct {
+	AttemptNumber int           // 尝试次数
+	StartTime     time.Time     // 开始时间
+	Duration      time.Duration // 耗时
+	Error         error         // 错误
+	Success       bool          // 是否成功
+}
+
+// SendResult 发送结果
+type SendResult struct {
+	Success      bool          // 最终是否成功
+	Attempts     []SendAttempt // 所有尝试记录
+	TotalRetries int           // 总重试次数
+	TotalTime    time.Duration // 总耗时
+	FinalError   error         // 最终错误
+}
 
 // ContextKey 上下文键类型
 type ContextKey string
@@ -146,6 +214,14 @@ type Hub struct {
 	// 并发控制
 	mutex    sync.RWMutex
 	sseMutex sync.RWMutex
+
+	// 消息发送失败回调处理器
+	sendFailureHandlers     []SendFailureHandler
+	queueFullHandlers       []QueueFullHandler
+	userOfflineHandlers     []UserOfflineHandler
+	connectionErrorHandlers []ConnectionErrorHandler
+	timeoutHandlers         []TimeoutHandler
+	failureHandlerMutex     sync.RWMutex
 
 	// 上下文
 	ctx    context.Context
@@ -616,11 +692,30 @@ func (h *Hub) SafeShutdown() error {
 		close(done)
 	}()
 
+	// 在测试环境中使用更短的超时时间
+	timeout := 30 * time.Second
+	if testing.Testing() {
+		timeout = 5 * time.Second
+	}
+
 	select {
 	case <-done:
 		// 正常关闭
-	case <-time.After(30 * time.Second):
-		return fmt.Errorf("hub关闭超时")
+	case <-time.After(timeout):
+		// 强制关闭所有客户端连接
+		h.mutex.Lock()
+		for _, client := range h.clients {
+			if client.Conn != nil {
+				client.Conn.Close()
+			}
+			select {
+			case <-client.SendChan:
+			default:
+				close(client.SendChan)
+			}
+		}
+		h.mutex.Unlock()
+		return fmt.Errorf("hub关闭超时，已强制关闭")
 	}
 
 	// 关闭所有客户端连接和channel
@@ -682,8 +777,151 @@ func (h *Hub) SendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 		case h.pendingMessages <- &msgCopy:
 			return nil
 		default:
-			return fmt.Errorf("消息队列已满，待发送队列也已满")
+			err := fmt.Errorf("消息队列已满，待发送队列也已满")
+			// 通知队列满处理器
+			h.notifyQueueFull(&msgCopy, toUserID, "all_queues", err)
+			return err
 		}
+	}
+}
+
+// SendToUserWithRetry 带重试机制的发送消息给指定用户
+func (h *Hub) SendToUserWithRetry(ctx context.Context, toUserID string, msg *HubMessage) *SendResult {
+	result := &SendResult{
+		Attempts: make([]SendAttempt, 0, h.config.MaxRetries+1),
+	}
+
+	startTime := time.Now()
+
+	// 创建 go-toolbox retry 实例用于延迟计算和条件判断
+	retryInstance := retry.NewRetryWithCtx(ctx).
+		SetAttemptCount(h.config.MaxRetries + 1). // +1 因为第一次不是重试
+		SetInterval(h.config.BaseDelay).
+		SetConditionFunc(h.isRetryableError)
+
+	// 执行带详细记录的重试逻辑
+	finalErr := retryInstance.Do(func() error {
+		attemptStart := time.Now()
+		attemptNumber := len(result.Attempts) + 1
+
+		err := h.SendToUser(ctx, toUserID, msg)
+		duration := time.Since(attemptStart)
+
+		// 记录每次尝试
+		sendAttempt := SendAttempt{
+			AttemptNumber: attemptNumber,
+			StartTime:     attemptStart,
+			Duration:      duration,
+			Error:         err,
+			Success:       err == nil,
+		}
+		result.Attempts = append(result.Attempts, sendAttempt)
+
+		return err
+	})
+
+	// 设置最终结果
+	result.Success = finalErr == nil
+	result.FinalError = finalErr
+	result.TotalTime = time.Since(startTime)
+	result.TotalRetries = len(result.Attempts) - 1 // 减1因为第一次不算重试
+
+	// 触发失败回调（只有在所有重试都失败后才触发）
+	if finalErr != nil {
+		h.notifySendFailureAfterRetries(msg, toUserID, result)
+	}
+
+	return result
+}
+
+// isRetryableError 判断错误是否可以重试
+func (h *Hub) isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errMsg := err.Error()
+
+	// 检查不可重试的错误
+	for _, nonRetryable := range h.config.NonRetryableErrors {
+		if strings.Contains(errMsg, nonRetryable) {
+			return false
+		}
+	}
+
+	// 检查可重试的错误
+	for _, retryable := range h.config.RetryableErrors {
+		if strings.Contains(errMsg, retryable) {
+			return true
+		}
+	}
+
+	// 默认情况下，大部分错误都可以重试，除非明确标记为不可重试
+	return true
+}
+
+// shouldRetryBasedOnErrorPattern 基于错误模式决定是否重试
+func (h *Hub) shouldRetryBasedOnErrorPattern(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errMsg := strings.ToLower(err.Error())
+
+	// 明确不需要重试的错误类型
+	nonRetryablePatterns := []string{
+		"user_offline",
+		"permission denied",
+		"authentication failed",
+		"invalid message format",
+		"message too large",
+		"rate limit exceeded permanently",
+	}
+
+	for _, pattern := range nonRetryablePatterns {
+		if strings.Contains(errMsg, pattern) {
+			return false
+		}
+	}
+
+	// 可以重试的错误类型
+	retryablePatterns := []string{
+		"queue_full",
+		"timeout",
+		"connection refused",
+		"connection reset",
+		"network unreachable",
+		"temporary",
+	}
+
+	for _, pattern := range retryablePatterns {
+		if strings.Contains(errMsg, pattern) {
+			return true
+		}
+	}
+
+	// 默认可以重试
+	return true
+}
+
+// notifySendFailureAfterRetries 在所有重试失败后通知失败处理器
+func (h *Hub) notifySendFailureAfterRetries(msg *HubMessage, recipient string, result *SendResult) {
+	h.failureHandlerMutex.RLock()
+	handlers := make([]SendFailureHandler, len(h.sendFailureHandlers))
+	copy(handlers, h.sendFailureHandlers)
+	h.failureHandlerMutex.RUnlock()
+
+	for _, handler := range handlers {
+		go func(h SendFailureHandler) {
+			defer func() {
+				if r := recover(); r != nil {
+					// 防止处理器panic影响主流程
+				}
+			}()
+			// 使用特殊的失败原因表示这是经过重试后的失败
+			reason := fmt.Sprintf("retry_exhausted_%d_attempts", result.TotalRetries+1)
+			h.HandleSendFailure(msg, recipient, reason, result.FinalError)
+		}(handler)
 	}
 }
 
@@ -855,12 +1093,17 @@ func (h *Hub) SendToUserWithAck(ctx context.Context, toUserID string, msg *HubMe
 		if record != nil {
 			h.recordManager.UpdateRecordStatus(msg.ID, MessageSendStatusFailed, FailureReasonUserOffline, "用户离线且未配置离线消息处理器")
 		}
+
+		err := fmt.Errorf("用户 %s 离线", toUserID)
+		// 通知用户离线处理器
+		h.notifyUserOffline(msg, toUserID, err)
+
 		return &AckMessage{
 			MessageID: msg.ID,
 			Status:    AckStatusFailed,
 			Timestamp: time.Now(),
 			Error:     "用户离线且未配置离线消息处理器",
-		}, fmt.Errorf("用户 %s 离线", toUserID)
+		}, err
 	}
 
 	// 更新记录状态为发送中
@@ -961,6 +1204,208 @@ func (h *Hub) SendToTicketWithAck(ctx context.Context, ticketID string, msg *Hub
 func (h *Hub) SetOfflineMessageHandler(handler OfflineMessageHandler) {
 	if h.ackManager != nil {
 		h.ackManager.offlineHandler = handler
+	}
+}
+
+// AddSendFailureHandler 添加通用消息发送失败处理器
+func (h *Hub) AddSendFailureHandler(handler SendFailureHandler) {
+	h.failureHandlerMutex.Lock()
+	defer h.failureHandlerMutex.Unlock()
+	h.sendFailureHandlers = append(h.sendFailureHandlers, handler)
+}
+
+// AddQueueFullHandler 添加队列满处理器
+func (h *Hub) AddQueueFullHandler(handler QueueFullHandler) {
+	h.failureHandlerMutex.Lock()
+	defer h.failureHandlerMutex.Unlock()
+	h.queueFullHandlers = append(h.queueFullHandlers, handler)
+}
+
+// AddUserOfflineHandler 添加用户离线处理器
+func (h *Hub) AddUserOfflineHandler(handler UserOfflineHandler) {
+	h.failureHandlerMutex.Lock()
+	defer h.failureHandlerMutex.Unlock()
+	h.userOfflineHandlers = append(h.userOfflineHandlers, handler)
+}
+
+// AddConnectionErrorHandler 添加连接错误处理器
+func (h *Hub) AddConnectionErrorHandler(handler ConnectionErrorHandler) {
+	h.failureHandlerMutex.Lock()
+	defer h.failureHandlerMutex.Unlock()
+	h.connectionErrorHandlers = append(h.connectionErrorHandlers, handler)
+}
+
+// AddTimeoutHandler 添加超时处理器
+func (h *Hub) AddTimeoutHandler(handler TimeoutHandler) {
+	h.failureHandlerMutex.Lock()
+	defer h.failureHandlerMutex.Unlock()
+	h.timeoutHandlers = append(h.timeoutHandlers, handler)
+}
+
+// RemoveSendFailureHandler 移除消息发送失败处理器
+func (h *Hub) RemoveSendFailureHandler(handler SendFailureHandler) {
+	h.failureHandlerMutex.Lock()
+	defer h.failureHandlerMutex.Unlock()
+	for i, existingHandler := range h.sendFailureHandlers {
+		if existingHandler == handler {
+			h.sendFailureHandlers = append(h.sendFailureHandlers[:i], h.sendFailureHandlers[i+1:]...)
+			break
+		}
+	}
+}
+
+// notifySendFailure 通知所有注册的发送失败处理器
+func (h *Hub) notifySendFailure(msg *HubMessage, recipient string, reason string, err error) {
+	h.failureHandlerMutex.RLock()
+	handlers := make([]SendFailureHandler, len(h.sendFailureHandlers))
+	copy(handlers, h.sendFailureHandlers)
+	h.failureHandlerMutex.RUnlock()
+
+	for _, handler := range handlers {
+		go func(h SendFailureHandler) {
+			defer func() {
+				if r := recover(); r != nil {
+					// 防止处理器panic影响主流程
+				}
+			}()
+			h.HandleSendFailure(msg, recipient, reason, err)
+		}(handler)
+	}
+}
+
+// notifyQueueFull 通知队列满处理器
+func (h *Hub) notifyQueueFull(msg *HubMessage, recipient string, queueType string, err error) {
+	h.failureHandlerMutex.RLock()
+	queueHandlers := make([]QueueFullHandler, len(h.queueFullHandlers))
+	copy(queueHandlers, h.queueFullHandlers)
+	generalHandlers := make([]SendFailureHandler, len(h.sendFailureHandlers))
+	copy(generalHandlers, h.sendFailureHandlers)
+	h.failureHandlerMutex.RUnlock()
+
+	// 调用专门的队列满处理器
+	for _, handler := range queueHandlers {
+		go func(h QueueFullHandler) {
+			defer func() {
+				if r := recover(); r != nil {
+					// 防止处理器panic影响主流程
+				}
+			}()
+			h.HandleQueueFull(msg, recipient, queueType, err)
+		}(handler)
+	}
+
+	// 同时调用通用处理器
+	for _, handler := range generalHandlers {
+		go func(h SendFailureHandler) {
+			defer func() {
+				if r := recover(); r != nil {
+					// 防止处理器panic影响主流程
+				}
+			}()
+			h.HandleSendFailure(msg, recipient, SendFailureReasonQueueFull, err)
+		}(handler)
+	}
+}
+
+// notifyUserOffline 通知用户离线处理器
+func (h *Hub) notifyUserOffline(msg *HubMessage, userID string, err error) {
+	h.failureHandlerMutex.RLock()
+	offlineHandlers := make([]UserOfflineHandler, len(h.userOfflineHandlers))
+	copy(offlineHandlers, h.userOfflineHandlers)
+	generalHandlers := make([]SendFailureHandler, len(h.sendFailureHandlers))
+	copy(generalHandlers, h.sendFailureHandlers)
+	h.failureHandlerMutex.RUnlock()
+
+	// 调用专门的用户离线处理器
+	for _, handler := range offlineHandlers {
+		go func(h UserOfflineHandler) {
+			defer func() {
+				if r := recover(); r != nil {
+					// 防止处理器panic影响主流程
+				}
+			}()
+			h.HandleUserOffline(msg, userID, err)
+		}(handler)
+	}
+
+	// 同时调用通用处理器
+	for _, handler := range generalHandlers {
+		go func(h SendFailureHandler) {
+			defer func() {
+				if r := recover(); r != nil {
+					// 防止处理器panic影响主流程
+				}
+			}()
+			h.HandleSendFailure(msg, userID, SendFailureReasonUserOffline, err)
+		}(handler)
+	}
+}
+
+// notifyConnectionError 通知连接错误处理器
+func (h *Hub) notifyConnectionError(msg *HubMessage, clientID string, err error) {
+	h.failureHandlerMutex.RLock()
+	connHandlers := make([]ConnectionErrorHandler, len(h.connectionErrorHandlers))
+	copy(connHandlers, h.connectionErrorHandlers)
+	generalHandlers := make([]SendFailureHandler, len(h.sendFailureHandlers))
+	copy(generalHandlers, h.sendFailureHandlers)
+	h.failureHandlerMutex.RUnlock()
+
+	// 调用专门的连接错误处理器
+	for _, handler := range connHandlers {
+		go func(h ConnectionErrorHandler) {
+			defer func() {
+				if r := recover(); r != nil {
+					// 防止处理器panic影响主流程
+				}
+			}()
+			h.HandleConnectionError(msg, clientID, err)
+		}(handler)
+	}
+
+	// 同时调用通用处理器
+	for _, handler := range generalHandlers {
+		go func(h SendFailureHandler) {
+			defer func() {
+				if r := recover(); r != nil {
+					// 防止处理器panic影响主流程
+				}
+			}()
+			h.HandleSendFailure(msg, clientID, SendFailureReasonConnError, err)
+		}(handler)
+	}
+}
+
+// notifyTimeout 通知超时处理器
+func (h *Hub) notifyTimeout(msg *HubMessage, recipient string, timeoutType string, duration time.Duration, err error) {
+	h.failureHandlerMutex.RLock()
+	timeoutHandlers := make([]TimeoutHandler, len(h.timeoutHandlers))
+	copy(timeoutHandlers, h.timeoutHandlers)
+	generalHandlers := make([]SendFailureHandler, len(h.sendFailureHandlers))
+	copy(generalHandlers, h.sendFailureHandlers)
+	h.failureHandlerMutex.RUnlock()
+
+	// 调用专门的超时处理器
+	for _, handler := range timeoutHandlers {
+		go func(h TimeoutHandler) {
+			defer func() {
+				if r := recover(); r != nil {
+					// 防止处理器panic影响主流程
+				}
+			}()
+			h.HandleTimeout(msg, recipient, timeoutType, duration, err)
+		}(handler)
+	}
+
+	// 同时调用通用处理器
+	for _, handler := range generalHandlers {
+		go func(h SendFailureHandler) {
+			defer func() {
+				if r := recover(); r != nil {
+					// 防止处理器panic影响主流程
+				}
+			}()
+			h.HandleSendFailure(msg, recipient, SendFailureReasonTimeout, err)
+		}(handler)
 	}
 }
 

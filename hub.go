@@ -13,6 +13,7 @@ package wsc
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/gorilla/websocket"
 	goconfig "github.com/kamalyes/go-config"
@@ -1750,7 +1751,74 @@ func (h *Hub) fastMarshalMessage(msg *HubMessage, buf []byte) ([]byte, error) {
 
 	buf = append(buf, `","create_at":"`...)
 	buf = append(buf, msg.CreateAt.Format(time.RFC3339)...)
-	buf = append(buf, `"}`...)
+	buf = append(buf, `"`...)
+
+	// 添加 Data 字段（如果存在）
+	if msg.Data != nil && len(msg.Data) > 0 {
+		buf = append(buf, `,"data":{`...)
+		first := true
+		for key, value := range msg.Data {
+			if !first {
+				buf = append(buf, `,`...)
+			}
+			first = false
+
+			// 添加键
+			buf = append(buf, `"`...)
+			buf = append(buf, key...)
+			buf = append(buf, `":`...)
+
+			// 添加值（简单类型处理）
+			switch v := value.(type) {
+			case string:
+				buf = append(buf, `"`...)
+				// 转义字符串值
+				for _, r := range v {
+					switch r {
+					case '"':
+						buf = append(buf, '\\', '"')
+					case '\\':
+						buf = append(buf, '\\', '\\')
+					case '\n':
+						buf = append(buf, '\\', 'n')
+					case '\r':
+						buf = append(buf, '\\', 'r')
+					case '\t':
+						buf = append(buf, '\\', 't')
+					default:
+						if r < 32 {
+							buf = append(buf, fmt.Sprintf("\\u%04x", r)...)
+						} else {
+							buf = append(buf, string(r)...)
+						}
+					}
+				}
+				buf = append(buf, `"`...)
+			case int:
+				buf = append(buf, fmt.Sprintf("%d", v)...)
+			case int64:
+				buf = append(buf, fmt.Sprintf("%d", v)...)
+			case float64:
+				buf = append(buf, fmt.Sprintf("%g", v)...)
+			case bool:
+				if v {
+					buf = append(buf, `true`...)
+				} else {
+					buf = append(buf, `false`...)
+				}
+			default:
+				// 对于复杂类型，使用 JSON 序列化
+				if valueBytes, err := json.Marshal(v); err == nil {
+					buf = append(buf, valueBytes...)
+				} else {
+					buf = append(buf, `null`...)
+				}
+			}
+		}
+		buf = append(buf, `}`...)
+	}
+
+	buf = append(buf, `}`...)
 
 	// 返回复制的数据，避免共享底层数组
 	result := make([]byte, len(buf))

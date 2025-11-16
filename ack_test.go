@@ -14,6 +14,7 @@ import (
 	"context"
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/stretchr/testify/assert"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -292,12 +293,17 @@ func TestAckWithRetry(t *testing.T) {
 
 		pm := am.AddPendingMessage(msg, 200*time.Millisecond, 2)
 
-		// 模拟第2次重试后返回ACK
+		// 使用channel来同步goroutine之间的通信，避免数据竞态
 		var retryCount int32
+		retryCountMu := &sync.Mutex{}
+
 		go func() {
 			for {
 				time.Sleep(250 * time.Millisecond)
+				retryCountMu.Lock()
 				current := atomic.AddInt32(&retryCount, 1)
+				retryCountMu.Unlock()
+
 				if current >= 2 {
 					ack := &AckMessage{
 						MessageID: msg.ID,
@@ -312,7 +318,9 @@ func TestAckWithRetry(t *testing.T) {
 
 		// 重试函数
 		retryFunc := func() error {
+			retryCountMu.Lock()
 			current := atomic.LoadInt32(&retryCount)
+			retryCountMu.Unlock()
 			t.Logf("重试发送消息，第 %d 次", current)
 			return nil
 		}

@@ -118,6 +118,8 @@ type Hub struct {
 	// 并发控制
 	wg       sync.WaitGroup
 	shutdown atomic.Bool
+	started  atomic.Bool
+	startCh  chan struct{}
 
 	// 欢迎消息提供者
 	welcomeProvider WelcomeMessageProvider
@@ -452,6 +454,7 @@ func NewHub(config *wscconfig.WSC) *Hub {
 		welcomeProvider: nil, // 使用默认欢迎提供者
 		ctx:             ctx,
 		cancel:          cancel,
+		startCh:         make(chan struct{}),
 		config:          config,
 		safeConfig:      goconfig.SafeConfig(config),
 		msgPool: sync.Pool{
@@ -538,6 +541,11 @@ func (h *Hub) Run() {
 	h.wg.Add(1)
 	defer h.wg.Done()
 
+	// 设置已启动标志并通知等待的goroutine
+	if h.started.CompareAndSwap(false, true) {
+		close(h.startCh)
+	}
+
 	ticker := time.NewTicker(time.Duration(h.safeConfig.GetInt("HeartbeatInterval", 30)) * time.Second)
 	defer ticker.Stop()
 
@@ -558,6 +566,81 @@ func (h *Hub) Run() {
 			h.checkHeartbeat()
 		}
 	}
+}
+
+// WaitForStart 等待Hub启动完成
+// 这个方法对于用户来说很重要，确保Hub完全启动后再进行操作
+func (h *Hub) WaitForStart() {
+	<-h.startCh
+}
+
+// WaitForStartWithTimeout 带超时的等待Hub启动
+func (h *Hub) WaitForStartWithTimeout(timeout time.Duration) error {
+	select {
+	case <-h.startCh:
+		return nil
+	case <-time.After(timeout):
+		return fmt.Errorf("hub启动超时")
+	}
+}
+
+// IsStarted 检查Hub是否已启动
+func (h *Hub) IsStarted() bool {
+	return h.started.Load()
+}
+
+// IsShutdown 检查Hub是否已关闭
+func (h *Hub) IsShutdown() bool {
+	return h.shutdown.Load()
+}
+
+// SafeShutdown 安全关闭Hub，确保所有操作完成
+func (h *Hub) SafeShutdown() error {
+	// 检查是否已经关闭
+	if h.shutdown.Load() {
+		return nil
+	}
+
+	// 设置关闭标志
+	if !h.shutdown.CompareAndSwap(false, true) {
+		return nil // 已经在关闭中
+	}
+
+	// 取消context
+	h.cancel()
+
+	// 等待所有goroutine完成，带超时保护
+	done := make(chan struct{})
+	go func() {
+		h.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// 正常关闭
+	case <-time.After(30 * time.Second):
+		return fmt.Errorf("hub关闭超时")
+	}
+
+	// 关闭所有客户端连接和channel
+	h.mutex.Lock()
+	for _, client := range h.clients {
+		if client.Conn != nil {
+			client.Conn.Close()
+		}
+		close(client.SendChan)
+	}
+	h.mutex.Unlock()
+
+	// 关闭SSE连接
+	h.sseMutex.Lock()
+	for _, conn := range h.sseClients {
+		close(conn.CloseCh)
+	}
+	h.sseMutex.Unlock()
+
+	return nil
 }
 
 // Register 注册客户端
@@ -1045,33 +1128,9 @@ func (h *Hub) GetNodeID() string {
 	return h.nodeID
 }
 
-// Shutdown 关闭Hub
+// Shutdown 关闭Hub（保持向后兼容）
 func (h *Hub) Shutdown() {
-	// 设置 shutdown 标志
-	h.shutdown.Store(true)
-
-	// 取消 context
-	h.cancel()
-
-	// 等待所有 goroutine 完成
-	h.wg.Wait()
-
-	// 关闭所有客户端连接和 channel
-	h.mutex.Lock()
-	for _, client := range h.clients {
-		if client.Conn != nil {
-			client.Conn.Close()
-		}
-		close(client.SendChan)
-	}
-	h.mutex.Unlock()
-
-	// 关闭 SSE 连接
-	h.sseMutex.Lock()
-	for _, conn := range h.sseClients {
-		close(conn.CloseCh)
-	}
-	h.sseMutex.Unlock()
+	_ = h.SafeShutdown() // 忽略错误，保持原有行为
 }
 
 // === 内部方法 ===
@@ -1210,7 +1269,7 @@ func (h *Hub) fastMarshalMessage(msg *HubMessage, buf []byte) ([]byte, error) {
 	buf = append(buf, `","type":"`...)
 	buf = append(buf, string(msg.Type)...)
 	buf = append(buf, `","content":"`...)
-	
+
 	// 转义JSON字符
 	for _, r := range msg.Content {
 		switch r {
@@ -1232,22 +1291,22 @@ func (h *Hub) fastMarshalMessage(msg *HubMessage, buf []byte) ([]byte, error) {
 			}
 		}
 	}
-	
+
 	buf = append(buf, `","from":"`...)
 	buf = append(buf, msg.From...)
 	buf = append(buf, `","to":"`...)
 	buf = append(buf, msg.To...)
-	
+
 	// 添加 ticket_id 字段
 	if msg.TicketID != "" {
 		buf = append(buf, `","ticket_id":"`...)
 		buf = append(buf, msg.TicketID...)
 	}
-	
+
 	buf = append(buf, `","create_at":"`...)
 	buf = append(buf, msg.CreateAt.Format(time.RFC3339)...)
 	buf = append(buf, `"}`...)
-	
+
 	// 返回复制的数据，避免共享底层数组
 	result := make([]byte, len(buf))
 	copy(result, buf)

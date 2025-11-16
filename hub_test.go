@@ -2142,8 +2142,12 @@ func TestHubEdgeCases(t *testing.T) {
 				Context:  context.WithValue(context.Background(), ContextKeyUserID, userID),
 			}
 			hub.Register(client)
-			// 新注册会替换旧的
+			// 等待注册完成，避免竞态条件
+			time.Sleep(1 * time.Millisecond)
 		}
+
+		// 等待所有注册操作完成
+		time.Sleep(10 * time.Millisecond)
 
 		// 最后只应该有一个连接
 		client := hub.GetClientByUserID(userID)

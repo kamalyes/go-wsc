@@ -2,12 +2,12 @@ package wsc
 
 import (
 	"fmt"
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/stretchr/testify/assert"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
-
-	"github.com/stretchr/testify/assert"
 )
 
 func TestWebSocketServer(t *testing.T) {
@@ -28,33 +28,50 @@ func TestWebSocketServer(t *testing.T) {
 	assert.NoError(t, err, "Should send message without error")
 
 	// 接收回显的消息
-       receivedCh := make(chan string, 1)
-       ws.OnTextMessageReceived(func(message string) {
-	       receivedCh <- message
-       })
+	receivedCh := make(chan string, 1)
+	ws.OnTextMessageReceived(func(message string) {
+		receivedCh <- message
+	})
 
-       var receivedMessage string
-       select {
-       case receivedMessage = <-receivedCh:
-       case <-time.After(2 * time.Second):
-	       t.Fatal("Timeout waiting for message")
-       }
-       assert.Equal(t, testMessage, receivedMessage, "Should receive the same message back")
+	var receivedMessage string
+	select {
+	case receivedMessage = <-receivedCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timeout waiting for message")
+	}
+	assert.Equal(t, testMessage, receivedMessage, "Should receive the same message back")
 }
 
 func TestWebSocketServerConnectionError(t *testing.T) {
 	// 尝试连接到一个不存在的 WebSocket 服务器
 	ws := New("ws://localhost:9999/ws")
 
+	// 设置更短的重连时间以避免测试等待太久
+	config := wscconfig.Default().
+		WithMinRecTime(10 * time.Millisecond).
+		WithMaxRecTime(50 * time.Millisecond)
+	ws.SetConfig(config)
+
+	errorReceived := make(chan bool, 1)
 	ws.OnConnectError(func(err error) {
 		assert.Error(t, err, "Should return an error when connecting to an invalid address")
+		select {
+		case errorReceived <- true:
+		default:
+		}
 	})
 
 	// 尝试连接
 	go ws.Connect()
 
-	// 等待一段时间以确保连接尝试完成
-	time.Sleep(1 * time.Second)
+	// 等待接收到错误或超时
+	select {
+	case <-errorReceived:
+		// 测试成功，收到了连接错误
+		ws.Close() // 停止重连
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("Timeout waiting for connection error")
+	}
 }
 
 func TestWebSocketServerMessageEcho(t *testing.T) {
@@ -75,18 +92,18 @@ func TestWebSocketServerMessageEcho(t *testing.T) {
 	assert.NoError(t, err, "Should send message without error")
 
 	// 接收回显的消息
-       receivedCh := make(chan string, 1)
-       ws.OnTextMessageReceived(func(message string) {
-	       receivedCh <- message
-       })
+	receivedCh := make(chan string, 1)
+	ws.OnTextMessageReceived(func(message string) {
+		receivedCh <- message
+	})
 
-       var receivedMessage string
-       select {
-       case receivedMessage = <-receivedCh:
-       case <-time.After(2 * time.Second):
-	       t.Fatal("Timeout waiting for message")
-       }
-       assert.Equal(t, testMessage, receivedMessage, "Should receive the same message back")
+	var receivedMessage string
+	select {
+	case receivedMessage = <-receivedCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timeout waiting for message")
+	}
+	assert.Equal(t, testMessage, receivedMessage, "Should receive the same message back")
 }
 
 // TestWsc_SetConfig 测试设置配置
@@ -94,15 +111,13 @@ func TestWsc_SetConfig(t *testing.T) {
 	client := New("ws://localhost:8080")
 	defer client.Close()
 
-	config := NewDefaultConfig()
-	config.WriteWait = 5 * time.Second
-	config.MaxMessageSize = 1024
-	config.MessageBufferSize = 128
+	config := wscconfig.Default().
+		WithClientTimeout(90).
+		WithMessageBufferSize(128)
 
 	client.SetConfig(config)
 
-	assert.Equal(t, 5*time.Second, client.Config.WriteWait)
-	assert.Equal(t, int64(1024), client.Config.MaxMessageSize)
+	assert.Equal(t, 90, client.Config.ClientTimeout)
 	assert.Equal(t, 128, client.Config.MessageBufferSize)
 }
 

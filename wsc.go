@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-09-06 09:50:55
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-07 01:21:00
+ * @LastEditTime: 2025-11-16 20:20:00
  * @FilePath: \go-wsc\wsc.go
  * @Description: Wsc 结构体及其方法
  *
@@ -11,6 +11,9 @@
 package wsc
 
 import (
+	"github.com/gorilla/websocket"
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"net/http"
 	"sync"
 	"sync/atomic"
 )
@@ -18,9 +21,9 @@ import (
 // Wsc 结构体表示 WebSocket 客户端
 // Wsc 结构体封装了 WebSocket 连接的管理及其相关操作
 type Wsc struct {
-	mu        sync.Mutex // 互斥锁，用于保护并发访问
-	Config    *Config    // 配置信息，用于配置 WebSocket 客户端的参数
-	WebSocket *WebSocket // 底层 WebSocket 连接，负责实际的网络通信
+	mu        sync.Mutex     // 互斥锁，用于保护并发访问
+	Config    *wscconfig.WSC // 配置信息，用于配置 WebSocket 客户端的参数
+	WebSocket *WebSocket     // 底层 WebSocket 连接，负责实际的网络通信
 
 	// 连接相关的回调函数
 	onConnected    atomic.Value // 连接成功回调 func()
@@ -44,14 +47,14 @@ type Wsc struct {
 func New(url string) *Wsc {
 	// 初始化 Wsc 客户端，使用默认配置和指定的 URL
 	return &Wsc{
-		Config:    NewDefaultConfig(), // 使用默认配置
-		WebSocket: NewWebSocket(url),  // 创建新的 WebSocket 连接
+		Config:    wscconfig.Default(), // 使用go-config默认配置
+		WebSocket: NewWebSocket(url),   // 创建新的 WebSocket 连接
 	}
 }
 
 // SetConfig 设置客户端配置
 // 参数 config: 用户自定义的配置
-func (wsc *Wsc) SetConfig(config *Config) {
+func (wsc *Wsc) SetConfig(config *wscconfig.WSC) {
 	wsc.Config = config // 更新 Wsc 实例的配置
 }
 
@@ -119,4 +122,19 @@ func (wsc *Wsc) OnTextMessageReceived(f func(message string)) {
 // 参数 f: 接收到二进制消息时调用的函数，参数为接收到的数据
 func (wsc *Wsc) OnBinaryMessageReceived(f func(data []byte)) {
 	wsc.onBinaryMessageReceived.Store(f)
+}
+
+// DefaultUpgrader 返回默认的WebSocket升级器
+var DefaultUpgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		return true // 允许所有来源
+	},
+}
+
+// IsNormalClose 检查WebSocket关闭是否为正常关闭
+func IsNormalClose(err error) bool {
+	if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+		return true
+	}
+	return false
 }

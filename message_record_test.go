@@ -12,10 +12,10 @@ package wsc
 
 import (
 	"context"
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/stretchr/testify/assert"
 	"testing"
 	"time"
-
-	"github.com/stretchr/testify/assert"
 )
 
 // TestMessageRecordManager 测试消息记录管理器
@@ -200,9 +200,10 @@ func TestMessageRecordManager(t *testing.T) {
 // TestHubWithMessageRecord 测试Hub集成消息记录
 func TestHubWithMessageRecord(t *testing.T) {
 	t.Run("启用消息记录的Hub", func(t *testing.T) {
-		config := DefaultHubConfig()
-		config.EnableMessageRecord = true
-		config.MaxRecords = 100
+		config := wscconfig.Default().
+			WithGroup(wscconfig.DefaultGroup().
+				Enable().
+				WithMessageRecord(true))
 
 		hub := NewHub(config)
 		assert.NotNil(t, hub.recordManager)
@@ -232,11 +233,17 @@ func TestHubWithMessageRecord(t *testing.T) {
 	})
 
 	t.Run("查询消息统计", func(t *testing.T) {
-		config := DefaultHubConfig()
-		config.EnableMessageRecord = true
+		config := wscconfig.Default().
+			WithGroup(wscconfig.DefaultGroup().
+				Enable().
+				WithMessageRecord(true))
 
 		hub := NewHub(config)
 		go hub.Run()
+
+		// 等待Hub启动
+		time.Sleep(100 * time.Millisecond)
+
 		defer hub.Shutdown()
 
 		stats := hub.GetMessageStatistics()
@@ -245,8 +252,10 @@ func TestHubWithMessageRecord(t *testing.T) {
 	})
 
 	t.Run("未启用消息记录", func(t *testing.T) {
-		config := DefaultHubConfig()
-		config.EnableMessageRecord = false
+		config := wscconfig.Default().
+			WithGroup(wscconfig.DefaultGroup().
+				Enable().
+				WithMessageRecord(false))
 
 		hub := NewHub(config)
 		assert.Nil(t, hub.recordManager)
@@ -259,11 +268,13 @@ func TestHubWithMessageRecord(t *testing.T) {
 // TestMessageRecordRetry 测试消息重试功能
 func TestMessageRecordRetry(t *testing.T) {
 	t.Run("重试失败消息", func(t *testing.T) {
-		config := DefaultHubConfig()
-		config.EnableMessageRecord = true
-		config.EnableAck = true
-		config.AckTimeout = 200 * time.Millisecond
-		config.MaxRetry = 2
+		config := wscconfig.Default().
+			WithGroup(wscconfig.DefaultGroup().
+				Enable().
+				WithMessageRecord(true)).
+			WithTicket(wscconfig.DefaultTicket().
+				Enable().
+				WithAck(true, 200, 2))
 
 		hub := NewHub(config)
 		go hub.Run()
@@ -297,8 +308,10 @@ func TestMessageRecordRetry(t *testing.T) {
 	})
 
 	t.Run("批量重试失败消息", func(t *testing.T) {
-		config := DefaultHubConfig()
-		config.EnableMessageRecord = true
+		config := wscconfig.Default().
+			WithGroup(wscconfig.DefaultGroup().
+				Enable().
+				WithMessageRecord(true))
 
 		hub := NewHub(config)
 		go hub.Run()

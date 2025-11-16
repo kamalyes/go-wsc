@@ -11,21 +11,21 @@
 package wsc
 
 import (
+	"github.com/gorilla/websocket"
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/stretchr/testify/assert"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/gorilla/websocket"
-	"github.com/stretchr/testify/assert"
 )
 
 // TestSendTextMessage 测试发送文本消息
 func TestSendTextMessage(t *testing.T) {
 	received := make(chan string, 1)
-	
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upgrader := websocket.Upgrader{}
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -62,7 +62,7 @@ func TestSendTextMessage(t *testing.T) {
 	case <-connected:
 		err := client.SendTextMessage("test message")
 		assert.NoError(t, err, "SendTextMessage should succeed")
-		
+
 		select {
 		case msg := <-received:
 			assert.Equal(t, "test message", msg, "Should receive correct message")
@@ -77,7 +77,7 @@ func TestSendTextMessage(t *testing.T) {
 // TestSendBinaryMessage 测试发送二进制消息
 func TestSendBinaryMessage(t *testing.T) {
 	received := make(chan []byte, 1)
-	
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upgrader := websocket.Upgrader{}
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -114,7 +114,7 @@ func TestSendBinaryMessage(t *testing.T) {
 	case <-connected:
 		err := client.SendBinaryMessage([]byte{0x01, 0x02, 0x03})
 		assert.NoError(t, err, "SendBinaryMessage should succeed")
-		
+
 		select {
 		case msg := <-received:
 			assert.Equal(t, []byte{0x01, 0x02, 0x03}, msg, "Should receive correct binary message")
@@ -133,7 +133,7 @@ func TestSendMessage_WhenClosed(t *testing.T) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		assert.NoError(t, err)
 		defer conn.Close()
-		time.Sleep(2 * time.Second) // 保持连接
+		time.Sleep(100 * time.Millisecond) // 短暂保持连接
 	}))
 	defer server.Close()
 
@@ -171,17 +171,16 @@ func TestSendMessage_BufferFull(t *testing.T) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		assert.NoError(t, err)
 		defer conn.Close()
-		
+
 		// 不读取消息，让缓冲区填满
-		time.Sleep(3 * time.Second)
+		time.Sleep(100 * time.Millisecond) // 减少等待时间
 	}))
 	defer server.Close()
 
 	url := "ws" + strings.TrimPrefix(server.URL, "http")
-	
+
 	// 创建小缓冲区的客户端
-	config := NewDefaultConfig()
-	config.MessageBufferSize = 2
+	config := wscconfig.Default().WithMessageBufferSize(2)
 	client := New(url)
 	client.SetConfig(config)
 	defer client.Close()
@@ -200,7 +199,7 @@ func TestSendMessage_BufferFull(t *testing.T) {
 		assert.NoError(t, err)
 		err = client.SendTextMessage("msg2")
 		assert.NoError(t, err)
-		
+
 		// 下一条消息应该返回 ErrBufferFull
 		err = client.SendTextMessage("msg3")
 		if err != nil {
@@ -289,7 +288,7 @@ func TestSendMessage_AfterSendChanClosed(t *testing.T) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		assert.NoError(t, err)
 		defer conn.Close()
-		time.Sleep(2 * time.Second)
+		time.Sleep(100 * time.Millisecond) // 减少等待时间
 	}))
 	defer server.Close()
 
@@ -314,7 +313,7 @@ func TestSendMessage_AfterSendChanClosed(t *testing.T) {
 
 		err = client.SendBinaryMessage([]byte("test"))
 		assert.Equal(t, ErrClose, err, "SendBinaryMessage with closed sendChan should return ErrClose")
-		
+
 		client.Close()
 	case <-time.After(2 * time.Second):
 		t.Fatal("Connection timeout")
@@ -329,7 +328,7 @@ func TestSendMessage_LargeMessage(t *testing.T) {
 	}
 
 	received := make(chan []byte, 1)
-	
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upgrader := websocket.Upgrader{}
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -365,7 +364,7 @@ func TestSendMessage_LargeMessage(t *testing.T) {
 	case <-connected:
 		err := client.SendBinaryMessage(largeData)
 		assert.NoError(t, err, "Should send large message successfully")
-		
+
 		select {
 		case msg := <-received:
 			assert.Equal(t, len(largeData), len(msg), "Should receive complete large message")
@@ -380,7 +379,7 @@ func TestSendMessage_LargeMessage(t *testing.T) {
 // TestSendMessage_EmptyMessage 测试发送空消息
 func TestSendMessage_EmptyMessage(t *testing.T) {
 	received := make(chan string, 1)
-	
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upgrader := websocket.Upgrader{}
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -416,7 +415,7 @@ func TestSendMessage_EmptyMessage(t *testing.T) {
 	case <-connected:
 		err := client.SendTextMessage("")
 		assert.NoError(t, err, "Should send empty message successfully")
-		
+
 		select {
 		case msg := <-received:
 			assert.Equal(t, "", msg, "Should receive empty message")

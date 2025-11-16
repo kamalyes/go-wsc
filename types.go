@@ -11,6 +11,7 @@
 package wsc
 
 import (
+	"fmt"
 	"strings"
 	"time"
 )
@@ -95,15 +96,62 @@ func (s UserStatus) IsValid() bool {
 type MessageType string
 
 const (
-	MessageTypeText   MessageType = "text"   // 文本消息
-	MessageTypeImage  MessageType = "image"  // 图片消息
-	MessageTypeFile   MessageType = "file"   // 文件消息
-	MessageTypeAudio  MessageType = "audio"  // 音频消息
-	MessageTypeVideo  MessageType = "video"  // 视频消息
-	MessageTypeSystem MessageType = "system" // 系统消息
-	MessageTypeNotice MessageType = "notice" // 通知消息
-	MessageTypeEvent  MessageType = "event"  // 事件消息
-	MessageTypeAck    MessageType = "ack"    // ACK确认消息
+	MessageTypeText         MessageType = "text"         // 文本消息
+	MessageTypeImage        MessageType = "image"        // 图片消息
+	MessageTypeFile         MessageType = "file"         // 文件消息
+	MessageTypeAudio        MessageType = "audio"        // 音频消息
+	MessageTypeVideo        MessageType = "video"        // 视频消息
+	MessageTypeSystem       MessageType = "system"       // 系统消息
+	MessageTypeNotice       MessageType = "notice"       // 通知消息
+	MessageTypeEvent        MessageType = "event"        // 事件消息
+	MessageTypeAck          MessageType = "ack"          // ACK确认消息
+	MessageTypeLocation     MessageType = "location"     // 位置消息
+	MessageTypeCard         MessageType = "card"         // 卡片消息
+	MessageTypeEmoji        MessageType = "emoji"        // 表情消息
+	MessageTypeSticker      MessageType = "sticker"      // 贴纸消息
+	MessageTypeLink         MessageType = "link"         // 链接消息
+	MessageTypeQuote        MessageType = "quote"        // 引用回复消息
+	MessageTypeForward      MessageType = "forward"      // 转发消息
+	MessageTypeCommand      MessageType = "command"      // 命令消息
+	MessageTypeMarkdown     MessageType = "markdown"     // Markdown格式消息
+	MessageTypeRichText     MessageType = "rich_text"    // 富文本消息
+	MessageTypeCode         MessageType = "code"         // 代码消息
+	MessageTypeJson         MessageType = "json"         // JSON数据消息
+	MessageTypeXML          MessageType = "xml"          // XML数据消息
+	MessageTypeBinary       MessageType = "binary"       // 二进制数据消息
+	MessageTypeVoice        MessageType = "voice"        // 语音消息
+	MessageTypeGIF          MessageType = "gif"          // GIF动图消息
+	MessageTypeDocument     MessageType = "document"     // 文档消息
+	MessageTypeSpreadsheet  MessageType = "spreadsheet"  // 电子表格消息
+	MessageTypePresentation MessageType = "presentation" // 演示文稿消息
+	MessageTypeContact      MessageType = "contact"      // 联系人卡片消息
+	MessageTypeCalendar     MessageType = "calendar"     // 日历事件消息
+	MessageTypeTask         MessageType = "task"         // 任务消息
+	MessageTypePoll         MessageType = "poll"         // 投票消息
+	MessageTypeForm         MessageType = "form"         // 表单消息
+	MessageTypePayment      MessageType = "payment"      // 支付消息
+	MessageTypeOrder        MessageType = "order"        // 订单消息
+	MessageTypeProduct      MessageType = "product"      // 产品消息
+	MessageTypeInvite       MessageType = "invite"       // 邀请消息
+	MessageTypeAnnouncement MessageType = "announcement" // 公告消息
+	MessageTypeAlert        MessageType = "alert"        // 警告消息
+	MessageTypeError        MessageType = "error"        // 错误消息
+	MessageTypeInfo         MessageType = "info"         // 信息消息
+	MessageTypeSuccess      MessageType = "success"      // 成功消息
+	MessageTypeWarning      MessageType = "warning"      // 警告消息
+	MessageTypeHeartbeat    MessageType = "heartbeat"    // 心跳消息
+	MessageTypePing         MessageType = "ping"         // Ping消息
+	MessageTypePong         MessageType = "pong"         // Pong消息
+	MessageTypeTyping       MessageType = "typing"       // 正在输入状态消息
+	MessageTypeRead         MessageType = "read"         // 已读消息
+	MessageTypeDelivered    MessageType = "delivered"    // 已送达消息
+	MessageTypeRecall       MessageType = "recall"       // 消息撤回
+	MessageTypeEdit         MessageType = "edit"         // 消息编辑
+	MessageTypeReaction     MessageType = "reaction"     // 消息反应/表态
+	MessageTypeThread       MessageType = "thread"       // 线程消息
+	MessageTypeReply        MessageType = "reply"        // 回复消息
+	MessageTypeMention      MessageType = "mention"      // @提及消息
+	MessageTypeCustom       MessageType = "custom"       // 自定义类型消息
 )
 
 // String 实现Stringer接口
@@ -114,13 +162,528 @@ func (t MessageType) String() string {
 // IsValid 检查消息类型是否有效
 func (t MessageType) IsValid() bool {
 	switch t {
-	case MessageTypeText, MessageTypeImage, MessageTypeFile,
-		MessageTypeAudio, MessageTypeVideo, MessageTypeSystem,
-		MessageTypeNotice, MessageTypeEvent, MessageTypeAck:
+	case MessageTypeText, MessageTypeImage, MessageTypeFile, MessageTypeAudio, MessageTypeVideo,
+		MessageTypeSystem, MessageTypeNotice, MessageTypeEvent, MessageTypeAck, MessageTypeLocation,
+		MessageTypeCard, MessageTypeEmoji, MessageTypeSticker, MessageTypeLink, MessageTypeQuote,
+		MessageTypeForward, MessageTypeCommand, MessageTypeMarkdown, MessageTypeRichText, MessageTypeCode,
+		MessageTypeJson, MessageTypeXML, MessageTypeBinary, MessageTypeVoice, MessageTypeGIF,
+		MessageTypeDocument, MessageTypeSpreadsheet, MessageTypePresentation, MessageTypeContact,
+		MessageTypeCalendar, MessageTypeTask, MessageTypePoll, MessageTypeForm, MessageTypePayment,
+		MessageTypeOrder, MessageTypeProduct, MessageTypeInvite, MessageTypeAnnouncement, MessageTypeAlert,
+		MessageTypeError, MessageTypeInfo, MessageTypeSuccess, MessageTypeWarning, MessageTypeHeartbeat,
+		MessageTypePing, MessageTypePong, MessageTypeTyping, MessageTypeRead, MessageTypeDelivered,
+		MessageTypeRecall, MessageTypeEdit, MessageTypeReaction, MessageTypeThread, MessageTypeReply,
+		MessageTypeMention, MessageTypeCustom:
 		return true
 	default:
 		return false
 	}
+}
+
+// IsMediaType 检查是否为媒体类型消息
+func (t MessageType) IsMediaType() bool {
+	switch t {
+	case MessageTypeImage, MessageTypeAudio, MessageTypeVideo, MessageTypeFile,
+		MessageTypeVoice, MessageTypeGIF, MessageTypeDocument, MessageTypeSpreadsheet,
+		MessageTypePresentation:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsTextType 检查是否为文本类型消息
+func (t MessageType) IsTextType() bool {
+	switch t {
+	case MessageTypeText, MessageTypeMarkdown, MessageTypeRichText, MessageTypeCode:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsSystemType 检查是否为系统类型消息
+func (t MessageType) IsSystemType() bool {
+	switch t {
+	case MessageTypeSystem, MessageTypeNotice, MessageTypeEvent, MessageTypeAnnouncement,
+		MessageTypeAlert, MessageTypeError, MessageTypeInfo, MessageTypeSuccess,
+		MessageTypeWarning, MessageTypeHeartbeat, MessageTypePing, MessageTypePong:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsInteractiveType 检查是否为交互类型消息
+func (t MessageType) IsInteractiveType() bool {
+	switch t {
+	case MessageTypeCard, MessageTypeLink, MessageTypeQuote, MessageTypeCommand,
+		MessageTypePoll, MessageTypeForm, MessageTypeTask, MessageTypeInvite:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsStatusType 检查是否为状态类型消息
+func (t MessageType) IsStatusType() bool {
+	switch t {
+	case MessageTypeTyping, MessageTypeRead, MessageTypeDelivered, MessageTypeAck:
+		return true
+	default:
+		return false
+	}
+}
+
+// GetCategory 获取消息类型分类
+func (t MessageType) GetCategory() string {
+	if t.IsMediaType() {
+		return "media"
+	}
+	if t.IsTextType() {
+		return "text"
+	}
+	if t.IsSystemType() {
+		return "system"
+	}
+	if t.IsInteractiveType() {
+		return "interactive"
+	}
+	if t.IsStatusType() {
+		return "status"
+	}
+	return "other"
+}
+
+// GetAllMessageTypes 返回所有可用的消息类型
+func GetAllMessageTypes() []MessageType {
+	return []MessageType{
+		MessageTypeText, MessageTypeImage, MessageTypeFile, MessageTypeAudio, MessageTypeVideo,
+		MessageTypeSystem, MessageTypeNotice, MessageTypeEvent, MessageTypeAck, MessageTypeLocation,
+		MessageTypeCard, MessageTypeEmoji, MessageTypeSticker, MessageTypeLink, MessageTypeQuote,
+		MessageTypeForward, MessageTypeCommand, MessageTypeMarkdown, MessageTypeRichText, MessageTypeCode,
+		MessageTypeJson, MessageTypeXML, MessageTypeBinary, MessageTypeVoice, MessageTypeGIF,
+		MessageTypeDocument, MessageTypeSpreadsheet, MessageTypePresentation, MessageTypeContact,
+		MessageTypeCalendar, MessageTypeTask, MessageTypePoll, MessageTypeForm, MessageTypePayment,
+		MessageTypeOrder, MessageTypeProduct, MessageTypeInvite, MessageTypeAnnouncement, MessageTypeAlert,
+		MessageTypeError, MessageTypeInfo, MessageTypeSuccess, MessageTypeWarning, MessageTypeHeartbeat,
+		MessageTypePing, MessageTypePong, MessageTypeTyping, MessageTypeRead, MessageTypeDelivered,
+		MessageTypeRecall, MessageTypeEdit, MessageTypeReaction, MessageTypeThread, MessageTypeReply,
+		MessageTypeMention, MessageTypeCustom,
+	}
+}
+
+// GetMessageTypesByCategory 根据分类返回消息类型
+func GetMessageTypesByCategory(category string) []MessageType {
+	var types []MessageType
+	for _, msgType := range GetAllMessageTypes() {
+		if msgType.GetCategory() == category {
+			types = append(types, msgType)
+		}
+	}
+	return types
+}
+
+// MessagePriority 消息优先级
+type MessagePriority int
+
+const (
+	// 低优先级：一般信息、日志、统计数据等
+	MessagePriorityLow MessagePriority = iota + 1
+	// 普通优先级：常规用户消息、文件传输等
+	MessagePriorityNormal
+	// 高优先级：重要通知、系统消息等
+	MessagePriorityHigh
+	// 紧急优先级：安全警告、错误信息等
+	MessagePriorityUrgent
+	// 关键优先级：系统故障、紧急维护等
+	MessagePriorityCritical
+)
+
+// String 实现Stringer接口
+func (p MessagePriority) String() string {
+	switch p {
+	case MessagePriorityLow:
+		return "low"
+	case MessagePriorityNormal:
+		return "normal"
+	case MessagePriorityHigh:
+		return "high"
+	case MessagePriorityUrgent:
+		return "urgent"
+	case MessagePriorityCritical:
+		return "critical"
+	default:
+		return "unknown"
+	}
+}
+
+// GetWeight 获取优先级权重值（数值越大优先级越高）
+func (p MessagePriority) GetWeight() int {
+	return int(p)
+}
+
+// IsHigherThan 判断是否比另一个优先级高
+func (p MessagePriority) IsHigherThan(other MessagePriority) bool {
+	return p > other
+}
+
+// GetPriorityByMessageType 根据消息类型获取默认优先级
+func (t MessageType) GetDefaultPriority() MessagePriority {
+	switch {
+	// 关键优先级 - 系统故障、安全相关
+	case t == MessageTypeError || t == MessageTypeAlert:
+		return MessagePriorityCritical
+
+	// 紧急优先级 - 重要系统消息
+	case t == MessageTypeSystem || t == MessageTypeAnnouncement || t == MessageTypeWarning:
+		return MessagePriorityUrgent
+
+	// 高优先级 - 重要业务消息
+	case t == MessageTypeNotice || t == MessageTypeEvent || t == MessageTypeSuccess ||
+		t == MessageTypePayment || t == MessageTypeOrder || t == MessageTypeInvite ||
+		t == MessageTypeTask || t == MessageTypeRecall:
+		return MessagePriorityHigh
+
+	// 普通优先级 - 常规交互消息
+	case t == MessageTypeText || t == MessageTypeImage || t == MessageTypeAudio ||
+		t == MessageTypeVideo || t == MessageTypeFile || t == MessageTypeCard ||
+		t == MessageTypeLink || t == MessageTypeQuote || t == MessageTypeForward ||
+		t == MessageTypeMarkdown || t == MessageTypeRichText || t == MessageTypeCode ||
+		t == MessageTypeVoice || t == MessageTypeLocation || t == MessageTypeContact ||
+		t == MessageTypeDocument || t == MessageTypeCalendar || t == MessageTypePoll ||
+		t == MessageTypeForm || t == MessageTypeProduct || t == MessageTypeEmoji ||
+		t == MessageTypeSticker || t == MessageTypeGIF || t == MessageTypeReply ||
+		t == MessageTypeThread || t == MessageTypeMention:
+		return MessagePriorityNormal
+
+	// 低优先级 - 状态、统计、心跳等
+	case t == MessageTypeTyping || t == MessageTypeRead || t == MessageTypeDelivered ||
+		t == MessageTypeAck || t == MessageTypeHeartbeat || t == MessageTypePing ||
+		t == MessageTypePong || t == MessageTypeInfo || t == MessageTypeEdit ||
+		t == MessageTypeReaction || t == MessageTypeJson || t == MessageTypeXML ||
+		t == MessageTypeBinary || t == MessageTypeSpreadsheet || t == MessageTypePresentation ||
+		t == MessageTypeCustom || t == MessageTypeCommand:
+		return MessagePriorityLow
+
+	// 默认普通优先级
+	default:
+		return MessagePriorityNormal
+	}
+}
+
+// GetMessageTypesByPriority 根据优先级获取消息类型列表
+func GetMessageTypesByPriority(priority MessagePriority) []MessageType {
+	var types []MessageType
+	for _, msgType := range GetAllMessageTypes() {
+		if msgType.GetDefaultPriority() == priority {
+			types = append(types, msgType)
+		}
+	}
+	return types
+}
+
+// PriorityStats 优先级统计
+type PriorityStats struct {
+	Critical int `json:"critical"` // 关键优先级数量
+	Urgent   int `json:"urgent"`   // 紧急优先级数量
+	High     int `json:"high"`     // 高优先级数量
+	Normal   int `json:"normal"`   // 普通优先级数量
+	Low      int `json:"low"`      // 低优先级数量
+	Total    int `json:"total"`    // 总数量
+}
+
+// GetPriorityStats 获取所有消息类型的优先级统计
+func GetPriorityStats() *PriorityStats {
+	stats := &PriorityStats{}
+
+	for _, msgType := range GetAllMessageTypes() {
+		priority := msgType.GetDefaultPriority()
+		switch priority {
+		case MessagePriorityCritical:
+			stats.Critical++
+		case MessagePriorityUrgent:
+			stats.Urgent++
+		case MessagePriorityHigh:
+			stats.High++
+		case MessagePriorityNormal:
+			stats.Normal++
+		case MessagePriorityLow:
+			stats.Low++
+		}
+		stats.Total++
+	}
+
+	return stats
+}
+
+// VIPLevel VIP等级
+type VIPLevel string
+
+const (
+	VIPLevelV0 VIPLevel = "v0" // 普通用户
+	VIPLevelV1 VIPLevel = "v1" // VIP1级
+	VIPLevelV2 VIPLevel = "v2" // VIP2级
+	VIPLevelV3 VIPLevel = "v3" // VIP3级
+	VIPLevelV4 VIPLevel = "v4" // VIP4级
+	VIPLevelV5 VIPLevel = "v5" // VIP5级
+	VIPLevelV6 VIPLevel = "v6" // VIP6级
+	VIPLevelV7 VIPLevel = "v7" // VIP7级
+	VIPLevelV8 VIPLevel = "v8" // VIP8级（最高级）
+)
+
+// String 实现Stringer接口
+func (v VIPLevel) String() string {
+	return string(v)
+}
+
+// IsValid 检查VIP等级是否有效
+func (v VIPLevel) IsValid() bool {
+	switch v {
+	case VIPLevelV0, VIPLevelV1, VIPLevelV2, VIPLevelV3,
+		VIPLevelV4, VIPLevelV5, VIPLevelV6, VIPLevelV7, VIPLevelV8:
+		return true
+	default:
+		return false
+	}
+}
+
+// GetLevel 获取VIP等级数值 (0-8)
+func (v VIPLevel) GetLevel() int {
+	switch v {
+	case VIPLevelV0:
+		return 0
+	case VIPLevelV1:
+		return 1
+	case VIPLevelV2:
+		return 2
+	case VIPLevelV3:
+		return 3
+	case VIPLevelV4:
+		return 4
+	case VIPLevelV5:
+		return 5
+	case VIPLevelV6:
+		return 6
+	case VIPLevelV7:
+		return 7
+	case VIPLevelV8:
+		return 8
+	default:
+		return 0
+	}
+}
+
+// IsHigherThan 比较VIP等级
+func (v VIPLevel) IsHigherThan(other VIPLevel) bool {
+	return v.GetLevel() > other.GetLevel()
+}
+
+// UrgencyLevel 紧急等级
+type UrgencyLevel string
+
+const (
+	UrgencyLevelLow    UrgencyLevel = "low"    // 低紧急
+	UrgencyLevelNormal UrgencyLevel = "normal" // 正常
+	UrgencyLevelHigh   UrgencyLevel = "high"   // 高紧急
+)
+
+// String 实现Stringer接口
+func (u UrgencyLevel) String() string {
+	return string(u)
+}
+
+// IsValid 检查紧急等级是否有效
+func (u UrgencyLevel) IsValid() bool {
+	switch u {
+	case UrgencyLevelLow, UrgencyLevelNormal, UrgencyLevelHigh:
+		return true
+	default:
+		return false
+	}
+}
+
+// GetLevel 获取紧急等级数值 (0-2)
+func (u UrgencyLevel) GetLevel() int {
+	switch u {
+	case UrgencyLevelLow:
+		return 0
+	case UrgencyLevelNormal:
+		return 1
+	case UrgencyLevelHigh:
+		return 2
+	default:
+		return 1
+	}
+}
+
+// IsMoreUrgentThan 比较紧急程度
+func (u UrgencyLevel) IsMoreUrgentThan(other UrgencyLevel) bool {
+	return u.GetLevel() > other.GetLevel()
+}
+
+// BusinessCategory 业务分类
+type BusinessCategory string
+
+const (
+	// 基本分类
+	BusinessCategoryGeneral    BusinessCategory = "general"    // 通用
+	BusinessCategoryCustomer   BusinessCategory = "customer"   // 客户服务
+	BusinessCategorySales      BusinessCategory = "sales"      // 销售
+	BusinessCategoryTechnical  BusinessCategory = "technical"  // 技术
+	BusinessCategoryFinance    BusinessCategory = "finance"    // 财务
+	BusinessCategorySecurity   BusinessCategory = "security"   // 安全
+	BusinessCategoryOperations BusinessCategory = "operations" // 运营
+)
+
+// String 实现Stringer接口
+func (b BusinessCategory) String() string {
+	return string(b)
+}
+
+// IsValid 检查业务分类是否有效
+func (b BusinessCategory) IsValid() bool {
+	switch b {
+	case BusinessCategoryGeneral, BusinessCategoryCustomer, BusinessCategorySales,
+		BusinessCategoryTechnical, BusinessCategoryFinance, BusinessCategorySecurity,
+		BusinessCategoryOperations:
+		return true
+	default:
+		return false
+	}
+}
+
+// GetCategoryType 获取业务分类类型
+func (b BusinessCategory) GetCategoryType() string {
+	return string(b)
+}
+
+// MessageClassification 消息综合分类
+type MessageClassification struct {
+	Type             MessageType      `json:"type"`
+	Priority         MessagePriority  `json:"priority"`
+	VIPLevel         VIPLevel         `json:"vip_level"`
+	UrgencyLevel     UrgencyLevel     `json:"urgency_level"`
+	BusinessCategory BusinessCategory `json:"business_category"`
+	Timestamp        int64            `json:"timestamp"`
+	UserID           string           `json:"user_id,omitempty"`
+}
+
+// GetFinalPriority 获取综合优先级分数 (0-100)
+func (mc *MessageClassification) GetFinalPriority() int {
+	// 基础优先级分数 (0-25)
+	basePriority := mc.Priority.GetWeight() * 5
+
+	// VIP等级加分 (0-40)
+	vipBonus := mc.VIPLevel.GetLevel() * 5
+
+	// 紧急等级加分 (0-20)
+	urgencyBonus := mc.UrgencyLevel.GetLevel() * 10
+
+	// 业务分类加分 (0-15)
+	var categoryBonus int
+	switch mc.BusinessCategory {
+	case BusinessCategorySecurity:
+		categoryBonus = 15
+	case BusinessCategoryFinance:
+		categoryBonus = 10
+	case BusinessCategoryCustomer:
+		categoryBonus = 8
+	case BusinessCategoryTechnical:
+		categoryBonus = 5
+	case BusinessCategorySales:
+		categoryBonus = 3
+	default:
+		categoryBonus = 0
+	}
+
+	totalScore := basePriority + vipBonus + urgencyBonus + categoryBonus
+
+	// 确保分数在50-100之间
+	if totalScore > 100 {
+		return 100
+	}
+	return totalScore
+}
+
+// GetDisplayName 获取分类显示名称
+func (mc *MessageClassification) GetDisplayName() string {
+	return fmt.Sprintf("[%s][%s][%s][%s]",
+		mc.Type,
+		mc.Priority,
+		mc.VIPLevel,
+		mc.UrgencyLevel,
+	)
+}
+
+// IsHighPriorityMessage 判断是否为高优先级消息
+func (mc *MessageClassification) IsHighPriorityMessage() bool {
+	return mc.GetFinalPriority() >= 70
+}
+
+// IsCriticalMessage 判断是否为关键消息
+func (mc *MessageClassification) IsCriticalMessage() bool {
+	return mc.GetFinalPriority() >= 90 ||
+		mc.Priority == MessagePriorityCritical ||
+		mc.UrgencyLevel == UrgencyLevelHigh ||
+		mc.BusinessCategory.GetCategoryType() == "security"
+}
+
+// GetAllVIPLevels 获取所有VIP等级
+func GetAllVIPLevels() []VIPLevel {
+	return []VIPLevel{
+		VIPLevelV0,
+		VIPLevelV1,
+		VIPLevelV2,
+		VIPLevelV3,
+		VIPLevelV4,
+		VIPLevelV5,
+		VIPLevelV6,
+		VIPLevelV7,
+		VIPLevelV8,
+	}
+}
+
+// GetAllUrgencyLevels 获取所有紧急等级
+func GetAllUrgencyLevels() []UrgencyLevel {
+	return []UrgencyLevel{
+		UrgencyLevelLow,
+		UrgencyLevelNormal,
+		UrgencyLevelHigh,
+	}
+}
+
+// GetAllBusinessCategories 获取所有业务分类
+func GetAllBusinessCategories() []BusinessCategory {
+	return []BusinessCategory{
+		BusinessCategoryGeneral,
+		BusinessCategoryCustomer,
+		BusinessCategorySales,
+		BusinessCategoryTechnical,
+		BusinessCategoryFinance,
+		BusinessCategorySecurity,
+		BusinessCategoryOperations,
+	}
+}
+
+// HubStats Hub统计信息结构体
+type HubStats struct {
+	// 连接统计
+	TotalClients      int `json:"total_clients"`      // 总客户端数
+	WebSocketClients  int `json:"websocket_clients"`  // WebSocket客户端数
+	SSEClients        int `json:"sse_clients"`        // SSE客户端数
+	AgentConnections  int `json:"agent_connections"`  // 座席连接数
+	TicketConnections int `json:"ticket_connections"` // 工单连接数
+
+	// 消息统计
+	MessagesSent     int64 `json:"messages_sent"`     // 已发送消息数
+	MessagesReceived int64 `json:"messages_received"` // 已接收消息数
+	BroadcastsSent   int64 `json:"broadcasts_sent"`   // 已发送广播数
+	QueuedMessages   int   `json:"queued_messages"`   // 排队消息数
+
+	// 其他统计
+	OnlineUsers int   `json:"online_users"` // 在线用户数
+	Uptime      int64 `json:"uptime"`       // 运行时间(秒)
 }
 
 // MessageStatus 消息状态

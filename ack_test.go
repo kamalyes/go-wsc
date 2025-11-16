@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-11-15
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-15
+ * @LastEditTime: 2025-11-16 19:49:51
  * @FilePath: \go-wsc\ack_test.go
  * @Description: ACK消息确认机制测试
  *
@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -119,10 +120,9 @@ func TestAckManager(t *testing.T) {
 // TestHubWithAck 测试Hub的ACK功能
 func TestHubWithAck(t *testing.T) {
 	t.Run("启用ACK的消息发送", func(t *testing.T) {
-		config := DefaultHubConfig()
-		config.EnableAck = true
-		config.AckTimeout = 2 * time.Second
-		config.MaxRetry = 2
+		config := wscconfig.Default().
+			Enable().
+			EnableTicket()
 
 		hub := NewHub(config)
 		go hub.Run()
@@ -178,8 +178,11 @@ func TestHubWithAck(t *testing.T) {
 	})
 
 	t.Run("未启用ACK的消息发送", func(t *testing.T) {
-		config := DefaultHubConfig()
-		config.EnableAck = false
+		config := wscconfig.Default().
+			Enable().
+			WithTicket(wscconfig.DefaultTicket().
+				Enable().
+				WithAck(false, 2000, 2))
 
 		hub := NewHub(config)
 		go hub.Run()
@@ -210,10 +213,11 @@ func TestHubWithAck(t *testing.T) {
 	})
 
 	t.Run("ACK超时重试", func(t *testing.T) {
-		config := DefaultHubConfig()
-		config.EnableAck = true
-		config.AckTimeout = 300 * time.Millisecond  // 增加超时时间
-		config.MaxRetry = 2
+		config := wscconfig.Default().
+			Enable().
+			WithTicket(wscconfig.DefaultTicket().
+				Enable().
+				WithAck(true, 300, 2))
 
 		hub := NewHub(config)
 		go hub.Run()

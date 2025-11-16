@@ -44,6 +44,19 @@ graph TB
             OfflineHandler[离线处理器<br/>持久化存储]
         end
         
+        subgraph "失败处理系统 Failure Handling"
+            RetryEngine[go-toolbox 重试引擎<br/>智能重试机制]
+            FailureHandler[5类失败处理器<br/>专业化处理]
+            
+            subgraph "处理器类型"
+                SendHandler[通用发送失败]
+                QueueHandler[队列满处理]
+                OfflineUserHandler[用户离线处理]  
+                ConnHandler[连接错误处理]
+                TimeoutHandler[超时处理]
+            end
+        end
+        
         subgraph "性能优化 Performance"
             AtomicOps[原子操作<br/>无锁统计]
             DynamicQueue[动态队列<br/>自适应缓冲]
@@ -55,6 +68,12 @@ graph TB
             AlertMgr[告警管理<br/>阈值监控]
             Dashboard[监控面板<br/>Grafana/Prometheus]
         end
+    end
+    
+    subgraph "配置层 Configuration"
+        ConfigMgr[go-config/wsc<br/>统一配置管理]
+        RetryConfig[重试参数配置<br/>MaxRetries/BaseDelay]
+        ErrorConfig[错误分类配置<br/>可重试/不可重试]
     end
     
     subgraph "存储层 Storage Layer"
@@ -79,6 +98,20 @@ graph TB
     ACKMgr --> MsgRecord
     MsgRecord --> OfflineHandler
     
+    %% 失败处理流程
+    MsgRouter --> RetryEngine
+    RetryEngine --> FailureHandler
+    FailureHandler --> SendHandler
+    FailureHandler --> QueueHandler
+    FailureHandler --> OfflineUserHandler
+    FailureHandler --> ConnHandler
+    FailureHandler --> TimeoutHandler
+    
+    %% 配置管理
+    ConfigMgr --> RetryEngine
+    ConfigMgr --> RetryConfig
+    ConfigMgr --> ErrorConfig
+    
     HubManager --> AtomicOps
     HubManager --> DynamicQueue
     HubManager --> WorkerPool
@@ -90,23 +123,31 @@ graph TB
     ACKMgr -.->|缓存| Redis
     OfflineHandler --> Database
     MsgRecord --> LogStore
+    QueueHandler -.->|备用存储| Redis
+    OfflineUserHandler --> Database
     
     %% 样式定义
     classDef clientStyle fill:#e1f5fe,stroke:#01579b,stroke-width:2px
     classDef serverStyle fill:#f3e5f5,stroke:#4a148c,stroke-width:2px  
     classDef storageStyle fill:#e8f5e8,stroke:#1b5e20,stroke-width:2px
     classDef coreStyle fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    classDef failureStyle fill:#ffebee,stroke:#c62828,stroke-width:2px
+    classDef configStyle fill:#f1f8e9,stroke:#33691e,stroke-width:2px
     
     class WSC,TSC,React,Vue,Angular clientStyle
     class HubManager,ConnRegistry,MsgRouter,ACKMgr,MsgRecord serverStyle
     class Redis,Database,LogStore storageStyle
     class AtomicOps,DynamicQueue,WorkerPool,MetricsCol coreStyle
+    class RetryEngine,FailureHandler,SendHandler,QueueHandler,OfflineUserHandler,ConnHandler,TimeoutHandler failureStyle
+    class ConfigMgr,RetryConfig,ErrorConfig configStyle
 ```
 
 ### 架构特点
 
-- **分层设计**: 客户端层 → 网络层 → 服务端层 → 存储层
-- **高可用性**: ACK 确认机制 + 消息记录 + 离线处理
+- **分层设计**: 客户端层 → 网络层 → 服务端层 → 配置层 → 存储层
+- **高可靠性**: ACK 确认机制 + 消息记录 + 离线处理 + 智能重试
+- **失败处理**: 5类专业化失败处理器 + go-toolbox重试引擎
+- **配置统一**: go-config/wsc 统一管理重试参数和错误分类
 - **高性能**: 原子操作 + 动态队列 + 协程池优化  
 - **可观测**: 全链路监控 + 实时告警 + 可视化面板
 - **可扩展**: 分布式架构 + 水平扩展支持
@@ -127,6 +168,20 @@ graph TB
 - **ACK 确认**：可靠消息传输
 - **性能监控**：实时指标统计
 
+### 🔄 失败处理与重试
+
+- **智能重试**：基于 go-toolbox 的重试引擎，支持指数退避
+- **失败分类**：5类专业化失败处理器（通用/队列满/离线/连接错误/超时）
+- **配置驱动**：通过 go-config/wsc 统一管理重试参数
+- **详细记录**：完整的重试尝试历史和性能指标
+
+### 📊 配置管理
+
+- **统一配置**：go-config/wsc 包统一管理所有 WebSocket 相关配置
+- **重试参数**：MaxRetries、BaseDelay、BackoffFactor 灵活配置
+- **错误分类**：RetryableErrors 和 NonRetryableErrors 智能分类
+- **热更新**：支持运行时配置更新和生效
+
 ## 📚 文档导航
 
 ### 📖 核心文档
@@ -140,12 +195,14 @@ graph TB
 - [🎯 TypeScript 前端集成](./docs/TypeScript_Integration.md) - React/Vue/Angular 示例
 - [☕ Java 客户端集成](./docs/Java_Client_Integration.md) - 企业级 Java 客户端实现
 - [📡 ACK 消息确认机制](./docs/ACK_Mechanism.md) - 可靠消息传输
+- [🔄 失败处理与重试机制](./docs/Failure_Handling.md) - 全面的失败处理策略
+- [🏗️ 架构设计文档](./docs/Architecture_Design.md) - 回调与失败机制架构
 - [📊 性能优化指南](./docs/Performance_Guide.md) - 调优和监控
 
 ### 📋 API 参考
 
 - [🔌 客户端 API](./docs/Client_API.md) - 完整接口说明  
-- [🏢 服务端 Hub API](./docs/Hub_API.md) - Hub 管理接口
+- [🏢 服务端 Hub API](./docs/Hub_API.md) - Hub 管理接口与失败处理器
 - [🧪 测试覆盖报告](./docs/Test_Coverage.md) - 测试用例和覆盖率
 
 ## 📦 安装
@@ -185,18 +242,26 @@ func main() {
 }
 ```
 
-### 基础服务端
+### 基础服务端（含失败处理）
 
 ```go
 package main
 
 import (
+    "context"
+    "log"
     "net/http"
+    "time"
+    
     "github.com/kamalyes/go-wsc"
 )
 
 func main() {
     hub := wsc.NewHub()
+    
+    // 配置失败处理器
+    setupFailureHandlers(hub)
+    
     go hub.Run()
     
     http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
@@ -204,6 +269,68 @@ func main() {
     })
     
     http.ListenAndServe(":8080", nil)
+}
+
+// 配置失败处理器
+func setupFailureHandlers(hub *wsc.Hub) {
+    // 通用失败处理器
+    hub.AddSendFailureHandler(&MyFailureHandler{})
+    
+    // 用户离线处理器
+    hub.AddUserOfflineHandler(&MyOfflineHandler{})
+    
+    // 队列满处理器  
+    hub.AddQueueFullHandler(&MyQueueHandler{})
+}
+
+// 自定义失败处理器
+type MyFailureHandler struct{}
+
+func (h *MyFailureHandler) HandleSendFailure(msg *wsc.HubMessage, recipient string, reason string, err error) {
+    log.Printf("🚨 消息发送失败: 用户=%s, 原因=%s, 消息=%s", recipient, reason, msg.ID)
+}
+
+type MyOfflineHandler struct{}
+
+func (h *MyOfflineHandler) HandleUserOffline(msg *wsc.HubMessage, userID string, err error) {
+    log.Printf("👤 用户离线，存储消息: 用户=%s, 消息=%s", userID, msg.ID)
+    // 存储离线消息到数据库
+}
+
+type MyQueueHandler struct{}
+
+func (h *MyQueueHandler) HandleQueueFull(msg *wsc.HubMessage, recipient string, queueType string, err error) {
+    log.Printf("📦 队列满，备用存储: 队列=%s, 用户=%s", queueType, recipient)
+    // 存储到Redis等外部存储
+}
+```
+
+### 带重试机制的消息发送
+
+```go
+// 使用重试机制发送重要消息
+func sendImportantMessage(hub *wsc.Hub, userID string, content string) {
+    msg := &wsc.HubMessage{
+        ID:       generateMessageID(),
+        Type:     wsc.TextMessage,
+        Content:  content,
+        CreateAt: time.Now(),
+        Priority: wsc.HighPriority,
+    }
+    
+    // 带详细重试信息的发送
+    result := hub.SendToUserWithRetry(context.Background(), userID, msg)
+    
+    if result.Success {
+        log.Printf("✅ 消息发送成功，重试 %d 次，总耗时 %v", result.TotalRetries, result.TotalTime)
+    } else {
+        log.Printf("❌ 消息发送失败，重试 %d 次后放弃: %v", result.TotalRetries, result.FinalError)
+    }
+    
+    // 查看详细的重试历史
+    for i, attempt := range result.Attempts {
+        log.Printf("   尝试 %d: %v (%v)", i+1, attempt.Success, attempt.Duration)
+    }
 }
 ```
 
@@ -246,6 +373,75 @@ config := wsc.Config{
 
 client := wsc.New("ws://localhost:8080/ws")
 client.SetConfig(config)
+```
+
+### 重试机制配置
+
+```go
+// go-config/wsc 配置文件示例
+import (
+    wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+)
+
+// YAML 配置文件 config.yaml
+/*
+wsc:
+  max_retries: 5
+  base_delay: 200ms
+  backoff_factor: 1.5
+  retryable_errors:
+    - "queue_full"
+    - "timeout"
+    - "conn_error"
+    - "channel_closed"
+    - "network_unreachable"
+  non_retryable_errors:
+    - "user_offline"
+    - "permission"
+    - "validation"
+    - "authentication_failed"
+*/
+
+// 代码中使用配置
+hub := wsc.NewHub()
+// 配置会自动从 go-config/wsc 加载
+```
+
+### 失败处理器配置
+
+```go
+// 配置多个失败处理器
+hub := wsc.NewHub()
+
+// 添加日志记录处理器
+hub.AddSendFailureHandler(&LoggingFailureHandler{
+    logLevel: "ERROR",
+})
+
+// 添加指标收集处理器
+hub.AddSendFailureHandler(&MetricsFailureHandler{
+    prometheusRegistry: registry,
+})
+
+// 添加告警处理器
+hub.AddSendFailureHandler(&AlertFailureHandler{
+    alertThreshold: 10,
+    alertChannel:   "#operations",
+})
+
+// 专门的队列满处理器，使用Redis作为备用存储
+hub.AddQueueFullHandler(&RedisQueueHandler{
+    redisClient: redisClient,
+    keyPrefix:   "wsc:queue:",
+    ttl:         24 * time.Hour,
+})
+
+// 专门的离线用户处理器，使用数据库存储
+hub.AddUserOfflineHandler(&DatabaseOfflineHandler{
+    db:             database,
+    tableName:      "offline_messages",
+    maxOfflineMsg:  1000,
+})
 ```
 
 ### ACK 消息确认

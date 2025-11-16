@@ -34,7 +34,7 @@ ACK (Acknowledgment) 确认机制确保重要消息能够被可靠传输。当�
   │                               │
   │ ⏰ 等待超时 (5秒)              │
   │                               │
-  │ ──── 重试发送(ID: msg_002) ───► │
+  │ ──── 重试发送(ID: msg_002) ───► │ (通过go-toolbox重试引擎)
   │                               │ 处理消息
   │ ◄── ACK确认(ID: msg_002) ──── │
   │                               │
@@ -43,13 +43,290 @@ ACK (Acknowledgment) 确认机制确保重要消息能够被可靠传输。当�
 
 ### 核心特性
 
-- **自动重试**: 超时未收到 ACK 时自动重试
-- **指数退避**: 重试间隔逐渐增加，避免网络拥堵
+- **智能重试**: 基于 go-toolbox/pkg/retry 的重试引擎，支持指数退避
+- **失败处理**: 集成5类专业化失败处理器，全面覆盖各种失败场景
 - **状态跟踪**: 完整的消息状态生命周期管理
+- **配置驱动**: 通过 go-config/wsc 统一管理ACK相关配置
 - **批量处理**: 支持批量重试失败消息
 - **离线缓存**: 连接断开时缓存待确认消息
 
 ## ⚙️ 配置说明
+
+### go-config/wsc 统一配置
+
+ACK 机制的配置现在通过 `go-config/wsc` 包统一管理：
+
+```yaml
+# config.yaml
+wsc:
+  # ACK 相关配置
+  ack_timeout: 30s                    # ACK 超时时间
+  ack_max_retries: 5                  # ACK 最大重试次数
+  ack_retry_interval: 2s              # ACK 重试间隔
+  enable_offline_ack: true            # 启用离线消息 ACK
+  
+  # 重试机制配置（与ACK集成）
+  max_retries: 3                      # 通用重试次数
+  base_delay: 100ms                   # 基础延迟
+  backoff_factor: 2.0                 # 退避因子
+  
+  # ACK 错误分类
+  retryable_errors:
+    - "ack_timeout"                   # ACK 超时可重试
+    - "network_error"                 # 网络错误可重试
+    - "temporary_failure"             # 临时失败可重试
+    
+  non_retryable_errors:
+    - "invalid_message_format"        # 消息格式错误不可重试
+    - "permission_denied"             # 权限错误不可重试
+```
+
+### 代码配置
+
+```go
+package main
+
+import (
+    "time"
+    "github.com/kamalyes/go-wsc"
+    wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+)
+
+func configureACK(hub *wsc.Hub) {
+    // ACK 配置会自动从 go-config/wsc 加载
+    // 也可以手动设置特定参数
+    
+    // 设置 ACK 超时时间
+    hub.SetACKTimeout(30 * time.Second)
+    
+    // 设置最大重试次数
+    hub.SetACKMaxRetries(5)
+    
+    // 启用离线消息 ACK
+    hub.EnableOfflineACK(true)
+}
+
+// 自定义 ACK 配置
+func setupCustomACKConfig() *wscconfig.WSC {
+    return &wscconfig.WSC{
+        AckTimeout:        30 * time.Second,
+        AckMaxRetries:     5,
+        AckRetryInterval:  2 * time.Second,
+        EnableOfflineAck:  true,
+        MaxRetries:        3,
+        BaseDelay:         100 * time.Millisecond,
+        BackoffFactor:     2.0,
+    }
+}
+```
+
+## 🔄 与失败处理器集成
+
+ACK 机制与新的失败处理器系统深度集成，提供全面的错误处理能力：
+
+### ACK 超时处理器
+
+```go
+// ACK 专门的超时处理器
+type ACKTimeoutHandler struct {
+    maxRetryAttempts int
+    backoffDuration  time.Duration
+}
+
+func (h *ACKTimeoutHandler) HandleTimeout(msg *wsc.HubMessage, recipient string, timeoutType string, duration time.Duration, err error) {
+    if timeoutType == "ack_timeout" {
+        log.Printf("⏰ ACK 超时处理 - 消息: %s, 接收者: %s, 耗时: %v", msg.ID, recipient, duration)
+        
+        // 特殊的 ACK 超时处理逻辑
+        h.handleACKTimeout(msg, recipient, duration)
+    }
+}
+
+func (h *ACKTimeoutHandler) handleACKTimeout(msg *wsc.HubMessage, recipient string, duration time.Duration) {
+    // 检查是否应该重试
+    if h.shouldRetryACK(msg, duration) {
+        // 延迟重试
+        go func() {
+            time.Sleep(h.backoffDuration)
+            // 重新发送 ACK 消息
+            log.Printf("🔄 重试 ACK 消息: %s -> %s", msg.ID, recipient)
+        }()
+    } else {
+        // 标记为永久失败
+        log.Printf("❌ ACK 消息永久失败: %s", msg.ID)
+        h.handlePermanentACKFailure(msg, recipient)
+    }
+}
+
+func (h *ACKTimeoutHandler) shouldRetryACK(msg *wsc.HubMessage, duration time.Duration) bool {
+    // 根据消息优先级和耗时决定是否重试
+    if msg.Priority == wsc.HighPriority {
+        return true // 高优先级消息总是重试
+    }
+    return duration < 10*time.Second // 超时时间较短时重试
+}
+
+func (h *ACKTimeoutHandler) handlePermanentACKFailure(msg *wsc.HubMessage, recipient string) {
+    // 记录永久失败的 ACK
+    log.Printf("📝 记录 ACK 永久失败: 消息=%s, 接收者=%s", msg.ID, recipient)
+    // 可以发送告警或记录到数据库
+}
+```
+
+### ACK 离线处理器
+
+```go
+// ACK 用户离线处理器
+type ACKOfflineHandler struct {
+    offlineACKStore map[string][]*wsc.HubMessage
+    maxOfflineACK   int
+    mutex           sync.RWMutex
+}
+
+func NewACKOfflineHandler(maxOfflineACK int) *ACKOfflineHandler {
+    return &ACKOfflineHandler{
+        offlineACKStore: make(map[string][]*wsc.HubMessage),
+        maxOfflineACK:   maxOfflineACK,
+    }
+}
+
+func (h *ACKOfflineHandler) HandleUserOffline(msg *wsc.HubMessage, userID string, err error) {
+    // 只处理需要 ACK 的消息
+    if !msg.RequireAck {
+        return
+    }
+    
+    h.mutex.Lock()
+    defer h.mutex.Unlock()
+    
+    log.Printf("📱 用户离线 ACK 处理 - 用户: %s, 消息: %s", userID, msg.ID)
+    
+    // 检查离线 ACK 消息数量限制
+    if len(h.offlineACKStore[userID]) < h.maxOfflineACK {
+        h.offlineACKStore[userID] = append(h.offlineACKStore[userID], msg)
+        log.Printf("💾 存储离线 ACK 消息: 用户=%s, 消息=%s", userID, msg.ID)
+    } else {
+        // 删除最旧的 ACK 消息
+        h.offlineACKStore[userID] = h.offlineACKStore[userID][1:]
+        h.offlineACKStore[userID] = append(h.offlineACKStore[userID], msg)
+        log.Printf("🔄 替换最旧的离线 ACK 消息: 用户=%s", userID)
+    }
+}
+
+// 用户重新上线时处理离线 ACK 消息
+func (h *ACKOfflineHandler) ProcessOfflineACKMessages(userID string, hub *wsc.Hub) {
+    h.mutex.Lock()
+    messages := h.offlineACKStore[userID]
+    delete(h.offlineACKStore, userID) // 清空离线消息
+    h.mutex.Unlock()
+    
+    if len(messages) == 0 {
+        return
+    }
+    
+    log.Printf("📬 处理用户 %s 的 %d 条离线 ACK 消息", userID, len(messages))
+    
+    for _, msg := range messages {
+        // 重新发送需要 ACK 的消息
+        go func(message *wsc.HubMessage) {
+            ctx := context.Background()
+            result := hub.SendToUserWithRetry(ctx, userID, message)
+            if !result.Success {
+                log.Printf("❌ 离线 ACK 消息重发失败: %s -> %s, 错误: %v", 
+                    message.ID, userID, result.FinalError)
+            }
+        }(msg)
+    }
+}
+```
+
+### ACK 与重试引擎集成
+
+```go
+// ACK 消息的智能重试
+func (hub *Hub) SendACKMessageWithRetry(ctx context.Context, toUserID string, msg *HubMessage) *SendResult {
+    // 标记消息需要 ACK
+    msg.RequireAck = true
+    
+    // 创建 ACK 管理器
+    ackManager := hub.GetACKManager()
+    
+    // 使用重试机制发送消息
+    result := hub.SendToUserWithRetry(ctx, toUserID, msg)
+    
+    if result.Success {
+        // 发送成功，开始等待 ACK
+        ackManager.WaitForACK(msg.ID, func(ackReceived bool) {
+            if ackReceived {
+                log.Printf("✅ ACK 确认收到: %s", msg.ID)
+            } else {
+                log.Printf("⏰ ACK 等待超时: %s", msg.ID)
+                // 触发 ACK 超时处理器
+                hub.notifyTimeout(msg, toUserID, "ack_timeout", hub.config.AckTimeout, 
+                    fmt.Errorf("ACK timeout for message %s", msg.ID))
+            }
+        })
+    }
+    
+    return result
+}
+
+// 扩展的 ACK 管理器
+type EnhancedACKManager struct {
+    pendingACKs    map[string]*ACKInfo
+    mutex          sync.RWMutex
+    timeoutHandler func(string, time.Duration) // ACK 超时回调
+}
+
+type ACKInfo struct {
+    Message     *HubMessage
+    UserID      string
+    SentAt      time.Time
+    RetryCount  int
+    MaxRetries  int
+    Timeout     time.Duration
+}
+
+func (m *EnhancedACKManager) WaitForACK(messageID string, callback func(bool)) {
+    m.mutex.Lock()
+    ackInfo, exists := m.pendingACKs[messageID]
+    m.mutex.Unlock()
+    
+    if !exists {
+        callback(false)
+        return
+    }
+    
+    // 设置超时处理
+    go func() {
+        select {
+        case <-time.After(ackInfo.Timeout):
+            // 超时处理
+            m.mutex.Lock()
+            delete(m.pendingACKs, messageID)
+            m.mutex.Unlock()
+            
+            callback(false)
+            
+            // 触发超时处理器
+            if m.timeoutHandler != nil {
+                m.timeoutHandler(messageID, ackInfo.Timeout)
+            }
+            
+        case <-m.waitForACKConfirmation(messageID):
+            // 收到 ACK 确认
+            callback(true)
+        }
+    }()
+}
+
+func (m *EnhancedACKManager) waitForACKConfirmation(messageID string) <-chan struct{} {
+    // 返回一个通道，当收到 ACK 时关闭
+    ch := make(chan struct{})
+    // 实际实现中，这个通道会在 ConfirmMessage 方法中被关闭
+    return ch
+}
+```
 
 ### 服务端 ACK 配置
 

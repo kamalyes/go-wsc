@@ -12,11 +12,11 @@ package wsc
 
 import (
 	"context"
-	"testing"
-	"time"
-
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/stretchr/testify/assert"
+	"sync/atomic"
+	"testing"
+	"time"
 )
 
 // TestAckManager 测试ACK管理器基本功能
@@ -94,7 +94,7 @@ func TestAckManager(t *testing.T) {
 
 	t.Run("清理过期消息", func(t *testing.T) {
 		am := NewAckManager(5*time.Second, 3)
-		
+
 		// 添加多个消息,使用较短的expireDuration
 		for i := 0; i < 5; i++ {
 			msg := &HubMessage{
@@ -172,7 +172,7 @@ func TestHubWithAck(t *testing.T) {
 		assert.NoError(t, err)
 		assert.NotNil(t, ackMsg)
 		assert.Equal(t, AckStatusConfirmed, ackMsg.Status)
-		
+
 		// 等待ACK处理完成再shutdown
 		time.Sleep(100 * time.Millisecond)
 	})
@@ -221,7 +221,7 @@ func TestHubWithAck(t *testing.T) {
 
 		hub := NewHub(config)
 		go hub.Run()
-		
+
 		// 注册测试客户端
 		client := &Client{
 			ID:       "client-3",
@@ -270,11 +270,11 @@ func TestHubWithAck(t *testing.T) {
 			Content: "Test message with retry",
 		}
 
-		ackMsg, err := hub.SendToUserWithAck(ctx, "user-3", msg, 0, -1)  // maxRetry=-1表示使用默认值
+		ackMsg, err := hub.SendToUserWithAck(ctx, "user-3", msg, 0, -1) // maxRetry=-1表示使用默认值
 		assert.NoError(t, err)
 		assert.NotNil(t, ackMsg)
 		assert.Equal(t, AckStatusConfirmed, ackMsg.Status)
-		
+
 		hub.Shutdown()
 		time.Sleep(100 * time.Millisecond)
 	})
@@ -293,12 +293,12 @@ func TestAckWithRetry(t *testing.T) {
 		pm := am.AddPendingMessage(msg, 200*time.Millisecond, 2)
 
 		// 模拟第2次重试后返回ACK
-		retryCount := 0
+		var retryCount int32
 		go func() {
 			for {
 				time.Sleep(250 * time.Millisecond)
-				retryCount++
-				if retryCount >= 2 {
+				current := atomic.AddInt32(&retryCount, 1)
+				if current >= 2 {
 					ack := &AckMessage{
 						MessageID: msg.ID,
 						Status:    AckStatusConfirmed,
@@ -312,7 +312,8 @@ func TestAckWithRetry(t *testing.T) {
 
 		// 重试函数
 		retryFunc := func() error {
-			t.Logf("重试发送消息，第 %d 次", retryCount)
+			current := atomic.LoadInt32(&retryCount)
+			t.Logf("重试发送消息，第 %d 次", current)
 			return nil
 		}
 

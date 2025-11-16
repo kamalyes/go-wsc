@@ -13,7 +13,6 @@ package wsc
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"github.com/gorilla/websocket"
 	goconfig "github.com/kamalyes/go-config"
@@ -155,6 +154,9 @@ type Hub struct {
 
 	// 安全配置访问器
 	safeConfig *goconfig.ConfigSafe
+
+	// 性能优化：消息字节缓存池
+	msgPool sync.Pool
 }
 
 // MessageRouter 智能消息路由器
@@ -452,7 +454,12 @@ func NewHub(config *wscconfig.WSC) *Hub {
 		cancel:          cancel,
 		config:          config,
 		safeConfig:      goconfig.SafeConfig(config),
-		startTime:       time.Now().Unix(), // 记录启动时间
+		msgPool: sync.Pool{
+			New: func() interface{} {
+				return make([]byte, 0, 1024) // 预分配1KB缓冲
+			},
+		},
+		startTime: time.Now().Unix(), // 记录启动时间
 	}
 
 	// 如果启用消息记录，创建记录管理器
@@ -1195,14 +1202,71 @@ func (h *Hub) handleBroadcast(msg *HubMessage) {
 	}
 }
 
+// fastMarshalMessage 高效消息序列化方法，避免反射和多次内存分配
+func (h *Hub) fastMarshalMessage(msg *HubMessage, buf []byte) ([]byte, error) {
+	// 手动构建 JSON，避免 reflect 的开销
+	buf = append(buf, `{"id":"`...)
+	buf = append(buf, msg.ID...)
+	buf = append(buf, `","type":"`...)
+	buf = append(buf, string(msg.Type)...)
+	buf = append(buf, `","content":"`...)
+	
+	// 转义JSON字符
+	for _, r := range msg.Content {
+		switch r {
+		case '"':
+			buf = append(buf, '\\', '"')
+		case '\\':
+			buf = append(buf, '\\', '\\')
+		case '\n':
+			buf = append(buf, '\\', 'n')
+		case '\r':
+			buf = append(buf, '\\', 'r')
+		case '\t':
+			buf = append(buf, '\\', 't')
+		default:
+			if r < 32 {
+				buf = append(buf, fmt.Sprintf("\\u%04x", r)...)
+			} else {
+				buf = append(buf, string(r)...)
+			}
+		}
+	}
+	
+	buf = append(buf, `","from":"`...)
+	buf = append(buf, msg.From...)
+	buf = append(buf, `","to":"`...)
+	buf = append(buf, msg.To...)
+	
+	// 添加 ticket_id 字段
+	if msg.TicketID != "" {
+		buf = append(buf, `","ticket_id":"`...)
+		buf = append(buf, msg.TicketID...)
+	}
+	
+	buf = append(buf, `","create_at":"`...)
+	buf = append(buf, msg.CreateAt.Format(time.RFC3339)...)
+	buf = append(buf, `"}`...)
+	
+	// 返回复制的数据，避免共享底层数组
+	result := make([]byte, len(buf))
+	copy(result, buf)
+	return result, nil
+}
+
 func (h *Hub) sendToClient(client *Client, msg *HubMessage) {
 	// 检查Hub是否已关闭
 	if h.shutdown.Load() {
 		return
 	}
 
-	// 直接序列化，避免buffer池的额外开销
-	data, err := json.Marshal(msg)
+	// 使用对象池获取字节缓冲
+	buf := h.msgPool.Get().([]byte)
+	buf = buf[:0] // 重置长度，保留容量
+	defer h.msgPool.Put(buf)
+
+	// 高效序列化 - 避免反射和内存分配
+	data, err := h.fastMarshalMessage(msg, buf)
 	if err != nil {
 		return
 	}

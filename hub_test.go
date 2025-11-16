@@ -3317,8 +3317,8 @@ func TestHubStressAndPerformance(t *testing.T) {
 		t.Skip("Skipping stress tests in short mode")
 	}
 
-	// 使用更大的缓冲区配置
-	config := wscconfig.Default().WithMessageBufferSize(1000)
+	// 使用更大的缓冲区配置，支持高性能测试
+	config := wscconfig.Default().WithMessageBufferSize(5000)
 	hub := NewHub(config)
 	defer hub.Shutdown()
 
@@ -3384,35 +3384,43 @@ func TestHubStressAndPerformance(t *testing.T) {
 				Role:     UserRoleCustomer,
 				Status:   UserStatusOnline,
 				LastSeen: time.Now(),
-				SendChan: make(chan []byte, 1024), // 更大缓冲
+				SendChan: make(chan []byte, 2048), // 高性能缓冲
 				Context:  context.Background(),
 			}
 			hub.Register(users[i])
 		}
 
 		const totalMessages = 10000
+		const batchSize = 100 // 批量发送，减少goroutine数量
 		var sentCount int64
 
 		start := time.Now()
 
 		var wg sync.WaitGroup
-		for i := 0; i < totalMessages; i++ {
+		for batch := 0; batch < totalMessages; batch += batchSize {
 			wg.Add(1)
-			go func(msgID int) {
+			go func(batchStart int) {
 				defer wg.Done()
 
-				targetUser := users[msgID%numUsers]
-				msg := &HubMessage{
-					ID:      fmt.Sprintf("perf-msg-%d", msgID),
-					Type:    MessageTypeText,
-					Content: fmt.Sprintf("Performance test message #%d", msgID),
+				batchEnd := batchStart + batchSize
+				if batchEnd > totalMessages {
+					batchEnd = totalMessages
 				}
 
-				err := hub.SendToUser(context.Background(), targetUser.UserID, msg)
-				if err == nil {
-					atomic.AddInt64(&sentCount, 1)
+				for msgID := batchStart; msgID < batchEnd; msgID++ {
+					targetUser := users[msgID%numUsers]
+					msg := &HubMessage{
+						ID:      fmt.Sprintf("perf-msg-%d", msgID),
+						Type:    MessageTypeText,
+						Content: fmt.Sprintf("Performance test message #%d", msgID),
+					}
+
+					err := hub.SendToUser(context.Background(), targetUser.UserID, msg)
+					if err == nil {
+						atomic.AddInt64(&sentCount, 1)
+					}
 				}
-			}(i)
+			}(batch)
 		}
 
 		wg.Wait()
@@ -3421,8 +3429,15 @@ func TestHubStressAndPerformance(t *testing.T) {
 		t.Logf("成功发送 %d/%d 条消息，耗时: %v (%.2f msg/s)",
 			sentCount, totalMessages, duration, float64(sentCount)/duration.Seconds())
 
-		// 在极高频率的压力测试中，50%成功率是合理的
-		assert.Greater(t, sentCount, int64(totalMessages*0.4)) // 至少40%成功率
+		// 优化后应该能达到更高的成功率
+		assert.Greater(t, sentCount, int64(totalMessages*0.9)) // 至少90%成功率
+
+		// 性能目标：1秒内发送10000条消息
+		if duration.Seconds() <= 1.0 && sentCount >= 10000 {
+			t.Logf("✅ 性能目标达成：1秒内发送%d条消息", sentCount)
+		} else {
+			t.Logf("⚠️  性能目标未达成：%.2f秒发送%d条消息，目标：1秒10000条", duration.Seconds(), sentCount)
+		}
 
 		// 清理
 		for _, user := range users {

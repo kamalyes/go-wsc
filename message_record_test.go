@@ -315,6 +315,10 @@ func TestMessageRecordRetry(t *testing.T) {
 
 		hub := NewHub(config)
 		go hub.Run()
+
+		// 等待Hub启动
+		time.Sleep(100 * time.Millisecond)
+
 		defer hub.Shutdown()
 
 		// 创建一些失败记录

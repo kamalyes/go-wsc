@@ -5,7 +5,7 @@ go 1.20
 require (
 	github.com/gorilla/websocket v1.4.2
 	github.com/jpillora/backoff v1.0.0
-	github.com/kamalyes/go-config v0.9.8
+	github.com/kamalyes/go-config v0.9.9
 	github.com/kamalyes/go-toolbox v0.11.68
 	github.com/stretchr/testify v1.11.1
 )

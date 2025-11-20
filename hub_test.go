@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-11-15 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-16 19:12:17
+ * @LastEditTime: 2025-11-21 00:57:27
  * @FilePath: \go-wsc\hub_test.go
  * @Description: Hub 测试文件 - 测试WebSocket/SSE连接管理中心的各种功能
  *
@@ -43,7 +43,7 @@ func newMockWelcomeProvider() *mockWelcomeProvider {
 	}
 }
 
-func (m *mockWelcomeProvider) GetWelcomeMessage(userID string, userRole UserRole, userType UserType, ticketID string, extraData map[string]interface{}) (*WelcomeMessage, bool, error) {
+func (m *mockWelcomeProvider) GetWelcomeMessage(userID string, userRole UserRole, userType UserType, extraData map[string]interface{}) (*WelcomeMessage, bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -200,33 +200,6 @@ func TestHubClientRegistration(t *testing.T) {
 
 		// 验证agent客户端已从agentClients中移除
 		assert.False(t, hub.HasAgentClient(client.UserID))
-	})
-
-	t.Run("注册带工单的客户端", func(t *testing.T) {
-		ticketID := "ticket-001"
-		client := &Client{
-			ID:       "client-002",
-			UserID:   "user-002",
-			UserType: UserTypeCustomer,
-			Role:     UserRoleCustomer,
-			TicketID: ticketID,
-			Status:   UserStatusOnline,
-			LastSeen: time.Now(),
-			SendChan: make(chan []byte, 256),
-			Context:  context.WithValue(context.Background(), ContextKeyUserID, "user-002"),
-		}
-
-		hub.Register(client)
-		time.Sleep(100 * time.Millisecond)
-
-		// 验证工单客户端已注册
-		assert.True(t, hub.HasTicketClient(ticketID, client))
-
-		hub.Unregister(client)
-		time.Sleep(100 * time.Millisecond)
-
-		// 验证工单客户端已移除
-		assert.False(t, hub.HasTicketClient(ticketID, client))
 	})
 
 	t.Run("替换现有用户连接", func(t *testing.T) {
@@ -435,75 +408,6 @@ func TestHubMessaging(t *testing.T) {
 
 		hub.Unregister(sender)
 		hub.Unregister(receiver)
-	})
-
-	t.Run("工单消息发送", func(t *testing.T) {
-		ticketID := "ticket-002"
-
-		// 创建多个工单相关客户端
-		customer := &Client{
-			ID:       "customer-002",
-			UserID:   "customer-002",
-			UserType: UserTypeCustomer,
-			Role:     UserRoleCustomer,
-			TicketID: ticketID,
-			Status:   UserStatusOnline,
-			LastSeen: time.Now(),
-			SendChan: make(chan []byte, 256),
-			Context:  context.WithValue(context.Background(), ContextKeyUserID, "customer-002"),
-		}
-
-		agent := &Client{
-			ID:       "agent-002",
-			UserID:   "agent-002",
-			UserType: UserTypeAgent,
-			Role:     UserRoleAgent,
-			TicketID: ticketID,
-			Status:   UserStatusOnline,
-			LastSeen: time.Now(),
-			SendChan: make(chan []byte, 256),
-			Context:  context.WithValue(context.Background(), ContextKeyUserID, "agent-002"),
-		}
-
-		hub.Register(customer)
-		hub.Register(agent)
-		time.Sleep(100 * time.Millisecond)
-
-		// 发送工单消息
-		ctx := context.WithValue(context.Background(), ContextKeySenderID, customer.UserID)
-		message := &HubMessage{
-			Type:     MessageTypeText,
-			TicketID: ticketID,
-			Content:  "工单测试消息",
-			Status:   MessageStatusSent,
-		}
-
-		err := hub.SendToTicket(ctx, ticketID, message)
-		assert.NoError(t, err)
-
-		// 验证agent收到消息
-		select {
-		case msgData := <-agent.SendChan:
-			var receivedMsg HubMessage
-			err := json.Unmarshal(msgData, &receivedMsg)
-			assert.NoError(t, err)
-			assert.Equal(t, message.Content, receivedMsg.Content)
-			assert.Equal(t, customer.UserID, receivedMsg.From)
-			assert.Equal(t, ticketID, receivedMsg.TicketID)
-		case <-time.After(1 * time.Second):
-			t.Fatal("Agent未收到工单消息")
-		}
-
-		// 验证发送者(customer)未收到消息（不给自己发送）
-		select {
-		case <-customer.SendChan:
-			// 可能收到欢迎消息，跳过
-		case <-time.After(100 * time.Millisecond):
-			// 正确情况
-		}
-
-		hub.Unregister(customer)
-		hub.Unregister(agent)
 	})
 
 	t.Run("广播消息", func(t *testing.T) {
@@ -1384,7 +1288,6 @@ func TestHubExtendedAPI(t *testing.T) {
 		assert.NotNil(t, stats)
 		assert.GreaterOrEqual(t, stats.TotalClients, 0)
 		assert.GreaterOrEqual(t, stats.AgentConnections, 0)
-		assert.GreaterOrEqual(t, stats.TicketConnections, 0)
 		assert.GreaterOrEqual(t, stats.WebSocketClients, 0)
 		assert.GreaterOrEqual(t, stats.SSEClients, 0)
 		assert.GreaterOrEqual(t, stats.OnlineUsers, 0)
@@ -2335,85 +2238,6 @@ func TestHubStatusTransitions(t *testing.T) {
 	})
 }
 
-// TestHubTicketMessaging Ticket消息测试
-func TestHubTicketMessaging(t *testing.T) {
-	hub := NewHub(nil)
-	defer hub.Shutdown()
-
-	go hub.Run()
-	time.Sleep(100 * time.Millisecond)
-
-	t.Run("SendToTicket-SingleRecipient", func(t *testing.T) {
-		ticketID := "test-ticket-001"
-		client := &Client{
-			ID:       "ticket-client-1",
-			UserID:   "ticket-user-1",
-			UserType: UserTypeAgent,
-			Role:     UserRoleAgent,
-			Status:   UserStatusOnline,
-			LastSeen: time.Now(),
-			SendChan: make(chan []byte, 256),
-			Context:  context.WithValue(context.Background(), ContextKeyUserID, "ticket-user-1"),
-			TicketID: ticketID,
-		}
-		hub.Register(client)
-		time.Sleep(100 * time.Millisecond)
-
-		msg := &HubMessage{
-			ID:       "ticket-msg-1",
-			Type:     MessageTypeText,
-			Content:  "ticket message",
-			TicketID: ticketID,
-		}
-		err := hub.SendToTicket(context.Background(), ticketID, msg)
-		assert.NoError(t, err)
-
-		hub.Unregister(client)
-	})
-
-	t.Run("SendToTicket-MultipleRecipients", func(t *testing.T) {
-		ticketID := "test-ticket-002"
-
-		// 创建多个代理处理同一工单
-		for i := 0; i < 3; i++ {
-			client := &Client{
-				ID:       fmt.Sprintf("ticket-agent-%d", i),
-				UserID:   fmt.Sprintf("ticket-agent-user-%d", i),
-				UserType: UserTypeAgent,
-				Role:     UserRoleAgent,
-				Status:   UserStatusOnline,
-				LastSeen: time.Now(),
-				SendChan: make(chan []byte, 256),
-				Context:  context.WithValue(context.Background(), ContextKeyUserID, fmt.Sprintf("ticket-agent-user-%d", i)),
-				TicketID: ticketID,
-			}
-			hub.Register(client)
-		}
-		time.Sleep(200 * time.Millisecond)
-
-		msg := &HubMessage{
-			ID:       "ticket-msg-2",
-			Type:     MessageTypeText,
-			Content:  "multi agent ticket message",
-			TicketID: ticketID,
-		}
-		err := hub.SendToTicket(context.Background(), ticketID, msg)
-		assert.NoError(t, err)
-	})
-
-	t.Run("SendToTicket-NonExistent", func(t *testing.T) {
-		msg := &HubMessage{
-			ID:       "ticket-msg-3",
-			Type:     MessageTypeText,
-			Content:  "nonexistent ticket",
-			TicketID: "nonexistent-ticket",
-		}
-		err := hub.SendToTicket(context.Background(), "nonexistent-ticket", msg)
-		// 实际实现可能不返回错误对于不存在的ticket
-		_ = err // 允许nil或error
-	})
-}
-
 // TestHubBatchSendToUsers 测试批量发送功能
 func TestHubBatchSendToUsers(t *testing.T) {
 	hub := NewHub(nil)
@@ -3003,7 +2827,6 @@ func TestHubMessageStatistics(t *testing.T) {
 		assert.Contains(t, stats, "message_stats")
 		assert.Contains(t, stats, "hub_health")
 		assert.Contains(t, stats, "agent_stats")
-		assert.Contains(t, stats, "ticket_stats")
 
 		// 检查message_stats的内容
 		msgStats, ok := stats["message_stats"]
@@ -3205,36 +3028,32 @@ func TestHubComplexScenarios(t *testing.T) {
 			hub.Register(agents[i])
 		}
 
-		// 模拟工单处理流程
-		tickets := []string{"TICKET-001", "TICKET-002", "TICKET-003"}
-
-		for i, ticketID := range tickets {
-			// 客户创建工单
+		// 模拟客服系统场景（不使用工单）
+		for i := 0; i < 3; i++ {
+			// 客户和客服配对
 			customer := customers[i%len(customers)]
 			agent := agents[i%len(agents)]
 
-			// 分配工单
-			customer.TicketID = ticketID
-			agent.TicketID = ticketID
-
-			// 客户发起咨询
+			// 客户发起咨询（直接发给指定客服）
 			msg := &HubMessage{
-				ID:       fmt.Sprintf("%s-inquiry", ticketID),
-				Type:     MessageTypeText,
-				Content:  fmt.Sprintf("I need help with issue #%d", i+1),
-				TicketID: ticketID,
+				ID:      fmt.Sprintf("inquiry-%d", i+1),
+				Type:    MessageTypeText,
+				Content: fmt.Sprintf("I need help with issue #%d", i+1),
+				To:      agent.UserID, // 直接发送给客服
+				From:    customer.UserID,
 			}
-			err := hub.SendToTicket(context.Background(), ticketID, msg)
+			err := hub.SendToUser(context.Background(), agent.UserID, msg)
 			assert.NoError(t, err)
 
-			// 客服回复
+			// 客服回复（直接回复给客户）
 			replyMsg := &HubMessage{
-				ID:       fmt.Sprintf("%s-reply", ticketID),
-				Type:     MessageTypeText,
-				Content:  fmt.Sprintf("Hello! I'm here to help you with %s", ticketID),
-				TicketID: ticketID,
+				ID:      fmt.Sprintf("reply-%d", i+1),
+				Type:    MessageTypeText,
+				Content: fmt.Sprintf("Hello! I'm here to help you with your inquiry #%d", i+1),
+				To:      customer.UserID, // 直接发送给客户
+				From:    agent.UserID,
 			}
-			err = hub.SendToTicket(context.Background(), ticketID, replyMsg)
+			err = hub.SendToUser(context.Background(), customer.UserID, replyMsg)
 			assert.NoError(t, err)
 		}
 

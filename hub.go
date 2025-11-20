@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-11-13 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-16 20:49:57
+ * @LastEditTime: 2025-11-21 00:05:52
  * @FilePath: \go-wsc\hub.go
  * @Description: WebSocket/SSE 服务端 Hub - 统一管理实时连接
  *
@@ -108,7 +108,6 @@ type HubMessage struct {
 	Type         MessageType            `json:"type"`                      // 消息类型
 	From         string                 `json:"from"`                      // 发送者ID (从上下文获取)
 	To           string                 `json:"to"`                        // 接收者ID
-	TicketID     string                 `json:"ticket_id,omitempty"`       // 工单ID
 	Content      string                 `json:"content"`                   // 消息内容
 	Data         map[string]interface{} `json:"data,omitempty"`            // 扩展数据
 	CreateAt     time.Time              `json:"create_at"`                 // 创建时间
@@ -126,7 +125,6 @@ type Client struct {
 	UserID     string                 // 用户ID
 	UserType   UserType               // 用户类型
 	VIPLevel   VIPLevel               // VIP等级
-	TicketID   string                 // 工单ID
 	Role       UserRole               // 角色
 	Conn       *websocket.Conn        // WebSocket连接
 	LastSeen   time.Time              // 最后活跃时间
@@ -160,10 +158,9 @@ type Hub struct {
 	nodes    map[string]*NodeInfo
 
 	// 客户端管理
-	clients       map[string]*Client   // 所有客户端 key: clientID
-	userToClient  map[string]*Client   // 用户ID到客户端
-	agentClients  map[string]*Client   // 客服连接
-	ticketClients map[string][]*Client // 工单相关客户端
+	clients      map[string]*Client // 所有客户端 key: clientID
+	userToClient map[string]*Client // 用户ID到客户端
+	agentClients map[string]*Client // 客服连接
 
 	// SSE 连接
 	sseClients map[string]*SSEConnection
@@ -518,7 +515,6 @@ func NewHub(config *wscconfig.WSC) *Hub {
 		clients:         make(map[string]*Client),
 		userToClient:    make(map[string]*Client),
 		agentClients:    make(map[string]*Client),
-		ticketClients:   make(map[string][]*Client),
 		sseClients:      make(map[string]*SSEConnection),
 		register:        make(chan *Client, config.MessageBufferSize),
 		unregister:      make(chan *Client, config.MessageBufferSize),
@@ -926,35 +922,6 @@ func (h *Hub) notifySendFailureAfterRetries(msg *HubMessage, recipient string, r
 	}
 }
 
-// SendToTicket 发送消息到工单
-func (h *Hub) SendToTicket(ctx context.Context, ticketID string, msg *HubMessage) error {
-	// 从上下文获取发送者ID
-	if msg.From == "" {
-		if senderID, ok := ctx.Value(ContextKeySenderID).(string); ok {
-			msg.From = senderID
-		}
-	}
-
-	msg.TicketID = ticketID
-	if msg.CreateAt.IsZero() {
-		msg.CreateAt = time.Now()
-	}
-
-	// 尝试发送到broadcast队列
-	select {
-	case h.broadcast <- msg:
-		return nil
-	default:
-		// broadcast队列满，尝试放入待发送队列
-		select {
-		case h.pendingMessages <- msg:
-			return nil
-		default:
-			return fmt.Errorf("消息队列已满，待发送队列也已满")
-		}
-	}
-}
-
 // Broadcast 广播消息
 func (h *Hub) Broadcast(ctx context.Context, msg *HubMessage) {
 	if msg.CreateAt.IsZero() {
@@ -1162,43 +1129,6 @@ func (h *Hub) SendToUserWithAck(ctx context.Context, toUserID string, msg *HubMe
 	}
 
 	return ackMsg, err
-}
-
-// SendToTicketWithAck 发送消息到工单并等待ACK确认
-func (h *Hub) SendToTicketWithAck(ctx context.Context, ticketID string, msg *HubMessage, timeout time.Duration, maxRetry int) (*AckMessage, error) {
-	// 检查是否启用ACK（从工单配置中获取）
-	if !h.safeConfig.Field("Ticket").Field("EnableAck").Bool(false) {
-		// 如果未启用ACK，直接发送
-		return nil, h.SendToTicket(ctx, ticketID, msg)
-	}
-
-	// 生成消息ID
-	if msg.ID == "" {
-		msg.ID = fmt.Sprintf("%s-%d", ticketID, time.Now().UnixNano())
-	}
-	msg.RequireAck = true
-
-	// 添加到待确认队列
-	pm := h.ackManager.AddPendingMessage(msg, timeout, maxRetry)
-	defer h.ackManager.RemovePendingMessage(msg.ID)
-
-	// 定义重试函数
-	retryFunc := func() error {
-		return h.SendToTicket(ctx, ticketID, msg)
-	}
-
-	// 首次发送
-	if err := retryFunc(); err != nil {
-		return &AckMessage{
-			MessageID: msg.ID,
-			Status:    AckStatusFailed,
-			Timestamp: time.Now(),
-			Error:     err.Error(),
-		}, err
-	}
-
-	// 等待ACK确认并支持重试
-	return pm.WaitForAckWithRetry(retryFunc)
 }
 
 // SetOfflineMessageHandler 设置离线消息处理器
@@ -1470,9 +1400,6 @@ func (h *Hub) RetryFailedMessage(messageID string) error {
 	if record.Message.To != "" {
 		_, err := h.SendToUserWithAck(ctx, record.Message.To, record.Message, 0, record.MaxRetry-record.RetryCount)
 		return err
-	} else if record.Message.TicketID != "" {
-		_, err := h.SendToTicketWithAck(ctx, record.Message.TicketID, record.Message, 0, record.MaxRetry-record.RetryCount)
-		return err
 	}
 
 	return fmt.Errorf("消息目标未指定")
@@ -1601,10 +1528,6 @@ func (h *Hub) handleRegister(client *Client) {
 		h.agentClients[client.UserID] = client
 	}
 
-	if client.TicketID != "" {
-		h.ticketClients[client.TicketID] = append(h.ticketClients[client.TicketID], client)
-	}
-
 	// 使用atomic无锁更新统计信息
 	h.totalConnections.Add(1)
 	h.activeConnections.Store(int64(len(h.clients)))
@@ -1636,17 +1559,6 @@ func (h *Hub) removeClientUnsafe(client *Client) {
 		delete(h.agentClients, client.UserID)
 	}
 
-	if client.TicketID != "" {
-		if clients, exists := h.ticketClients[client.TicketID]; exists {
-			for i, c := range clients {
-				if c.ID == client.ID {
-					h.ticketClients[client.TicketID] = append(clients[:i], clients[i+1:]...)
-					break
-				}
-			}
-		}
-	}
-
 	h.activeConnections.Store(int64(len(h.clients)))
 
 	if client.SendChan != nil {
@@ -1666,18 +1578,6 @@ func (h *Hub) handleBroadcast(msg *HubMessage) {
 			h.sendToClient(client, msg)
 		} else {
 			h.SendToUserViaSSE(msg.To, msg)
-		}
-
-	case msg.TicketID != "": // 工单消息
-		h.mutex.RLock()
-		ticketClients := make([]*Client, len(h.ticketClients[msg.TicketID]))
-		copy(ticketClients, h.ticketClients[msg.TicketID])
-		h.mutex.RUnlock()
-
-		for _, client := range ticketClients {
-			if client.UserID != msg.From {
-				h.sendToClient(client, msg)
-			}
 		}
 
 	default: // 广播消息
@@ -1742,12 +1642,6 @@ func (h *Hub) fastMarshalMessage(msg *HubMessage, buf []byte) ([]byte, error) {
 	buf = append(buf, msg.From...)
 	buf = append(buf, `","to":"`...)
 	buf = append(buf, msg.To...)
-
-	// 添加 ticket_id 字段
-	if msg.TicketID != "" {
-		buf = append(buf, `","ticket_id":"`...)
-		buf = append(buf, msg.TicketID...)
-	}
 
 	buf = append(buf, `","create_at":"`...)
 	buf = append(buf, msg.CreateAt.Format(time.RFC3339)...)
@@ -1934,7 +1828,6 @@ func (h *Hub) sendWelcomeMessage(client *Client) {
 		client.UserID,
 		client.Role,
 		client.UserType,
-		client.TicketID,
 		extraData,
 	)
 
@@ -1946,7 +1839,6 @@ func (h *Hub) sendWelcomeMessage(client *Client) {
 		Type:     welcomeMsg.MessageType,
 		From:     "system",
 		To:       client.UserID,
-		TicketID: client.TicketID,
 		Content:  welcomeMsg.Content,
 		Data:     welcomeMsg.Data,
 		CreateAt: time.Now(),
@@ -2174,10 +2066,6 @@ func (h *Hub) GetDetailedStats() *HubStats {
 	h.mutex.RLock()
 	wsCount := len(h.clients)
 	agentCount := len(h.agentClients)
-	ticketCount := 0
-	for _, clients := range h.ticketClients {
-		ticketCount += len(clients)
-	}
 	h.mutex.RUnlock()
 
 	h.sseMutex.RLock()
@@ -2186,17 +2074,16 @@ func (h *Hub) GetDetailedStats() *HubStats {
 
 	stats := &HubStats{
 		// 兼容性字段
-		TotalClients:      wsCount + sseCount,
-		WebSocketClients:  wsCount,
-		SSEClients:        sseCount,
-		AgentConnections:  agentCount,
-		TicketConnections: ticketCount,
-		MessagesSent:      h.messagesSent.Load(),
-		MessagesReceived:  h.messagesReceived.Load(),
-		BroadcastsSent:    h.broadcastsSent.Load(),
-		QueuedMessages:    len(h.pendingMessages),
-		OnlineUsers:       h.GetOnlineUsersCount(),
-		Uptime:            h.GetUptime(),
+		TotalClients:     wsCount + sseCount,
+		WebSocketClients: wsCount,
+		SSEClients:       sseCount,
+		AgentConnections: agentCount,
+		MessagesSent:     h.messagesSent.Load(),
+		MessagesReceived: h.messagesReceived.Load(),
+		BroadcastsSent:   h.broadcastsSent.Load(),
+		QueuedMessages:   len(h.pendingMessages),
+		OnlineUsers:      h.GetOnlineUsersCount(),
+		Uptime:           h.GetUptime(),
 	}
 
 	return stats
@@ -2256,21 +2143,6 @@ func (h *Hub) GetAgentStats() map[string]interface{} {
 
 	stats["agents"] = agents
 	return stats
-}
-
-// GetTicketStats 获取工单统计
-func (h *Hub) GetTicketStats() map[string]interface{} {
-	h.mutex.RLock()
-	ticketStats := make(map[string]interface{})
-	for ticketID, clients := range h.ticketClients {
-		ticketStats[ticketID] = len(clients)
-	}
-	h.mutex.RUnlock()
-
-	return map[string]interface{}{
-		"total_tickets": len(ticketStats),
-		"tickets":       ticketStats,
-	}
 }
 
 // ============================================================================
@@ -2445,7 +2317,6 @@ func (h *Hub) GetConnectionInfo(clientID string) map[string]interface{} {
 		"department":  client.Department.String(),
 		"client_type": client.ClientType.String(),
 		"last_seen":   client.LastSeen,
-		"ticket_id":   client.TicketID,
 		"node_id":     client.NodeID,
 		"max_tickets": client.MaxTickets,
 	}
@@ -2625,7 +2496,6 @@ func (h *Hub) GetMessageStatisticsDetailed() map[string]interface{} {
 		"message_stats": stats,
 		"hub_health":    h.GetHubHealth(),
 		"agent_stats":   h.GetAgentStats(),
-		"ticket_stats":  h.GetTicketStats(),
 	}
 }
 
@@ -3317,40 +3187,6 @@ func (s *Span) End() {
 }
 
 // 安全的查询方法，用于测试和监控
-// GetTicketClients 获取工单的客户端列表（安全副本）
-func (h *Hub) GetTicketClients(ticketID string) []*Client {
-	h.mutex.RLock()
-	defer h.mutex.RUnlock()
-
-	clients, exists := h.ticketClients[ticketID]
-	if !exists {
-		return nil
-	}
-
-	// 返回副本以避免竞态条件
-	result := make([]*Client, len(clients))
-	copy(result, clients)
-	return result
-}
-
-// HasTicketClient 检查工单是否包含特定客户端
-func (h *Hub) HasTicketClient(ticketID string, client *Client) bool {
-	h.mutex.RLock()
-	defer h.mutex.RUnlock()
-
-	clients, exists := h.ticketClients[ticketID]
-	if !exists {
-		return false
-	}
-
-	for _, c := range clients {
-		if c == client {
-			return true
-		}
-	}
-	return false
-}
-
 // GetUserClient 获取用户对应的客户端
 func (h *Hub) GetUserClient(userID string) *Client {
 	h.mutex.RLock()
@@ -3365,17 +3201,6 @@ func (h *Hub) GetClientCount() int {
 	defer h.mutex.RUnlock()
 
 	return len(h.clients)
-}
-
-// GetTicketClientCount 获取工单的客户端数量
-func (h *Hub) GetTicketClientCount(ticketID string) int {
-	h.mutex.RLock()
-	defer h.mutex.RUnlock()
-
-	if clients, exists := h.ticketClients[ticketID]; exists {
-		return len(clients)
-	}
-	return 0
 }
 
 // HasClient 检查是否存在指定ID的客户端

@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-01-21
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-01-21
+ * @LastEditTime: 2025-11-21 00:58:15
  * @FilePath: \go-wsc\types.go
  * @Description: WebSocket 系统类型定义
  *
@@ -669,11 +669,10 @@ func GetAllBusinessCategories() []BusinessCategory {
 // HubStats Hub统计信息结构体
 type HubStats struct {
 	// 连接统计
-	TotalClients      int `json:"total_clients"`      // 总客户端数
-	WebSocketClients  int `json:"websocket_clients"`  // WebSocket客户端数
-	SSEClients        int `json:"sse_clients"`        // SSE客户端数
-	AgentConnections  int `json:"agent_connections"`  // 座席连接数
-	TicketConnections int `json:"ticket_connections"` // 工单连接数
+	TotalClients     int `json:"total_clients"`     // 总客户端数
+	WebSocketClients int `json:"websocket_clients"` // WebSocket客户端数
+	SSEClients       int `json:"sse_clients"`       // SSE客户端数
+	AgentConnections int `json:"agent_connections"` // 座席连接数
 
 	// 消息统计
 	MessagesSent     int64 `json:"messages_sent"`     // 已发送消息数
@@ -707,60 +706,6 @@ func (s MessageStatus) IsValid() bool {
 	switch s {
 	case MessageStatusPending, MessageStatusSent, MessageStatusDelivered,
 		MessageStatusRead, MessageStatusFailed:
-		return true
-	default:
-		return false
-	}
-}
-
-// TicketStatus 工单状态
-type TicketStatus string
-
-const (
-	TicketStatusOpen       TicketStatus = "open"       // 打开
-	TicketStatusPending    TicketStatus = "pending"    // 待处理
-	TicketStatusProcessing TicketStatus = "processing" // 处理中
-	TicketStatusResolved   TicketStatus = "resolved"   // 已解决
-	TicketStatusClosed     TicketStatus = "closed"     // 已关闭
-)
-
-// String 实现Stringer接口
-func (s TicketStatus) String() string {
-	return string(s)
-}
-
-// IsValid 检查工单状态是否有效
-func (s TicketStatus) IsValid() bool {
-	switch s {
-	case TicketStatusOpen, TicketStatusPending, TicketStatusProcessing,
-		TicketStatusResolved, TicketStatusClosed:
-		return true
-	default:
-		return false
-	}
-}
-
-// TicketPriority 工单优先级
-type TicketPriority string
-
-const (
-	TicketPriorityLow      TicketPriority = "low"      // 低优先级
-	TicketPriorityNormal   TicketPriority = "normal"   // 普通优先级
-	TicketPriorityHigh     TicketPriority = "high"     // 高优先级
-	TicketPriorityUrgent   TicketPriority = "urgent"   // 紧急优先级
-	TicketPriorityCritical TicketPriority = "critical" // 关键优先级
-)
-
-// String 实现Stringer接口
-func (p TicketPriority) String() string {
-	return string(p)
-}
-
-// IsValid 检查工单优先级是否有效
-func (p TicketPriority) IsValid() bool {
-	switch p {
-	case TicketPriorityLow, TicketPriorityNormal, TicketPriorityHigh,
-		TicketPriorityUrgent, TicketPriorityCritical:
 		return true
 	default:
 		return false
@@ -968,9 +913,9 @@ type DistributedMessage struct {
 // WelcomeMessageProvider 欢迎消息提供者接口
 type WelcomeMessageProvider interface {
 	// GetWelcomeMessage 获取欢迎消息
-	// 参数: userID 用户ID, userRole 用户角色, userType 用户类型, ticketID 工单ID, extraData 扩展数据
+	// 参数: userID 用户ID, userRole 用户角色, userType 用户类型, extraData 扩展数据
 	// 返回: 欢迎消息内容, 是否启用欢迎消息, 错误信息
-	GetWelcomeMessage(userID string, userRole UserRole, userType UserType, ticketID string, extraData map[string]interface{}) (*WelcomeMessage, bool, error)
+	GetWelcomeMessage(userID string, userRole UserRole, userType UserType, extraData map[string]interface{}) (*WelcomeMessage, bool, error)
 
 	// RefreshConfig 刷新配置 - 当数据库配置更新时调用
 	RefreshConfig() error
@@ -992,7 +937,7 @@ type WelcomeTemplate struct {
 	MessageType MessageType            `json:"message_type"` // 消息类型
 	Data        map[string]interface{} `json:"data"`         // 扩展数据
 	Enabled     bool                   `json:"enabled"`      // 是否启用
-	Variables   []string               `json:"variables"`    // 支持的变量列表，如: {user_name}, {ticket_id}, {time}
+	Variables   []string               `json:"variables"`    // 支持的变量列表，如: {user_name}, {time}
 }
 
 // ReplaceVariables 替换模板中的变量

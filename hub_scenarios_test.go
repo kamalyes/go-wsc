@@ -14,11 +14,10 @@ package wsc
 import (
 	"context"
 	"fmt"
+	"github.com/stretchr/testify/assert"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/stretchr/testify/assert"
 )
 
 // TestHub200Scenarios 200个场景的综合测试
@@ -68,7 +67,7 @@ func testBasicScenarios(t *testing.T, hub *Hub) {
 				stats := hub.GetStats()
 				assert.GreaterOrEqual(t, stats["total_lifetime"].(int64), int64(1),
 					"场景%d: 应该至少有1个连接", i)
-				
+
 				hub.Unregister(client)
 				time.Sleep(10 * time.Millisecond)
 
@@ -92,7 +91,7 @@ func testBasicScenarios(t *testing.T, hub *Hub) {
 				onlineUsers := hub.GetOnlineUsers()
 				assert.Contains(t, onlineUsers, client.UserID,
 					"场景%d: 在线用户应包含刚注册的用户", i)
-				
+
 				hub.Unregister(client)
 
 			case i <= 30: // 场景21-30: 不同状态的客户端
@@ -114,12 +113,12 @@ func testBasicScenarios(t *testing.T, hub *Hub) {
 
 				assert.Equal(t, statuses[(i-21)%5], client.Status,
 					"场景%d: 客户端状态应保持不变", i)
-				
+
 				hub.Unregister(client)
 
 			case i <= 40: // 场景31-40: Hub统计信息测试
 				initialStats := hub.GetStats()
-				
+
 				client := &Client{
 					ID:       fmt.Sprintf("stats-client-%d", i),
 					UserID:   fmt.Sprintf("stats-user-%d", i),
@@ -136,7 +135,7 @@ func testBasicScenarios(t *testing.T, hub *Hub) {
 				assert.GreaterOrEqual(t, newStats["total_lifetime"].(int64),
 					initialStats["total_lifetime"].(int64),
 					"场景%d: 总连接数应增加", i)
-				
+
 				hub.Unregister(client)
 
 			default: // 场景41-50: 获取在线用户
@@ -349,39 +348,6 @@ func testRoutingScenarios(t *testing.T, hub *Hub) {
 				hub.Unregister(sender)
 				hub.Unregister(receiver)
 
-			case i <= 135: // 场景121-135: 工单消息
-				ticketID := fmt.Sprintf("ticket-%d", i)
-				clients := make([]*Client, 3)
-				
-				for j := 0; j < 3; j++ {
-					clients[j] = &Client{
-						ID:       fmt.Sprintf("ticket-client-%d-%d", i, j),
-						UserID:   fmt.Sprintf("ticket-user-%d-%d", i, j),
-						UserType: UserTypeAgent,
-						Role:     UserRoleAgent,
-						Status:   UserStatusOnline,
-						TicketID: ticketID,
-						SendChan: make(chan []byte, 256),
-						Context:  context.Background(),
-					}
-					hub.Register(clients[j])
-				}
-				time.Sleep(50 * time.Millisecond)
-
-				msg := &HubMessage{
-					Type:     MessageTypeText,
-					Content:  fmt.Sprintf("工单消息-%d", i),
-					CreateAt: time.Now(),
-					Status:   MessageStatusSent,
-				}
-
-				err := hub.SendToTicket(context.Background(), ticketID, msg)
-				assert.NoError(t, err, "场景%d: 发送工单消息应成功", i)
-
-				for j := 0; j < 3; j++ {
-					hub.Unregister(clients[j])
-				}
-
 			default: // 场景136-150: 广播消息
 				clients := make([]*Client, 5)
 				for j := 0; j < 5; j++ {
@@ -460,7 +426,7 @@ func testEdgeCaseScenarios(t *testing.T, hub *Hub) {
 
 			case i <= 180: // 场景171-180: 重复注册相同用户
 				userID := fmt.Sprintf("duplicate-user-%d", i)
-				
+
 				client1 := &Client{
 					ID:       fmt.Sprintf("duplicate-client1-%d", i),
 					UserID:   userID,

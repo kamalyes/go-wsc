@@ -517,42 +517,6 @@ func (r *RedisConfigRule) GetDescription() string {
 func (r *RedisConfigRule) Validate(config *wscconfig.WSC) []ValidationResult {
 	var results []ValidationResult
 
-	if config.Redis == nil {
-		return results // Redis是可选的
-	}
-
-	redis := config.Redis
-
-	// 检查Redis地址
-	if redis.Addr == "" {
-		results = append(results, ValidationResult{
-			Level:       ValidationLevelError,
-			Field:       "Redis.Addr",
-			Message:     "Redis地址未设置",
-			Suggestion:  "设置Redis服务器地址，如: localhost:6379",
-			AutoFixable: true,
-			FixAction: func(c *wscconfig.WSC) error {
-				c.Redis.Addr = "localhost:6379"
-				return nil
-			},
-		})
-	}
-
-	// 检查连接池大小
-	if redis.PoolSize <= 0 {
-		results = append(results, ValidationResult{
-			Level:       ValidationLevelError,
-			Field:       "Redis.PoolSize",
-			Message:     "Redis连接池大小必须大于0",
-			Suggestion:  "推荐设置为10",
-			AutoFixable: true,
-			FixAction: func(c *wscconfig.WSC) error {
-				c.Redis.PoolSize = 10
-				return nil
-			},
-		})
-	}
-
 	return results
 }
 

@@ -562,10 +562,18 @@ func (sm *SecurityManager) cleanupExpiredBlocks() {
 	defer sm.mutex.Unlock()
 
 	now := time.Now()
+	var expiredIPs []string
+
+	// 先收集过期的IP
 	for ip, expireTime := range sm.blockedIPs {
 		if now.After(expireTime) {
-			delete(sm.blockedIPs, ip)
+			expiredIPs = append(expiredIPs, ip)
 		}
+	}
+
+	// 然后安全地删除它们
+	for _, ip := range expiredIPs {
+		delete(sm.blockedIPs, ip)
 	}
 }
 

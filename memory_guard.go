@@ -327,29 +327,41 @@ func (mg *MemoryGuard) cleanupIdleConnections() {
 	idleThreshold := now.Add(-mg.connectionIdleTimeout)
 	cleanedCount := 0
 
+	// 先收集要删除的客户端ID，避免在遍历期间修改map
+	var clientsToDelete []string
+	var clientsToClose []*Client
+
 	for clientID, client := range mg.hub.clients {
 		if client.LastSeen.Before(idleThreshold) {
-			// 关闭连接
-			if client.Conn != nil {
-				client.Conn.Close()
-			}
-
-			// 清理资源
-			select {
-			case <-client.SendChan:
-			default:
-				close(client.SendChan)
-			}
-
-			// 从映射中删除
-			delete(mg.hub.clients, clientID)
-			delete(mg.hub.userToClient, client.UserID)
-			if client.UserType == UserTypeAgent {
-				delete(mg.hub.agentClients, client.UserID)
-			}
-
-			cleanedCount++
+			clientsToDelete = append(clientsToDelete, clientID)
+			clientsToClose = append(clientsToClose, client)
 		}
+	}
+
+	// 现在安全地关闭连接和清理资源
+	for i, clientID := range clientsToDelete {
+		client := clientsToClose[i]
+
+		// 关闭连接
+		if client.Conn != nil {
+			client.Conn.Close()
+		}
+
+		// 清理资源
+		select {
+		case <-client.SendChan:
+		default:
+			close(client.SendChan)
+		}
+
+		// 从映射中删除
+		delete(mg.hub.clients, clientID)
+		delete(mg.hub.userToClient, client.UserID)
+		if client.UserType == UserTypeAgent {
+			delete(mg.hub.agentClients, client.UserID)
+		}
+
+		cleanedCount++
 	}
 
 	if cleanedCount > 0 && mg.hub.logger != nil {
@@ -391,11 +403,17 @@ func (mg *MemoryGuard) forceCleanupIdleConnections() {
 		}
 	}
 
-	// 移除超出限制的连接
-	removedCount := 0
+	// 收集要移除的连接，避免在遍历过程中修改map
+	var clientsToRemove []clientWithTime
 	for i := maxKeep; i < len(clients); i++ {
-		client := clients[i].client
-		clientID := clients[i].clientID
+		clientsToRemove = append(clientsToRemove, clients[i])
+	}
+
+	// 现在安全地移除连接
+	removedCount := 0
+	for _, clientInfo := range clientsToRemove {
+		client := clientInfo.client
+		clientID := clientInfo.clientID
 
 		// 关闭连接
 		if client.Conn != nil {

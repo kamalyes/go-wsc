@@ -5,9 +5,9 @@ go 1.23.0
 require (
 	github.com/gorilla/websocket v1.4.2
 	github.com/jpillora/backoff v1.0.0
-	github.com/kamalyes/go-config v0.10.1
+	github.com/kamalyes/go-config v0.10.3
 	github.com/kamalyes/go-logger v0.4.0
-	github.com/kamalyes/go-toolbox v0.11.77
+	github.com/kamalyes/go-toolbox v0.11.78
 	github.com/stretchr/testify v1.11.1
 )
 
@@ -48,19 +48,17 @@ require (
 	golang.org/x/exp v0.0.0-20230905200255-921286631fa9 // indirect
 	golang.org/x/net v0.25.0 // indirect
 	golang.org/x/sys v0.26.0 // indirect
-	golang.org/x/text v0.19.0 // indirect
+	golang.org/x/text v0.20.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
 // 本地开发替换
-// replace github.com/kamalyes/go-wsc => ../go-wsc
-
 // replace github.com/kamalyes/go-cachex => ../go-cachex
 
-replace github.com/kamalyes/go-config => ../go-config
+// replace github.com/kamalyes/go-config => ../go-config
 
-replace github.com/kamalyes/go-logger => ../go-logger
+// replace github.com/kamalyes/go-logger => ../go-logger
 
 // replace github.com/kamalyes/go-toolbox => ../go-toolbox
 

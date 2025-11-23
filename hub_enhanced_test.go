@@ -237,11 +237,11 @@ func TestHubEnhancedSend(t *testing.T) {
 		Context:  context.Background(),
 	}
 
-	// 手动添加到Hub（模拟注册）
-	hub.mutex.Lock()
-	hub.clients[client.ID] = client
-	hub.userToClient[client.UserID] = client
-	hub.mutex.Unlock()
+	// 通过公共API注册客户端
+	hub.Register(client)
+
+	// 等待注册完成
+	time.Sleep(10 * time.Millisecond)
 
 	// 创建测试消息
 	msg := &HubMessage{

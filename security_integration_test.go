@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-11-22 21:32:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-23 07:11:16
+ * @LastEditTime: 2025-11-23 17:09:30
  * @FilePath: \go-wsc\security_integration_test.go
  * @Description: 安全管理器与Hub集成测试
  *
@@ -151,7 +151,7 @@ func TestHubSecurityThreatPatterns(t *testing.T) {
 		// 包含威胁的消息应该被拒绝
 		err = hub.securityManager.ValidateMessage("testuser", "192.168.1.400", []byte("This contains malicious_content"))
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "威胁")
+		assert.Contains(t, err.Error(), "threat detected")
 	}
 
 	// 移除威胁模式
@@ -222,7 +222,7 @@ func TestHubSecurityMessageValidation(t *testing.T) {
 	}
 	err = hub.securityManager.ValidateMessage(userID, clientIP, largeMessage)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "超出限制")
+	assert.Contains(t, err.Error(), "message too large")
 
 	// 检查安全事件
 	events := hub.GetSecurityEvents(10)
@@ -235,7 +235,7 @@ func TestHubSecurityMessageValidation(t *testing.T) {
 			break
 		}
 	}
-	assert.True(t, found, "应该记录无效消息事件")
+	assert.True(t, found, "should record invalid message events")
 }
 
 func TestHubSecurityWhitelistBlacklist(t *testing.T) {
@@ -260,7 +260,7 @@ func TestHubSecurityWhitelistBlacklist(t *testing.T) {
 	hub.AddToSecurityBlacklist(testIP)
 	err = hub.securityManager.ValidateConnection(testIP, "testuser", map[string]string{})
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "黑名单")
+	assert.Contains(t, err.Error(), "ip address is in blacklist")
 
 	// 添加到白名单（应该从黑名单移除）
 	hub.AddToSecurityWhitelist(testIP)

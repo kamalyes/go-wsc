@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-11-13 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-22 23:02:53
+ * @LastEditTime: 2025-11-23 16:55:16
  * @FilePath: \go-wsc\hub.go
  * @Description: WebSocket/SSE 服务端 Hub - 统一管理实时连接
  *
@@ -3840,13 +3840,20 @@ func initLogger(config *wscconfig.WSC) WSCLogger {
 		switch config.Logging.Output {
 		case "file":
 			if config.Logging.FilePath != "" {
-				loggerConfig = loggerConfig.WithOutput(logger.NewFileWriterFromConfig(&logger.FileConfig{
-					Filename:   config.Logging.FilePath,
-					MaxSize:    config.Logging.MaxSize,
-					MaxBackups: config.Logging.MaxBackups,
-					MaxAge:     config.Logging.MaxAge,
-					Compress:   config.Logging.Compress,
-				}))
+				// 根据是否需要轮转决定使用哪种文件写入器
+				if config.Logging.MaxSize > 0 && config.Logging.MaxBackups > 0 {
+					// 使用轮转文件写入器
+					rotateWriter := logger.NewRotateWriter(
+						config.Logging.FilePath,
+						int64(config.Logging.MaxSize)*1024*1024, // 转换为字节
+						config.Logging.MaxBackups,
+					)
+					loggerConfig = loggerConfig.WithOutput(rotateWriter)
+				} else {
+					// 使用简单文件写入器
+					fileWriter := logger.NewFileWriter(config.Logging.FilePath)
+					loggerConfig = loggerConfig.WithOutput(fileWriter)
+				}
 			}
 		default:
 			// 默认使用控制台输出

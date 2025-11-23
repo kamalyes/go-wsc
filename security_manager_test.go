@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-11-22 21:25:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-22 21:32:40
+ * @LastEditTime: 2025-11-23 18:41:28
  * @FilePath: \go-wsc\security_manager_test.go
  * @Description: 安全管理器测试
  *
@@ -50,7 +50,7 @@ func TestConnectionValidation(t *testing.T) {
 	// 黑名单IP应该被拒绝
 	err = sm.ValidateConnection("192.168.1.200", "user456", map[string]string{})
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "黑名单")
+	assert.Contains(t, err.Error(), "ip address is in blacklist")
 
 	// 检查安全事件
 	events := sm.GetSecurityEvents(10)
@@ -87,7 +87,7 @@ func TestBruteForceDetection(t *testing.T) {
 	// 第4次尝试应该被检测为暴力攻击
 	err := sm.ValidateConnection(clientIP, userID, map[string]string{})
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "暴力攻击")
+	assert.Contains(t, err.Error(), "brute force attack detected")
 
 	// 检查统计信息
 	stats := sm.GetSecurityStats()
@@ -117,13 +117,13 @@ func TestMessageValidation(t *testing.T) {
 	}
 	err = sm.ValidateMessage(userID, clientIP, largeMessage)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "超出限制")
+	assert.Contains(t, err.Error(), "message too large")
 
 	// 包含威胁的消息应该被拒绝
 	threatMessage := []byte("SELECT * FROM users WHERE 1=1; DROP TABLE users;")
 	err = sm.ValidateMessage(userID, clientIP, threatMessage)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "威胁")
+	assert.Contains(t, err.Error(), "threat detected")
 
 	// 检查安全事件
 	events := sm.GetSecurityEvents(10)
@@ -213,7 +213,7 @@ func TestAccessRules(t *testing.T) {
 	// 被规则拒绝的IP
 	err := sm.ValidateConnection("192.168.1.500", "testuser", map[string]string{})
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "拒绝")
+	assert.Contains(t, err.Error(), "access denied by security rule")
 
 	// 其他IP应该正常
 	err = sm.ValidateConnection("192.168.1.501", "testuser", map[string]string{})
@@ -235,7 +235,7 @@ func TestAccessRules(t *testing.T) {
 	// 被规则拒绝的用户
 	err = sm.ValidateConnection("192.168.1.502", "baduser", map[string]string{})
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "拒绝")
+	assert.Contains(t, err.Error(), "access denied by security rule")
 }
 
 func TestIPRangeMatching(t *testing.T) {

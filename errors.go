@@ -102,6 +102,9 @@ const (
 )
 
 // init 初始化所有错误类型注册
+// 注意：在运行多个测试包时，可能会看到 "ErrorType XXX is already registered" 的警告信息
+// 这是正常现象，因为每个测试包会独立加载并初始化此包
+// 这些警告不影响功能，errorx包内部会忽略重复注册
 func init() {
 	// 注册基础错误恢复类型
 	errorx.RegisterError(ErrorTypeConnection, "connection error")

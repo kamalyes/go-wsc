@@ -2,8 +2,8 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-09-06 09:50:55
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-09-06 10:00:51
- * @FilePath: \go-wsc\message.go
+ * @LastEditTime: 2025-11-24 14:27:15
+ * @FilePath: \engine-im-service\go-wsc\message.go
  * @Description: 消息处理逻辑
  *
  * Copyright (c) 2025 by kamalyes, All Rights Reserved.
@@ -71,7 +71,7 @@ func (wsc *Wsc) SendBinaryMessage(data []byte) error {
 func (wsc *Wsc) send(messageType int, data []byte) error {
 	wsc.WebSocket.sendMu.Lock()
 	defer wsc.WebSocket.sendMu.Unlock()
-	
+
 	// 使用读锁保护连接状态和 Conn 的访问
 	wsc.WebSocket.connMu.RLock()
 	if !wsc.WebSocket.isConnected {
@@ -80,8 +80,8 @@ func (wsc *Wsc) send(messageType int, data []byte) error {
 	}
 	conn := wsc.WebSocket.Conn
 	wsc.WebSocket.connMu.RUnlock()
-	
+
 	// 设置写超时
-	_ = conn.SetWriteDeadline(time.Now().Add(wsc.Config.WriteWait))
+	_ = conn.SetWriteDeadline(time.Now().Add(wsc.Config.WriteTimeout))
 	return conn.WriteMessage(messageType, data)
 }

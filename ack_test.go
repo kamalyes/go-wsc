@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-11-15
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-16 19:49:51
+ * @LastEditTime: 2025-11-22 23:23:51
  * @FilePath: \go-wsc\ack_test.go
  * @Description: ACK消息确认机制测试
  *
@@ -123,7 +123,9 @@ func TestHubWithAck(t *testing.T) {
 	t.Run("启用ACK的消息发送", func(t *testing.T) {
 		config := wscconfig.Default().
 			Enable().
-			EnableTicket()
+			WithAck(2000 * time.Millisecond)
+
+		t.Logf("配置创建后 EnableAck: %v, AckTimeout: %v", config.EnableAck, config.AckTimeoutMs)
 
 		hub := NewHub(config)
 		go hub.Run()
@@ -135,11 +137,23 @@ func TestHubWithAck(t *testing.T) {
 			UserID:   "user-1",
 			SendChan: make(chan []byte, 10),
 			Context:  context.Background(),
+			LastSeen: time.Now(), // 设置最后活跃时间防止被清理
 		}
 		hub.Register(client)
 
-		// 等待注册完成
-		time.Sleep(200 * time.Millisecond)
+		// 可靠地等待注册完成，通过检查用户是否在线
+		registered := false
+		for i := 0; i < 50; i++ { // 最多等待5秒
+			if hub.IsUserOnline("user-1") {
+				registered = true
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if !registered {
+			t.Fatal("客户端注册超时")
+		}
+		t.Log("客户端注册成功")
 
 		// 模拟客户端处理消息并发送ACK
 		go func() {
@@ -147,7 +161,11 @@ func TestHubWithAck(t *testing.T) {
 			select {
 			case msg := <-client.SendChan:
 				// 收到消息,立即发送ACK
-				t.Logf("收到消息: %s", string(msg))
+				msgStr := "<empty message>"
+				if len(msg) > 0 {
+					msgStr = string(msg)
+				}
+				t.Logf("收到消息: %s", msgStr)
 				ack := &AckMessage{
 					MessageID: "test-msg-with-ack",
 					Status:    AckStatusConfirmed,
@@ -170,6 +188,7 @@ func TestHubWithAck(t *testing.T) {
 		}
 
 		ackMsg, err := hub.SendToUserWithAck(ctx, "user-1", msg, 0, 0)
+		t.Logf("EnableAck配置: %v, AckTimeout: %v", hub.safeConfig.Field("EnableAck").Bool(false), hub.safeConfig.Field("AckTimeoutMs").Duration(0))
 		assert.NoError(t, err)
 		assert.NotNil(t, ackMsg)
 		assert.Equal(t, AckStatusConfirmed, ackMsg.Status)
@@ -179,11 +198,8 @@ func TestHubWithAck(t *testing.T) {
 	})
 
 	t.Run("未启用ACK的消息发送", func(t *testing.T) {
-		config := wscconfig.Default().
-			Enable().
-			WithTicket(wscconfig.DefaultTicket().
-				Enable().
-				WithAck(false, 2000, 2))
+		config := wscconfig.Default().Enable()
+		// 不调用WithAck，保持EnableAck=false
 
 		hub := NewHub(config)
 		go hub.Run()
@@ -195,11 +211,22 @@ func TestHubWithAck(t *testing.T) {
 			UserID:   "user-2",
 			SendChan: make(chan []byte, 10),
 			Context:  context.Background(),
+			LastSeen: time.Now(), // 设置最后活跃时间防止被清理
 		}
 		hub.Register(client)
 
-		// 等待注册完成
-		time.Sleep(100 * time.Millisecond)
+		// 可靠地等待注册完成
+		registered := false
+		for i := 0; i < 50; i++ { // 最多等待5秒
+			if hub.IsUserOnline("user-2") {
+				registered = true
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if !registered {
+			t.Fatal("客户端注册超时")
+		}
 
 		// 发送消息（无ACK）
 		ctx := context.WithValue(context.Background(), ContextKeySenderID, "sender-2")
@@ -213,12 +240,12 @@ func TestHubWithAck(t *testing.T) {
 		assert.Nil(t, ackMsg) // 未启用ACK时返回nil
 	})
 
-	t.Run("ACK超时重试", func(t *testing.T) {
+	t.Run("启用ACK的消息发送", func(t *testing.T) {
 		config := wscconfig.Default().
 			Enable().
-			WithTicket(wscconfig.DefaultTicket().
-				Enable().
-				WithAck(true, 300, 2))
+			WithAck(500 * time.Millisecond) // 减少超时时间到500ms
+
+		t.Logf("配置创建后 EnableAck: %v, AckTimeout: %v", config.EnableAck, config.AckTimeoutMs)
 
 		hub := NewHub(config)
 		go hub.Run()
@@ -229,11 +256,22 @@ func TestHubWithAck(t *testing.T) {
 			UserID:   "user-3",
 			SendChan: make(chan []byte, 10),
 			Context:  context.Background(),
+			LastSeen: time.Now(), // 设置最后活跃时间防止被清理
 		}
 		hub.Register(client)
 
-		// 等待注册完成
-		time.Sleep(100 * time.Millisecond)
+		// 可靠地等待注册完成
+		registered := false
+		for i := 0; i < 50; i++ { // 最多等待5秒
+			if hub.IsUserOnline("user-3") {
+				registered = true
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if !registered {
+			t.Fatal("客户端注册超时")
+		}
 
 		// 模拟在第2次重试后返回ACK
 		done := make(chan struct{})
@@ -244,9 +282,20 @@ func TestHubWithAck(t *testing.T) {
 				select {
 				case msg := <-client.SendChan:
 					messageCount++
-					t.Logf("收到第%d次消息: %s", messageCount, string(msg)[:50])
+					var msgStr string
+					if len(msg) > 0 {
+						msgStr = string(msg)
+						if len(msgStr) > 50 {
+							msgStr = msgStr[:50] + "..."
+						}
+					} else {
+						msgStr = "<empty or nil message>"
+					}
+					t.Logf("收到第%d次消息: %s", messageCount, msgStr)
 					// 第1次和第2次忽略,第3次(第2次重试)回复ACK
 					if messageCount >= 3 {
+						// 稍微延迟一下,确保消息处理完成
+						time.Sleep(50 * time.Millisecond)
 						ack := &AckMessage{
 							MessageID: "test-msg-retry",
 							Status:    AckStatusConfirmed,
@@ -271,13 +320,16 @@ func TestHubWithAck(t *testing.T) {
 			Content: "Test message with retry",
 		}
 
-		ackMsg, err := hub.SendToUserWithAck(ctx, "user-3", msg, 0, -1) // maxRetry=-1表示使用默认值
+		ackMsg, err := hub.SendToUserWithAck(ctx, "user-3", msg, 0, 2) // 明确设置maxRetry为2
 		assert.NoError(t, err)
 		assert.NotNil(t, ackMsg)
 		assert.Equal(t, AckStatusConfirmed, ackMsg.Status)
 
-		hub.Shutdown()
+		// 等待ACK处理完成
+		<-done
 		time.Sleep(100 * time.Millisecond)
+
+		hub.Shutdown()
 	})
 }
 

@@ -26,13 +26,13 @@ type wsMsg struct {
 // SendTextMessage 发送文本消息
 func (wsc *Wsc) SendTextMessage(message string) error {
 	if wsc.Closed() {
-		return ErrClose
+		return ErrConnectionClosed
 	}
 	// 读锁保护 sendChan 指针与关闭标志一致性
 	wsc.WebSocket.sendChanMu.RLock()
 	defer wsc.WebSocket.sendChanMu.RUnlock()
 	if atomic.LoadInt32(&wsc.WebSocket.sendChanClosed) == 1 {
-		return ErrClose
+		return ErrConnectionClosed
 	}
 	select {
 	case wsc.WebSocket.sendChan <- &wsMsg{
@@ -40,7 +40,7 @@ func (wsc *Wsc) SendTextMessage(message string) error {
 		msg: []byte(message),
 	}:
 	default:
-		return ErrBufferFull
+		return ErrMessageBufferFull
 	}
 	return nil
 }
@@ -48,13 +48,13 @@ func (wsc *Wsc) SendTextMessage(message string) error {
 // SendBinaryMessage 发送二进制消息
 func (wsc *Wsc) SendBinaryMessage(data []byte) error {
 	if wsc.Closed() {
-		return ErrClose
+		return ErrConnectionClosed
 	}
 	// 读锁保护 sendChan 指针与关闭标志一致性
 	wsc.WebSocket.sendChanMu.RLock()
 	defer wsc.WebSocket.sendChanMu.RUnlock()
 	if atomic.LoadInt32(&wsc.WebSocket.sendChanClosed) == 1 {
-		return ErrClose
+		return ErrConnectionClosed
 	}
 	select {
 	case wsc.WebSocket.sendChan <- &wsMsg{
@@ -62,7 +62,7 @@ func (wsc *Wsc) SendBinaryMessage(data []byte) error {
 		msg: data,
 	}:
 	default:
-		return ErrBufferFull
+		return ErrMessageBufferFull
 	}
 	return nil
 }
@@ -76,7 +76,7 @@ func (wsc *Wsc) send(messageType int, data []byte) error {
 	wsc.WebSocket.connMu.RLock()
 	if !wsc.WebSocket.isConnected {
 		wsc.WebSocket.connMu.RUnlock()
-		return ErrClose
+		return ErrConnectionClosed
 	}
 	conn := wsc.WebSocket.Conn
 	wsc.WebSocket.connMu.RUnlock()

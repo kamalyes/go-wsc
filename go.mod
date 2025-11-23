@@ -1,12 +1,13 @@
 module github.com/kamalyes/go-wsc
 
-go 1.20
+go 1.23.0
 
 require (
 	github.com/gorilla/websocket v1.4.2
 	github.com/jpillora/backoff v1.0.0
-	github.com/kamalyes/go-config v0.9.10
-	github.com/kamalyes/go-toolbox v0.11.71
+	github.com/kamalyes/go-config v0.10.1
+	github.com/kamalyes/go-logger v0.4.0
+	github.com/kamalyes/go-toolbox v0.11.77
 	github.com/stretchr/testify v1.11.1
 )
 
@@ -24,7 +25,6 @@ require (
 	github.com/goccy/go-json v0.10.2 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
-	github.com/kamalyes/go-logger v0.3.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.7 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
@@ -58,9 +58,9 @@ require (
 
 // replace github.com/kamalyes/go-cachex => ../go-cachex
 
-// replace github.com/kamalyes/go-config => ../go-config
+replace github.com/kamalyes/go-config => ../go-config
 
-// replace github.com/kamalyes/go-logger => ../go-logger
+replace github.com/kamalyes/go-logger => ../go-logger
 
 // replace github.com/kamalyes/go-toolbox => ../go-toolbox
 

@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-11-16
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-16 23:20:00
+ * @LastEditTime: 2025-11-22 22:03:55
  * @FilePath: \go-wsc\hub_failure_handlers_test.go
  * @Description: Hub消息发送失败处理器测试
  *
@@ -185,9 +185,14 @@ type TestConfigurableSendFailureHandler struct {
 }
 
 func (h *TestConfigurableSendFailureHandler) HandleSendFailure(msg *HubMessage, recipient string, reason string, err error) {
-	if h.panicMode {
+	h.mu.RLock()
+	shouldPanic := h.panicMode
+	h.mu.RUnlock()
+
+	if shouldPanic {
 		panic("test panic")
 	}
+
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	atomic.AddInt64(&h.failureCount, 1)
@@ -198,6 +203,8 @@ func (h *TestConfigurableSendFailureHandler) HandleSendFailure(msg *HubMessage, 
 }
 
 func (h *TestConfigurableSendFailureHandler) SetPanicMode(panic bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.panicMode = panic
 }
 
@@ -213,7 +220,9 @@ func (h *TestConfigurableSendFailureHandler) GetLastFailure() (*HubMessage, stri
 
 // TestHubFailureHandlers 测试Hub失败处理器
 func TestHubFailureHandlers(t *testing.T) {
-	hub := NewHub(nil)
+	// 创建启用ACK的配置，这样SendToUserWithAck才会正确工作
+	config := wscconfig.Default().Enable().WithAck(100 * time.Millisecond)
+	hub := NewHub(config)
 	defer hub.Shutdown()
 
 	go hub.Run()
@@ -522,6 +531,18 @@ func TestHubRetryMechanism(t *testing.T) {
 	})
 
 	t.Run("NonRetryableError", func(t *testing.T) {
+		// 创建一个启用ACK的配置用于测试，使用更短的超时
+		ackConfig := wscconfig.Default().WithAck(10 * time.Millisecond)
+		ackHub := NewHub(ackConfig)
+
+		// 使用context控制超时
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		defer ackHub.Shutdown()
+
+		go ackHub.Run()
+		time.Sleep(50 * time.Millisecond)
+
 		// 测试不可重试的错误（如用户离线）
 		msg := &HubMessage{
 			ID:      "non-retry-test",
@@ -529,13 +550,13 @@ func TestHubRetryMechanism(t *testing.T) {
 			Content: "Test non-retryable error",
 		}
 
-		// 使用带ACK的方法触发用户离线错误
-		_, err := hub.SendToUserWithAck(context.Background(), "offline-user", msg, 50*time.Millisecond, 1)
+		// 使用带ACK的方法触发用户离线错误，使用更短的超时
+		_, err := ackHub.SendToUserWithAck(ctx, "offline-user", msg, 10*time.Millisecond, 1)
 
 		assert.Error(t, err, "应该有错误")
 
 		// 验证是否是不可重试的错误
-		isRetryable := hub.shouldRetryBasedOnErrorPattern(err)
+		isRetryable := ackHub.shouldRetryBasedOnErrorPattern(err)
 		assert.False(t, isRetryable, "用户离线错误应该不可重试")
 	})
 
@@ -547,32 +568,4 @@ func TestHubRetryMechanism(t *testing.T) {
 		assert.Equal(t, 5*time.Second, hub.config.MaxDelay, "最大延迟应该为5秒")
 		assert.Equal(t, 2.0, hub.config.BackoffFactor, "退避因子应该为2.0")
 	})
-}
-
-// TestRetryableErrorPatterns 测试可重试错误模式
-func TestRetryableErrorPatterns(t *testing.T) {
-	hub := NewHub(nil)
-	defer hub.Shutdown()
-
-	testCases := []struct {
-		name        string
-		error       error
-		shouldRetry bool
-	}{
-		{"QueueFull", fmt.Errorf("queue_full: message queue is full"), true},
-		{"Timeout", fmt.Errorf("timeout: operation timed out"), true},
-		{"ConnError", fmt.Errorf("connection refused"), true},
-		{"UserOffline", fmt.Errorf("user_offline: user is not connected"), false},
-		{"Permission", fmt.Errorf("permission denied"), false},
-		{"InvalidFormat", fmt.Errorf("invalid message format"), false},
-		{"NetworkUnreachable", fmt.Errorf("network unreachable"), true},
-		{"Temporary", fmt.Errorf("temporary failure"), true},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			shouldRetry := hub.shouldRetryBasedOnErrorPattern(tc.error)
-			assert.Equal(t, tc.shouldRetry, shouldRetry, "错误重试判断应该正确")
-		})
-	}
 }

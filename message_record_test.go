@@ -272,9 +272,7 @@ func TestMessageRecordRetry(t *testing.T) {
 			WithGroup(wscconfig.DefaultGroup().
 				Enable().
 				WithMessageRecord(true)).
-			WithTicket(wscconfig.DefaultTicket().
-				Enable().
-				WithAck(true, 200, 2))
+			WithAck(200 * time.Millisecond)
 
 		hub := NewHub(config)
 		go hub.Run()

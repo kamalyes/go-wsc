@@ -54,7 +54,7 @@ func BenchmarkSendTextMessage_Small(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		if err := ws.SendTextMessage(msg); err != nil {
 			// 缓冲区满时等待一下
-			if err == ErrBufferFull {
+			if err == ErrMessageBufferFull {
 				time.Sleep(time.Microsecond)
 				i-- // 重试
 				continue
@@ -76,7 +76,7 @@ func BenchmarkSendTextMessage_Medium(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		if err := ws.SendTextMessage(msg); err != nil {
-			if err == ErrBufferFull {
+			if err == ErrMessageBufferFull {
 				time.Sleep(time.Microsecond)
 				i--
 				continue
@@ -98,7 +98,7 @@ func BenchmarkSendTextMessage_Large(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		if err := ws.SendTextMessage(msg); err != nil {
-			if err == ErrBufferFull {
+			if err == ErrMessageBufferFull {
 				time.Sleep(time.Microsecond)
 				i--
 				continue
@@ -120,7 +120,7 @@ func BenchmarkSendBinaryMessage(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		if err := ws.SendBinaryMessage(data); err != nil {
-			if err == ErrBufferFull {
+			if err == ErrMessageBufferFull {
 				time.Sleep(time.Microsecond)
 				i--
 				continue
@@ -142,9 +142,18 @@ func BenchmarkSendTextMessage_Parallel(b *testing.B) {
 
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			for {
+			const maxRetries = 1000
+			startTime := time.Now()
+			const retryTimeout = 5 * time.Second
+
+			for retries := 0; retries < maxRetries; retries++ {
+				if time.Since(startTime) > retryTimeout {
+					b.Error("发送消息超时")
+					return
+				}
+
 				if err := ws.SendTextMessage(msg); err != nil {
-					if err == ErrBufferFull {
+					if err == ErrMessageBufferFull {
 						time.Sleep(time.Microsecond)
 						continue
 					}
@@ -218,9 +227,17 @@ func BenchmarkCallback_OnTextMessageReceived(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		for {
+		const maxRetries = 1000
+		startTime := time.Now()
+		const retryTimeout = 5 * time.Second
+
+		for retries := 0; retries < maxRetries; retries++ {
+			if time.Since(startTime) > retryTimeout {
+				b.Fatal("发送消息超时")
+			}
+
 			if err := ws.SendTextMessage("test"); err != nil {
-				if err == ErrBufferFull {
+				if err == ErrMessageBufferFull {
 					time.Sleep(time.Microsecond)
 					continue
 				}
@@ -250,15 +267,31 @@ func BenchmarkCallback_OnBinaryMessageReceived(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		for {
+		// 添加重试限制避免无限循环
+		maxRetries := 1000
+		retryTimeout := 5 * time.Second
+		startTime := time.Now()
+
+		for retries := 0; retries < maxRetries; retries++ {
+			// 检查超时
+			if time.Since(startTime) > retryTimeout {
+				b.Fatalf("发送消息超时: %v", retryTimeout)
+			}
+
 			if err := ws.SendBinaryMessage(data); err != nil {
-				if err == ErrBufferFull {
+				if err == ErrMessageBufferFull {
 					time.Sleep(time.Microsecond)
 					continue
 				}
 				b.Fatal(err)
 			}
 			break
+		}
+
+		// 如果达到最大重试次数则跳过
+		if time.Since(startTime) > retryTimeout {
+			b.Logf("跳过消息 %d: 缓冲区持续满载", i)
+			continue
 		}
 	}
 
@@ -281,15 +314,31 @@ func BenchmarkCallback_OnTextMessageSent(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		for {
+		// 添加重试限制避免无限循环
+		maxRetries := 1000
+		retryTimeout := 5 * time.Second
+		startTime := time.Now()
+
+		for retries := 0; retries < maxRetries; retries++ {
+			// 检查超时
+			if time.Since(startTime) > retryTimeout {
+				b.Fatalf("发送消息超时: %v", retryTimeout)
+			}
+
 			if err := ws.SendTextMessage("callback test"); err != nil {
-				if err == ErrBufferFull {
+				if err == ErrMessageBufferFull {
 					time.Sleep(time.Microsecond)
 					continue
 				}
 				b.Fatal(err)
 			}
 			break
+		}
+
+		// 如果达到最大重试次数则跳过
+		if time.Since(startTime) > retryTimeout {
+			b.Logf("跳过消息 %d: 缓冲区持续满载", i)
+			continue
 		}
 	}
 
@@ -312,15 +361,31 @@ func BenchmarkCallback_OnBinaryMessageSent(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		for {
+		// 添加重试限制避免无限循环
+		maxRetries := 1000
+		retryTimeout := 5 * time.Second
+		startTime := time.Now()
+
+		for retries := 0; retries < maxRetries; retries++ {
+			// 检查超时
+			if time.Since(startTime) > retryTimeout {
+				b.Fatalf("发送消息超时: %v", retryTimeout)
+			}
+
 			if err := ws.SendBinaryMessage(data); err != nil {
-				if err == ErrBufferFull {
+				if err == ErrMessageBufferFull {
 					time.Sleep(time.Microsecond)
 					continue
 				}
 				b.Fatal(err)
 			}
 			break
+		}
+
+		// 如果达到最大重试次数则跳过
+		if time.Since(startTime) > retryTimeout {
+			b.Logf("跳过消息 %d: 缓冲区持续满载", i)
+			continue
 		}
 	}
 
@@ -417,15 +482,31 @@ func BenchmarkCallback_MultipleCallbacks(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		for {
+		// 添加重试限制避免无限循环
+		maxRetries := 1000
+		retryTimeout := 5 * time.Second
+		startTime := time.Now()
+
+		for retries := 0; retries < maxRetries; retries++ {
+			// 检查超时
+			if time.Since(startTime) > retryTimeout {
+				b.Fatalf("发送消息超时: %v", retryTimeout)
+			}
+
 			if err := ws.SendTextMessage("multi callback test"); err != nil {
-				if err == ErrBufferFull {
+				if err == ErrMessageBufferFull {
 					time.Sleep(time.Microsecond)
 					continue
 				}
 				b.Fatal(err)
 			}
 			break
+		}
+
+		// 如果达到最大重试次数则跳过
+		if time.Since(startTime) > retryTimeout {
+			b.Logf("跳过消息 %d: 缓冲区持续满载", i)
+			continue
 		}
 	}
 
@@ -457,12 +538,22 @@ func BenchmarkHighThroughput(b *testing.B) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < msgsPerSender; j++ {
-				for {
+				const maxRetries = 1000
+				startTime := time.Now()
+				const retryTimeout = 5 * time.Second
+
+				for retries := 0; retries < maxRetries; retries++ {
+					if time.Since(startTime) > retryTimeout {
+						b.Error("发送消息超时")
+						return
+					}
+
 					if err := ws.SendTextMessage(msg); err != nil {
-						if err == ErrBufferFull {
+						if err == ErrMessageBufferFull {
 							time.Sleep(time.Microsecond)
 							continue
 						}
+						b.Error(err)
 						return
 					}
 					break
@@ -486,9 +577,17 @@ func BenchmarkMemoryAllocation(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		for {
+		const maxRetries = 1000
+		startTime := time.Now()
+		const retryTimeout = 5 * time.Second
+
+		for retries := 0; retries < maxRetries; retries++ {
+			if time.Since(startTime) > retryTimeout {
+				b.Fatal("发送消息超时")
+			}
+
 			if err := ws.SendTextMessage(msg); err != nil {
-				if err == ErrBufferFull {
+				if err == ErrMessageBufferFull {
 					time.Sleep(time.Microsecond)
 					continue
 				}

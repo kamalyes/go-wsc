@@ -12,11 +12,10 @@ package wsc
 
 import (
 	"context"
-	"testing"
-	"time"
-
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/stretchr/testify/assert"
+	"testing"
+	"time"
 )
 
 func TestHubEnhancedFeatures(t *testing.T) {
@@ -30,8 +29,11 @@ func TestHubEnhancedFeatures(t *testing.T) {
 			WithCircuitBreaker(true, 5, 3, 30)).
 		WithNodeIP("127.0.0.1").
 		WithNodePort(8080)
-	
+
 	hub := NewHub(config)
+
+	// 手动初始化增强组件
+	hub.InitializeEnhancements()
 
 	// 验证增强组件已初始化
 	assert.NotNil(t, hub.messageRouter, "MessageRouter should be initialized")
@@ -215,19 +217,13 @@ func TestHubEnhancedSend(t *testing.T) {
 	config := wscconfig.Default().
 		Enable().
 		WithNodeIP("127.0.0.1").
-		WithNodePort(8080).
-		WithTicket(wscconfig.DefaultTicket().
-			Enable().
-			WithAck(true, 10000, 3))
-	
+		WithNodePort(8080)
+
 	config.Enhancement.Enabled = true
 	config.Enhancement.SmartRouting = true
 	config.Enhancement.LoadBalancing = true
 	config.Enhancement.SmartQueue = true
-	config.Ticket.EnableAck = true
-	config.Ticket.AckTimeoutMs = 10000
-	config.Ticket.MaxRetry = 3
-	
+
 	hub := NewHub(config)
 
 	hub.InitializeEnhancements()
@@ -284,12 +280,12 @@ func TestHubRulesAndFilters(t *testing.T) {
 			WithRuleEngine(true).
 			WithMessageFiltering(true).
 			WithMonitoring(true))
-	
+
 	config.Enhancement.Enabled = true
 	config.Enhancement.RuleEngine = true
 	config.Enhancement.MessageFiltering = true
 	config.Enhancement.Monitoring = true
-	
+
 	hub := NewHub(config)
 
 	hub.InitializeEnhancements()
@@ -355,13 +351,13 @@ func BenchmarkEnhancedHub(b *testing.B) {
 			WithLoadBalancing(true, "round-robin").
 			WithSmartQueue(true, 1000).
 			WithPerformanceTracking(true))
-	
+
 	config.Enhancement.Enabled = true
 	config.Enhancement.SmartRouting = true
 	config.Enhancement.LoadBalancing = true
 	config.Enhancement.SmartQueue = true
 	config.Enhancement.PerformanceTracking = true
-	
+
 	hub := NewHub(config)
 
 	hub.InitializeEnhancements()

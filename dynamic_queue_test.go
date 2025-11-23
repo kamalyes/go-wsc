@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-09-06 09:50:55
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-07 00:54:03
+ * @LastEditTime: 2025-11-22 19:23:47
  * @FilePath: \go-wsc\dynamic_queue_test.go
  * @Description:
  *
@@ -11,10 +11,9 @@
 package wsc
 
 import (
-	"testing"
-
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
+	"testing"
 )
 
 // TestSmartGrowth 测试智能增长策略
@@ -26,27 +25,27 @@ func TestSmartGrowth(t *testing.T) {
 
 	// 逐步增加消息，观察容量变化
 	steps := []int{10, 100, 500, 1000, 5000, 10000, 20000}
-	
+
 	t.Log("容量增长过程:")
 	var prevResizeCount int64 = 0
-	
+
 	for _, targetCount := range steps {
 		// 填充到目标数量
 		for q.Len() < targetCount {
 			err := q.Push(msg)
 			assert.NoError(t, err, "Push failed at count %d", q.Len())
 		}
-		
+
 		stats := q.Stats()
 		resizeCount := stats["resizeCount"].(int64)
 		newResizes := resizeCount - prevResizeCount
-		
+
 		t.Logf("  消息数: %5d, 容量: %6d, 本阶段扩容: %d次, 累计扩容: %d次, 使用率: %.1f%%",
 			targetCount, q.Cap(), newResizes, resizeCount, stats["utilization"])
-		
+
 		prevResizeCount = resizeCount
 	}
-	
+
 	// 验证最大容量没有爆炸式增长
 	// 对于20000消息，2倍增长需要32768容量（10->20->40...->32768）
 	// 智能增长应该更节省（预期约22000-25000）
@@ -55,13 +54,13 @@ func TestSmartGrowth(t *testing.T) {
 	for doubleGrowthCap < 20000 {
 		doubleGrowthCap *= 2
 	}
-	
+
 	savings := float64(doubleGrowthCap-finalCap) / float64(doubleGrowthCap) * 100
 	t.Logf("\n内存节省: 2倍增长需要 %d, 智能增长需要 %d, 节省 %.1f%%",
 		doubleGrowthCap, finalCap, savings)
-	
+
 	assert.Less(t, finalCap, doubleGrowthCap*2, "智能增长容量不应超过2倍增长策略的2倍")
-	
+
 	if finalCap < doubleGrowthCap {
 		t.Logf("✓ 智能增长策略有效节省了内存")
 	}
@@ -85,14 +84,14 @@ func TestAdaptiveShrink(t *testing.T) {
 
 	// 逐步消费并观察缩容
 	shrinkSteps := []int{9000, 7000, 5000, 3000, 1000, 100}
-	
+
 	for _, remaining := range shrinkSteps {
 		// 消费到目标剩余数量
 		for q.Len() > remaining {
 			_, err := q.Pop()
 			assert.NoError(t, err, "Pop failed")
 		}
-		
+
 		stats := q.Stats()
 		t.Logf("剩余消息: %5d, 容量: %6d, 缩容次数: %d, 使用率: %.1f%%",
 			remaining, q.Cap(), stats["shrinkCount"], stats["utilization"])
@@ -101,16 +100,16 @@ func TestAdaptiveShrink(t *testing.T) {
 	// 验证最终容量缩小了
 	finalCap := q.Cap()
 	assert.Less(t, finalCap, expandedCap, "容量应该缩小")
-	t.Logf("✓ 容量成功缩小：%d -> %d (%.1f%%)", expandedCap, finalCap, 
+	t.Logf("✓ 容量成功缩小：%d -> %d (%.1f%%)", expandedCap, finalCap,
 		float64(finalCap)/float64(expandedCap)*100)
 }
 
 // TestGrowthComparison 对比不同增长策略的内存使用
 func TestGrowthComparison(t *testing.T) {
 	testCases := []struct {
-		name          string
-		initialCap    int
-		targetCount   int
+		name           string
+		initialCap     int
+		targetCount    int
 		expectedMaxCap int // 预期的最大容量
 	}{
 		{"小规模", 10, 100, 256},       // 2倍增长: 10->20->40->80->160
@@ -133,20 +132,20 @@ func TestGrowthComparison(t *testing.T) {
 
 			finalCap := q.Cap()
 			stats := q.Stats()
-			
+
 			t.Logf("目标数量: %d, 最终容量: %d, 扩容次数: %d",
 				tc.targetCount, finalCap, stats["resizeCount"])
-			
+
 			// 计算如果用2倍策略的容量
 			doubleGrowthCap := tc.initialCap
 			for doubleGrowthCap < tc.targetCount {
 				doubleGrowthCap *= 2
 			}
-			
+
 			memSaving := float64(doubleGrowthCap-finalCap) / float64(doubleGrowthCap) * 100
 			t.Logf("2倍增长需要: %d, 智能增长需要: %d, 节省内存: %.1f%%",
 				doubleGrowthCap, finalCap, memSaving)
-			
+
 			if finalCap < doubleGrowthCap {
 				t.Logf("✓ 智能增长策略更节省内存")
 			}
@@ -203,7 +202,7 @@ func TestDynamicQueue_SetAutoResize(t *testing.T) {
 
 	// 再次push应该失败（队列已满且不自动扩容）
 	err := q.Push(msg)
-	assert.Equal(t, ErrBufferFull, err, "Should return ErrBufferFull when auto-resize is disabled")
+	assert.Equal(t, ErrMessageBufferFull, err, "Should return ErrMessageBufferFull when auto-resize is disabled")
 
 	// 启用自动扩容
 	q.SetAutoResize(true)
@@ -228,7 +227,7 @@ func TestDynamicQueue_PopFromEmpty(t *testing.T) {
 // TestDynamicQueue_ClosedOperations 测试关闭后的操作
 func TestDynamicQueue_ClosedOperations(t *testing.T) {
 	q := NewDynamicQueue(10, 100)
-	
+
 	// 先添加一些消息
 	msg := &wsMsg{t: websocket.TextMessage, msg: []byte("test")}
 	err := q.Push(msg)
@@ -240,16 +239,16 @@ func TestDynamicQueue_ClosedOperations(t *testing.T) {
 
 	// 关闭后push应该失败
 	err = q.Push(msg)
-	assert.Equal(t, ErrClose, err, "Push after close should return ErrClose")
+	assert.Equal(t, ErrConnectionClosed, err, "Push after close should return ErrConnectionClosed")
 
 	// Pop应该返回队列中剩余的消息
 	poppedMsg, err := q.Pop()
 	assert.NoError(t, err, "Pop should succeed for remaining message")
 	assert.NotNil(t, poppedMsg, "Should get the message")
 
-	// 再次Pop应该返回ErrClose（队列已空且已关闭）
+	// 再次Pop应该返回ErrConnectionClosed（队列已空且已关闭）
 	_, err = q.Pop()
-	assert.Equal(t, ErrClose, err, "Pop after close with empty queue should return ErrClose")
+	assert.Equal(t, ErrConnectionClosed, err, "Pop after close with empty queue should return ErrConnectionClosed")
 
 	// TryPop应该返回false
 	_, ok := q.TryPop()
@@ -274,7 +273,7 @@ func TestDynamicQueue_MaxCapacity(t *testing.T) {
 
 	// 超过最大容量应该失败
 	err := q.Push(msg)
-	assert.Equal(t, ErrBufferFull, err, "Push beyond max capacity should fail")
+	assert.Equal(t, ErrMessageBufferFull, err, "Push beyond max capacity should fail")
 }
 
 // TestDynamicQueue_EdgeCases 测试边界情况
@@ -284,10 +283,10 @@ func TestDynamicQueue_EdgeCases(t *testing.T) {
 		defer q.Close()
 
 		msg := &wsMsg{t: websocket.TextMessage, msg: []byte("test")}
-		
+
 		err := q.Push(msg)
 		assert.NoError(t, err, "Push to minimal queue should succeed")
-		
+
 		popped, err := q.Pop()
 		assert.NoError(t, err, "Pop from minimal queue should succeed")
 		assert.Equal(t, "test", string(popped.msg), "Popped message should match")
@@ -317,13 +316,13 @@ func TestDynamicQueue_EdgeCases(t *testing.T) {
 // TestDynamicQueue_GrowthBoundaries 测试增长策略的边界
 func TestDynamicQueue_GrowthBoundaries(t *testing.T) {
 	testCases := []struct {
-		name       string
-		initialCap int
-		pushCount  int
+		name           string
+		initialCap     int
+		pushCount      int
 		minExpectedCap int
 	}{
-		{"Below1024", 512, 600, 1024},      // 应触发2倍增长
-		{"At1024", 1024, 1100, 1536},       // 应触发1.5倍增长
+		{"Below1024", 512, 600, 1024},       // 应触发2倍增长
+		{"At1024", 1024, 1100, 1536},        // 应触发1.5倍增长
 		{"Above10000", 10000, 11000, 12000}, // 应触发固定增量
 	}
 
@@ -339,7 +338,7 @@ func TestDynamicQueue_GrowthBoundaries(t *testing.T) {
 				assert.NoError(t, err, "Push %d should succeed", i)
 			}
 
-			assert.GreaterOrEqual(t, q.Cap(), tc.minExpectedCap, 
+			assert.GreaterOrEqual(t, q.Cap(), tc.minExpectedCap,
 				"Capacity should grow to at least %d", tc.minExpectedCap)
 		})
 	}
@@ -374,10 +373,10 @@ func TestDynamicQueue_ShrinkBoundaries(t *testing.T) {
 	}
 
 	shrunkCap := q.Cap()
-	t.Logf("After consuming to %d messages, capacity: %d -> %d", 
+	t.Logf("After consuming to %d messages, capacity: %d -> %d",
 		targetRemaining, expandedCap, shrunkCap)
 
 	// 验证至少保留了消息的2倍空间
-	assert.GreaterOrEqual(t, shrunkCap, q.Len()*2, 
+	assert.GreaterOrEqual(t, shrunkCap, q.Len()*2,
 		"Shrunk capacity should be at least 2x message count")
 }

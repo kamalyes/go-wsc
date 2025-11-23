@@ -17,20 +17,20 @@ import (
 
 // DynamicQueue 动态扩容的消息队列
 type DynamicQueue struct {
-	items         []*wsMsg      // 消息数组
-	mu            sync.RWMutex  // 读写锁
-	notEmpty      *sync.Cond    // 非空条件变量
-	head          int           // 队列头部索引
-	tail          int           // 队列尾部索引
-	count         int64         // 当前消息数（原子）
-	capacity      int           // 当前容量
-	minCapacity   int           // 最小容量
-	maxCapacity   int           // 最大容量
-	closed        int32         // 关闭标记（原子）
-	autoResize    bool          // 是否自动调整容量
-	resizeCount   int64         // 扩容次数（用于统计）
-	shrinkCount   int64         // 缩容次数（用于统计）
-	growthFactor  float64       // 增长因子（默认1.5）
+	items        []*wsMsg     // 消息数组
+	mu           sync.RWMutex // 读写锁
+	notEmpty     *sync.Cond   // 非空条件变量
+	head         int          // 队列头部索引
+	tail         int          // 队列尾部索引
+	count        int64        // 当前消息数（原子）
+	capacity     int          // 当前容量
+	minCapacity  int          // 最小容量
+	maxCapacity  int          // 最大容量
+	closed       int32        // 关闭标记（原子）
+	autoResize   bool         // 是否自动调整容量
+	resizeCount  int64        // 扩容次数（用于统计）
+	shrinkCount  int64        // 缩容次数（用于统计）
+	growthFactor float64      // 增长因子（默认1.5）
 }
 
 // NewDynamicQueue 创建动态队列
@@ -67,7 +67,7 @@ func NewDynamicQueue(minCap, maxCap int) *DynamicQueue {
 // Push 将消息推入队列，如果队列满则自动扩容
 func (q *DynamicQueue) Push(msg *wsMsg) error {
 	if atomic.LoadInt32(&q.closed) == 1 {
-		return ErrClose
+		return ErrConnectionClosed
 	}
 
 	q.mu.Lock()
@@ -79,7 +79,7 @@ func (q *DynamicQueue) Push(msg *wsMsg) error {
 			newCap := q.calculateGrowth()
 			q.resize(newCap)
 		} else {
-			return ErrBufferFull
+			return ErrMessageBufferFull
 		}
 	}
 
@@ -105,7 +105,7 @@ func (q *DynamicQueue) Pop() (*wsMsg, error) {
 
 	// 队列已关闭且为空
 	if q.isEmpty() && atomic.LoadInt32(&q.closed) == 1 {
-		return nil, ErrClose
+		return nil, ErrConnectionClosed
 	}
 
 	// 取出消息
@@ -195,7 +195,7 @@ func (q *DynamicQueue) shouldShrink() bool {
 func (q *DynamicQueue) calculateGrowth() int {
 	currentCap := q.capacity
 	var newCap int
-	
+
 	// 策略1: 容量小于1024时，使用2倍增长
 	if currentCap < 1024 {
 		newCap = currentCap * 2
@@ -211,41 +211,41 @@ func (q *DynamicQueue) calculateGrowth() int {
 		}
 		newCap = currentCap + increment
 	}
-	
+
 	// 确保增长倍数不超过2倍（避免突然的大幅增长）
 	maxAllowed := currentCap * 2
 	if newCap > maxAllowed {
 		newCap = maxAllowed
 	}
-	
+
 	// 确保不超过最大容量
 	if newCap > q.maxCapacity {
 		newCap = q.maxCapacity
 	}
-	
+
 	return newCap
 }
 
 // calculateShrink 计算缩容后的新容量
 func (q *DynamicQueue) calculateShrink() int {
 	currentCap := q.capacity
-	
+
 	// 缩容为当前容量的2/3，更温和
 	newCap := currentCap * 2 / 3
-	
+
 	// 确保至少保留当前消息数量的2倍空间
 	minRequired := int(atomic.LoadInt64(&q.count)) * 2
 	if newCap < minRequired {
 		newCap = minRequired
 	}
-	
+
 	return newCap
 }
 
 // resize 调整队列容量（需要持有锁）
 func (q *DynamicQueue) resize(newCap int) {
 	oldCap := q.capacity
-	
+
 	// 限制在最小和最大容量之间
 	if newCap < q.minCapacity {
 		newCap = q.minCapacity
@@ -272,7 +272,7 @@ func (q *DynamicQueue) resize(newCap int) {
 	q.head = 0
 	q.tail = count
 	q.capacity = newCap
-	
+
 	// 统计扩容/缩容次数
 	if newCap > oldCap {
 		atomic.AddInt64(&q.resizeCount, 1)

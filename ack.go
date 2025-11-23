@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-11-15
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-15
+ * @LastEditTime: 2025-11-22 19:03:45
  * @FilePath: \go-wsc\ack.go
  * @Description: ACK消息确认机制
  *
@@ -13,10 +13,10 @@ package wsc
 import (
 	"context"
 	"fmt"
+	"github.com/jpillora/backoff"
+	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"sync"
 	"time"
-
-	"github.com/jpillora/backoff"
 )
 
 // OfflineMessageHandler 离线消息处理器接口
@@ -46,13 +46,13 @@ type AckMessage struct {
 
 // PendingMessage 待确认消息
 type PendingMessage struct {
-	Message   *HubMessage       // 原始消息
-	AckChan   chan *AckMessage  // ACK确认通道
-	Timestamp time.Time         // 发送时间
-	Timeout   time.Duration     // 超时时间
-	Retry     int               // 重试次数
-	MaxRetry  int               // 最大重试次数
-	ctx       context.Context   // 上下文
+	Message   *HubMessage        // 原始消息
+	AckChan   chan *AckMessage   // ACK确认通道
+	Timestamp time.Time          // 发送时间
+	Timeout   time.Duration      // 超时时间
+	Retry     int                // 重试次数
+	MaxRetry  int                // 最大重试次数
+	ctx       context.Context    // 上下文
 	cancel    context.CancelFunc // 取消函数
 }
 
@@ -61,10 +61,10 @@ type AckManager struct {
 	pending           map[string]*PendingMessage // 待确认消息映射
 	mu                sync.RWMutex               // 读写锁
 	defaultAckTimeout time.Duration              // 默认ACK超时时间
-	maxRetry          int                         // 最大重试次数
-	backoff           *backoff.Backoff            // 重试退避策略
-	expireDuration    time.Duration               // 消息过期时间（超过此时间自动清理）
-	offlineHandler    OfflineMessageHandler       // 离线消息处理器
+	maxRetry          int                        // 最大重试次数
+	backoff           *backoff.Backoff           // 重试退避策略
+	expireDuration    time.Duration              // 消息过期时间（超过此时间自动清理）
+	offlineHandler    OfflineMessageHandler      // 离线消息处理器
 }
 
 // NewAckManager 创建ACK管理器
@@ -74,12 +74,17 @@ func NewAckManager(ackTimeout time.Duration, maxRetry int) *AckManager {
 
 // NewAckManagerWithOptions 创建ACK管理器（带选项）
 func NewAckManagerWithOptions(ackTimeout time.Duration, maxRetry int, expireDuration time.Duration, offlineHandler OfflineMessageHandler) *AckManager {
+	// 设置合理的默认ACK超时时间
 	if ackTimeout <= 0 {
 		ackTimeout = 5 * time.Second
 	}
+
+	// 设置合理的默认最大重试次数
 	if maxRetry < 0 {
 		maxRetry = 3
 	}
+
+	// 设置合理的默认过期时间
 	if expireDuration <= 0 {
 		expireDuration = 5 * time.Minute // 默认5分钟过期
 	}
@@ -121,7 +126,7 @@ func (am *AckManager) AddPendingMessageWithExpire(msg *HubMessage, timeout time.
 
 	// 使用expireDuration作为context超时(给予足够时间进行重试)
 	ctx, cancel := context.WithTimeout(context.Background(), expireDuration)
-	
+
 	pm := &PendingMessage{
 		Message:   msg,
 		AckChan:   make(chan *AckMessage, 1),
@@ -194,7 +199,7 @@ func (pm *PendingMessage) WaitForAck() (*AckMessage, error) {
 			Status:    AckStatusTimeout,
 			Timestamp: time.Now(),
 			Error:     "ACK timeout",
-		}, fmt.Errorf("ACK timeout for message %s", pm.Message.ID)
+		}, errorx.NewError(ErrTypeAckTimeout, pm.Message.ID)
 	}
 }
 
@@ -215,7 +220,7 @@ func (pm *PendingMessage) WaitForAckWithRetry(retryFunc func() error) (*AckMessa
 					Status:    AckStatusTimeout,
 					Timestamp: time.Now(),
 					Error:     fmt.Sprintf("ACK timeout after %d retries", pm.Retry),
-				}, fmt.Errorf("ACK timeout for message %s after %d retries", pm.Message.ID, pm.Retry)
+				}, errorx.NewError(ErrTypeAckTimeoutRetries, pm.Retry, pm.Message.ID)
 			}
 
 			pm.Retry++
@@ -236,7 +241,7 @@ func (pm *PendingMessage) WaitForAckWithRetry(retryFunc func() error) (*AckMessa
 				Status:    AckStatusTimeout,
 				Timestamp: time.Now(),
 				Error:     "Context cancelled",
-			}, fmt.Errorf("context cancelled for message %s", pm.Message.ID)
+			}, errorx.NewError(ErrTypeContextCancelled, pm.Message.ID)
 		}
 	}
 }

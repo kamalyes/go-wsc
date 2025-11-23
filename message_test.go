@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-11-07 01:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-07 01:00:00
+ * @LastEditTime: 2025-11-22 19:24:48
  * @FilePath: \go-wsc\message_test.go
  * @Description: 消息发送测试
  *
@@ -155,10 +155,10 @@ func TestSendMessage_WhenClosed(t *testing.T) {
 
 		// 尝试发送消息应该失败
 		err := client.SendTextMessage("test")
-		assert.Equal(t, ErrClose, err, "SendTextMessage after close should return ErrClose")
+		assert.Equal(t, ErrConnectionClosed, err, "SendTextMessage after close should return ErrConnectionClosed")
 
 		err = client.SendBinaryMessage([]byte("test"))
-		assert.Equal(t, ErrClose, err, "SendBinaryMessage after close should return ErrClose")
+		assert.Equal(t, ErrConnectionClosed, err, "SendBinaryMessage after close should return ErrConnectionClosed")
 	case <-time.After(2 * time.Second):
 		t.Fatal("Connection timeout")
 	}
@@ -200,10 +200,10 @@ func TestSendMessage_BufferFull(t *testing.T) {
 		err = client.SendTextMessage("msg2")
 		assert.NoError(t, err)
 
-		// 下一条消息应该返回 ErrBufferFull
+		// 下一条消息应该返回 ErrMessageBufferFull
 		err = client.SendTextMessage("msg3")
 		if err != nil {
-			assert.Equal(t, ErrBufferFull, err, "Should return ErrBufferFull when buffer is full")
+			assert.Equal(t, ErrMessageBufferFull, err, "Should return ErrMessageBufferFull when buffer is full")
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Connection timeout")
@@ -254,7 +254,7 @@ func TestSendMessage_Concurrent(t *testing.T) {
 						done <- true
 						return
 					}
-					if err == ErrClose {
+					if err == ErrConnectionClosed {
 						done <- false
 						return
 					}
@@ -309,10 +309,10 @@ func TestSendMessage_AfterSendChanClosed(t *testing.T) {
 
 		// 尝试发送消息应该失败
 		err := client.SendTextMessage("test")
-		assert.Equal(t, ErrClose, err, "SendTextMessage with closed sendChan should return ErrClose")
+		assert.Equal(t, ErrConnectionClosed, err, "SendTextMessage with closed sendChan should return ErrConnectionClosed")
 
 		err = client.SendBinaryMessage([]byte("test"))
-		assert.Equal(t, ErrClose, err, "SendBinaryMessage with closed sendChan should return ErrClose")
+		assert.Equal(t, ErrConnectionClosed, err, "SendBinaryMessage with closed sendChan should return ErrConnectionClosed")
 
 		client.Close()
 	case <-time.After(2 * time.Second):

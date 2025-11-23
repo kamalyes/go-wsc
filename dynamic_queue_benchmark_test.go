@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-11-06 09:50:55
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-07 00:59:56
+ * @LastEditTime: 2025-11-22 19:23:28
  * @FilePath: \go-wsc\dynamic_queue_benchmark_test.go
  * @Description:
  *
@@ -11,13 +11,12 @@
 package wsc
 
 import (
+	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/assert"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/gorilla/websocket"
-	"github.com/stretchr/testify/assert"
 )
 
 func TestDynamicQueue_Basic(t *testing.T) {
@@ -105,7 +104,7 @@ func TestDynamicQueue_Concurrent(t *testing.T) {
 				msg := &wsMsg{t: websocket.TextMessage, msg: []byte("test")}
 				for {
 					if err := q.Push(msg); err != nil {
-						if err == ErrBufferFull {
+						if err == ErrMessageBufferFull {
 							time.Sleep(time.Microsecond)
 							continue
 						}
@@ -184,7 +183,7 @@ func BenchmarkDynamicQueue_Push(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		for {
 			if err := q.Push(msg); err != nil {
-				if err == ErrBufferFull {
+				if err == ErrMessageBufferFull {
 					time.Sleep(time.Microsecond)
 					continue
 				}

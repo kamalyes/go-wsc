@@ -1,0 +1,117 @@
+# Git line ending normalization
+* text=auto
+
+# Go source files
+*.go text eol=lf
+
+# Configuration files
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+
+# Documentation files
+*.md text eol=lf
+*.txt text eol=lf
+*.rst text eol=lf
+
+# Shell scripts
+*.sh text eol=lf
+*.bash text eol=lf
+
+# Batch files
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# License and legal files
+LICENSE text eol=lf
+COPYING text eol=lf
+COPYRIGHT* text eol=lf
+
+# Makefile
+Makefile text eol=lf
+makefile text eol=lf
+*.mk text eol=lf
+
+# Docker files
+Dockerfile text eol=lf
+*.dockerfile text eol=lf
+docker-compose*.yml text eol=lf
+
+# Git files
+.gitignore text eol=lf
+.gitattributes text eol=lf
+.gitmodules text eol=lf
+
+# Binary files (explicitly binary to prevent corruption)
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.a binary
+
+# Images
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.svg binary
+
+# Archives
+*.zip binary
+*.tar binary
+*.gz binary
+*.tgz binary
+*.bz2 binary
+*.xz binary
+*.7z binary
+*.rar binary
+
+# Go vendor directory (treat as binary to avoid line ending issues)
+vendor/** binary
+
+# Go module cache
+*.sum text eol=lf
+go.mod text eol=lf
+
+# IDE and editor files
+.vscode/* text eol=lf
+*.code-workspace text eol=lf
+
+# Test fixtures and data files
+test-fixtures/** binary
+testdata/** binary
+*.golden text eol=lf
+
+# Certificate and key files
+*.pem binary
+*.crt binary
+*.key binary
+*.p12 binary
+*.pfx binary
+
+# Database files
+*.db binary
+*.sqlite binary
+*.sqlite3 binary
+examples/** binary
+
+# Export ignore for git archive (affects git tag packages)
+# These files will be excluded when creating release archives
+pkg/**/*.json export-ignore
+pkg/**/*.yaml export-ignore
+*.config.json export-ignore
+*.config.yaml export-ignore
+config/*.json export-ignore
+config/*.yaml export-ignore
+configs/*.json export-ignore
+configs/*.yaml export-ignore
+*-local.yaml export-ignore
+*-local.json export-ignore
+
+# Exclude development directories from archives
+examples/** export-ignore
+scripts/** export-ignore
+bootstarp/** export-ignore

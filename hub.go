@@ -3860,11 +3860,29 @@ func initLogger(config *wscconfig.WSC) WSCLogger {
 			loggerConfig = loggerConfig.WithOutput(logger.NewConsoleWriter(os.Stdout))
 		}
 
-		return NewWSCLogger(loggerConfig)
+		wscLogger := NewWSCLogger(loggerConfig)
+
+		// 配置 WebSocket 上下文提取器
+		if adapter, ok := wscLogger.(*WSCLoggerAdapter); ok {
+			if ultraLogger, ok := adapter.ILogger.(*logger.UltraFastLogger); ok {
+				ultraLogger.SetContextExtractor(logger.GetPresetExtractor(logger.PresetExtractorWebSocket))
+			}
+		}
+
+		return wscLogger
 	}
 
 	// 使用默认配置
-	return NewDefaultWSCLogger()
+	defaultLogger := NewDefaultWSCLogger()
+
+	// 配置 WebSocket 上下文提取器
+	if adapter, ok := defaultLogger.(*WSCLoggerAdapter); ok {
+		if ultraLogger, ok := adapter.ILogger.(*logger.UltraFastLogger); ok {
+			ultraLogger.SetContextExtractor(logger.GetPresetExtractor(logger.PresetExtractorWebSocket))
+		}
+	}
+
+	return defaultLogger
 }
 
 // parseLogLevel 解析日志级别字符串

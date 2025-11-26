@@ -3,7 +3,7 @@
  * @Date: 2025-09-06 09:50:55
  * @LastEditors: kamalyes 501893067@qq.com
  * @LastEditTime: 2025-11-24 14:27:15
- * @FilePath: \engine-im-service\go-wsc\message.go
+ * @FilePath: \go-wsc\message.go
  * @Description: 消息处理逻辑
  *
  * Copyright (c) 2025 by kamalyes, All Rights Reserved.

@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-11-15
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-15
+ * @LastEditTime: 2025-11-26 19:55:25
  * @FilePath: \go-wsc\message_record_test.go
  * @Description: 消息记录功能测试
  *
@@ -12,10 +12,11 @@ package wsc
 
 import (
 	"context"
-	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
-	"github.com/stretchr/testify/assert"
 	"testing"
 	"time"
+
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/stretchr/testify/assert"
 )
 
 // TestMessageRecordManager 测试消息记录管理器
@@ -26,10 +27,10 @@ func TestMessageRecordManager(t *testing.T) {
 		assert.Equal(t, 0, mrm.GetRecordCount())
 
 		msg := &HubMessage{
-			ID:      "test-msg-1",
-			Type:    MessageTypeText,
-			Content: "Test message",
-			To:      "user-1",
+			ID:          "test-msg-1",
+			MessageType: MessageTypeText,
+			Content:     "Test message",
+			Receiver:    "user-1",
 		}
 
 		record := mrm.CreateRecord(msg, 3, time.Now().Add(time.Hour))
@@ -43,9 +44,9 @@ func TestMessageRecordManager(t *testing.T) {
 	t.Run("更新记录状态", func(t *testing.T) {
 		mrm := NewMessageRecordManager(100, time.Hour, nil)
 		msg := &HubMessage{
-			ID:      "test-msg-2",
-			Type:    MessageTypeText,
-			Content: "Test message",
+			ID:          "test-msg-2",
+			MessageType: MessageTypeText,
+			Content:     "Test message",
 		}
 
 		record := mrm.CreateRecord(msg, 3, time.Now().Add(time.Hour))
@@ -64,9 +65,9 @@ func TestMessageRecordManager(t *testing.T) {
 	t.Run("记录重试尝试", func(t *testing.T) {
 		mrm := NewMessageRecordManager(100, time.Hour, nil)
 		msg := &HubMessage{
-			ID:      "test-msg-3",
-			Type:    MessageTypeText,
-			Content: "Test message",
+			ID:          "test-msg-3",
+			MessageType: MessageTypeText,
+			Content:     "Test message",
 		}
 
 		record := mrm.CreateRecord(msg, 3, time.Now().Add(time.Hour))
@@ -90,10 +91,10 @@ func TestMessageRecordManager(t *testing.T) {
 	t.Run("标记用户离线", func(t *testing.T) {
 		mrm := NewMessageRecordManager(100, time.Hour, nil)
 		msg := &HubMessage{
-			ID:      "test-msg-4",
-			Type:    MessageTypeText,
-			Content: "Test message",
-			To:      "offline-user",
+			ID:          "test-msg-4",
+			MessageType: MessageTypeText,
+			Content:     "Test message",
+			Receiver:    "offline-user",
 		}
 
 		mrm.CreateRecord(msg, 3, time.Now().Add(time.Hour))
@@ -111,9 +112,9 @@ func TestMessageRecordManager(t *testing.T) {
 		// 创建多条记录
 		for i := 0; i < 5; i++ {
 			msg := &HubMessage{
-				ID:      string(rune('a' + i)),
-				Type:    MessageTypeText,
-				Content: "Test message",
+				ID:          string(rune('a' + i)),
+				MessageType: MessageTypeText,
+				Content:     "Test message",
 			}
 			mrm.CreateRecord(msg, 3, time.Now().Add(time.Hour))
 		}
@@ -133,19 +134,19 @@ func TestMessageRecordManager(t *testing.T) {
 		mrm := NewMessageRecordManager(100, time.Hour, nil)
 
 		// 失败但未达到最大重试次数
-		msg1 := &HubMessage{ID: "retry-1", Type: MessageTypeText}
+		msg1 := &HubMessage{ID: "retry-1", MessageType: MessageTypeText}
 		record1 := mrm.CreateRecord(msg1, 3, time.Now().Add(time.Hour))
 		mrm.UpdateRecordStatus("retry-1", MessageSendStatusFailed, FailureReasonNetworkError, "error")
 		record1.RetryCount = 1
 
 		// 失败且已达到最大重试次数
-		msg2 := &HubMessage{ID: "retry-2", Type: MessageTypeText}
+		msg2 := &HubMessage{ID: "retry-2", MessageType: MessageTypeText}
 		record2 := mrm.CreateRecord(msg2, 3, time.Now().Add(time.Hour))
 		mrm.UpdateRecordStatus("retry-2", MessageSendStatusFailed, FailureReasonMaxRetry, "max retry")
 		record2.RetryCount = 3
 
 		// 已过期
-		msg3 := &HubMessage{ID: "retry-3", Type: MessageTypeText}
+		msg3 := &HubMessage{ID: "retry-3", MessageType: MessageTypeText}
 		mrm.CreateRecord(msg3, 3, time.Now().Add(-time.Hour))
 		mrm.UpdateRecordStatus("retry-3", MessageSendStatusFailed, FailureReasonExpired, "expired")
 
@@ -158,7 +159,7 @@ func TestMessageRecordManager(t *testing.T) {
 		mrm := NewMessageRecordManager(100, 100*time.Millisecond, nil)
 
 		// 创建记录
-		msg := &HubMessage{ID: "expire-1", Type: MessageTypeText}
+		msg := &HubMessage{ID: "expire-1", MessageType: MessageTypeText}
 		mrm.CreateRecord(msg, 3, time.Now().Add(-time.Hour))
 
 		// 等待过期
@@ -182,7 +183,7 @@ func TestMessageRecordManager(t *testing.T) {
 		}
 
 		for i, status := range statuses {
-			msg := &HubMessage{ID: string(rune('a' + i)), Type: MessageTypeText}
+			msg := &HubMessage{ID: string(rune('a' + i)), MessageType: MessageTypeText}
 			mrm.CreateRecord(msg, 3, time.Now().Add(time.Hour))
 			mrm.UpdateRecordStatus(string(rune('a'+i)), status, "", "")
 		}
@@ -224,8 +225,8 @@ func TestHubWithMessageRecord(t *testing.T) {
 		// 发送消息
 		ctx := context.WithValue(context.Background(), ContextKeySenderID, "sender-1")
 		msg := &HubMessage{
-			Type:    MessageTypeText,
-			Content: "Test message with record",
+			MessageType: MessageTypeText,
+			Content:     "Test message with record",
 		}
 
 		err := hub.SendToUser(ctx, "user-1", msg)
@@ -291,9 +292,9 @@ func TestMessageRecordRetry(t *testing.T) {
 		// 发送消息（会超时）
 		ctx := context.WithValue(context.Background(), ContextKeySenderID, "sender-1")
 		msg := &HubMessage{
-			ID:      "retry-test-msg",
-			Type:    MessageTypeText,
-			Content: "Test retry message",
+			ID:          "retry-test-msg",
+			MessageType: MessageTypeText,
+			Content:     "Test retry message",
 		}
 
 		_, _ = hub.SendToUserWithAck(ctx, "user-1", msg, 0, 0)
@@ -322,10 +323,10 @@ func TestMessageRecordRetry(t *testing.T) {
 		// 创建一些失败记录
 		for i := 0; i < 3; i++ {
 			msg := &HubMessage{
-				ID:      string(rune('a' + i)),
-				Type:    MessageTypeText,
-				Content: "Test message",
-				To:      "user-1",
+				ID:          string(rune('a' + i)),
+				MessageType: MessageTypeText,
+				Content:     "Test message",
+				Receiver:    "user-1",
 			}
 			hub.recordManager.CreateRecord(msg, 3, time.Now().Add(time.Hour))
 			hub.recordManager.UpdateRecordStatus(string(rune('a'+i)), MessageSendStatusFailed, FailureReasonNetworkError, "test")

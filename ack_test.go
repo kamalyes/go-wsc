@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-11-15
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-22 23:23:51
+ * @LastEditTime: 2025-11-26 21:09:50
  * @FilePath: \go-wsc\ack_test.go
  * @Description: ACK消息确认机制测试
  *
@@ -33,9 +33,9 @@ func TestAckManager(t *testing.T) {
 	t.Run("添加待确认消息", func(t *testing.T) {
 		am := NewAckManager(5*time.Second, 3)
 		msg := &HubMessage{
-			ID:      "test-msg-1",
-			Type:    MessageTypeText,
-			Content: "Test message",
+			ID:          "test-msg-1",
+			MessageType: MessageTypeText,
+			Content:     "Test message",
 		}
 
 		pm := am.AddPendingMessage(msg, 2*time.Second, 2)
@@ -49,9 +49,9 @@ func TestAckManager(t *testing.T) {
 	t.Run("确认消息成功", func(t *testing.T) {
 		am := NewAckManager(5*time.Second, 3)
 		msg := &HubMessage{
-			ID:      "test-msg-2",
-			Type:    MessageTypeText,
-			Content: "Test message",
+			ID:          "test-msg-2",
+			MessageType: MessageTypeText,
+			Content:     "Test message",
 		}
 
 		pm := am.AddPendingMessage(msg, 5*time.Second, 2)
@@ -78,9 +78,9 @@ func TestAckManager(t *testing.T) {
 	t.Run("ACK超时", func(t *testing.T) {
 		am := NewAckManager(5*time.Second, 3)
 		msg := &HubMessage{
-			ID:      "test-msg-3",
-			Type:    MessageTypeText,
-			Content: "Test message",
+			ID:          "test-msg-3",
+			MessageType: MessageTypeText,
+			Content:     "Test message",
 		}
 
 		// 使用较短的expireDuration避免测试超时
@@ -99,9 +99,9 @@ func TestAckManager(t *testing.T) {
 		// 添加多个消息,使用较短的expireDuration
 		for i := 0; i < 5; i++ {
 			msg := &HubMessage{
-				ID:      string(rune('a' + i)),
-				Type:    MessageTypeText,
-				Content: "Test message",
+				ID:          string(rune('a' + i)),
+				MessageType: MessageTypeText,
+				Content:     "Test message",
 			}
 			am.AddPendingMessageWithExpire(msg, 100*time.Millisecond, 0, 300*time.Millisecond)
 		}
@@ -182,9 +182,9 @@ func TestHubWithAck(t *testing.T) {
 		// 发送带ACK的消息
 		ctx := context.WithValue(context.Background(), ContextKeySenderID, "sender-1")
 		msg := &HubMessage{
-			ID:      "test-msg-with-ack",
-			Type:    MessageTypeText,
-			Content: "Test message with ACK",
+			ID:          "test-msg-with-ack",
+			MessageType: MessageTypeText,
+			Content:     "Test message with ACK",
 		}
 
 		ackMsg, err := hub.SendToUserWithAck(ctx, "user-1", msg, 0, 0)
@@ -231,8 +231,8 @@ func TestHubWithAck(t *testing.T) {
 		// 发送消息（无ACK）
 		ctx := context.WithValue(context.Background(), ContextKeySenderID, "sender-2")
 		msg := &HubMessage{
-			Type:    MessageTypeText,
-			Content: "Test message without ACK",
+			MessageType: MessageTypeText,
+			Content:     "Test message without ACK",
 		}
 
 		ackMsg, err := hub.SendToUserWithAck(ctx, "user-2", msg, 0, 0)
@@ -315,9 +315,9 @@ func TestHubWithAck(t *testing.T) {
 		// 发送带ACK的消息
 		ctx := context.WithValue(context.Background(), ContextKeySenderID, "sender-3")
 		msg := &HubMessage{
-			ID:      "test-msg-retry",
-			Type:    MessageTypeText,
-			Content: "Test message with retry",
+			ID:          "test-msg-retry",
+			MessageType: MessageTypeText,
+			Content:     "Test message with retry",
 		}
 
 		ackMsg, err := hub.SendToUserWithAck(ctx, "user-3", msg, 0, 2) // 明确设置maxRetry为2
@@ -338,9 +338,9 @@ func TestAckWithRetry(t *testing.T) {
 	t.Run("重试成功", func(t *testing.T) {
 		am := NewAckManager(5*time.Second, 3)
 		msg := &HubMessage{
-			ID:      "test-retry-msg",
-			Type:    MessageTypeText,
-			Content: "Test retry message",
+			ID:          "test-retry-msg",
+			MessageType: MessageTypeText,
+			Content:     "Test retry message",
 		}
 
 		pm := am.AddPendingMessage(msg, 200*time.Millisecond, 2)
@@ -387,9 +387,9 @@ func TestAckWithRetry(t *testing.T) {
 	t.Run("重试次数耗尽", func(t *testing.T) {
 		am := NewAckManager(5*time.Second, 3)
 		msg := &HubMessage{
-			ID:      "test-exhaust-msg",
-			Type:    MessageTypeText,
-			Content: "Test exhaust message",
+			ID:          "test-exhaust-msg",
+			MessageType: MessageTypeText,
+			Content:     "Test exhaust message",
 		}
 
 		pm := am.AddPendingMessage(msg, 100*time.Millisecond, 1)

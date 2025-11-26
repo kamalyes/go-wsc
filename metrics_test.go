@@ -132,13 +132,13 @@ func TestMetricsCollector(t *testing.T) {
 
 		// 发送测试消息
 		testMsg := &HubMessage{
-			ID:       "metrics-test-msg-001",
-			Type:     MessageTypeText,
-			From:     "sender-001",
-			To:       "metrics-msg-user-001",
-			Content:  "指标测试消息",
-			CreateAt: time.Now(),
-			Status:   MessageStatusSent,
+			ID:          "metrics-test-msg-001",
+			MessageType: MessageTypeText,
+			Sender:      "sender-001",
+			Receiver:    "metrics-msg-user-001",
+			Content:     "指标测试消息",
+			CreateAt:    time.Now(),
+			Status:      MessageStatusSent,
 		}
 
 		// 发送消息

@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-01-21
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-21 00:58:15
+ * @LastEditTime: 2025-11-26 19:55:53
  * @FilePath: \go-wsc\types.go
  * @Description: WebSocket 系统类型定义
  *
@@ -49,6 +49,7 @@ const (
 	UserTypeAdmin    UserType = "admin"    // 系统管理员
 	UserTypeBot      UserType = "bot"      // 机器人客服
 	UserTypeVIP      UserType = "vip"      // VIP客户
+	UserTypeSystem   UserType = "system"   // 系统用户
 )
 
 // String 实现Stringer接口
@@ -59,7 +60,7 @@ func (t UserType) String() string {
 // IsValid 检查用户类型是否有效
 func (t UserType) IsValid() bool {
 	switch t {
-	case UserTypeCustomer, UserTypeAgent, UserTypeAdmin, UserTypeBot, UserTypeVIP:
+	case UserTypeCustomer, UserTypeAgent, UserTypeAdmin, UserTypeBot, UserTypeVIP, UserTypeSystem:
 		return true
 	default:
 		return false

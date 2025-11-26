@@ -248,7 +248,7 @@ func testConcurrentScenarios(t *testing.T, hub *Hub) {
 					go func(index int) {
 						defer wg.Done()
 						msg := &HubMessage{
-							Type:     MessageTypeText,
+							MessageType:     MessageTypeText,
 							Content:  fmt.Sprintf("并发消息-%d", index),
 							CreateAt: time.Now(),
 							Status:   MessageStatusSent,
@@ -336,7 +336,7 @@ func testRoutingScenarios(t *testing.T, hub *Hub) {
 				time.Sleep(50 * time.Millisecond)
 
 				msg := &HubMessage{
-					Type:     MessageTypeText,
+					MessageType:     MessageTypeText,
 					Content:  fmt.Sprintf("点对点消息-%d", i),
 					CreateAt: time.Now(),
 					Status:   MessageStatusSent,
@@ -365,7 +365,7 @@ func testRoutingScenarios(t *testing.T, hub *Hub) {
 				time.Sleep(100 * time.Millisecond)
 
 				msg := &HubMessage{
-					Type:     MessageTypeText,
+					MessageType:     MessageTypeText,
 					Content:  fmt.Sprintf("广播消息-%d", i),
 					CreateAt: time.Now(),
 					Status:   MessageStatusSent,
@@ -402,7 +402,7 @@ func testEdgeCaseScenarios(t *testing.T, hub *Hub) {
 				time.Sleep(50 * time.Millisecond)
 
 				msg := &HubMessage{
-					Type:     MessageTypeText,
+					MessageType:     MessageTypeText,
 					Content:  "",
 					CreateAt: time.Now(),
 					Status:   MessageStatusSent,
@@ -415,7 +415,7 @@ func testEdgeCaseScenarios(t *testing.T, hub *Hub) {
 
 			case i <= 170: // 场景161-170: 不存在的用户
 				msg := &HubMessage{
-					Type:     MessageTypeText,
+					MessageType:     MessageTypeText,
 					Content:  "测试消息",
 					CreateAt: time.Now(),
 					Status:   MessageStatusSent,
@@ -482,7 +482,7 @@ func testEdgeCaseScenarios(t *testing.T, hub *Hub) {
 				}
 
 				msg := &HubMessage{
-					Type:     MessageTypeText,
+					MessageType:     MessageTypeText,
 					Content:  string(largeContent),
 					CreateAt: time.Now(),
 					Status:   MessageStatusSent,

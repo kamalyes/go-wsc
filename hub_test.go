@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-11-15 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-21 00:57:27
+ * @LastEditTime: 2025-11-26 08:10:06
  * @FilePath: \go-wsc\hub_test.go
  * @Description: Hub 测试文件 - 测试WebSocket/SSE连接管理中心的各种功能
  *
@@ -294,12 +294,12 @@ func TestHubSSESupport(t *testing.T) {
 		hub.RegisterSSE(sseConn)
 
 		message := &HubMessage{
-			Type:     MessageTypeText,
-			From:     "system",
-			To:       userID,
-			Content:  "SSE测试消息",
-			CreateAt: time.Now(),
-			Status:   MessageStatusSent,
+			MessageType: MessageTypeText,
+			Sender:      "system",
+			Receiver:    userID,
+			Content:     "SSE测试消息",
+			CreateAt:    time.Now(),
+			Status:      MessageStatusSent,
 		}
 
 		// 发送消息
@@ -310,8 +310,8 @@ func TestHubSSESupport(t *testing.T) {
 		select {
 		case receivedMsg := <-sseConn.MessageCh:
 			assert.Equal(t, message.Content, receivedMsg.Content)
-			assert.Equal(t, message.From, receivedMsg.From)
-			assert.Equal(t, message.To, receivedMsg.To)
+			assert.Equal(t, message.Sender, receivedMsg.Sender)
+			assert.Equal(t, message.Receiver, receivedMsg.Receiver)
 		case <-time.After(1 * time.Second):
 			t.Fatal("未收到SSE消息")
 		}
@@ -321,8 +321,8 @@ func TestHubSSESupport(t *testing.T) {
 
 	t.Run("向不存在的SSE用户发送消息", func(t *testing.T) {
 		success := hub.SendToUserViaSSE("nonexistent-user", &HubMessage{
-			Type:    MessageTypeText,
-			Content: "测试消息",
+			MessageType: MessageTypeText,
+			Content:     "测试消息",
 		})
 		assert.False(t, success)
 	})
@@ -376,10 +376,10 @@ func TestHubMessaging(t *testing.T) {
 		// 发送点对点消息
 		ctx := context.WithValue(context.Background(), ContextKeySenderID, sender.UserID)
 		message := &HubMessage{
-			Type:    MessageTypeText,
-			To:      receiver.UserID,
-			Content: "点对点测试消息",
-			Status:  MessageStatusSent,
+			MessageType: MessageTypeText,
+			Receiver:    receiver.UserID,
+			Content:     "点对点测试消息",
+			Status:      MessageStatusSent,
 		}
 
 		err := hub.SendToUser(ctx, receiver.UserID, message)
@@ -392,8 +392,8 @@ func TestHubMessaging(t *testing.T) {
 			err := json.Unmarshal(msgData, &receivedMsg)
 			assert.NoError(t, err)
 			assert.Equal(t, message.Content, receivedMsg.Content)
-			assert.Equal(t, sender.UserID, receivedMsg.From)
-			assert.Equal(t, receiver.UserID, receivedMsg.To)
+			assert.Equal(t, sender.UserID, receivedMsg.Sender)
+			assert.Equal(t, receiver.UserID, receivedMsg.Receiver)
 		case <-time.After(1 * time.Second):
 			t.Fatal("接收者未收到消息")
 		}
@@ -430,11 +430,11 @@ func TestHubMessaging(t *testing.T) {
 
 		// 发送广播消息
 		message := &HubMessage{
-			Type:     MessageTypeSystem,
-			From:     "system",
-			Content:  "系统广播消息",
-			CreateAt: time.Now(),
-			Status:   MessageStatusSent,
+			MessageType: MessageTypeSystem,
+			Sender:      "system",
+			Content:     "系统广播消息",
+			CreateAt:    time.Now(),
+			Status:      MessageStatusSent,
 		}
 
 		hub.Broadcast(context.Background(), message)
@@ -447,7 +447,7 @@ func TestHubMessaging(t *testing.T) {
 				err := json.Unmarshal(msgData, &receivedMsg)
 				assert.NoError(t, err)
 				assert.Equal(t, message.Content, receivedMsg.Content)
-				assert.Equal(t, "system", receivedMsg.From)
+				assert.Equal(t, "system", receivedMsg.Sender)
 			case <-time.After(1 * time.Second):
 				t.Fatalf("客户端 %d 未收到广播消息", i)
 			}
@@ -490,9 +490,9 @@ func TestHubMessaging(t *testing.T) {
 		successCount := 0
 		for i := 0; i < 10; i++ {
 			message := &HubMessage{
-				Type:     MessageTypeText,
-				Content:  fmt.Sprintf("消息 %d", i),
-				CreateAt: time.Now(),
+				MessageType: MessageTypeText,
+				Content:     fmt.Sprintf("消息 %d", i),
+				CreateAt:    time.Now(),
 			}
 			err := smallHub.SendToUser(context.Background(), "queue-test-user", message)
 			if err != nil {
@@ -635,9 +635,9 @@ func TestHubWelcomeMessage(t *testing.T) {
 			var welcomeMsg HubMessage
 			err := json.Unmarshal(msgData, &welcomeMsg)
 			assert.NoError(t, err)
-			assert.Equal(t, MessageTypeSystem, welcomeMsg.Type)
-			assert.Equal(t, "system", welcomeMsg.From)
-			assert.Equal(t, client.UserID, welcomeMsg.To)
+			assert.Equal(t, MessageTypeSystem, welcomeMsg.MessageType)
+			assert.Equal(t, "system", welcomeMsg.Sender)
+			assert.Equal(t, client.UserID, welcomeMsg.Receiver)
 			assert.Contains(t, welcomeMsg.Content, client.UserID)
 			assert.Contains(t, welcomeMsg.Data, "type")
 			assert.Equal(t, "welcome", welcomeMsg.Data["type"])
@@ -783,11 +783,11 @@ func TestHubMessageFallback(t *testing.T) {
 
 		// 发送点对点消息
 		message := &HubMessage{
-			Type:     MessageTypeText,
-			To:       userID,
-			Content:  "降级测试消息",
-			CreateAt: time.Now(),
-			Status:   MessageStatusSent,
+			MessageType: MessageTypeText,
+			Receiver:    userID,
+			Content:     "降级测试消息",
+			CreateAt:    time.Now(),
+			Status:      MessageStatusSent,
 		}
 
 		err := hub.SendToUser(context.Background(), userID, message)
@@ -797,7 +797,7 @@ func TestHubMessageFallback(t *testing.T) {
 		select {
 		case receivedMsg := <-sseConn.MessageCh:
 			assert.Equal(t, message.Content, receivedMsg.Content)
-			assert.Equal(t, userID, receivedMsg.To)
+			assert.Equal(t, userID, receivedMsg.Receiver)
 		case <-time.After(1 * time.Second):
 			t.Fatal("未通过SSE收到消息")
 		}
@@ -897,11 +897,11 @@ func TestHubConcurrentOperations(t *testing.T) {
 			go func(msgNum int) {
 				defer wg.Done()
 				message := &HubMessage{
-					Type:     MessageTypeText,
-					To:       receiver.UserID,
-					Content:  fmt.Sprintf("并发消息 %d", msgNum),
-					CreateAt: time.Now(),
-					Status:   MessageStatusSent,
+					MessageType: MessageTypeText,
+					Receiver:    receiver.UserID,
+					Content:     fmt.Sprintf("并发消息 %d", msgNum),
+					CreateAt:    time.Now(),
+					Status:      MessageStatusSent,
 				}
 				err := hub.SendToUser(context.Background(), receiver.UserID, message)
 				assert.NoError(t, err)
@@ -992,11 +992,11 @@ func BenchmarkHubOperations(b *testing.B) {
 		time.Sleep(100 * time.Millisecond)
 
 		message := &HubMessage{
-			Type:     MessageTypeText,
-			To:       receiver.UserID,
-			Content:  "基准测试消息",
-			CreateAt: time.Now(),
-			Status:   MessageStatusSent,
+			MessageType: MessageTypeText,
+			Receiver:    receiver.UserID,
+			Content:     "基准测试消息",
+			CreateAt:    time.Now(),
+			Status:      MessageStatusSent,
 		}
 
 		b.ResetTimer()
@@ -1524,9 +1524,9 @@ func TestHubSendConditional(t *testing.T) {
 
 	t.Run("SendConditional-OnlineOnly", func(t *testing.T) {
 		msg := &HubMessage{
-			ID:      "cond-msg-1",
-			Type:    MessageTypeText,
-			Content: "test conditional",
+			ID:          "cond-msg-1",
+			MessageType: MessageTypeText,
+			Content:     "test conditional",
 		}
 		// 只发送给在线用户
 		count := hub.SendConditional(context.Background(), func(c *Client) bool {
@@ -1537,9 +1537,9 @@ func TestHubSendConditional(t *testing.T) {
 
 	t.Run("SendConditional-SpecificRole", func(t *testing.T) {
 		msg := &HubMessage{
-			ID:      "cond-msg-2",
-			Type:    MessageTypeText,
-			Content: "test role conditional",
+			ID:          "cond-msg-2",
+			MessageType: MessageTypeText,
+			Content:     "test role conditional",
 		}
 		count := hub.SendConditional(context.Background(), func(c *Client) bool {
 			return c.Role == UserRoleCustomer
@@ -1549,9 +1549,9 @@ func TestHubSendConditional(t *testing.T) {
 
 	t.Run("SendConditional-SpecificUserType", func(t *testing.T) {
 		msg := &HubMessage{
-			ID:      "cond-msg-3",
-			Type:    MessageTypeText,
-			Content: "test type conditional",
+			ID:          "cond-msg-3",
+			MessageType: MessageTypeText,
+			Content:     "test type conditional",
 		}
 		count := hub.SendConditional(context.Background(), func(c *Client) bool {
 			return c.UserType == UserTypeCustomer
@@ -1561,9 +1561,9 @@ func TestHubSendConditional(t *testing.T) {
 
 	t.Run("SendConditional-EmptyCondition", func(t *testing.T) {
 		msg := &HubMessage{
-			ID:      "cond-msg-4",
-			Type:    MessageTypeText,
-			Content: "test empty condition",
+			ID:          "cond-msg-4",
+			MessageType: MessageTypeText,
+			Content:     "test empty condition",
 		}
 		count := hub.SendConditional(context.Background(), func(c *Client) bool {
 			return false
@@ -1613,9 +1613,9 @@ func TestHubConcurrentSendConditional(t *testing.T) {
 			go func(idx int) {
 				defer wg.Done()
 				msg := &HubMessage{
-					ID:      fmt.Sprintf("concurrent-cond-msg-%d", idx),
-					Type:    MessageTypeText,
-					Content: fmt.Sprintf("concurrent message %d", idx),
+					ID:          fmt.Sprintf("concurrent-cond-msg-%d", idx),
+					MessageType: MessageTypeText,
+					Content:     fmt.Sprintf("concurrent message %d", idx),
 				}
 				count := hub.SendConditional(context.Background(), func(c *Client) bool {
 					return c.Status == UserStatusOnline
@@ -1650,9 +1650,9 @@ func TestHubConcurrentSendConditional(t *testing.T) {
 			go func(idx int) {
 				defer wg.Done()
 				msg := &HubMessage{
-					ID:      fmt.Sprintf("concurrent-batch-msg-%d", idx),
-					Type:    MessageTypeText,
-					Content: fmt.Sprintf("batch message %d", idx),
+					ID:          fmt.Sprintf("concurrent-batch-msg-%d", idx),
+					MessageType: MessageTypeText,
+					Content:     fmt.Sprintf("batch message %d", idx),
 				}
 				errors := hub.BatchSendToUsers(context.Background(), userIDs, msg, 0)
 				successes := len(userIDs) - len(errors)
@@ -1806,9 +1806,9 @@ func TestHubHighThroughputMessaging(t *testing.T) {
 
 		for i := 0; i < 1000; i++ {
 			msg := &HubMessage{
-				ID:      fmt.Sprintf("throughput-msg-%d", i),
-				Type:    MessageTypeText,
-				Content: fmt.Sprintf("high throughput message %d", i),
+				ID:          fmt.Sprintf("throughput-msg-%d", i),
+				MessageType: MessageTypeText,
+				Content:     fmt.Sprintf("high throughput message %d", i),
 			}
 			hub.Broadcast(context.Background(), msg)
 		}
@@ -1827,9 +1827,9 @@ func TestHubHighThroughputMessaging(t *testing.T) {
 			go func(idx int) {
 				defer wg.Done()
 				msg := &HubMessage{
-					ID:      fmt.Sprintf("parallel-broadcast-msg-%d", idx),
-					Type:    MessageTypeText,
-					Content: fmt.Sprintf("parallel broadcast %d", idx),
+					ID:          fmt.Sprintf("parallel-broadcast-msg-%d", idx),
+					MessageType: MessageTypeText,
+					Content:     fmt.Sprintf("parallel broadcast %d", idx),
 				}
 				hub.Broadcast(context.Background(), msg)
 			}(i)
@@ -1847,9 +1847,9 @@ func TestHubHighThroughputMessaging(t *testing.T) {
 
 		for i := 0; i < 500; i++ {
 			msg := &HubMessage{
-				ID:      fmt.Sprintf("rapid-send-msg-%d", i),
-				Type:    MessageTypeText,
-				Content: fmt.Sprintf("rapid message %d", i),
+				ID:          fmt.Sprintf("rapid-send-msg-%d", i),
+				MessageType: MessageTypeText,
+				Content:     fmt.Sprintf("rapid message %d", i),
 			}
 			err := hub.SendToUser(context.Background(), userID, msg)
 			assert.NoError(t, err)
@@ -1871,9 +1871,9 @@ func TestHubHighThroughputMessaging(t *testing.T) {
 				userID := fmt.Sprintf("throughput-user-%d", uIdx)
 				for i := 0; i < 100; i++ {
 					msg := &HubMessage{
-						ID:      fmt.Sprintf("multi-user-msg-%d-%d", uIdx, i),
-						Type:    MessageTypeText,
-						Content: fmt.Sprintf("multi user message %d", i),
+						ID:          fmt.Sprintf("multi-user-msg-%d-%d", uIdx, i),
+						MessageType: MessageTypeText,
+						Content:     fmt.Sprintf("multi user message %d", i),
 					}
 					hub.SendToUser(context.Background(), userID, msg)
 				}
@@ -1916,9 +1916,9 @@ func TestHubMemoryEfficiency(t *testing.T) {
 		}
 
 		msg := &HubMessage{
-			ID:      "large-msg-1",
-			Type:    MessageTypeText,
-			Content: string(largeContent),
+			ID:          "large-msg-1",
+			MessageType: MessageTypeText,
+			Content:     string(largeContent),
 		}
 
 		err := hub.SendToUser(context.Background(), "large-msg-user", msg)
@@ -1944,9 +1944,9 @@ func TestHubMemoryEfficiency(t *testing.T) {
 		// 发送10000条小消息
 		for i := 0; i < 10000; i++ {
 			msg := &HubMessage{
-				ID:      fmt.Sprintf("small-msg-%d", i),
-				Type:    MessageTypeText,
-				Content: fmt.Sprintf("small message %d", i),
+				ID:          fmt.Sprintf("small-msg-%d", i),
+				MessageType: MessageTypeText,
+				Content:     fmt.Sprintf("small message %d", i),
 			}
 			err := hub.SendToUser(context.Background(), "many-msg-user", msg)
 			if err != nil && i%1000 == 0 {
@@ -2011,9 +2011,9 @@ func TestHubEdgeCases(t *testing.T) {
 
 	t.Run("Send-To-Nonexistent-User", func(t *testing.T) {
 		msg := &HubMessage{
-			ID:      "nonexistent-msg",
-			Type:    MessageTypeText,
-			Content: "test nonexistent",
+			ID:          "nonexistent-msg",
+			MessageType: MessageTypeText,
+			Content:     "test nonexistent",
 		}
 		err := hub.SendToUser(context.Background(), "nonexistent-user", msg)
 		// 实际实现可能不返回错误，只是不发送
@@ -2074,9 +2074,9 @@ func TestHubEdgeCases(t *testing.T) {
 
 	t.Run("Empty-UserID", func(t *testing.T) {
 		msg := &HubMessage{
-			ID:      "empty-userid-msg",
-			Type:    MessageTypeText,
-			Content: "test empty",
+			ID:          "empty-userid-msg",
+			MessageType: MessageTypeText,
+			Content:     "test empty",
 		}
 		err := hub.SendToUser(context.Background(), "", msg)
 		// 实际实现可能允许空UserID
@@ -2134,9 +2134,9 @@ func TestHubEdgeCases(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 
 		msg := &HubMessage{
-			ID:      "after-shutdown-msg",
-			Type:    MessageTypeText,
-			Content: "after shutdown",
+			ID:          "after-shutdown-msg",
+			MessageType: MessageTypeText,
+			Content:     "after shutdown",
 		}
 		// 关闭后的操作可能会失败或无效
 		err := testHub.SendToUser(context.Background(), "any-user", msg)
@@ -2267,9 +2267,9 @@ func TestHubBatchSendToUsers(t *testing.T) {
 
 	t.Run("BatchSendToUsers-NoLimit", func(t *testing.T) {
 		msg := &HubMessage{
-			ID:      "batch-msg-1",
-			Type:    MessageTypeText,
-			Content: "batch message",
+			ID:          "batch-msg-1",
+			MessageType: MessageTypeText,
+			Content:     "batch message",
 		}
 		errors := hub.BatchSendToUsers(context.Background(), userIDs, msg, 0)
 		successes := len(userIDs) - len(errors)
@@ -2280,9 +2280,9 @@ func TestHubBatchSendToUsers(t *testing.T) {
 
 	t.Run("BatchSendToUsers-WithLimit", func(t *testing.T) {
 		msg := &HubMessage{
-			ID:      "batch-msg-2",
-			Type:    MessageTypeText,
-			Content: "batch message with limit",
+			ID:          "batch-msg-2",
+			MessageType: MessageTypeText,
+			Content:     "batch message with limit",
 		}
 		errors := hub.BatchSendToUsers(context.Background(), userIDs, msg, 100)
 		successes := len(userIDs) - len(errors)
@@ -2294,9 +2294,9 @@ func TestHubBatchSendToUsers(t *testing.T) {
 	t.Run("BatchSendToUsers-PartialUsers", func(t *testing.T) {
 		partialUsers := userIDs[:5]
 		msg := &HubMessage{
-			ID:      "batch-msg-3",
-			Type:    MessageTypeText,
-			Content: "partial batch message",
+			ID:          "batch-msg-3",
+			MessageType: MessageTypeText,
+			Content:     "partial batch message",
 		}
 		errors := hub.BatchSendToUsers(context.Background(), partialUsers, msg, 0)
 		successes := len(partialUsers) - len(errors)
@@ -2306,9 +2306,9 @@ func TestHubBatchSendToUsers(t *testing.T) {
 
 	t.Run("BatchSendToUsers-EmptyList", func(t *testing.T) {
 		msg := &HubMessage{
-			ID:      "batch-msg-4",
-			Type:    MessageTypeText,
-			Content: "empty batch",
+			ID:          "batch-msg-4",
+			MessageType: MessageTypeText,
+			Content:     "empty batch",
 		}
 		errors := hub.BatchSendToUsers(context.Background(), []string{}, msg, 0)
 		successes := 0 - len(errors)
@@ -2320,9 +2320,9 @@ func TestHubBatchSendToUsers(t *testing.T) {
 	t.Run("BatchSendToUsers-NonExistentUsers", func(t *testing.T) {
 		nonExistent := []string{"nonexistent-1", "nonexistent-2"}
 		msg := &HubMessage{
-			ID:      "batch-msg-5",
-			Type:    MessageTypeText,
-			Content: "nonexistent batch",
+			ID:          "batch-msg-5",
+			MessageType: MessageTypeText,
+			Content:     "nonexistent batch",
 		}
 		errors := hub.BatchSendToUsers(context.Background(), nonExistent, msg, 0)
 
@@ -2404,9 +2404,9 @@ func TestHubBroadcastToGroup(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 
 		msg := &HubMessage{
-			ID:      "group-msg-1",
-			Type:    MessageTypeText,
-			Content: "sales department message",
+			ID:          "group-msg-1",
+			MessageType: MessageTypeText,
+			Content:     "sales department message",
 		}
 		count := hub.BroadcastToGroup(context.Background(), UserTypeCustomer, msg)
 		assert.GreaterOrEqual(t, count, 0) // 允许为0，取决于实际实现
@@ -2414,9 +2414,9 @@ func TestHubBroadcastToGroup(t *testing.T) {
 
 	t.Run("BroadcastToGroup-DifferentDept", func(t *testing.T) {
 		msg := &HubMessage{
-			ID:      "group-msg-2",
-			Type:    MessageTypeText,
-			Content: "support department message",
+			ID:          "group-msg-2",
+			MessageType: MessageTypeText,
+			Content:     "support department message",
 		}
 		count := hub.BroadcastToGroup(context.Background(), UserTypeAgent, msg)
 		assert.Greater(t, count, 0)
@@ -2424,9 +2424,9 @@ func TestHubBroadcastToGroup(t *testing.T) {
 
 	t.Run("BroadcastToGroup-NonExistent", func(t *testing.T) {
 		msg := &HubMessage{
-			ID:      "group-msg-3",
-			Type:    MessageTypeText,
-			Content: "nonexistent group",
+			ID:          "group-msg-3",
+			MessageType: MessageTypeText,
+			Content:     "nonexistent group",
 		}
 		count := hub.BroadcastToGroup(context.Background(), UserTypeCustomer, msg)
 		assert.GreaterOrEqual(t, count, 0) // 可能有之前测试的客户端存在
@@ -2473,9 +2473,9 @@ func TestHubBroadcastToRole(t *testing.T) {
 
 	t.Run("BroadcastToRole-Admin", func(t *testing.T) {
 		msg := &HubMessage{
-			ID:      "role-broadcast-msg-1",
-			Type:    MessageTypeText,
-			Content: "admin only message",
+			ID:          "role-broadcast-msg-1",
+			MessageType: MessageTypeText,
+			Content:     "admin only message",
 		}
 		count := hub.BroadcastToRole(context.Background(), UserRoleAdmin, msg)
 		assert.GreaterOrEqual(t, count, 2)
@@ -2483,9 +2483,9 @@ func TestHubBroadcastToRole(t *testing.T) {
 
 	t.Run("BroadcastToRole-Agent", func(t *testing.T) {
 		msg := &HubMessage{
-			ID:      "role-broadcast-msg-2",
-			Type:    MessageTypeText,
-			Content: "agent message",
+			ID:          "role-broadcast-msg-2",
+			MessageType: MessageTypeText,
+			Content:     "agent message",
 		}
 		count := hub.BroadcastToRole(context.Background(), UserRoleAgent, msg)
 		assert.GreaterOrEqual(t, count, 3)
@@ -2493,9 +2493,9 @@ func TestHubBroadcastToRole(t *testing.T) {
 
 	t.Run("BroadcastToRole-Customer", func(t *testing.T) {
 		msg := &HubMessage{
-			ID:      "role-broadcast-msg-3",
-			Type:    MessageTypeText,
-			Content: "customer message",
+			ID:          "role-broadcast-msg-3",
+			MessageType: MessageTypeText,
+			Content:     "customer message",
 		}
 		count := hub.BroadcastToRole(context.Background(), UserRoleCustomer, msg)
 		// 可能没有客户角色
@@ -2528,9 +2528,9 @@ func TestHubSendWithCallback(t *testing.T) {
 
 	t.Run("SendWithCallback-Success", func(t *testing.T) {
 		msg := &HubMessage{
-			ID:      "callback-msg-1",
-			Type:    MessageTypeText,
-			Content: "callback test",
+			ID:          "callback-msg-1",
+			MessageType: MessageTypeText,
+			Content:     "callback test",
 		}
 
 		done := make(chan bool, 1)
@@ -2555,9 +2555,9 @@ func TestHubSendWithCallback(t *testing.T) {
 
 	t.Run("SendWithCallback-NonExistent", func(t *testing.T) {
 		msg := &HubMessage{
-			ID:      "callback-msg-2",
-			Type:    MessageTypeText,
-			Content: "callback test nonexistent",
+			ID:          "callback-msg-2",
+			MessageType: MessageTypeText,
+			Content:     "callback test nonexistent",
 		}
 
 		done := make(chan bool, 1)
@@ -2610,9 +2610,9 @@ func TestHubScheduleMessage(t *testing.T) {
 
 	t.Run("ScheduleMessage-Immediate", func(t *testing.T) {
 		msg := &HubMessage{
-			ID:      "schedule-msg-1",
-			Type:    MessageTypeText,
-			Content: "scheduled message",
+			ID:          "schedule-msg-1",
+			MessageType: MessageTypeText,
+			Content:     "scheduled message",
 		}
 		hub.ScheduleMessage(context.Background(), userID, msg, 100*time.Millisecond)
 		// Scheduled message will be sent after delay
@@ -2622,9 +2622,9 @@ func TestHubScheduleMessage(t *testing.T) {
 
 	t.Run("ScheduleMessage-Future", func(t *testing.T) {
 		msg := &HubMessage{
-			ID:      "schedule-msg-2",
-			Type:    MessageTypeText,
-			Content: "future scheduled message",
+			ID:          "schedule-msg-2",
+			MessageType: MessageTypeText,
+			Content:     "future scheduled message",
 		}
 		hub.ScheduleMessage(context.Background(), userID, msg, 500*time.Millisecond)
 
@@ -2633,9 +2633,9 @@ func TestHubScheduleMessage(t *testing.T) {
 
 	t.Run("ScheduleMessage-ZeroDuration", func(t *testing.T) {
 		msg := &HubMessage{
-			ID:      "schedule-msg-3",
-			Type:    MessageTypeText,
-			Content: "zero duration scheduled",
+			ID:          "schedule-msg-3",
+			MessageType: MessageTypeText,
+			Content:     "zero duration scheduled",
 		}
 		hub.ScheduleMessage(context.Background(), userID, msg, 0)
 
@@ -2671,9 +2671,9 @@ func TestHubBroadcastAfterDelay(t *testing.T) {
 
 	t.Run("BroadcastAfterDelay-NoDelay", func(t *testing.T) {
 		msg := &HubMessage{
-			ID:      "delay-msg-1",
-			Type:    MessageTypeText,
-			Content: "no delay broadcast",
+			ID:          "delay-msg-1",
+			MessageType: MessageTypeText,
+			Content:     "no delay broadcast",
 		}
 		hub.BroadcastAfterDelay(context.Background(), msg, 0)
 
@@ -2682,9 +2682,9 @@ func TestHubBroadcastAfterDelay(t *testing.T) {
 
 	t.Run("BroadcastAfterDelay-WithDelay", func(t *testing.T) {
 		msg := &HubMessage{
-			ID:      "delay-msg-2",
-			Type:    MessageTypeText,
-			Content: "delayed broadcast",
+			ID:          "delay-msg-2",
+			MessageType: MessageTypeText,
+			Content:     "delayed broadcast",
 		}
 		hub.BroadcastAfterDelay(context.Background(), msg, 200*time.Millisecond)
 
@@ -2693,9 +2693,9 @@ func TestHubBroadcastAfterDelay(t *testing.T) {
 
 	t.Run("BroadcastAfterDelay-SmallDelay", func(t *testing.T) {
 		msg := &HubMessage{
-			ID:      "delay-msg-3",
-			Type:    MessageTypeText,
-			Content: "small delay broadcast",
+			ID:          "delay-msg-3",
+			MessageType: MessageTypeText,
+			Content:     "small delay broadcast",
 		}
 		hub.BroadcastAfterDelay(context.Background(), msg, 50*time.Millisecond)
 
@@ -2732,9 +2732,9 @@ func TestHubSendToMultipleUsers(t *testing.T) {
 
 	t.Run("SendToMultipleUsers-AllValid", func(t *testing.T) {
 		msg := &HubMessage{
-			ID:      "multi-msg-1",
-			Type:    MessageTypeText,
-			Content: "multi user message",
+			ID:          "multi-msg-1",
+			MessageType: MessageTypeText,
+			Content:     "multi user message",
 		}
 		count := hub.SendToMultipleUsers(context.Background(), userIDs, msg)
 		assert.Equal(t, 0, len(count)) // 没有错误表示成功
@@ -2743,9 +2743,9 @@ func TestHubSendToMultipleUsers(t *testing.T) {
 	t.Run("SendToMultipleUsers-PartialValid", func(t *testing.T) {
 		partialIDs := append(userIDs[:3], "nonexistent-user")
 		msg := &HubMessage{
-			ID:      "multi-msg-2",
-			Type:    MessageTypeText,
-			Content: "partial multi message",
+			ID:          "multi-msg-2",
+			MessageType: MessageTypeText,
+			Content:     "partial multi message",
 		}
 		errs := hub.SendToMultipleUsers(context.Background(), partialIDs, msg)
 		assert.LessOrEqual(t, len(errs), 1) // 最多1个错误（不存在的用户）
@@ -2753,9 +2753,9 @@ func TestHubSendToMultipleUsers(t *testing.T) {
 
 	t.Run("SendToMultipleUsers-Empty", func(t *testing.T) {
 		msg := &HubMessage{
-			ID:      "multi-msg-3",
-			Type:    MessageTypeText,
-			Content: "empty list message",
+			ID:          "multi-msg-3",
+			MessageType: MessageTypeText,
+			Content:     "empty list message",
 		}
 		errs := hub.SendToMultipleUsers(context.Background(), []string{}, msg)
 		assert.Equal(t, 0, len(errs)) // 空列表应该没有错误
@@ -2764,9 +2764,9 @@ func TestHubSendToMultipleUsers(t *testing.T) {
 	t.Run("SendToMultipleUsers-AllInvalid", func(t *testing.T) {
 		invalidIDs := []string{"invalid-1", "invalid-2", "invalid-3"}
 		msg := &HubMessage{
-			ID:      "multi-msg-4",
-			Type:    MessageTypeText,
-			Content: "all invalid",
+			ID:          "multi-msg-4",
+			MessageType: MessageTypeText,
+			Content:     "all invalid",
 		}
 		errs := hub.SendToMultipleUsers(context.Background(), invalidIDs, msg)
 		assert.Equal(t, 0, len(errs)) // 无有效用户，应该没有错误
@@ -2960,9 +2960,9 @@ func TestHubComplexScenarios(t *testing.T) {
 
 				for j := 0; j < 10; j++ {
 					msg := &HubMessage{
-						ID:      fmt.Sprintf("chat-msg-%d-%d", userIndex, j),
-						Type:    MessageTypeText,
-						Content: fmt.Sprintf("Hello from %s! Message #%d", users[userIndex].Metadata["nickname"], j),
+						ID:          fmt.Sprintf("chat-msg-%d-%d", userIndex, j),
+						MessageType: MessageTypeText,
+						Content:     fmt.Sprintf("Hello from %s! Message #%d", users[userIndex].Metadata["nickname"], j),
 					}
 
 					// 广播到聊天室
@@ -2972,9 +2972,9 @@ func TestHubComplexScenarios(t *testing.T) {
 					// 随机私聊
 					if j%3 == 0 && userIndex > 0 {
 						privateMsg := &HubMessage{
-							ID:      fmt.Sprintf("private-msg-%d-%d", userIndex, j),
-							Type:    MessageTypeText,
-							Content: fmt.Sprintf("Private message from %s", users[userIndex].Metadata["nickname"]),
+							ID:          fmt.Sprintf("private-msg-%d-%d", userIndex, j),
+							MessageType: MessageTypeText,
+							Content:     fmt.Sprintf("Private message from %s", users[userIndex].Metadata["nickname"]),
 						}
 						hub.SendToUser(context.Background(), users[userIndex-1].UserID, privateMsg)
 					}
@@ -3036,22 +3036,22 @@ func TestHubComplexScenarios(t *testing.T) {
 
 			// 客户发起咨询（直接发给指定客服）
 			msg := &HubMessage{
-				ID:      fmt.Sprintf("inquiry-%d", i+1),
-				Type:    MessageTypeText,
-				Content: fmt.Sprintf("I need help with issue #%d", i+1),
-				To:      agent.UserID, // 直接发送给客服
-				From:    customer.UserID,
+				ID:          fmt.Sprintf("inquiry-%d", i+1),
+				MessageType: MessageTypeText,
+				Content:     fmt.Sprintf("I need help with issue #%d", i+1),
+				Receiver:    agent.UserID, // 直接发送给客服
+				Sender:      customer.UserID,
 			}
 			err := hub.SendToUser(context.Background(), agent.UserID, msg)
 			assert.NoError(t, err)
 
 			// 客服回复（直接回复给客户）
 			replyMsg := &HubMessage{
-				ID:      fmt.Sprintf("reply-%d", i+1),
-				Type:    MessageTypeText,
-				Content: fmt.Sprintf("Hello! I'm here to help you with your inquiry #%d", i+1),
-				To:      customer.UserID, // 直接发送给客户
-				From:    agent.UserID,
+				ID:          fmt.Sprintf("reply-%d", i+1),
+				MessageType: MessageTypeText,
+				Content:     fmt.Sprintf("Hello! I'm here to help you with your inquiry #%d", i+1),
+				Receiver:    customer.UserID, // 直接发送给客户
+				Sender:      agent.UserID,
 			}
 			err = hub.SendToUser(context.Background(), customer.UserID, replyMsg)
 			assert.NoError(t, err)
@@ -3059,9 +3059,9 @@ func TestHubComplexScenarios(t *testing.T) {
 
 		// 广播系统通知给所有客服
 		sysMsg := &HubMessage{
-			ID:      "system-notification",
-			Type:    MessageTypeNotice,
-			Content: "System maintenance scheduled for tonight",
+			ID:          "system-notification",
+			MessageType: MessageTypeNotice,
+			Content:     "System maintenance scheduled for tonight",
 		}
 		count := hub.BroadcastToRole(context.Background(), UserRoleAgent, sysMsg)
 		assert.GreaterOrEqual(t, count, 0)
@@ -3108,9 +3108,9 @@ func TestHubComplexScenarios(t *testing.T) {
 
 		// 测试条件发送 - 只给VIP用户
 		vipMsg := &HubMessage{
-			ID:      "vip-exclusive",
-			Type:    MessageTypeText, // 使用已存在的类型
-			Content: "Exclusive VIP offer!",
+			ID:          "vip-exclusive",
+			MessageType: MessageTypeText, // 使用已存在的类型
+			Content:     "Exclusive VIP offer!",
 		}
 
 		vipCount := hub.SendConditional(context.Background(), func(c *Client) bool {
@@ -3125,9 +3125,9 @@ func TestHubComplexScenarios(t *testing.T) {
 		}
 
 		normalMsg := &HubMessage{
-			ID:      "normal-announcement",
-			Type:    MessageTypeText,
-			Content: "Regular announcement for all users",
+			ID:          "normal-announcement",
+			MessageType: MessageTypeText,
+			Content:     "Regular announcement for all users",
 		}
 
 		errors := hub.BatchSendToUsers(context.Background(), userIDs, normalMsg, 2)
@@ -3135,9 +3135,9 @@ func TestHubComplexScenarios(t *testing.T) {
 
 		// 测试优先级广播
 		urgentMsg := &HubMessage{
-			ID:      "urgent-broadcast",
-			Type:    MessageTypeText, // 使用已存在的类型
-			Content: "URGENT: Server maintenance in 5 minutes",
+			ID:          "urgent-broadcast",
+			MessageType: MessageTypeText, // 使用已存在的类型
+			Content:     "URGENT: Server maintenance in 5 minutes",
 		}
 		hub.Broadcast(context.Background(), urgentMsg) // 使用普通广播
 
@@ -3188,9 +3188,9 @@ func TestHubStressAndPerformance(t *testing.T) {
 
 				// 发送测试消息
 				msg := &HubMessage{
-					ID:      fmt.Sprintf("stress-msg-%d", id),
-					Type:    MessageTypeText,
-					Content: fmt.Sprintf("Stress test message from client %d", id),
+					ID:          fmt.Sprintf("stress-msg-%d", id),
+					MessageType: MessageTypeText,
+					Content:     fmt.Sprintf("Stress test message from client %d", id),
 				}
 
 				hub.SendToUser(context.Background(), client.UserID, msg)
@@ -3248,9 +3248,9 @@ func TestHubStressAndPerformance(t *testing.T) {
 				for msgID := batchStart; msgID < batchEnd; msgID++ {
 					targetUser := users[msgID%numUsers]
 					msg := &HubMessage{
-						ID:      fmt.Sprintf("perf-msg-%d", msgID),
-						Type:    MessageTypeText,
-						Content: fmt.Sprintf("Performance test message #%d", msgID),
+						ID:          fmt.Sprintf("perf-msg-%d", msgID),
+						MessageType: MessageTypeText,
+						Content:     fmt.Sprintf("Performance test message #%d", msgID),
 					}
 
 					err := hub.SendToUser(context.Background(), targetUser.UserID, msg)
@@ -3360,9 +3360,9 @@ func TestHubWithNewMessageTypes(t *testing.T) {
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
 				msg := &HubMessage{
-					ID:      "msg-" + string(tc.msgType),
-					Type:    tc.msgType,
-					Content: tc.content,
+					ID:          "msg-" + string(tc.msgType),
+					MessageType: tc.msgType,
+					Content:     tc.content,
 				}
 
 				// 验证消息类型有效性
@@ -3415,11 +3415,11 @@ func TestHubWithNewMessageTypes(t *testing.T) {
 
 	t.Run("批量发送不同类型消息", func(t *testing.T) {
 		messages := []*HubMessage{
-			{ID: "batch-1", Type: MessageTypeText, Content: "文本消息"},
-			{ID: "batch-2", Type: MessageTypeImage, Content: `{"url": "image.jpg", "width": 800, "height": 600}`},
-			{ID: "batch-3", Type: MessageTypeLocation, Content: `{"lat": 39.9042, "lng": 116.4074, "address": "北京"}`},
-			{ID: "batch-4", Type: MessageTypeCard, Content: `{"title": "卡片", "description": "描述"}`},
-			{ID: "batch-5", Type: MessageTypeMarkdown, Content: "**粗体** *斜体* `代码`"},
+			{ID: "batch-1", MessageType: MessageTypeText, Content: "文本消息"},
+			{ID: "batch-2", MessageType: MessageTypeImage, Content: `{"url": "image.jpg", "width": 800, "height": 600}`},
+			{ID: "batch-3", MessageType: MessageTypeLocation, Content: `{"lat": 39.9042, "lng": 116.4074, "address": "北京"}`},
+			{ID: "batch-4", MessageType: MessageTypeCard, Content: `{"title": "卡片", "description": "描述"}`},
+			{ID: "batch-5", MessageType: MessageTypeMarkdown, Content: "**粗体** *斜体* `代码`"},
 		}
 
 		successCount := 0
@@ -3428,7 +3428,7 @@ func TestHubWithNewMessageTypes(t *testing.T) {
 			if err == nil {
 				successCount++
 			}
-			t.Logf("消息 %d (%s): %v", i+1, msg.Type, err)
+			t.Logf("消息 %d (%s): %v", i+1, msg.MessageType, err)
 		}
 
 		assert.Equal(t, len(messages), successCount, "所有消息应该发送成功")

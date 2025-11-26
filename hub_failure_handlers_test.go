@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-11-16
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-22 22:03:55
+ * @LastEditTime: 2025-11-26 08:08:58
  * @FilePath: \go-wsc\hub_failure_handlers_test.go
  * @Description: Hub消息发送失败处理器测试
  *
@@ -245,9 +245,9 @@ func TestHubFailureHandlers(t *testing.T) {
 	t.Run("QueueFullHandler", func(t *testing.T) {
 		// 模拟队列满的情况 - 发送大量消息直到队列满
 		msg := &HubMessage{
-			ID:      "queue-full-test",
-			Type:    MessageTypeText,
-			Content: "Test queue full",
+			ID:          "queue-full-test",
+			MessageType: MessageTypeText,
+			Content:     "Test queue full",
 		}
 
 		// 发送大量消息直到队列满
@@ -282,9 +282,9 @@ func TestHubFailureHandlers(t *testing.T) {
 
 	t.Run("UserOfflineHandler", func(t *testing.T) {
 		msg := &HubMessage{
-			ID:      "offline-test",
-			Type:    MessageTypeText,
-			Content: "Test offline user",
+			ID:          "offline-test",
+			MessageType: MessageTypeText,
+			Content:     "Test offline user",
 		}
 
 		// 尝试向离线用户发送消息（使用带ACK的方法）
@@ -310,9 +310,9 @@ func TestHubFailureHandlers(t *testing.T) {
 		atomic.StoreInt64(&offlineHandler.offlineCount, 0)
 
 		msg := &HubMessage{
-			ID:      "multi-handler-test",
-			Type:    MessageTypeText,
-			Content: "Test multiple handlers",
+			ID:          "multi-handler-test",
+			MessageType: MessageTypeText,
+			Content:     "Test multiple handlers",
 		}
 
 		// 向离线用户发送消息
@@ -345,9 +345,9 @@ func TestHubFailureHandlers(t *testing.T) {
 		hub.AddSendFailureHandler(panicHandler)
 
 		msg := &HubMessage{
-			ID:      "panic-test",
-			Type:    MessageTypeText,
-			Content: "Test panic recovery",
+			ID:          "panic-test",
+			MessageType: MessageTypeText,
+			Content:     "Test panic recovery",
 		}
 
 		// 发送消息，应该不会因为处理器panic而崩溃
@@ -431,9 +431,9 @@ func TestHubRetryMechanism(t *testing.T) {
 		retryHub.pendingMessages = make(chan *HubMessage, 0) // 无缓冲区
 
 		msg := &HubMessage{
-			ID:      "retry-test",
-			Type:    MessageTypeText,
-			Content: "Test retry on retryable error",
+			ID:          "retry-test",
+			MessageType: MessageTypeText,
+			Content:     "Test retry on retryable error",
 		}
 
 		result := retryHub.SendToUserWithRetry(context.Background(), "retry-test-user", msg)
@@ -484,7 +484,7 @@ func TestHubRetryMechanism(t *testing.T) {
 
 		msg := &HubMessage{
 			ID:      "success-test",
-			Type:    MessageTypeText,
+			MessageType:    MessageTypeText,
 			Content: "Test success on first attempt",
 		}
 
@@ -512,7 +512,7 @@ func TestHubRetryMechanism(t *testing.T) {
 
 		msg := &HubMessage{
 			ID:      "context-cancel-test",
-			Type:    MessageTypeText,
+			MessageType:    MessageTypeText,
 			Content: "Test context cancellation",
 		}
 
@@ -546,7 +546,7 @@ func TestHubRetryMechanism(t *testing.T) {
 		// 测试不可重试的错误（如用户离线）
 		msg := &HubMessage{
 			ID:      "non-retry-test",
-			Type:    MessageTypeText,
+			MessageType:    MessageTypeText,
 			Content: "Test non-retryable error",
 		}
 

@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-11-13 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-23 16:55:16
+ * @LastEditTime: 2025-11-26 09:55:10
  * @FilePath: \go-wsc\hub.go
  * @Description: WebSocket/SSE 服务端 Hub - 统一管理实时连接
  *
@@ -15,18 +15,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/gorilla/websocket"
-	goconfig "github.com/kamalyes/go-config"
-	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
-	"github.com/kamalyes/go-logger"
-	"github.com/kamalyes/go-toolbox/pkg/errorx"
-	"github.com/kamalyes/go-toolbox/pkg/retry"
 	"net/http"
 	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
+	goconfig "github.com/kamalyes/go-config"
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-logger"
+	"github.com/kamalyes/go-toolbox/pkg/errorx"
+	"github.com/kamalyes/go-toolbox/pkg/retry"
 )
 
 // SendFailureHandler 消息发送失败处理器接口 - 通用处理器
@@ -107,13 +108,16 @@ const (
 // HubMessage Hub消息结构（复用 go-wsc 类型）
 type HubMessage struct {
 	ID           string                 `json:"id"`                        // 消息ID（用于ACK）
-	Type         MessageType            `json:"type"`                      // 消息类型
-	From         string                 `json:"from"`                      // 发送者ID (从上下文获取)
-	To           string                 `json:"to"`                        // 接收者ID
+	MessageType  MessageType            `json:"message_type"`              // 消息类型
+	Sender       string                 `json:"sender"`                    // 发送者ID (从上下文获取)
+	SenderType   UserType               `json:"sender_type"`               // 发送者类型
+	Receiver     string                 `json:"receiver"`                  // 接收者ID
+	ReceiverType UserType               `json:"receiver_type"`             // 接收者类型
+	SessionId    string                 `json:"session_id"`                // 会话ID
 	Content      string                 `json:"content"`                   // 消息内容
 	Data         map[string]interface{} `json:"data,omitempty"`            // 扩展数据
 	CreateAt     time.Time              `json:"create_at"`                 // 创建时间
-	MsgID        string                 `json:"msg_id"`                    // 消息ID
+	MessageID    string                 `json:"message_id"`                // 业务消息ID
 	SeqNo        int64                  `json:"seq_no"`                    // 消息序列号
 	Priority     Priority               `json:"priority"`                  // 优先级
 	ReplyToMsgID string                 `json:"reply_to_msg_id,omitempty"` // 回复的消息ID
@@ -954,15 +958,15 @@ func (h *Hub) SendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 	msgCopy := *msg
 
 	// 从上下文获取发送者ID
-	if msgCopy.From == "" {
+	if msgCopy.Sender == "" {
 		if senderID, ok := ctx.Value(ContextKeySenderID).(string); ok {
-			msgCopy.From = senderID
+			msgCopy.Sender = senderID
 		} else if userID, ok := ctx.Value(ContextKeyUserID).(string); ok {
-			msgCopy.From = userID
+			msgCopy.Sender = userID
 		}
 	}
 
-	msgCopy.To = toUserID
+	msgCopy.Receiver = toUserID
 	if msgCopy.CreateAt.IsZero() {
 		msgCopy.CreateAt = time.Now()
 	}
@@ -970,7 +974,7 @@ func (h *Hub) SendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 	// 尝试发送到broadcast队列
 	select {
 	case h.broadcast <- &msgCopy:
-		h.logger.LogMessage(msgCopy.ID, msgCopy.From, msgCopy.To, msgCopy.Type, true, nil)
+		h.logger.LogMessage(msgCopy.ID, msgCopy.Sender, msgCopy.Receiver, msgCopy.MessageType, true, nil)
 		return nil
 	default:
 		// broadcast队列满，尝试放入待发送队列
@@ -980,7 +984,7 @@ func (h *Hub) SendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 		default:
 			err := ErrQueueAndPendingFull
 			// 记录消息发送失败日志
-			h.logger.LogMessage(msgCopy.ID, msgCopy.From, msgCopy.To, msgCopy.Type, false, err)
+			h.logger.LogMessage(msgCopy.ID, msgCopy.Sender, msgCopy.Receiver, msgCopy.MessageType, false, err)
 			// 通知队列满处理器
 			h.notifyQueueFull(&msgCopy, toUserID, "all_queues", err)
 			return err
@@ -1057,9 +1061,9 @@ func (h *Hub) notifySendFailureAfterRetries(msg *HubMessage, recipient string, r
 	// 记录重试最终失败的日志
 	h.logger.ErrorKV("消息发送重试失败",
 		"message_id", msg.ID,
-		"from", msg.From,
-		"to", recipient,
-		"type", msg.Type,
+		"sender", msg.Sender,
+		"receiver", recipient,
+		"message_type", msg.MessageType,
 		"total_retries", result.TotalRetries,
 		"total_time", result.TotalTime,
 		"final_error", result.FinalError,
@@ -1097,8 +1101,8 @@ func (h *Hub) Broadcast(ctx context.Context, msg *HubMessage) {
 		// broadcast队列满，尝试放入待发送队列
 		h.logger.WarnKV("广播队列已满，尝试使用待发送队列",
 			"message_id", msg.ID,
-			"from", msg.From,
-			"type", msg.Type,
+			"sender", msg.Sender,
+			"message_type", msg.MessageType,
 		)
 		select {
 		case h.pendingMessages <- msg:
@@ -1107,8 +1111,8 @@ func (h *Hub) Broadcast(ctx context.Context, msg *HubMessage) {
 			// 两个队列都满，静默丢弃（广播消息不返回错误）
 			h.logger.ErrorKV("所有队列已满，丢弃广播消息",
 				"message_id", msg.ID,
-				"from", msg.From,
-				"type", msg.Type,
+				"sender", msg.Sender,
+				"message_type", msg.MessageType,
 				"content_length", len(msg.Content),
 			)
 		}
@@ -1152,9 +1156,9 @@ func (h *Hub) processPendingMessages() {
 				timeoutCount++
 				h.logger.WarnKV("待发送消息处理超时",
 					"message_id", msg.ID,
-					"from", msg.From,
-					"to", msg.To,
-					"type", msg.Type,
+					"sender", msg.Sender,
+					"receiver", msg.Receiver,
+					"message_type", msg.MessageType,
 					"timeout", "5s",
 				)
 			}
@@ -1212,7 +1216,7 @@ func (h *Hub) SendToUserViaSSE(userID string, msg *HubMessage) bool {
 		h.logger.WarnKV("SSE用户不存在",
 			"user_id", userID,
 			"message_id", msg.ID,
-			"message_type", msg.Type,
+			"message_type", msg.MessageType,
 		)
 		return false
 	}
@@ -1221,11 +1225,11 @@ func (h *Hub) SendToUserViaSSE(userID string, msg *HubMessage) bool {
 	case conn.MessageCh <- msg:
 		conn.LastActive = time.Now()
 		// 记录SSE消息发送成功
-		h.logger.LogMessage(msg.ID, msg.From, userID, msg.Type, true, nil)
+		h.logger.LogMessage(msg.ID, msg.Sender, userID, msg.MessageType, true, nil)
 		h.logger.InfoKV("SSE消息发送成功",
 			"user_id", userID,
 			"message_id", msg.ID,
-			"message_type", msg.Type,
+			"message_type", msg.MessageType,
 		)
 		return true
 	default:
@@ -1233,7 +1237,7 @@ func (h *Hub) SendToUserViaSSE(userID string, msg *HubMessage) bool {
 		h.logger.WarnKV("SSE消息队列已满",
 			"user_id", userID,
 			"message_id", msg.ID,
-			"message_type", msg.Type,
+			"message_type", msg.MessageType,
 		)
 		return false
 	}
@@ -1698,8 +1702,8 @@ func (h *Hub) RetryFailedMessage(messageID string) error {
 
 	// 重新发送消息
 	ctx := context.Background()
-	if record.Message.To != "" {
-		_, err := h.SendToUserWithAck(ctx, record.Message.To, record.Message, 0, record.MaxRetry-record.RetryCount)
+	if record.Message.Receiver != "" {
+		_, err := h.SendToUserWithAck(ctx, record.Message.Receiver, record.Message, 0, record.MaxRetry-record.RetryCount)
 		return err
 	}
 
@@ -1943,7 +1947,7 @@ func (h *Hub) handleBroadcast(msg *HubMessage) {
 		// 获取发送者的客户端信息以获取IP
 		var clientIP string
 		h.mutex.RLock()
-		if senderClient, exists := h.userToClient[msg.From]; exists {
+		if senderClient, exists := h.userToClient[msg.Sender]; exists {
 			if senderClient.Conn != nil && senderClient.Conn.RemoteAddr() != nil {
 				clientIP = senderClient.Conn.RemoteAddr().String()
 			}
@@ -1951,43 +1955,43 @@ func (h *Hub) handleBroadcast(msg *HubMessage) {
 		h.mutex.RUnlock()
 
 		// 验证消息内容
-		if err := h.securityManager.ValidateMessage(msg.From, clientIP, []byte(msg.Content)); err != nil {
+		if err := h.securityManager.ValidateMessage(msg.Sender, clientIP, []byte(msg.Content)); err != nil {
 			h.logger.WarnKV("消息被安全策略拒绝",
 				"message_id", msg.ID,
-				"from", msg.From,
-				"to", msg.To,
-				"type", msg.Type,
+				"sender", msg.Sender,
+				"receiver", msg.Receiver,
+				"message_type", msg.MessageType,
 				"client_ip", clientIP,
 				"reason", err.Error(),
 			)
 			// 记录消息发送失败
-			h.logger.LogMessage(msg.ID, msg.From, msg.To, msg.Type, false, err)
+			h.logger.LogMessage(msg.ID, msg.Sender, msg.Receiver, msg.MessageType, false, err)
 			return
 		}
 	}
 
 	switch {
-	case msg.To != "": // 点对点消息 - 最快路径
+	case msg.Receiver != "": // 点对点消息 - 最快路径
 		h.mutex.RLock()
-		client := h.userToClient[msg.To]
+		client := h.userToClient[msg.Receiver]
 		h.mutex.RUnlock()
 
 		if client != nil {
 			h.sendToClient(client, msg)
-			h.logger.LogMessage(msg.ID, msg.From, msg.To, msg.Type, true, nil)
+			h.logger.LogMessage(msg.ID, msg.Sender, msg.Receiver, msg.MessageType, true, nil)
 		} else {
 			// 客户端不在线，尝试SSE
-			sent := h.SendToUserViaSSE(msg.To, msg)
+			sent := h.SendToUserViaSSE(msg.Receiver, msg)
 			if sent {
-				h.logger.LogMessage(msg.ID, msg.From, msg.To, msg.Type, true, nil)
+				h.logger.LogMessage(msg.ID, msg.Sender, msg.Receiver, msg.MessageType, true, nil)
 			} else {
 				// SSE也失败，记录用户离线
-				h.logger.LogMessage(msg.ID, msg.From, msg.To, msg.Type, false, ErrUserOffline)
+				h.logger.LogMessage(msg.ID, msg.Sender, msg.Receiver, msg.MessageType, false, ErrUserOffline)
 				h.logger.WarnKV("用户离线，消息发送失败",
 					"message_id", msg.ID,
-					"from", msg.From,
-					"to", msg.To,
-					"type", msg.Type,
+					"sender", msg.Sender,
+					"receiver", msg.Receiver,
+					"message_type", msg.MessageType,
 				)
 			}
 		}
@@ -1997,11 +2001,11 @@ func (h *Hub) handleBroadcast(msg *HubMessage) {
 		h.broadcastsSent.Add(1)
 
 		// 记录广播消息日志
-		h.logger.LogMessage(msg.ID, msg.From, "broadcast", msg.Type, true, nil)
+		h.logger.LogMessage(msg.ID, msg.Sender, "broadcast", msg.MessageType, true, nil)
 		h.logger.InfoKV("发送广播消息",
 			"message_id", msg.ID,
-			"from", msg.From,
-			"type", msg.Type,
+			"sender", msg.Sender,
+			"message_type", msg.MessageType,
 			"content_length", len(msg.Content),
 			"target_clients", len(h.clients),
 		)
@@ -2030,117 +2034,11 @@ func (h *Hub) handleBroadcast(msg *HubMessage) {
 	}
 }
 
-// fastMarshalMessage 高效消息序列化方法，避免反射和多次内存分配
+// fastMarshalMessage 高效消息序列化方法，包含完整的HubMessage结构体字段
 func (h *Hub) fastMarshalMessage(msg *HubMessage, buf []byte) ([]byte, error) {
-	// 手动构建 JSON，避免 reflect 的开销
-	buf = append(buf, `{"id":"`...)
-	buf = append(buf, msg.ID...)
-	buf = append(buf, `","type":"`...)
-	buf = append(buf, string(msg.Type)...)
-	buf = append(buf, `","content":"`...)
-
-	// 转义JSON字符
-	for _, r := range msg.Content {
-		switch r {
-		case '"':
-			buf = append(buf, '\\', '"')
-		case '\\':
-			buf = append(buf, '\\', '\\')
-		case '\n':
-			buf = append(buf, '\\', 'n')
-		case '\r':
-			buf = append(buf, '\\', 'r')
-		case '\t':
-			buf = append(buf, '\\', 't')
-		default:
-			if r < 32 {
-				buf = append(buf, fmt.Sprintf("\\u%04x", r)...)
-			} else {
-				buf = append(buf, string(r)...)
-			}
-		}
-	}
-
-	buf = append(buf, `","from":"`...)
-	buf = append(buf, msg.From...)
-	buf = append(buf, `","to":"`...)
-	buf = append(buf, msg.To...)
-
-	buf = append(buf, `","create_at":"`...)
-	buf = append(buf, msg.CreateAt.Format(time.RFC3339)...)
-	buf = append(buf, `"`...)
-
-	// 添加 Data 字段（如果存在）
-	if len(msg.Data) > 0 {
-		buf = append(buf, `,"data":{`...)
-		first := true
-		for key, value := range msg.Data {
-			if !first {
-				buf = append(buf, `,`...)
-			}
-			first = false
-
-			// 添加键
-			buf = append(buf, `"`...)
-			buf = append(buf, key...)
-			buf = append(buf, `":`...)
-
-			// 添加值（简单类型处理）
-			switch v := value.(type) {
-			case string:
-				buf = append(buf, `"`...)
-				// 转义字符串值
-				for _, r := range v {
-					switch r {
-					case '"':
-						buf = append(buf, '\\', '"')
-					case '\\':
-						buf = append(buf, '\\', '\\')
-					case '\n':
-						buf = append(buf, '\\', 'n')
-					case '\r':
-						buf = append(buf, '\\', 'r')
-					case '\t':
-						buf = append(buf, '\\', 't')
-					default:
-						if r < 32 {
-							buf = append(buf, fmt.Sprintf("\\u%04x", r)...)
-						} else {
-							buf = append(buf, string(r)...)
-						}
-					}
-				}
-				buf = append(buf, `"`...)
-			case int:
-				buf = append(buf, fmt.Sprintf("%d", v)...)
-			case int64:
-				buf = append(buf, fmt.Sprintf("%d", v)...)
-			case float64:
-				buf = append(buf, fmt.Sprintf("%g", v)...)
-			case bool:
-				if v {
-					buf = append(buf, `true`...)
-				} else {
-					buf = append(buf, `false`...)
-				}
-			default:
-				// 对于复杂类型，使用 JSON 序列化
-				if valueBytes, err := json.Marshal(v); err == nil {
-					buf = append(buf, valueBytes...)
-				} else {
-					buf = append(buf, `null`...)
-				}
-			}
-		}
-		buf = append(buf, `}`...)
-	}
-
-	buf = append(buf, `}`...)
-
-	// 返回复制的数据，避免共享底层数组
-	result := make([]byte, len(buf))
-	copy(result, buf)
-	return result, nil
+	// 使用标准 json.Marshal 确保正确的JSON格式
+	// 虽然性能稍低，但确保了数据格式的正确性和兼容性
+	return json.Marshal(msg)
 }
 
 func (h *Hub) sendToClient(client *Client, msg *HubMessage) {
@@ -2152,7 +2050,7 @@ func (h *Hub) sendToClient(client *Client, msg *HubMessage) {
 					"client_id":    client.ID,
 					"user_id":      client.UserID,
 					"message_id":   msg.ID,
-					"message_type": msg.Type,
+					"message_type": msg.MessageType,
 					"panic":        r,
 				}
 				h.errorRecovery.ReportError(ErrorTypeMessage, SeverityCritical,
@@ -2192,7 +2090,7 @@ func (h *Hub) sendToClient(client *Client, msg *HubMessage) {
 				"client_id":    client.ID,
 				"user_id":      client.UserID,
 				"message_id":   msg.ID,
-				"message_type": msg.Type,
+				"message_type": msg.MessageType,
 			}
 			h.errorRecovery.ReportError(ErrorTypeMessage, SeverityMedium,
 				"消息序列化失败: "+err.Error(), ctx)
@@ -2222,7 +2120,7 @@ func (h *Hub) sendToClient(client *Client, msg *HubMessage) {
 			"client_id", client.ID,
 			"user_id", client.UserID,
 			"message_id", msg.ID,
-			"message_type", msg.Type,
+			"message_type", msg.MessageType,
 		)
 
 		// 记录队列溢出指标
@@ -2236,7 +2134,7 @@ func (h *Hub) sendToClient(client *Client, msg *HubMessage) {
 				"client_id":    client.ID,
 				"user_id":      client.UserID,
 				"message_id":   msg.ID,
-				"message_type": msg.Type,
+				"message_type": msg.MessageType,
 			}
 			h.errorRecovery.ReportError(ErrorTypeConcurrency, SeverityMedium,
 				"客户端发送队列已满", ctx)
@@ -2381,14 +2279,14 @@ func (h *Hub) sendWelcomeMessage(client *Client) {
 	}
 
 	msg := &HubMessage{
-		Type:     welcomeMsg.MessageType,
-		From:     "system",
-		To:       client.UserID,
-		Content:  welcomeMsg.Content,
-		Data:     welcomeMsg.Data,
-		CreateAt: time.Now(),
-		Priority: welcomeMsg.Priority,
-		Status:   MessageStatusSent,
+		MessageType: welcomeMsg.MessageType,
+		Sender:      "system",
+		Receiver:    client.UserID,
+		Content:     welcomeMsg.Content,
+		Data:        welcomeMsg.Data,
+		CreateAt:    time.Now(),
+		Priority:    welcomeMsg.Priority,
+		Status:      MessageStatusSent,
 	}
 
 	if msg.Data == nil {
@@ -3147,7 +3045,7 @@ func (h *Hub) SendToUserWithClassification(ctx context.Context, userID string, m
 
 	// 设置消息分类信息
 	if classification != nil {
-		msg.Type = classification.Type
+		msg.MessageType = classification.Type
 
 		// 根据分类计算优先级
 		finalScore := classification.GetFinalPriority()
@@ -3471,7 +3369,7 @@ func (mr *MessageRouter) Route(msg *HubMessage, client *Client) error {
 	mr.mutex.RLock()
 	defer mr.mutex.RUnlock()
 
-	if rules, exists := mr.routes[msg.Type]; exists {
+	if rules, exists := mr.routes[msg.MessageType]; exists {
 		for _, rule := range rules {
 			if rule.Condition(msg, client) {
 				return rule.Handler(msg, client)
@@ -3524,7 +3422,7 @@ func (sq *SmartQueue) Enqueue(msg *HubMessage) error {
 	case msg.Priority == PriorityHigh:
 		targetQueue = sq.highPriorityQueue
 		sq.metrics.CurrentHigh.Add(1)
-	case msg.Type == MessageTypeAlert || msg.Type == MessageTypeSystem:
+	case msg.MessageType == MessageTypeAlert || msg.MessageType == MessageTypeSystem:
 		targetQueue = sq.vipQueue
 		sq.metrics.CurrentVIP.Add(1)
 	case msg.Priority == PriorityLow:
@@ -3616,17 +3514,17 @@ func (mf *MessageFilter) Allow(msg *HubMessage) bool {
 	defer mf.mutex.RUnlock()
 
 	// 黑名单检查
-	if mf.blacklist[msg.From] {
+	if mf.blacklist[msg.Sender] {
 		return false
 	}
 
 	// 白名单检查
-	if len(mf.whitelist) > 0 && !mf.whitelist[msg.From] {
+	if len(mf.whitelist) > 0 && !mf.whitelist[msg.Sender] {
 		return false
 	}
 
 	// 速率限制检查
-	if rateLimit, exists := mf.rateLimit[msg.From]; exists {
+	if rateLimit, exists := mf.rateLimit[msg.Sender]; exists {
 		if !rateLimit.Allow() {
 			return false
 		}

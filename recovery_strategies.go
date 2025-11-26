@@ -409,9 +409,9 @@ func (nrs *NetworkRecoveryStrategy) GetName() string {
 func (nrs *NetworkRecoveryStrategy) performNetworkRecovery(ctx context.Context, hub *Hub) error {
 	// 广播网络状态检查消息
 	networkCheckMsg := &HubMessage{
-		Type:     MessageTypeSystem,
-		Content:  `{"type":"network_recovery","message":"Network recovery in progress"}`,
-		CreateAt: time.Now(),
+		MessageType: MessageTypeSystem,
+		Content:     `{"type":"network_recovery","message":"Network recovery in progress"}`,
+		CreateAt:    time.Now(),
 	}
 
 	select {

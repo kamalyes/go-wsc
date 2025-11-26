@@ -21,7 +21,7 @@ import (
 func TestCustomFields(t *testing.T) {
 	t.Run("设置和获取自定义字段", func(t *testing.T) {
 		mrm := NewMessageRecordManager(100, time.Hour, nil)
-		msg := &HubMessage{ID: "test-1", Type: MessageTypeText}
+		msg := &HubMessage{ID: "test-1", MessageType: MessageTypeText}
 		mrm.CreateRecord(msg, 3, time.Now().Add(time.Hour))
 
 		// 设置自定义字段
@@ -60,7 +60,7 @@ func TestCustomFields(t *testing.T) {
 func TestTags(t *testing.T) {
 	t.Run("添加和查询标签", func(t *testing.T) {
 		mrm := NewMessageRecordManager(100, time.Hour, nil)
-		msg := &HubMessage{ID: "test-1", Type: MessageTypeText}
+		msg := &HubMessage{ID: "test-1", MessageType: MessageTypeText}
 		mrm.CreateRecord(msg, 3, time.Now().Add(time.Hour))
 
 		// 添加标签
@@ -82,7 +82,7 @@ func TestTags(t *testing.T) {
 
 	t.Run("移除标签", func(t *testing.T) {
 		mrm := NewMessageRecordManager(100, time.Hour, nil)
-		msg := &HubMessage{ID: "test-2", Type: MessageTypeText}
+		msg := &HubMessage{ID: "test-2", MessageType: MessageTypeText}
 		mrm.CreateRecord(msg, 3, time.Now().Add(time.Hour))
 
 		mrm.AddRecordTag("test-2", "tag1")
@@ -107,7 +107,7 @@ func TestTags(t *testing.T) {
 
 		// 创建多条记录
 		for i := 0; i < 5; i++ {
-			msg := &HubMessage{ID: string(rune('a' + i)), Type: MessageTypeText}
+			msg := &HubMessage{ID: string(rune('a' + i)), MessageType: MessageTypeText}
 			mrm.CreateRecord(msg, 3, time.Now().Add(time.Hour))
 		}
 
@@ -173,7 +173,7 @@ func TestHooks(t *testing.T) {
 		hooks := &MockHooks{}
 		mrm.SetHooks(hooks)
 
-		msg := &HubMessage{ID: "test-1", Type: MessageTypeText}
+		msg := &HubMessage{ID: "test-1", MessageType: MessageTypeText}
 		mrm.CreateRecord(msg, 3, time.Now().Add(time.Hour))
 
 		assert.Equal(t, 1, hooks.CreatedCount)
@@ -184,7 +184,7 @@ func TestHooks(t *testing.T) {
 		hooks := &MockHooks{}
 		mrm.SetHooks(hooks)
 
-		msg := &HubMessage{ID: "test-2", Type: MessageTypeText}
+		msg := &HubMessage{ID: "test-2", MessageType: MessageTypeText}
 		mrm.CreateRecord(msg, 3, time.Now().Add(time.Hour))
 
 		mrm.UpdateRecordStatus("test-2", MessageSendStatusSending, "", "")
@@ -203,7 +203,7 @@ func TestHooks(t *testing.T) {
 		hooks := &MockHooks{}
 		mrm.SetHooks(hooks)
 
-		msg := &HubMessage{ID: "test-3", Type: MessageTypeText}
+		msg := &HubMessage{ID: "test-3", MessageType: MessageTypeText}
 		mrm.CreateRecord(msg, 3, time.Now().Add(time.Hour))
 
 		mrm.RecordRetryAttempt("test-3", 1, 100*time.Millisecond, nil, false)
@@ -218,7 +218,7 @@ func TestHooks(t *testing.T) {
 		hooks := &MockHooks{}
 		mrm.SetHooks(hooks)
 
-		msg := &HubMessage{ID: "test-4", Type: MessageTypeText}
+		msg := &HubMessage{ID: "test-4", MessageType: MessageTypeText}
 		mrm.CreateRecord(msg, 3, time.Now().Add(-time.Hour))
 
 		time.Sleep(20 * time.Millisecond)
@@ -259,7 +259,7 @@ func TestCustomFilters(t *testing.T) {
 
 		// 创建不同状态的记录
 		for i := 0; i < 5; i++ {
-			msg := &HubMessage{ID: string(rune('a' + i)), Type: MessageTypeText}
+			msg := &HubMessage{ID: string(rune('a' + i)), MessageType: MessageTypeText}
 			mrm.CreateRecord(msg, 3, time.Now().Add(time.Hour))
 		}
 
@@ -282,7 +282,7 @@ func TestCustomFilters(t *testing.T) {
 		mrm := NewMessageRecordManager(100, time.Hour, nil)
 
 		for i := 0; i < 3; i++ {
-			msg := &HubMessage{ID: string(rune('a' + i)), Type: MessageTypeText}
+			msg := &HubMessage{ID: string(rune('a' + i)), MessageType: MessageTypeText}
 			mrm.CreateRecord(msg, 3, time.Now().Add(time.Hour))
 		}
 
@@ -370,7 +370,7 @@ func TestExtraData(t *testing.T) {
 			ProductID string
 		}
 
-		msg := &HubMessage{ID: "test-1", Type: MessageTypeText}
+		msg := &HubMessage{ID: "test-1", MessageType: MessageTypeText}
 		record := mrm.CreateRecord(msg, 3, time.Now().Add(time.Hour))
 
 		// 设置ExtraData

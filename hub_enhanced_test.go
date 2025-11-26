@@ -52,24 +52,24 @@ func TestSmartQueue(t *testing.T) {
 
 	// 测试不同优先级的消息入队
 	highPriorityMsg := &HubMessage{
-		ID:       "high-priority",
-		Type:     MessageTypeAlert,
-		Priority: PriorityHigh,
-		Content:  "High priority alert",
+		ID:          "high-priority",
+		MessageType: MessageTypeAlert,
+		Priority:    PriorityHigh,
+		Content:     "High priority alert",
 	}
 
 	normalMsg := &HubMessage{
-		ID:       "normal",
-		Type:     MessageTypeText,
-		Priority: PriorityNormal,
-		Content:  "Normal message",
+		ID:          "normal",
+		MessageType: MessageTypeText,
+		Priority:    PriorityNormal,
+		Content:     "Normal message",
 	}
 
 	lowPriorityMsg := &HubMessage{
-		ID:       "low-priority",
-		Type:     MessageTypeText,
-		Priority: PriorityLow,
-		Content:  "Low priority message",
+		ID:          "low-priority",
+		MessageType: MessageTypeText,
+		Priority:    PriorityLow,
+		Content:     "Low priority message",
 	}
 
 	// 入队测试
@@ -118,10 +118,10 @@ func TestMessageFilter(t *testing.T) {
 
 	// 创建测试消息
 	msg := &HubMessage{
-		ID:      "test-msg",
-		Type:    MessageTypeText,
-		From:    "user1",
-		Content: "Test message",
+		ID:          "test-msg",
+		MessageType: MessageTypeText,
+		Sender:      "user1",
+		Content:     "Test message",
 	}
 
 	// 默认应该允许
@@ -245,11 +245,11 @@ func TestHubEnhancedSend(t *testing.T) {
 
 	// 创建测试消息
 	msg := &HubMessage{
-		ID:      "test-enhanced-msg",
-		Type:    MessageTypeText,
-		From:    "sender",
-		To:      "test-user",
-		Content: "Enhanced message",
+		ID:          "test-enhanced-msg",
+		MessageType: MessageTypeText,
+		Sender:      "sender",
+		Receiver:    "test-user",
+		Content:     "Enhanced message",
 	}
 
 	ctx := context.Background()
@@ -297,7 +297,7 @@ func TestHubRulesAndFilters(t *testing.T) {
 		Enabled: true,
 		Condition: func(vars map[string]interface{}) bool {
 			msg, ok := vars["message"].(*HubMessage)
-			return ok && msg.Type == MessageTypeAlert
+			return ok && msg.MessageType == MessageTypeAlert
 		},
 		Action: func(vars map[string]interface{}) error {
 			ruleExecuted = true
@@ -325,9 +325,9 @@ func TestHubRulesAndFilters(t *testing.T) {
 
 	// 测试规则是否工作
 	msg := &HubMessage{
-		ID:      "alert-msg",
-		Type:    MessageTypeAlert,
-		Content: "Emergency alert",
+		ID:          "alert-msg",
+		MessageType: MessageTypeAlert,
+		Content:     "Emergency alert",
 	}
 
 	variables := map[string]interface{}{
@@ -363,10 +363,10 @@ func BenchmarkEnhancedHub(b *testing.B) {
 	hub.InitializeEnhancements()
 
 	msg := &HubMessage{
-		ID:      "benchmark-msg",
-		Type:    MessageTypeText,
-		From:    "sender",
-		Content: "Benchmark message",
+		ID:          "benchmark-msg",
+		MessageType: MessageTypeText,
+		Sender:      "sender",
+		Content:     "Benchmark message",
 	}
 
 	b.ResetTimer()

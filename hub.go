@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-11-13 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-26 09:55:10
+ * @LastEditTime: 2025-11-27 07:18:39
  * @FilePath: \go-wsc\hub.go
  * @Description: WebSocket/SSE 服务端 Hub - 统一管理实时连接
  *
@@ -15,19 +15,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"os"
-	"sync"
-	"sync/atomic"
-	"testing"
-	"time"
-
 	"github.com/gorilla/websocket"
 	goconfig "github.com/kamalyes/go-config"
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-logger"
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"github.com/kamalyes/go-toolbox/pkg/retry"
+	"net/http"
+	"os"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
 )
 
 // SendFailureHandler 消息发送失败处理器接口 - 通用处理器
@@ -59,6 +58,10 @@ type TimeoutHandler interface {
 	// HandleTimeout 处理超时情况
 	HandleTimeout(msg *HubMessage, recipient string, timeoutType string, duration time.Duration, err error)
 }
+
+// HeartbeatTimeoutCallback 心跳超时回调函数
+// 参数: clientID - 客户端ID, userID - 用户ID, lastHeartbeat - 最后心跳时间
+type HeartbeatTimeoutCallback func(clientID string, userID string, lastHeartbeat time.Time)
 
 // SendFailureReason 消息发送失败原因
 const (
@@ -127,22 +130,23 @@ type HubMessage struct {
 
 // Client 客户端连接（服务端视角）
 type Client struct {
-	ID         string                 // 客户端ID
-	UserID     string                 // 用户ID
-	UserType   UserType               // 用户类型
-	VIPLevel   VIPLevel               // VIP等级
-	Role       UserRole               // 角色
-	Conn       *websocket.Conn        // WebSocket连接
-	LastSeen   time.Time              // 最后活跃时间
-	Status     UserStatus             // 状态
-	Department Department             // 部门
-	Skills     []Skill                // 技能
-	MaxTickets int                    // 最大工单数
-	NodeID     string                 // 节点ID
-	ClientType ClientType             // 客户端类型
-	Metadata   map[string]interface{} // 元数据
-	SendChan   chan []byte            // 发送通道
-	Context    context.Context        // 上下文（存储发送者ID等信息）
+	ID            string                 // 客户端ID
+	UserID        string                 // 用户ID
+	UserType      UserType               // 用户类型
+	VIPLevel      VIPLevel               // VIP等级
+	Role          UserRole               // 角色
+	Conn          *websocket.Conn        // WebSocket连接
+	LastSeen      time.Time              // 最后活跃时间
+	LastHeartbeat time.Time              // 最后心跳时间
+	Status        UserStatus             // 状态
+	Department    Department             // 部门
+	Skills        []Skill                // 技能
+	MaxTickets    int                    // 最大工单数
+	NodeID        string                 // 节点ID
+	ClientType    ClientType             // 客户端类型
+	Metadata      map[string]interface{} // 元数据
+	SendChan      chan []byte            // 发送通道
+	Context       context.Context        // 上下文（存储发送者ID等信息）
 }
 
 // SSEConnection SSE连接
@@ -232,6 +236,12 @@ type Hub struct {
 	connectionErrorHandlers []ConnectionErrorHandler // 连接错误处理器
 	timeoutHandlers         []TimeoutHandler         // 超时处理器
 	failureHandlerMutex     sync.RWMutex             // 失败处理器互斥锁
+
+	// 心跳机制
+	heartbeatInterval       time.Duration            // 心跳间隔
+	heartbeatTimeout        time.Duration            // 心跳超时时间
+	heartbeatTimeoutHandler HeartbeatTimeoutCallback // 心跳超时回调函数
+	heartbeatTicker         *time.Ticker             // 心跳定时器
 
 	// 上下文
 	ctx    context.Context
@@ -1874,6 +1884,15 @@ func (h *Hub) handleRegister(client *Client) {
 	h.clients[client.ID] = client
 	h.userToClient[client.UserID] = client
 
+	// 初始化心跳时间
+	now := time.Now()
+	if client.LastHeartbeat.IsZero() {
+		client.LastHeartbeat = now
+	}
+	if client.LastSeen.IsZero() {
+		client.LastSeen = now
+	}
+
 	if client.UserType == UserTypeAgent || client.UserType == UserTypeBot {
 		h.agentClients[client.UserID] = client
 	}
@@ -2215,9 +2234,28 @@ func (h *Hub) checkHeartbeat() {
 	timeoutClients := 0
 	timeoutSSE := 0
 
+	// 使用配置的超时时间，默认90秒
+	timeoutDuration := h.heartbeatTimeout
+	if timeoutDuration == 0 {
+		timeoutDuration = time.Duration(h.safeConfig.GetInt("ClientTimeout", 90)) * time.Second
+	}
+
 	for _, client := range h.clients {
-		if now.Sub(client.LastSeen) > time.Duration(h.safeConfig.GetInt("ClientTimeout", 90))*time.Second {
+		// 优先使用LastHeartbeat，如果为零则使用LastSeen
+		lastActive := client.LastHeartbeat
+		if lastActive.IsZero() {
+			lastActive = client.LastSeen
+		}
+
+		if now.Sub(lastActive) > timeoutDuration {
 			h.logger.LogConnection(client.ID, client.UserID, "heartbeat_timeout")
+
+			// 调用心跳超时回调函数
+			if h.heartbeatTimeoutHandler != nil {
+				h.heartbeatTimeoutHandler(client.ID, client.UserID, lastActive)
+			}
+
+			// 关闭连接
 			if client.Conn != nil {
 				client.Conn.Close()
 			}
@@ -2252,6 +2290,26 @@ func (h *Hub) checkHeartbeat() {
 // SetWelcomeProvider 设置欢迎消息提供者
 func (h *Hub) SetWelcomeProvider(provider WelcomeMessageProvider) {
 	h.welcomeProvider = provider
+}
+
+// SetHeartbeatConfig 设置心跳配置
+// interval: 心跳间隔，建议30秒
+// timeout: 心跳超时时间，建议90秒（interval的3倍）
+func (h *Hub) SetHeartbeatConfig(interval, timeout time.Duration) {
+	h.heartbeatInterval = interval
+	h.heartbeatTimeout = timeout
+}
+
+// UpdateHeartbeat 更新客户端心跳时间
+func (h *Hub) UpdateHeartbeat(clientID string) {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+
+	if client, exists := h.clients[clientID]; exists {
+		now := time.Now()
+		client.LastHeartbeat = now
+		client.LastSeen = now
+	}
 }
 
 func (h *Hub) sendWelcomeMessage(client *Client) {
@@ -2993,11 +3051,9 @@ func (h *Hub) WaitForCondition(condition func() bool, timeout time.Duration) boo
 			return true
 		}
 
-		select {
-		case <-ticker.C:
-			if time.Now().After(deadline) {
-				return false
-			}
+		<-ticker.C
+		if time.Now().After(deadline) {
+			return false
 		}
 	}
 }
@@ -4066,7 +4122,41 @@ func (h *Hub) AddToSecurityBlacklist(ip string) {
 	}
 }
 
+// ============================================================================
+// 回调注册方法 - Hub 级别的事件回调 (统一管理所有 OnXxx 方法)
+// ============================================================================
+// 注意：这些是服务端 Hub 级别的回调，用于处理全局事件
+// 客户端级别的回调请参考 wsc.go 中的 Wsc 结构体
+
+// OnHeartbeatTimeout 注册心跳超时回调函数
+// 当客户端心跳超时时会调用此回调
+//
+// 参数:
+//   - clientID: 超时的客户端ID
+//   - userID: 超时的用户ID
+//   - lastHeartbeat: 最后一次心跳时间
+//
+// 示例:
+//
+//	hub.OnHeartbeatTimeout(func(clientID, userID string, lastHeartbeat time.Time) {
+//	    log.Printf("客户端 %s 心跳超时", clientID)
+//	    更新数据库、清理缓存等
+//	})
+func (h *Hub) OnHeartbeatTimeout(callback HeartbeatTimeoutCallback) {
+	h.heartbeatTimeoutHandler = callback
+}
+
 // OnSecurityEvent 注册安全事件处理器
+// 当发生安全相关事件时会调用此回调
+//
+// 参数:
+//   - handler: 安全事件处理函数，接收 SecurityEvent 参数
+//
+// 示例:
+//
+//	hub.OnSecurityEvent(func(event SecurityEvent) {
+//	    log.Printf("安全事件: %v", event)
+//	})
 func (h *Hub) OnSecurityEvent(handler func(SecurityEvent)) {
 	if h.securityManager != nil {
 		h.securityManager.OnSecurityEvent(handler)

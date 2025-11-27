@@ -44,6 +44,7 @@ func (r UserRole) IsValid() bool {
 type UserType string
 
 const (
+	UserTypeVisitor  UserType = "visitor"  // 访客用户
 	UserTypeCustomer UserType = "customer" // 普通客户
 	UserTypeAgent    UserType = "agent"    // 人工客服
 	UserTypeAdmin    UserType = "admin"    // 系统管理员
@@ -97,62 +98,67 @@ func (s UserStatus) IsValid() bool {
 type MessageType string
 
 const (
-	MessageTypeText         MessageType = "text"         // 文本消息
-	MessageTypeImage        MessageType = "image"        // 图片消息
-	MessageTypeFile         MessageType = "file"         // 文件消息
-	MessageTypeAudio        MessageType = "audio"        // 音频消息
-	MessageTypeVideo        MessageType = "video"        // 视频消息
-	MessageTypeSystem       MessageType = "system"       // 系统消息
-	MessageTypeNotice       MessageType = "notice"       // 通知消息
-	MessageTypeEvent        MessageType = "event"        // 事件消息
-	MessageTypeAck          MessageType = "ack"          // ACK确认消息
-	MessageTypeLocation     MessageType = "location"     // 位置消息
-	MessageTypeCard         MessageType = "card"         // 卡片消息
-	MessageTypeEmoji        MessageType = "emoji"        // 表情消息
-	MessageTypeSticker      MessageType = "sticker"      // 贴纸消息
-	MessageTypeLink         MessageType = "link"         // 链接消息
-	MessageTypeQuote        MessageType = "quote"        // 引用回复消息
-	MessageTypeForward      MessageType = "forward"      // 转发消息
-	MessageTypeCommand      MessageType = "command"      // 命令消息
-	MessageTypeMarkdown     MessageType = "markdown"     // Markdown格式消息
-	MessageTypeRichText     MessageType = "rich_text"    // 富文本消息
-	MessageTypeCode         MessageType = "code"         // 代码消息
-	MessageTypeJson         MessageType = "json"         // JSON数据消息
-	MessageTypeXML          MessageType = "xml"          // XML数据消息
-	MessageTypeBinary       MessageType = "binary"       // 二进制数据消息
-	MessageTypeVoice        MessageType = "voice"        // 语音消息
-	MessageTypeGIF          MessageType = "gif"          // GIF动图消息
-	MessageTypeDocument     MessageType = "document"     // 文档消息
-	MessageTypeSpreadsheet  MessageType = "spreadsheet"  // 电子表格消息
-	MessageTypePresentation MessageType = "presentation" // 演示文稿消息
-	MessageTypeContact      MessageType = "contact"      // 联系人卡片消息
-	MessageTypeCalendar     MessageType = "calendar"     // 日历事件消息
-	MessageTypeTask         MessageType = "task"         // 任务消息
-	MessageTypePoll         MessageType = "poll"         // 投票消息
-	MessageTypeForm         MessageType = "form"         // 表单消息
-	MessageTypePayment      MessageType = "payment"      // 支付消息
-	MessageTypeOrder        MessageType = "order"        // 订单消息
-	MessageTypeProduct      MessageType = "product"      // 产品消息
-	MessageTypeInvite       MessageType = "invite"       // 邀请消息
-	MessageTypeAnnouncement MessageType = "announcement" // 公告消息
-	MessageTypeAlert        MessageType = "alert"        // 警告消息
-	MessageTypeError        MessageType = "error"        // 错误消息
-	MessageTypeInfo         MessageType = "info"         // 信息消息
-	MessageTypeSuccess      MessageType = "success"      // 成功消息
-	MessageTypeWarning      MessageType = "warning"      // 警告消息
-	MessageTypeHeartbeat    MessageType = "heartbeat"    // 心跳消息
-	MessageTypePing         MessageType = "ping"         // Ping消息
-	MessageTypePong         MessageType = "pong"         // Pong消息
-	MessageTypeTyping       MessageType = "typing"       // 正在输入状态消息
-	MessageTypeRead         MessageType = "read"         // 已读消息
-	MessageTypeDelivered    MessageType = "delivered"    // 已送达消息
-	MessageTypeRecall       MessageType = "recall"       // 消息撤回
-	MessageTypeEdit         MessageType = "edit"         // 消息编辑
-	MessageTypeReaction     MessageType = "reaction"     // 消息反应/表态
-	MessageTypeThread       MessageType = "thread"       // 线程消息
-	MessageTypeReply        MessageType = "reply"        // 回复消息
-	MessageTypeMention      MessageType = "mention"      // @提及消息
-	MessageTypeCustom       MessageType = "custom"       // 自定义类型消息
+	MessageTypeText           MessageType = "text"           // 文本消息
+	MessageTypeImage          MessageType = "image"          // 图片消息
+	MessageTypeFile           MessageType = "file"           // 文件消息
+	MessageTypeAudio          MessageType = "audio"          // 音频消息
+	MessageTypeVideo          MessageType = "video"          // 视频消息
+	MessageTypeSystem         MessageType = "system"         // 系统消息
+	MessageTypeNotice         MessageType = "notice"         // 通知消息
+	MessageTypeEvent          MessageType = "event"          // 事件消息
+	MessageTypeAck            MessageType = "ack"            // ACK确认消息
+	MessageTypeLocation       MessageType = "location"       // 位置消息
+	MessageTypeCard           MessageType = "card"           // 卡片消息
+	MessageTypeEmoji          MessageType = "emoji"          // 表情消息
+	MessageTypeSticker        MessageType = "sticker"        // 贴纸消息
+	MessageTypeLink           MessageType = "link"           // 链接消息
+	MessageTypeQuote          MessageType = "quote"          // 引用回复消息
+	MessageTypeForward        MessageType = "forward"        // 转发消息
+	MessageTypeCommand        MessageType = "command"        // 命令消息
+	MessageTypeMarkdown       MessageType = "markdown"       // Markdown格式消息
+	MessageTypeRichText       MessageType = "rich_text"      // 富文本消息
+	MessageTypeCode           MessageType = "code"           // 代码消息
+	MessageTypeJson           MessageType = "json"           // JSON数据消息
+	MessageTypeXML            MessageType = "xml"            // XML数据消息
+	MessageTypeBinary         MessageType = "binary"         // 二进制数据消息
+	MessageTypeVoice          MessageType = "voice"          // 语音消息
+	MessageTypeGIF            MessageType = "gif"            // GIF动图消息
+	MessageTypeDocument       MessageType = "document"       // 文档消息
+	MessageTypeSpreadsheet    MessageType = "spreadsheet"    // 电子表格消息
+	MessageTypePresentation   MessageType = "presentation"   // 演示文稿消息
+	MessageTypeContact        MessageType = "contact"        // 联系人卡片消息
+	MessageTypeCalendar       MessageType = "calendar"       // 日历事件消息
+	MessageTypeTask           MessageType = "task"           // 任务消息
+	MessageTypePoll           MessageType = "poll"           // 投票消息
+	MessageTypeForm           MessageType = "form"           // 表单消息
+	MessageTypePayment        MessageType = "payment"        // 支付消息
+	MessageTypeOrder          MessageType = "order"          // 订单消息
+	MessageTypeProduct        MessageType = "product"        // 产品消息
+	MessageTypeInvite         MessageType = "invite"         // 邀请消息
+	MessageTypeAnnouncement   MessageType = "announcement"   // 公告消息
+	MessageTypeAlert          MessageType = "alert"          // 警告消息
+	MessageTypeError          MessageType = "error"          // 错误消息
+	MessageTypeInfo           MessageType = "info"           // 信息消息
+	MessageTypeSuccess        MessageType = "success"        // 成功消息
+	MessageTypeWarning        MessageType = "warning"        // 警告消息
+	MessageTypeHeartbeat      MessageType = "heartbeat"      // 心跳消息
+	MessageTypePing           MessageType = "ping"           // Ping消息
+	MessageTypePong           MessageType = "pong"           // Pong消息
+	MessageTypeTyping         MessageType = "typing"         // 正在输入状态消息
+	MessageTypeRead           MessageType = "read"           // 已读消息
+	MessageTypeDelivered      MessageType = "delivered"      // 已送达消息
+	MessageTypeRecall         MessageType = "recall"         // 消息撤回
+	MessageTypeEdit           MessageType = "edit"           // 消息编辑
+	MessageTypeReaction       MessageType = "reaction"       // 消息反应/表态
+	MessageTypeThread         MessageType = "thread"         // 线程消息
+	MessageTypeReply          MessageType = "reply"          // 回复消息
+	MessageTypeMention        MessageType = "mention"        // @提及消息
+	MessageTypeCustom         MessageType = "custom"         // 自定义类型消息
+	MessageTypeUnknown        MessageType = "unknown"        // 未知类型消息
+	MessageTypeAssignedTicket MessageType = "assignedticket" // 工单消息
+	MessageTypeCloseTicket    MessageType = "closeticket"    // 关闭工单消息
+	MessageTypeTransferTicket MessageType = "transferticket" // 转移工单消息
+	MessageTypeTest           MessageType = "test"           // 测试消息
 )
 
 // String 实现Stringer接口
@@ -174,7 +180,8 @@ func (t MessageType) IsValid() bool {
 		MessageTypeError, MessageTypeInfo, MessageTypeSuccess, MessageTypeWarning, MessageTypeHeartbeat,
 		MessageTypePing, MessageTypePong, MessageTypeTyping, MessageTypeRead, MessageTypeDelivered,
 		MessageTypeRecall, MessageTypeEdit, MessageTypeReaction, MessageTypeThread, MessageTypeReply,
-		MessageTypeMention, MessageTypeCustom:
+		MessageTypeMention, MessageTypeCustom, MessageTypeAssignedTicket, MessageTypeCloseTicket,
+		MessageTypeTransferTicket, MessageTypeTest:
 		return true
 	default:
 		return false
@@ -270,7 +277,8 @@ func GetAllMessageTypes() []MessageType {
 		MessageTypeError, MessageTypeInfo, MessageTypeSuccess, MessageTypeWarning, MessageTypeHeartbeat,
 		MessageTypePing, MessageTypePong, MessageTypeTyping, MessageTypeRead, MessageTypeDelivered,
 		MessageTypeRecall, MessageTypeEdit, MessageTypeReaction, MessageTypeThread, MessageTypeReply,
-		MessageTypeMention, MessageTypeCustom,
+		MessageTypeMention, MessageTypeCustom, MessageTypeAssignedTicket, MessageTypeCloseTicket,
+		MessageTypeTransferTicket, MessageTypeTest,
 	}
 }
 
@@ -343,7 +351,8 @@ func (t MessageType) GetDefaultPriority() MessagePriority {
 	// 高优先级 - 重要业务消息
 	case t == MessageTypeNotice || t == MessageTypeEvent || t == MessageTypeSuccess ||
 		t == MessageTypePayment || t == MessageTypeOrder || t == MessageTypeInvite ||
-		t == MessageTypeTask || t == MessageTypeRecall:
+		t == MessageTypeTask || t == MessageTypeRecall || t == MessageTypeAssignedTicket ||
+		t == MessageTypeCloseTicket || t == MessageTypeTransferTicket || t == MessageTypeTest:
 		return MessagePriorityHigh
 
 	// 普通优先级 - 常规交互消息
@@ -535,6 +544,10 @@ const (
 	BusinessCategoryFinance    BusinessCategory = "finance"    // 财务
 	BusinessCategorySecurity   BusinessCategory = "security"   // 安全
 	BusinessCategoryOperations BusinessCategory = "operations" // 运营
+	BusinessCategorySupport    BusinessCategory = "support"    // 支持
+	BusinessCategoryIT         BusinessCategory = "it"         // 信息技术
+	BusinessCategoryQuality    BusinessCategory = "quality"    // 质量
+	BusinessCategoryOther      BusinessCategory = "other"      // 其他
 )
 
 // String 实现Stringer接口

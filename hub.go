@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-11-13 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-27 07:18:39
+ * @LastEditTime: 2025-11-28 16:55:36
  * @FilePath: \go-wsc\hub.go
  * @Description: WebSocket/SSE 服务端 Hub - 统一管理实时连接
  *
@@ -15,18 +15,21 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
 	"github.com/gorilla/websocket"
 	goconfig "github.com/kamalyes/go-config"
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-logger"
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"github.com/kamalyes/go-toolbox/pkg/retry"
-	"net/http"
-	"os"
-	"sync"
-	"sync/atomic"
-	"testing"
-	"time"
 )
 
 // SendFailureHandler 消息发送失败处理器接口 - 通用处理器
@@ -4161,4 +4164,81 @@ func (h *Hub) OnSecurityEvent(handler func(SecurityEvent)) {
 	if h.securityManager != nil {
 		h.securityManager.OnSecurityEvent(handler)
 	}
+}
+
+// ============================================================================
+// Client 扩展方法 - 获取客户端信息
+// ============================================================================
+
+// GetClientIP 获取客户端IP地址
+func (c *Client) GetClientIP() string {
+	// 1. 优先从WebSocket连接直接获取（内置方法）
+	if c.Conn != nil {
+		if remoteAddr := c.Conn.RemoteAddr(); remoteAddr != nil {
+			// 提取IP地址（去除端口号）
+			if host, _, err := net.SplitHostPort(remoteAddr.String()); err == nil {
+				return host
+			}
+			// 如果没有端口号，直接返回
+			return remoteAddr.String()
+		}
+	}
+
+	// 2. 备用方案：从Metadata中获取（代理/负载均衡器设置）
+	if c.Metadata != nil {
+		// X-Forwarded-For 或 X-Real-IP 头
+		if ip, ok := c.Metadata["client_ip"].(string); ok && ip != "" {
+			return ip
+		}
+		if ip, ok := c.Metadata["x-forwarded-for"].(string); ok && ip != "" {
+			// X-Forwarded-For 可能包含多个IP，取第一个
+			if parts := strings.Split(ip, ","); len(parts) > 0 {
+				return strings.TrimSpace(parts[0])
+			}
+		}
+		if ip, ok := c.Metadata["x-real-ip"].(string); ok && ip != "" {
+			return ip
+		}
+		if ip, ok := c.Metadata["remote_addr"].(string); ok && ip != "" {
+			return ip
+		}
+	}
+
+	// 3. 最后备用：从Context中获取
+	if c.Context != nil {
+		if ip := c.Context.Value("client_ip"); ip != nil {
+			if ipStr, ok := ip.(string); ok && ipStr != "" {
+				return ipStr
+			}
+		}
+	}
+
+	return "unknown"
+}
+
+// GetUserAgent 获取用户代理
+func (c *Client) GetUserAgent() string {
+	// 尝试从 Metadata 中获取用户代理
+	if c.Metadata != nil {
+		if ua, ok := c.Metadata["user_agent"].(string); ok && ua != "" {
+			return ua
+		}
+		if ua, ok := c.Metadata["user-agent"].(string); ok && ua != "" {
+			return ua
+		}
+	}
+	// 尝试从 Context 中获取
+	if c.Context != nil {
+		if ua := c.Context.Value("user_agent"); ua != nil {
+			if uaStr, ok := ua.(string); ok && uaStr != "" {
+				return uaStr
+			}
+		}
+		if ua := c.Context.Value("user-agent"); ua != nil {
+			if uaStr, ok := ua.(string); ok && uaStr != "" {
+				return uaStr
+			}
+		}
+	}
+	return "unknown"
 }

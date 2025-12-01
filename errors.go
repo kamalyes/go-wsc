@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-09-06 09:50:55
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-22 22:50:44
+ * @LastEditTime: 2025-12-02 09:26:28
  * @FilePath: \go-wsc\errors.go
  * @Description: WebSocket 通信错误定义 - 基于errorx.BaseError模式
  *
@@ -100,6 +100,9 @@ const (
 	ErrTypeBruteForceDetected ErrorType = 81202 // 检测到暴力攻击
 	ErrTypeThreatDetected     ErrorType = 81203 // 检测到威胁内容
 	ErrTypeAccessDeniedByRule ErrorType = 81204 // 被访问规则拒绝
+
+	// 消息记录仓库相关错误 (81300-81399) - 不可重试
+	ErrTypeRecordRepositoryNotSet ErrorType = 81301 // 消息记录仓库未设置
 )
 
 // init 初始化所有错误类型注册
@@ -187,6 +190,9 @@ func init() {
 	errorx.RegisterError(ErrTypeBruteForceDetected, "brute force attack detected: %s")
 	errorx.RegisterError(ErrTypeThreatDetected, "threat detected: %s")
 	errorx.RegisterError(ErrTypeAccessDeniedByRule, "access denied by security rule: %s")
+
+	// 注册消息记录仓库相关错误
+	errorx.RegisterError(ErrTypeRecordRepositoryNotSet, "message record repository is not set")
 }
 
 // ============================================================================
@@ -226,9 +232,10 @@ var (
 
 // 业务逻辑错误变量
 var (
-	ErrMessageFiltered   = errorx.NewError(ErrTypeMessageFiltered)
-	ErrNoAvailableAgents = errorx.NewError(ErrTypeNoAvailableAgents)
-	ErrQueueFull         = errorx.NewError(ErrTypeQueueFull)
+	ErrMessageFiltered        = errorx.NewError(ErrTypeMessageFiltered)
+	ErrNoAvailableAgents      = errorx.NewError(ErrTypeNoAvailableAgents)
+	ErrQueueFull              = errorx.NewError(ErrTypeQueueFull)
+	ErrRecordRepositoryNotSet = errorx.NewError(ErrTypeRecordRepositoryNotSet)
 )
 
 // IsRetryableError 判断错误是否可以重试
@@ -268,4 +275,60 @@ func IsRetryableErrorType(errType ErrorType) bool {
 	default:
 		return false
 	}
+}
+
+// ============================================================================
+// 错误类型判断辅助函数
+// ============================================================================
+
+// IsQueueFullError 判断是否为队列满错误
+func IsQueueFullError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errxErr, ok := err.(interface{ Type() ErrorType }); ok {
+		errType := errxErr.Type()
+		return errType == ErrTypeQueueFull ||
+			errType == ErrTypeMessageBufferFull ||
+			errType == ErrTypePendingQueueFull ||
+			errType == ErrTypeQueueAndPendingFull
+	}
+	return err == ErrQueueFull || err == ErrMessageBufferFull || err == ErrQueueAndPendingFull
+}
+
+// IsUserOfflineError 判断是否为用户离线错误
+func IsUserOfflineError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errxErr, ok := err.(interface{ Type() ErrorType }); ok {
+		return errxErr.Type() == ErrTypeUserOffline
+	}
+	return err == ErrUserOffline
+}
+
+// IsSendTimeoutError 判断是否为发送超时错误
+func IsSendTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errxErr, ok := err.(interface{ Type() ErrorType }); ok {
+		errType := errxErr.Type()
+		return errType == ErrTypeOperationTimeout ||
+			errType == ErrTypeMessageDeliveryTimeout ||
+			errType == ErrTypeConnectionTimeout
+	}
+	return err == ErrMessageDeliveryTimeout
+}
+
+// IsAckTimeoutError 判断是否为ACK超时错误
+func IsAckTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errxErr, ok := err.(interface{ Type() ErrorType }); ok {
+		errType := errxErr.Type()
+		return errType == ErrTypeAckTimeout || errType == ErrTypeAckTimeoutRetries
+	}
+	return err == ErrAckTimeout || err == ErrAckTimeoutRetries
 }

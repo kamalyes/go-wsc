@@ -1,14 +1,25 @@
+/*
+ * @Author: kamalyes 501893067@qq.com
+ * @Date: 2025-01-21
+ * @LastEditors: kamalyes 501893067@qq.com
+ * @LastEditTime: 2025-12-02 09:25:06
+ * @FilePath: \go-wsc\websocket_benchmark_test.go
+ * @Description: WebSocket性能基准测试
+ *
+ * Copyright (c) 2025 by kamalyes, All Rights Reserved.
+ */
 package wsc
 
 import (
 	"fmt"
-	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 )
 
 // setupBenchServer 创建测试服务器并返回连接的客户端

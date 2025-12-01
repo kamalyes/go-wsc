@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-11-07 01:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-22 19:24:48
+ * @LastEditTime: 2025-11-22 19:24:55
  * @FilePath: \go-wsc\message_test.go
  * @Description: 消息发送测试
  *
@@ -11,15 +11,16 @@
 package wsc
 
 import (
-	"github.com/gorilla/websocket"
-	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
-	"github.com/stretchr/testify/assert"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/stretchr/testify/assert"
 )
 
 // TestSendTextMessage 测试发送文本消息

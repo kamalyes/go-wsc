@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-11-15
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-26 21:09:50
+ * @LastEditTime: 2025-12-02 09:26:00
  * @FilePath: \go-wsc\ack_test.go
  * @Description: ACK消息确认机制测试
  *
@@ -12,12 +12,13 @@ package wsc
 
 import (
 	"context"
-	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
-	"github.com/stretchr/testify/assert"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/stretchr/testify/assert"
 )
 
 // TestAckManager 测试ACK管理器基本功能
@@ -125,7 +126,7 @@ func TestHubWithAck(t *testing.T) {
 			Enable().
 			WithAck(2000 * time.Millisecond)
 
-		t.Logf("配置创建后 EnableAck: %v, AckTimeout: %v", config.EnableAck, config.AckTimeoutMs)
+		t.Logf("配置创建后 EnableAck: %v, AckTimeout: %v", config.EnableAck, config.AckTimeout)
 
 		hub := NewHub(config)
 		go hub.Run()
@@ -144,7 +145,7 @@ func TestHubWithAck(t *testing.T) {
 		// 可靠地等待注册完成，通过检查用户是否在线
 		registered := false
 		for i := 0; i < 50; i++ { // 最多等待5秒
-			if hub.IsUserOnline("user-1") {
+			if isOnline, _ := hub.IsUserOnline("user-1"); isOnline {
 				registered = true
 				break
 			}
@@ -188,7 +189,7 @@ func TestHubWithAck(t *testing.T) {
 		}
 
 		ackMsg, err := hub.SendToUserWithAck(ctx, "user-1", msg, 0, 0)
-		t.Logf("EnableAck配置: %v, AckTimeout: %v", hub.safeConfig.Field("EnableAck").Bool(false), hub.safeConfig.Field("AckTimeoutMs").Duration(0))
+		t.Logf("EnableAck配置: %v, AckTimeout: %v", hub.safeConfig.Field("EnableAck").Bool(false), hub.safeConfig.Field("AckTimeout").Duration(0))
 		assert.NoError(t, err)
 		assert.NotNil(t, ackMsg)
 		assert.Equal(t, AckStatusConfirmed, ackMsg.Status)
@@ -217,8 +218,8 @@ func TestHubWithAck(t *testing.T) {
 
 		// 可靠地等待注册完成
 		registered := false
-		for i := 0; i < 50; i++ { // 最多等待5秒
-			if hub.IsUserOnline("user-2") {
+		for i := 0; i < 50; i++ {
+			if isOnline, _ := hub.IsUserOnline("user-2"); isOnline {
 				registered = true
 				break
 			}
@@ -245,7 +246,7 @@ func TestHubWithAck(t *testing.T) {
 			Enable().
 			WithAck(500 * time.Millisecond) // 减少超时时间到500ms
 
-		t.Logf("配置创建后 EnableAck: %v, AckTimeout: %v", config.EnableAck, config.AckTimeoutMs)
+		t.Logf("配置创建后 EnableAck: %v, AckTimeout: %v", config.EnableAck, config.AckTimeout)
 
 		hub := NewHub(config)
 		go hub.Run()
@@ -262,8 +263,8 @@ func TestHubWithAck(t *testing.T) {
 
 		// 可靠地等待注册完成
 		registered := false
-		for i := 0; i < 50; i++ { // 最多等待5秒
-			if hub.IsUserOnline("user-3") {
+		for i := 0; i < 50; i++ {
+			if isOnline, _ := hub.IsUserOnline("user-3"); isOnline {
 				registered = true
 				break
 			}

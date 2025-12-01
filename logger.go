@@ -2,41 +2,27 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-11-22 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-22 19:30:00
+ * @LastEditTime: 2025-12-01 23:30:00
  * @FilePath: \go-wsc\logger.go
- * @Description: go-wsc 日志接口，复用 go-logger
+ * @Description: go-wsc 日志接口，直接复用 go-logger
  *
  * Copyright (c) 2025 by kamalyes, All Rights Reserved.
  */
 package wsc
 
 import (
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-logger"
+	"os"
+	"time"
 )
 
-// WSCLogger go-wsc 专用的日志接口（继承 go-logger.ILogger）
-type WSCLogger interface {
-	logger.ILogger
-
-	// 扩展方法：业务特定的日志记录
-	LogConnection(clientID, userID string, action string)
-	LogMessage(messageID, fromUser, toUser string, messageType MessageType, success bool, err error)
-	LogPerformance(operation string, duration string, details map[string]interface{})
-	LogError(component string, err error, details map[string]interface{})
-}
-
-// WSCLoggerAdapter go-logger 的适配器实现
-type WSCLoggerAdapter struct {
-	logger.ILogger
-}
+// WSCLogger 直接使用 go-logger.ILogger
+type WSCLogger = logger.ILogger
 
 // NewWSCLogger 创建新的WSC日志器，基于 go-logger
 func NewWSCLogger(config *logger.LogConfig) WSCLogger {
-	goLogger := logger.NewLogger(config)
-
-	return &WSCLoggerAdapter{
-		ILogger: goLogger,
-	}
+	return logger.NewLogger(config)
 }
 
 // NewDefaultWSCLogger 创建默认配置的WSC日志器
@@ -48,84 +34,15 @@ func NewDefaultWSCLogger() WSCLogger {
 		WithColorful(true).
 		WithTimeFormat("2006-01-02 15:04:05")
 
-	return NewWSCLogger(config)
-}
-
-// 业务特定的日志方法实现
-func (w *WSCLoggerAdapter) LogConnection(clientID, userID string, action string) {
-	w.InfoKV("连接事件",
-		"client_id", clientID,
-		"user_id", userID,
-		"action", action,
-	)
-}
-
-func (w *WSCLoggerAdapter) LogMessage(messageID, fromUser, toUser string, messageType MessageType, success bool, err error) {
-	fields := map[string]interface{}{
-		"message_id":   messageID,
-		"from_user":    fromUser,
-		"to_user":      toUser,
-		"message_type": messageType,
-		"success":      success,
-	}
-
-	if err != nil {
-		fields["error"] = err.Error()
-		w.WithFields(fields).Error("消息发送失败")
-	} else {
-		w.WithFields(fields).Info("消息发送成功")
-	}
-}
-
-func (w *WSCLoggerAdapter) LogPerformance(operation string, duration string, details map[string]interface{}) {
-	fields := map[string]interface{}{
-		"operation": operation,
-		"duration":  duration,
-	}
-
-	// 合并详细信息
-	for k, v := range details {
-		fields[k] = v
-	}
-
-	w.WithFields(fields).Info("性能统计")
-}
-
-func (w *WSCLoggerAdapter) LogError(component string, err error, details map[string]interface{}) {
-	fields := map[string]interface{}{
-		"component": component,
-		"error":     err.Error(),
-	}
-
-	// 合并详细信息
-	for k, v := range details {
-		fields[k] = v
-	}
-
-	w.WithFields(fields).Error("组件错误")
-}
-
-// NoOpLogger 空日志实现（用于禁用日志）
-type NoOpLogger struct {
-	logger.ILogger
+	return logger.NewLogger(config)
 }
 
 // NewNoOpLogger 创建空日志实例
 func NewNoOpLogger() WSCLogger {
-	return &NoOpLogger{
-		ILogger: logger.NewEmptyLogger(),
-	}
+	return logger.NewEmptyLogger()
 }
 
-// 业务方法的空实现
-func (n *NoOpLogger) LogConnection(clientID, userID string, action string) {}
-func (n *NoOpLogger) LogMessage(messageID, fromUser, toUser string, messageType MessageType, success bool, err error) {
-}
-func (n *NoOpLogger) LogPerformance(operation string, duration string, details map[string]interface{}) {
-}
-func (n *NoOpLogger) LogError(component string, err error, details map[string]interface{}) {}
-
-// 全局日志器（可选，用于简化使用）
+// 全局日志器
 var (
 	// DefaultLogger 默认日志器实例
 	DefaultLogger WSCLogger = NewDefaultWSCLogger()
@@ -134,32 +51,68 @@ var (
 	NoOpLoggerInstance WSCLogger = NewNoOpLogger()
 )
 
-// 全局日志方法（可选，用于简化使用）
-func Debug(msg string, fields ...interface{}) {
-	DefaultLogger.Debug(msg, fields...)
-}
-
-func Info(msg string, fields ...interface{}) {
-	DefaultLogger.Info(msg, fields...)
-}
-
-func Warn(msg string, fields ...interface{}) {
-	DefaultLogger.Warn(msg, fields...)
-}
-
-func Error(msg string, fields ...interface{}) {
-	DefaultLogger.Error(msg, fields...)
-}
-
-func InfoKV(msg string, keysAndValues ...interface{}) {
-	DefaultLogger.InfoKV(msg, keysAndValues...)
-}
-
-func ErrorKV(msg string, keysAndValues ...interface{}) {
-	DefaultLogger.ErrorKV(msg, keysAndValues...)
-}
-
 // SetDefaultLogger 设置默认日志器
-func SetDefaultLogger(logger WSCLogger) {
-	DefaultLogger = logger
+func SetDefaultLogger(l WSCLogger) {
+	DefaultLogger = l
+}
+
+// initLogger 根据配置初始化日志器
+func initLogger(config *wscconfig.WSC) WSCLogger {
+	// 如果配置中有日志配置且启用，使用配置中的
+	if config.Logging != nil && config.Logging.Enabled {
+		// 转换配置到 go-logger 的配置
+		loggerConfig := logger.DefaultConfig().
+			WithLevel(parseLogLevel(config.Logging.Level)).
+			WithPrefix("[WSC] ").
+			WithShowCaller(false).
+			WithColorful(true).
+			WithTimeFormat(time.DateTime)
+
+		// 根据输出类型配置输出
+		switch config.Logging.Output {
+		case "file":
+			if config.Logging.FilePath != "" {
+				// 根据是否需要轮转决定使用哪种文件写入器
+				if config.Logging.MaxSize > 0 && config.Logging.MaxBackups > 0 {
+					// 使用轮转文件写入器
+					rotateWriter := logger.NewRotateWriter(
+						config.Logging.FilePath,
+						int64(config.Logging.MaxSize)*1024*1024, // 转换为字节
+						config.Logging.MaxBackups,
+					)
+					loggerConfig = loggerConfig.WithOutput(rotateWriter)
+				} else {
+					// 使用简单文件写入器
+					fileWriter := logger.NewFileWriter(config.Logging.FilePath)
+					loggerConfig = loggerConfig.WithOutput(fileWriter)
+				}
+			}
+		default:
+			// 默认使用控制台输出
+			loggerConfig = loggerConfig.WithOutput(logger.NewConsoleWriter(os.Stdout))
+		}
+
+		return logger.NewLogger(loggerConfig)
+	}
+
+	// 使用默认配置
+	return NewDefaultWSCLogger()
+}
+
+// parseLogLevel 解析日志级别字符串
+func parseLogLevel(level string) logger.LogLevel {
+	switch level {
+	case "debug", "DEBUG":
+		return logger.DEBUG
+	case "info", "INFO":
+		return logger.INFO
+	case "warn", "WARN", "warning", "WARNING":
+		return logger.WARN
+	case "error", "ERROR":
+		return logger.ERROR
+	case "fatal", "FATAL":
+		return logger.FATAL
+	default:
+		return logger.INFO // 默认级别
+	}
 }

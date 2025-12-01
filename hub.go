@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-11-13 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-28 16:55:36
+ * @LastEditTime: 2025-12-02 09:24:05
  * @FilePath: \go-wsc\hub.go
  * @Description: WebSocket/SSE 服务端 Hub - 统一管理实时连接
  *
@@ -15,10 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
-	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -27,7 +24,6 @@ import (
 	"github.com/gorilla/websocket"
 	goconfig "github.com/kamalyes/go-config"
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
-	"github.com/kamalyes/go-logger"
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"github.com/kamalyes/go-toolbox/pkg/retry"
 )
@@ -138,6 +134,7 @@ type Client struct {
 	UserType      UserType               // 用户类型
 	VIPLevel      VIPLevel               // VIP等级
 	Role          UserRole               // 角色
+	ClientIP      string                 // 客户端IP地址
 	Conn          *websocket.Conn        // WebSocket连接
 	LastSeen      time.Time              // 最后活跃时间
 	LastHeartbeat time.Time              // 最后心跳时间
@@ -192,7 +189,15 @@ type Hub struct {
 	ackManager *AckManager
 
 	// 消息记录管理器
-	recordManager *MessageRecordManager
+
+	// 消息记录仓库（数据库持久化）
+	messageRecordRepo MessageRecordRepository
+
+	// 在线状态仓库（Redis 分布式存储）
+	onlineStatusRepo OnlineStatusRepository
+
+	// Hub 统计仓库（Redis 分布式统计，支持多节点）
+	statsRepo HubStatsRepository
 
 	// 并发控制
 	wg       sync.WaitGroup
@@ -203,30 +208,8 @@ type Hub struct {
 	// 欢迎消息提供者
 	welcomeProvider WelcomeMessageProvider
 
-	// 统计信息（使用atomic实现无锁统计，提升高并发性能）
-	totalConnections  atomic.Int64 // 累计总连接数
-	activeConnections atomic.Int64 // 当前活跃连接数
-	messagesSent      atomic.Int64 // 已发送消息数
-	messagesReceived  atomic.Int64 // 已接收消息数
-	broadcastsSent    atomic.Int64 // 已发送广播数
-	startTime         int64        // Hub启动时间（Unix时间戳）
-
-	// 增强功能
-	messageRouter      *MessageRouter       // 智能消息路由
-	loadBalancer       *LoadBalancer        // 负载均衡器
-	smartQueue         *SmartQueue          // 智能消息队列
-	monitor            *HubMonitor          // 监控系统
-	clusterManager     *ClusterManager      // 集群管理
-	ruleEngine         *RuleEngine          // 规则引擎
-	circuitBreaker     *CircuitBreaker      // 熔断器
-	messageFilter      *MessageFilter       // 消息过滤器
-	performanceTracker *PerformanceTracker  // 性能追踪器
-	logger             WSCLogger            // 日志器
-	metricsCollector   *MetricsCollector    // 高级指标收集器
-	memoryGuard        *MemoryGuard         // 内存防护
-	errorRecovery      *ErrorRecoverySystem // 错误恢复系统
-	configValidator    *ConfigValidator     // 配置验证器
-	securityManager    *SecurityManager     // 安全管理器
+	// 核心组件
+	logger WSCLogger // 日志器
 
 	// 并发控制
 	mutex    sync.RWMutex
@@ -260,252 +243,6 @@ type Hub struct {
 	msgPool sync.Pool
 }
 
-// MessageRouter 智能消息路由器
-type MessageRouter struct {
-	routes       map[MessageType][]RouteRule
-	defaultRoute RouteRule
-	mutex        sync.RWMutex
-}
-
-// RouteRule 路由规则
-type RouteRule struct {
-	Condition func(*HubMessage, *Client) bool
-	Handler   func(*HubMessage, *Client) error
-	Priority  int
-	Name      string
-}
-
-// LoadBalancer 负载均衡器
-type LoadBalancer struct {
-	algorithm LoadBalanceAlgorithm
-	agents    []*Client
-	current   int
-	mutex     sync.RWMutex
-}
-
-// LoadBalanceAlgorithm 负载均衡算法
-type LoadBalanceAlgorithm int
-
-const (
-	RoundRobin LoadBalanceAlgorithm = iota
-	LeastConnections
-	WeightedRandom
-	ConsistentHash
-)
-
-// ParseLoadBalanceAlgorithm 从字符串解析负载均衡算法
-func ParseLoadBalanceAlgorithm(algorithm string) LoadBalanceAlgorithm {
-	switch algorithm {
-	case "least-connections":
-		return LeastConnections
-	case "weighted-random":
-		return WeightedRandom
-	case "consistent-hash":
-		return ConsistentHash
-	default:
-		return RoundRobin
-	}
-}
-
-// SmartQueue 智能消息队列
-type SmartQueue struct {
-	highPriorityQueue chan *HubMessage
-	normalQueue       chan *HubMessage
-	lowPriorityQueue  chan *HubMessage
-	vipQueue          chan *HubMessage
-	maxSize           int
-	metrics           *QueueMetrics
-	mutex             sync.RWMutex
-}
-
-// QueueMetrics 队列指标
-type QueueMetrics struct {
-	TotalEnqueued atomic.Int64
-	TotalDequeued atomic.Int64
-	CurrentHigh   atomic.Int64
-	CurrentNormal atomic.Int64
-	CurrentLow    atomic.Int64
-	CurrentVIP    atomic.Int64
-}
-
-// HubMonitor 监控系统
-type HubMonitor struct {
-	metrics         *MonitorMetrics
-	alerts          []Alert
-	healthChecks    map[string]HealthCheck
-	lastHealthCheck time.Time
-	alertChannel    chan Alert
-	mutex           sync.RWMutex
-}
-
-// MonitorMetrics 监控指标
-type MonitorMetrics struct {
-	CPUUsage          float64
-	MemoryUsage       float64
-	ConnectionsPerSec float64
-	MessagesPerSec    float64
-	ErrorRate         float64
-	LatencyP95        time.Duration
-	LastUpdated       time.Time
-}
-
-// Alert 警报
-type Alert struct {
-	Level     AlertLevel
-	Message   string
-	Component string
-	Timestamp time.Time
-	Resolved  bool
-}
-
-// AlertLevel 警报级别
-type AlertLevel int
-
-const (
-	AlertInfo AlertLevel = iota
-	AlertWarning
-	AlertError
-	AlertCritical
-)
-
-// HealthCheck 健康检查
-type HealthCheck struct {
-	Name     string
-	Check    func() error
-	Interval time.Duration
-	Timeout  time.Duration
-}
-
-// ClusterManager 集群管理
-type ClusterManager struct {
-	nodes     map[string]*NodeInfo
-	leader    string
-	isLeader  bool
-	heartbeat time.Duration
-	mutex     sync.RWMutex
-	election  *Election
-}
-
-// Election 选举
-type Election struct {
-	candidates map[string]*Candidate
-	votes      map[string]string
-	term       int64
-	mutex      sync.RWMutex
-}
-
-// Candidate 候选人
-type Candidate struct {
-	NodeID   string
-	Priority int
-	LastSeen time.Time
-	Votes    int
-}
-
-// RuleEngine 规则引擎
-type RuleEngine struct {
-	rules     []Rule
-	rulesets  map[string][]Rule
-	variables map[string]interface{}
-	mutex     sync.RWMutex
-}
-
-// Rule 规则
-type Rule struct {
-	Name        string
-	Condition   func(map[string]interface{}) bool
-	Action      func(map[string]interface{}) error
-	Priority    int
-	Enabled     bool
-	Description string
-}
-
-// CircuitBreaker 熔断器
-type CircuitBreaker struct {
-	name             string
-	state            CircuitState
-	failureCount     int
-	successCount     int
-	failureThreshold int
-	successThreshold int
-	timeout          time.Duration
-	lastFailTime     time.Time
-	mutex            sync.RWMutex
-}
-
-// CircuitState 熔断器状态
-type CircuitState int
-
-const (
-	CircuitClosed CircuitState = iota
-	CircuitOpen
-	CircuitHalfOpen
-)
-
-// MessageFilter 消息过滤器
-type MessageFilter struct {
-	filters   []Filter
-	whitelist map[string]bool
-	blacklist map[string]bool
-	rateLimit map[string]*RateLimit
-	mutex     sync.RWMutex
-}
-
-// Filter 过滤器
-type Filter struct {
-	Name      string
-	Condition func(*HubMessage) bool
-	Action    FilterAction
-	Priority  int
-}
-
-// FilterAction 过滤动作
-type FilterAction int
-
-const (
-	FilterAllow FilterAction = iota
-	FilterDeny
-	FilterModify
-	FilterDelay
-)
-
-// RateLimit 速率限制
-type RateLimit struct {
-	Limit     int
-	Window    time.Duration
-	Counter   int
-	LastReset time.Time
-	mutex     sync.Mutex
-}
-
-// PerformanceTracker 性能追踪器
-type PerformanceTracker struct {
-	spans      map[string]*Span
-	samples    []Sample
-	maxSamples int
-	mutex      sync.RWMutex
-}
-
-// Span 性能追踪段
-type Span struct {
-	ID        string
-	Name      string
-	StartTime time.Time
-	EndTime   time.Time
-	Duration  time.Duration
-	Tags      map[string]string
-	Parent    *Span
-	Children  []*Span
-}
-
-// Sample 性能样本
-type Sample struct {
-	Name      string
-	Value     float64
-	Timestamp time.Time
-	Tags      map[string]string
-}
-
 // DefaultHubConfig 创建默认Hub配置
 // NodeInfo 节点信息
 type NodeInfo struct {
@@ -520,8 +257,6 @@ type NodeInfo struct {
 
 // NewHub 创建新的Hub
 func NewHub(config *wscconfig.WSC) *Hub {
-	isExplicitConfig := config != nil // 检查是否传递了明确的配置
-
 	if config == nil {
 		config = wscconfig.Default()
 	}
@@ -549,8 +284,7 @@ func NewHub(config *wscconfig.WSC) *Hub {
 		nodeMessage:     make(chan *DistributedMessage, config.MessageBufferSize*4),
 		pendingMessages: make(chan *HubMessage, 1000), // 使用默认值
 		maxPendingSize:  1000,
-		ackManager:      NewAckManager(config.AckTimeoutMs, config.AckMaxRetries),
-		recordManager:   nil, // 将在下面条件创建
+		ackManager:      NewAckManager(config.AckTimeout, config.AckMaxRetries),
 		welcomeProvider: nil, // 使用默认欢迎提供者
 		ctx:             ctx,
 		cancel:          cancel,
@@ -563,148 +297,8 @@ func NewHub(config *wscconfig.WSC) *Hub {
 				return make([]byte, 0, 1024) // 预分配1KB缓冲
 			},
 		},
-		startTime: time.Now().Unix(), // 记录启动时间
-	}
-
-	// 如果启用消息记录，创建记录管理器
-	if config.Group != nil && config.Group.EnableMessageRecord {
-		hub.recordManager = NewMessageRecordManager(1000, time.Hour*24, nil)
-	}
-
-	// 初始化增强功能组件
-	if config.Enhancement != nil && config.Enhancement.Enabled {
-		hub.initEnhancementComponents()
-	}
-
-	// 初始化高级指标收集器（显式配置且启用时才创建）
-	if isExplicitConfig && config.Performance != nil && config.Performance.EnableMetrics {
-		interval := time.Duration(config.Performance.MetricsInterval) * time.Second
-		if interval <= 0 {
-			interval = 5 * time.Minute // 默认5分钟
-		}
-		hub.metricsCollector = NewMetricsCollector(hub, interval)
-	}
-
-	// 初始化内存防护器（默认启用，可通过配置关闭）
-	if isExplicitConfig && config.Performance != nil {
-		// 创建内存防护器，默认1分钟检查间隔
-		hub.memoryGuard = NewMemoryGuard(hub, 1*time.Minute)
-
-		// 如果设置了最大连接数，可以用于计算内存限制
-		if config.Performance.MaxConnectionsPerNode > 0 {
-			// 估算内存限制：每个连接大约使用1MB内存
-			estimatedMemoryMB := int64(config.Performance.MaxConnectionsPerNode + 256) // 加256MB基础内存
-			hub.memoryGuard.SetMemoryLimit(estimatedMemoryMB)
-		}
-	}
-
-	// 初始化错误恢复系统
-	if isExplicitConfig {
-		hub.errorRecovery = NewErrorRecoverySystem(hub)
-	}
-
-	// 初始化配置验证器
-	hub.configValidator = NewConfigValidator()
-
-	// 初始化安全管理器
-	if isExplicitConfig && config.Security != nil {
-		hub.securityManager = NewSecurityManager(config)
-	}
-
-	// 验证配置并记录结果
-	if hub.configValidator != nil {
-		validationResults := hub.configValidator.Validate(config)
-		if len(validationResults) > 0 {
-			// 尝试自动修复
-			fixed, err := hub.configValidator.AutoFix(config)
-			if err == nil && len(fixed) > 0 {
-				initLogger(config).InfoKV("配置自动修复完成",
-					"fixed_count", len(fixed),
-				)
-			}
-
-			// 记录验证结果
-			for _, result := range validationResults {
-				switch result.Level {
-				case ValidationLevelCritical, ValidationLevelError:
-					initLogger(config).ErrorKV("配置验证失败",
-						"field", result.Field,
-						"message", result.Message,
-						"level", result.Level,
-					)
-				case ValidationLevelWarning:
-					initLogger(config).WarnKV("配置验证警告",
-						"field", result.Field,
-						"message", result.Message,
-					)
-				case ValidationLevelInfo:
-					initLogger(config).InfoKV("配置验证信息",
-						"field", result.Field,
-						"message", result.Message,
-					)
-				}
-			}
-		}
 	}
 	return hub
-}
-
-// initEnhancementComponents 初始化增强功能组件
-func (h *Hub) initEnhancementComponents() {
-	enhancement := h.config.Enhancement
-	if enhancement == nil {
-		return
-	}
-
-	// 智能路由
-	if enhancement.SmartRouting {
-		h.messageRouter = NewMessageRouter()
-	}
-
-	// 负载均衡
-	if enhancement.LoadBalancing {
-		h.loadBalancer = NewLoadBalancer(ParseLoadBalanceAlgorithm(enhancement.LoadBalanceAlgorithm))
-	}
-
-	// 智能队列
-	if enhancement.SmartQueue {
-		h.smartQueue = NewSmartQueue(enhancement.MaxQueueSize)
-	}
-
-	// 监控系统
-	if enhancement.Monitoring {
-		h.monitor = NewHubMonitor()
-	}
-
-	// 集群管理
-	if enhancement.ClusterManagement {
-		h.clusterManager = NewClusterManager(h.nodeID)
-	}
-
-	// 规则引擎
-	if enhancement.RuleEngine {
-		h.ruleEngine = NewRuleEngine()
-	}
-
-	// 熔断器
-	if enhancement.CircuitBreaker {
-		h.circuitBreaker = NewCircuitBreaker(
-			"hub-circuit-breaker",
-			enhancement.FailureThreshold,
-			enhancement.SuccessThreshold,
-			time.Duration(enhancement.CircuitTimeout)*time.Second,
-		)
-	}
-
-	// 消息过滤器
-	if enhancement.MessageFiltering {
-		h.messageFilter = NewMessageFilter()
-	}
-
-	// 性能追踪器
-	if enhancement.PerformanceTracking {
-		h.performanceTracker = NewPerformanceTracker(enhancement.MaxSamples)
-	}
 }
 
 // Run 启动Hub
@@ -727,21 +321,16 @@ func (h *Hub) Run() {
 			"heartbeat_interval", h.config.HeartbeatInterval,
 		)
 
+		// 设置启动时间到 Redis
+		if h.statsRepo != nil {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				_ = h.statsRepo.SetStartTime(ctx, h.nodeID, time.Now().Unix())
+			}()
+		}
+
 		// 启动指标收集器（如果已配置）
-		if h.metricsCollector != nil {
-			h.metricsCollector.Start()
-		}
-
-		// 启动内存防护器（如果已配置）
-		if h.memoryGuard != nil {
-			h.memoryGuard.Start()
-		}
-
-		// 启动错误恢复系统（如果已配置）
-		if h.errorRecovery != nil {
-			h.errorRecovery.Start()
-		}
-
 		close(h.startCh)
 	}
 
@@ -780,36 +369,26 @@ func (h *Hub) reportPerformanceMetrics() {
 	sseClients := len(h.sseClients)
 	h.mutex.RUnlock()
 
-	totalConnections := h.totalConnections.Load()
-	totalMessages := h.messagesSent.Load()
-	totalBroadcasts := h.broadcastsSent.Load()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// 从 Redis 获取统计信息
+	stats, err := h.statsRepo.GetNodeStats(ctx, h.nodeID)
+	if err != nil {
+		h.logger.WarnKV("获取节点统计失败", "error", err)
+		return
+	}
 
 	// 记录性能指标日志
-	h.logger.LogPerformance("hub_metrics", "5m", map[string]interface{}{
-		"active_websocket_clients": activeClients,
-		"active_sse_clients":       sseClients,
-		"total_connections":        totalConnections,
-		"total_messages_sent":      totalMessages,
-		"total_broadcasts_sent":    totalBroadcasts,
-		"node_id":                  h.nodeID,
-		"uptime_seconds":           time.Now().Unix() - h.startTime,
-	})
-
-	// 如果有性能追踪器，记录额外的性能数据
-	if h.performanceTracker != nil {
-		samples := h.performanceTracker.GetSamples()
-		if len(samples) > 0 {
-			h.logger.InfoKV("性能样本统计",
-				"sample_count", len(samples),
-				"latest_samples", func() interface{} {
-					if len(samples) > 5 {
-						return samples[len(samples)-5:]
-					}
-					return samples
-				}(),
-			)
-		}
-	}
+	h.logger.InfoKV("Hub性能指标",
+		"active_websocket_clients", activeClients,
+		"active_sse_clients", sseClients,
+		"total_connections", stats.TotalConnections,
+		"total_messages_sent", stats.MessagesSent,
+		"total_broadcasts_sent", stats.BroadcastsSent,
+		"node_id", h.nodeID,
+		"uptime_seconds", stats.Uptime,
+	)
 }
 
 // WaitForStart 等待Hub启动完成
@@ -862,26 +441,6 @@ func (h *Hub) SafeShutdown() error {
 		return nil // 已经在关闭中
 	}
 
-	// 停止指标收集器（如果已配置）
-	if h.metricsCollector != nil {
-		h.metricsCollector.Stop()
-	}
-
-	// 停止内存防护器（如果已配置）
-	if h.memoryGuard != nil {
-		h.memoryGuard.Stop()
-	}
-
-	// 停止错误恢复系统（如果已配置）
-	if h.errorRecovery != nil {
-		h.errorRecovery.Stop()
-	}
-
-	// 停止安全管理器（如果已配置）
-	if h.securityManager != nil {
-		h.securityManager.Shutdown()
-	}
-
 	// 取消context
 	h.cancel()
 
@@ -901,14 +460,25 @@ func (h *Hub) SafeShutdown() error {
 	select {
 	case <-done:
 		// 正常关闭
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		stats, _ := h.statsRepo.GetNodeStats(ctx, h.nodeID)
+		cancel()
+
+		finalStats := map[string]interface{}{
+			"total_connections": int64(0),
+			"messages_sent":     int64(0),
+			"broadcasts_sent":   int64(0),
+		}
+		if stats != nil {
+			finalStats["total_connections"] = stats.TotalConnections
+			finalStats["messages_sent"] = stats.MessagesSent
+			finalStats["broadcasts_sent"] = stats.BroadcastsSent
+		}
+
 		h.logger.InfoKV("Hub安全关闭成功",
 			"node_id", h.nodeID,
 			"shutdown_timeout", timeout,
-			"final_stats", map[string]interface{}{
-				"total_connections": h.totalConnections.Load(),
-				"messages_sent":     h.messagesSent.Load(),
-				"broadcasts_sent":   h.broadcastsSent.Load(),
-			},
+			"final_stats", finalStats,
 		)
 	case <-time.After(timeout):
 		// 强制关闭所有客户端连接
@@ -955,13 +525,13 @@ func (h *Hub) SafeShutdown() error {
 
 // Register 注册客户端
 func (h *Hub) Register(client *Client) {
-	h.logger.LogConnection(client.ID, client.UserID, "register_request")
+	h.logger.DebugKV("客户端注册请求", "client_id", client.ID, "user_id", client.UserID)
 	h.register <- client
 }
 
 // Unregister 注销客户端
 func (h *Hub) Unregister(client *Client) {
-	h.logger.LogConnection(client.ID, client.UserID, "unregister_request")
+	h.logger.DebugKV("客户端注销请求", "client_id", client.ID, "user_id", client.UserID)
 	h.unregister <- client
 }
 
@@ -989,7 +559,9 @@ func (h *Hub) SendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 	// 尝试发送到broadcast队列
 	select {
 	case h.broadcast <- msg:
-		h.logger.LogMessage(msg.ID, msg.Sender, msg.Receiver, msg.MessageType, true, nil)
+		h.logger.DebugKV("消息已广播", "message_id", msg.ID, "from", msg.Sender, "to", msg.Receiver, "type", msg.MessageType)
+		// 记录消息到数据库
+		go h.recordMessageToDatabase(msg, nil)
 		return nil
 	default:
 		// broadcast队列满，尝试放入待发送队列
@@ -999,7 +571,7 @@ func (h *Hub) SendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 		default:
 			err := ErrQueueAndPendingFull
 			// 记录消息发送失败日志
-			h.logger.LogMessage(msg.ID, msg.Sender, msg.Receiver, msg.MessageType, false, err)
+			h.logger.ErrorKV("消息发送失败", "message_id", msg.ID, "from", msg.Sender, "to", msg.Receiver, "type", msg.MessageType, "error", err)
 			// 通知队列满处理器
 			h.notifyQueueFull(msg, toUserID, "all_queues", err)
 			return err
@@ -1197,7 +769,7 @@ func (h *Hub) RegisterSSE(conn *SSEConnection) {
 	h.sseClients[conn.UserID] = conn
 
 	// 记录SSE连接注册日志
-	h.logger.LogConnection("sse_"+conn.UserID, conn.UserID, "sse_connected")
+	h.logger.InfoKV("SSE连接建立", "user_id", conn.UserID)
 	h.logger.InfoKV("SSE连接已注册",
 		"user_id", conn.UserID,
 		"total_sse_clients", len(h.sseClients),
@@ -1210,7 +782,7 @@ func (h *Hub) UnregisterSSE(userID string) {
 	defer h.sseMutex.Unlock()
 	if conn, exists := h.sseClients[userID]; exists {
 		// 记录SSE连接注销日志
-		h.logger.LogConnection("sse_"+userID, userID, "sse_disconnected")
+		h.logger.InfoKV("SSE连接断开", "user_id", userID)
 		h.logger.InfoKV("SSE连接已注销",
 			"user_id", userID,
 			"remaining_sse_clients", len(h.sseClients)-1,
@@ -1240,7 +812,7 @@ func (h *Hub) SendToUserViaSSE(userID string, msg *HubMessage) bool {
 	case conn.MessageCh <- msg:
 		conn.LastActive = time.Now()
 		// 记录SSE消息发送成功
-		h.logger.LogMessage(msg.ID, msg.Sender, userID, msg.MessageType, true, nil)
+		h.logger.DebugKV("SSE消息发送", "message_id", msg.ID, "from", msg.Sender, "to", userID, "type", msg.MessageType)
 		h.logger.InfoKV("SSE消息发送成功",
 			"user_id", userID,
 			"message_id", msg.ID,
@@ -1288,30 +860,15 @@ func (h *Hub) SendToUserWithAck(ctx context.Context, toUserID string, msg *HubMe
 		"enable_ack", enableAck,
 	)
 
-	// 创建消息发送记录
-	var record *MessageSendRecord
-	if h.recordManager != nil {
-		expiresAt := time.Now().Add(h.ackManager.expireDuration)
-		record = h.recordManager.CreateRecord(msg, maxRetry, expiresAt)
-	}
-
 	// 检查用户是否在线
 	h.mutex.RLock()
 	_, isOnline := h.userToClient[toUserID]
 	h.mutex.RUnlock()
 
 	if !isOnline {
-		// 记录用户离线
-		if record != nil {
-			h.recordManager.MarkUserOffline(msg.ID)
-		}
-
 		// 用户离线，使用离线处理器处理消息
 		if h.ackManager.offlineHandler != nil {
 			if err := h.ackManager.offlineHandler.HandleOfflineMessage(msg); err != nil {
-				if record != nil {
-					h.recordManager.UpdateRecordStatus(msg.ID, MessageSendStatusFailed, FailureReasonUserOffline, err.Error())
-				}
 				return &AckMessage{
 					MessageID: msg.ID,
 					Status:    AckStatusFailed,
@@ -1321,19 +878,12 @@ func (h *Hub) SendToUserWithAck(ctx context.Context, toUserID string, msg *HubMe
 			}
 
 			// 离线消息处理成功
-			if record != nil {
-				h.recordManager.UpdateRecordStatus(msg.ID, MessageSendStatusSuccess, "", "用户离线，消息已存储")
-			}
 			return &AckMessage{
 				MessageID: msg.ID,
 				Status:    AckStatusConfirmed,
 				Timestamp: time.Now(),
 				Error:     "用户离线，消息已存储",
 			}, nil
-		}
-
-		if record != nil {
-			h.recordManager.UpdateRecordStatus(msg.ID, MessageSendStatusFailed, FailureReasonUserOffline, "用户离线且未配置离线消息处理器")
 		}
 
 		err := errorx.NewError(ErrTypeUserOffline)
@@ -1348,11 +898,6 @@ func (h *Hub) SendToUserWithAck(ctx context.Context, toUserID string, msg *HubMe
 		}, err
 	}
 
-	// 更新记录状态为发送中
-	if record != nil {
-		h.recordManager.UpdateRecordStatus(msg.ID, MessageSendStatusSending, "", "")
-	}
-
 	// 使用配置中的ACK超时时间，如果传入的timeout > 0则使用传入值
 	ackTimeout := h.safeConfig.Field("AckTimeoutMs").Duration(500 * time.Millisecond)
 	if timeout > 0 {
@@ -1363,27 +908,16 @@ func (h *Hub) SendToUserWithAck(ctx context.Context, toUserID string, msg *HubMe
 	pm := h.ackManager.AddPendingMessage(msg, ackTimeout, maxRetry)
 	defer h.ackManager.RemovePendingMessage(msg.ID)
 
-	// 定义重试函数（带记录）
+	// 定义重试函数
 	attemptNum := 0
 	retryFunc := func() error {
 		attemptNum++
-		startTime := time.Now()
 		err := h.SendToUser(ctx, toUserID, msg)
-		duration := time.Since(startTime)
-
-		// 记录重试尝试
-		if record != nil {
-			h.recordManager.RecordRetryAttempt(msg.ID, attemptNum, duration, err, err == nil)
-		}
-
 		return err
 	}
 
 	// 首次发送
 	if err := retryFunc(); err != nil {
-		if record != nil {
-			h.recordManager.UpdateRecordStatus(msg.ID, MessageSendStatusFailed, FailureReasonSendTimeout, err.Error())
-		}
 		return &AckMessage{
 			MessageID: msg.ID,
 			Status:    AckStatusFailed,
@@ -1395,19 +929,6 @@ func (h *Hub) SendToUserWithAck(ctx context.Context, toUserID string, msg *HubMe
 	// 等待ACK确认并支持重试
 	ackMsg, err := pm.WaitForAckWithRetry(retryFunc)
 
-	// 更新最终记录状态
-	if record != nil {
-		if err != nil {
-			if ackMsg != nil && ackMsg.Status == AckStatusTimeout {
-				h.recordManager.UpdateRecordStatus(msg.ID, MessageSendStatusAckTimeout, FailureReasonAckTimeout, err.Error())
-			} else {
-				h.recordManager.UpdateRecordStatus(msg.ID, MessageSendStatusFailed, FailureReasonUnknown, err.Error())
-			}
-		} else {
-			h.recordManager.UpdateRecordStatus(msg.ID, MessageSendStatusSuccess, "", "")
-		}
-	}
-
 	return ackMsg, err
 }
 
@@ -1416,6 +937,29 @@ func (h *Hub) SetOfflineMessageHandler(handler OfflineMessageHandler) {
 	if h.ackManager != nil {
 		h.ackManager.offlineHandler = handler
 	}
+}
+
+// SetOnlineStatusRepository 设置在线状态仓库（Redis）
+func (h *Hub) SetOnlineStatusRepository(repo OnlineStatusRepository) {
+	h.onlineStatusRepo = repo
+	h.logger.InfoKV("在线状态仓库已设置", "repository_type", "redis")
+}
+
+// SetMessageRecordRepository 设置消息记录仓库（MySQL）
+func (h *Hub) SetMessageRecordRepository(repo MessageRecordRepository) {
+	h.messageRecordRepo = repo
+	h.logger.InfoKV("消息记录仓库已设置", "repository_type", "mysql")
+}
+
+// SetHubStatsRepository 设置 Hub 统计仓库（Redis）
+func (h *Hub) SetHubStatsRepository(repo HubStatsRepository) {
+	h.statsRepo = repo
+	h.logger.InfoKV("Hub统计仓库已设置", "repository_type", "redis")
+
+	// 设置启动时间到 Redis
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_ = repo.SetStartTime(ctx, h.nodeID, time.Now().Unix())
 }
 
 // AddSendFailureHandler 添加通用消息发送失败处理器
@@ -1571,74 +1115,6 @@ func (h *Hub) notifyUserOffline(msg *HubMessage, userID string, err error) {
 	}
 }
 
-// notifyConnectionError 通知连接错误处理器
-func (h *Hub) notifyConnectionError(msg *HubMessage, clientID string, err error) {
-	h.failureHandlerMutex.RLock()
-	connHandlers := make([]ConnectionErrorHandler, len(h.connectionErrorHandlers))
-	copy(connHandlers, h.connectionErrorHandlers)
-	generalHandlers := make([]SendFailureHandler, len(h.sendFailureHandlers))
-	copy(generalHandlers, h.sendFailureHandlers)
-	h.failureHandlerMutex.RUnlock()
-
-	// 调用专门的连接错误处理器
-	for _, handler := range connHandlers {
-		go func(h ConnectionErrorHandler) {
-			defer func() {
-				if r := recover(); r != nil {
-					// 防止处理器panic影响主流程
-				}
-			}()
-			h.HandleConnectionError(msg, clientID, err)
-		}(handler)
-	}
-
-	// 同时调用通用处理器
-	for _, handler := range generalHandlers {
-		go func(h SendFailureHandler) {
-			defer func() {
-				if r := recover(); r != nil {
-					// 防止处理器panic影响主流程
-				}
-			}()
-			h.HandleSendFailure(msg, clientID, SendFailureReasonConnError, err)
-		}(handler)
-	}
-}
-
-// notifyTimeout 通知超时处理器
-func (h *Hub) notifyTimeout(msg *HubMessage, recipient string, timeoutType string, duration time.Duration, err error) {
-	h.failureHandlerMutex.RLock()
-	timeoutHandlers := make([]TimeoutHandler, len(h.timeoutHandlers))
-	copy(timeoutHandlers, h.timeoutHandlers)
-	generalHandlers := make([]SendFailureHandler, len(h.sendFailureHandlers))
-	copy(generalHandlers, h.sendFailureHandlers)
-	h.failureHandlerMutex.RUnlock()
-
-	// 调用专门的超时处理器
-	for _, handler := range timeoutHandlers {
-		go func(h TimeoutHandler) {
-			defer func() {
-				if r := recover(); r != nil {
-					// 防止处理器panic影响主流程
-				}
-			}()
-			h.HandleTimeout(msg, recipient, timeoutType, duration, err)
-		}(handler)
-	}
-
-	// 同时调用通用处理器
-	for _, handler := range generalHandlers {
-		go func(h SendFailureHandler) {
-			defer func() {
-				if r := recover(); r != nil {
-					// 防止处理器panic影响主流程
-				}
-			}()
-			h.HandleSendFailure(msg, recipient, SendFailureReasonTimeout, err)
-		}(handler)
-	}
-}
-
 // SetMessageExpireDuration 设置消息过期时间
 func (h *Hub) SetMessageExpireDuration(duration time.Duration) {
 	if h.ackManager != nil {
@@ -1656,122 +1132,6 @@ func (h *Hub) HandleAck(ackMsg *AckMessage) {
 	)
 
 	h.ackManager.ConfirmMessage(ackMsg.MessageID, ackMsg)
-}
-
-// GetMessageRecord 获取消息发送记录
-func (h *Hub) GetMessageRecord(messageID string) (*MessageSendRecord, bool) {
-	if h.recordManager == nil {
-		return nil, false
-	}
-	return h.recordManager.GetRecord(messageID)
-}
-
-// GetFailedMessages 获取所有失败的消息
-func (h *Hub) GetFailedMessages() []*MessageSendRecord {
-	if h.recordManager == nil {
-		return nil
-	}
-	return h.recordManager.GetFailedRecords()
-}
-
-// GetRetryableMessages 获取可重试的消息
-func (h *Hub) GetRetryableMessages() []*MessageSendRecord {
-	if h.recordManager == nil {
-		return nil
-	}
-	return h.recordManager.GetRetryableRecords()
-}
-
-// RetryFailedMessage 重试失败的消息
-func (h *Hub) RetryFailedMessage(messageID string) error {
-	if h.recordManager == nil {
-		h.logger.WarnKV("消息记录管理器未初始化，无法重试",
-			"message_id", messageID,
-		)
-		return errorx.NewError(ErrTypeRecordManagerNotInitialized)
-	}
-
-	// 获取消息记录
-	record, exists := h.recordManager.GetRecord(messageID)
-	if !exists {
-		h.logger.WarnKV("消息记录不存在，无法重试",
-			"message_id", messageID,
-		)
-		return errorx.NewError(ErrTypeMessageRecordNotFound, "message_id: %s", messageID)
-	}
-
-	// 检查是否可重试
-	if record.RetryCount >= record.MaxRetry {
-		h.logger.WarnKV("消息已达最大重试次数，无法重试",
-			"message_id", messageID,
-			"retry_count", record.RetryCount,
-			"max_retries", record.MaxRetry,
-		)
-		return errorx.NewError(ErrTypeMaxRetriesExceeded)
-	}
-
-	// 记录重试开始
-	h.logger.InfoKV("开始重试失败消息",
-		"message_id", messageID,
-		"retry_count", record.RetryCount+1,
-		"max_retries", record.MaxRetry,
-		"status", record.Status,
-	)
-
-	// 重新发送消息
-	ctx := context.Background()
-	if record.Message.Receiver != "" {
-		_, err := h.SendToUserWithAck(ctx, record.Message.Receiver, record.Message, 0, record.MaxRetry-record.RetryCount)
-		return err
-	}
-
-	return ErrMessageTargetMissing
-}
-
-// RetryAllFailedMessages 批量重试所有失败的消息
-func (h *Hub) RetryAllFailedMessages() (int, int) {
-	if h.recordManager == nil {
-		return 0, 0
-	}
-
-	retryable := h.recordManager.GetRetryableRecords()
-	success := 0
-	failed := 0
-
-	for _, record := range retryable {
-		if err := h.RetryFailedMessage(record.MessageID); err != nil {
-			failed++
-		} else {
-			success++
-		}
-	}
-
-	return success, failed
-}
-
-// GetMessageStatistics 获取消息统计信息
-func (h *Hub) GetMessageStatistics() map[string]int {
-	if h.recordManager == nil {
-		return map[string]int{"enabled": 0}
-	}
-	stats := h.recordManager.GetStatistics()
-	stats["enabled"] = 1
-	return stats
-}
-
-// CleanupExpiredMessages 清理过期消息记录
-func (h *Hub) CleanupExpiredMessages() int {
-	if h.recordManager == nil {
-		return 0
-	}
-	return h.recordManager.CleanupExpiredRecords()
-}
-
-// SetMessageRecordPersistence 设置消息记录持久化接口
-func (h *Hub) SetMessageRecordPersistence(persistence MessageRecordPersistence) {
-	if h.recordManager != nil {
-		h.recordManager.persistence = persistence
-	}
 }
 
 // GetOnlineUsers 获取在线用户
@@ -1808,14 +1168,10 @@ func (h *Hub) GetStats() map[string]interface{} {
 	h.sseMutex.RUnlock()
 
 	return map[string]interface{}{
-		"node_id":            h.nodeID,
-		"websocket_count":    wsCount,
-		"sse_count":          sseCount,
-		"total_connections":  wsCount + sseCount,
-		"total_lifetime":     h.totalConnections.Load(),
-		"active_connections": h.activeConnections.Load(),
-		"messages_sent":      h.messagesSent.Load(),
-		"messages_received":  h.messagesReceived.Load(),
+		"node_id":           h.nodeID,
+		"websocket_count":   wsCount,
+		"sse_count":         sseCount,
+		"total_connections": wsCount + sseCount,
 	}
 }
 
@@ -1834,54 +1190,20 @@ func (h *Hub) Shutdown() {
 func (h *Hub) handleRegister(client *Client) {
 	defer func() {
 		if r := recover(); r != nil {
-			// 捕获panic，报告错误
-			if h.errorRecovery != nil {
-				ctx := map[string]interface{}{
-					"client_id": client.ID,
-					"user_id":   client.UserID,
-					"panic":     r,
-				}
-				h.errorRecovery.ReportError(ErrorTypeSystem, SeverityCritical,
-					fmt.Sprintf("handleRegister panic: %v", r), ctx)
-			}
-		}
-	}()
-
-	// 安全验证 - 验证客户端连接
-	if h.securityManager != nil {
-		clientIP := ""
-		headers := make(map[string]string)
-
-		// 从客户端连接中获取IP地址
-		if client.Conn != nil {
-			if remoteAddr := client.Conn.RemoteAddr(); remoteAddr != nil {
-				clientIP = remoteAddr.String()
-			}
-		}
-
-		// 验证连接
-		if err := h.securityManager.ValidateConnection(clientIP, client.UserID, headers); err != nil {
-			h.logger.WarnKV("客户端连接被安全策略拒绝",
+			h.logger.ErrorKV("handleRegister panic",
 				"client_id", client.ID,
 				"user_id", client.UserID,
-				"client_ip", clientIP,
-				"reason", err.Error(),
+				"panic", r,
 			)
-
-			// 关闭连接
-			if client.Conn != nil {
-				client.Conn.Close()
-			}
-			return
 		}
-	}
+	}()
 
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
 
 	// 关闭旧连接
 	if existingClient, exists := h.userToClient[client.UserID]; exists {
-		h.logger.LogConnection(existingClient.ID, existingClient.UserID, "disconnect_old_connection")
+		h.logger.InfoKV("断开旧连接", "client_id", existingClient.ID, "user_id", existingClient.UserID)
 		if existingClient.Conn != nil {
 			existingClient.Conn.Close()
 		}
@@ -1906,23 +1228,51 @@ func (h *Hub) handleRegister(client *Client) {
 	}
 
 	// 使用atomic无锁更新统计信息
-	h.totalConnections.Add(1)
-	h.activeConnections.Store(int64(len(h.clients)))
-
-	// 更新指标收集器
-	if h.metricsCollector != nil {
-		atomic.AddInt64(&h.metricsCollector.totalConnections, 1)
-	}
+	// 同步统计到 Redis
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = h.statsRepo.IncrementTotalConnections(ctx, h.nodeID, 1)
+		_ = h.statsRepo.SetActiveConnections(ctx, h.nodeID, int64(len(h.clients)))
+		_ = h.statsRepo.UpdateNodeHeartbeat(ctx, h.nodeID)
+	}()
 
 	// 记录成功注册日志
-	h.logger.LogConnection(client.ID, client.UserID, "connected")
+	h.logger.InfoKV("客户端已连接", "client_id", client.ID, "user_id", client.UserID, "user_type", client.UserType)
 	h.logger.InfoKV("客户端连接成功",
 		"client_id", client.ID,
 		"user_id", client.UserID,
 		"user_type", client.UserType,
-		"total_connections", h.totalConnections.Load(),
 		"active_connections", len(h.clients),
 	)
+
+	// 同步在线状态到 Redis
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+
+		onlineInfo := &OnlineClientInfo{
+			ClientID:      client.ID,
+			UserID:        client.UserID,
+			UserType:      client.UserType,
+			NodeID:        h.nodeID,
+			NodeIP:        h.config.NodeIP,
+			ClientIP:      client.ClientIP,
+			ConnectTime:   time.Now(),
+			LastSeen:      client.LastSeen,
+			LastHeartbeat: client.LastHeartbeat,
+			ClientType:    client.ClientType,
+			Status:        client.Status,
+			Metadata:      client.Metadata,
+		}
+
+		if err := h.onlineStatusRepo.SetOnline(ctx, client.UserID, onlineInfo, 0); err != nil {
+			h.logger.ErrorKV("同步在线状态到Redis失败",
+				"user_id", client.UserID,
+				"error", err,
+			)
+		}
+	}()
 
 	// 发送欢迎消息
 	h.sendWelcomeMessage(client)
@@ -1945,7 +1295,7 @@ func (h *Hub) removeClientUnsafe(client *Client) {
 	}
 
 	// 记录客户端移除日志
-	h.logger.LogConnection(client.ID, client.UserID, "disconnected")
+	h.logger.InfoKV("客户端已断开", "client_id", client.ID, "user_id", client.UserID)
 	h.logger.InfoKV("客户端断开连接",
 		"client_id", client.ID,
 		"user_id", client.UserID,
@@ -1960,7 +1310,25 @@ func (h *Hub) removeClientUnsafe(client *Client) {
 		delete(h.agentClients, client.UserID)
 	}
 
-	h.activeConnections.Store(int64(len(h.clients)))
+	// 同步活跃连接数到 Redis
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = h.statsRepo.SetActiveConnections(ctx, h.nodeID, int64(len(h.clients)))
+	}()
+
+	// 从 Redis 移除在线状态
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+
+		if err := h.onlineStatusRepo.SetOffline(ctx, client.UserID); err != nil {
+			h.logger.ErrorKV("从Redis移除在线状态失败",
+				"user_id", client.UserID,
+				"error", err,
+			)
+		}
+	}()
 
 	if client.SendChan != nil {
 		defer func() { recover() }()
@@ -1969,34 +1337,6 @@ func (h *Hub) removeClientUnsafe(client *Client) {
 }
 
 func (h *Hub) handleBroadcast(msg *HubMessage) {
-	// 安全验证 - 验证消息内容
-	if h.securityManager != nil && msg != nil {
-		// 获取发送者的客户端信息以获取IP
-		var clientIP string
-		h.mutex.RLock()
-		if senderClient, exists := h.userToClient[msg.Sender]; exists {
-			if senderClient.Conn != nil && senderClient.Conn.RemoteAddr() != nil {
-				clientIP = senderClient.Conn.RemoteAddr().String()
-			}
-		}
-		h.mutex.RUnlock()
-
-		// 验证消息内容
-		if err := h.securityManager.ValidateMessage(msg.Sender, clientIP, []byte(msg.Content)); err != nil {
-			h.logger.WarnKV("消息被安全策略拒绝",
-				"message_id", msg.ID,
-				"sender", msg.Sender,
-				"receiver", msg.Receiver,
-				"message_type", msg.MessageType,
-				"client_ip", clientIP,
-				"reason", err.Error(),
-			)
-			// 记录消息发送失败
-			h.logger.LogMessage(msg.ID, msg.Sender, msg.Receiver, msg.MessageType, false, err)
-			return
-		}
-	}
-
 	switch {
 	case msg.Receiver != "": // 点对点消息 - 最快路径
 		h.mutex.RLock()
@@ -2005,15 +1345,15 @@ func (h *Hub) handleBroadcast(msg *HubMessage) {
 
 		if client != nil {
 			h.sendToClient(client, msg)
-			h.logger.LogMessage(msg.ID, msg.Sender, msg.Receiver, msg.MessageType, true, nil)
+			h.logger.DebugKV("消息已发送", "message_id", msg.ID, "from", msg.Sender, "to", msg.Receiver, "type", msg.MessageType)
 		} else {
 			// 客户端不在线，尝试SSE
 			sent := h.SendToUserViaSSE(msg.Receiver, msg)
 			if sent {
-				h.logger.LogMessage(msg.ID, msg.Sender, msg.Receiver, msg.MessageType, true, nil)
+				h.logger.DebugKV("消息已发送", "message_id", msg.ID, "from", msg.Sender, "to", msg.Receiver, "type", msg.MessageType)
 			} else {
 				// SSE也失败，记录用户离线
-				h.logger.LogMessage(msg.ID, msg.Sender, msg.Receiver, msg.MessageType, false, ErrUserOffline)
+				h.logger.WarnKV("用户离线", "message_id", msg.ID, "from", msg.Sender, "to", msg.Receiver, "type", msg.MessageType)
 				h.logger.WarnKV("用户离线，消息发送失败",
 					"message_id", msg.ID,
 					"sender", msg.Sender,
@@ -2024,11 +1364,15 @@ func (h *Hub) handleBroadcast(msg *HubMessage) {
 		}
 
 	default: // 广播消息
-		// 统计广播数
-		h.broadcastsSent.Add(1)
+		// 统计广播数到 Redis
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+			defer cancel()
+			_ = h.statsRepo.IncrementBroadcastsSent(ctx, h.nodeID, 1)
+		}()
 
 		// 记录广播消息日志
-		h.logger.LogMessage(msg.ID, msg.Sender, "broadcast", msg.MessageType, true, nil)
+		h.logger.DebugKV("广播消息已发送", "message_id", msg.ID, "from", msg.Sender, "type", msg.MessageType, "client_count", len(h.clients))
 		h.logger.InfoKV("发送广播消息",
 			"message_id", msg.ID,
 			"sender", msg.Sender,
@@ -2071,18 +1415,13 @@ func (h *Hub) fastMarshalMessage(msg *HubMessage, buf []byte) ([]byte, error) {
 func (h *Hub) sendToClient(client *Client, msg *HubMessage) {
 	defer func() {
 		if r := recover(); r != nil {
-			// 捕获panic，报告错误
-			if h.errorRecovery != nil {
-				ctx := map[string]interface{}{
-					"client_id":    client.ID,
-					"user_id":      client.UserID,
-					"message_id":   msg.ID,
-					"message_type": msg.MessageType,
-					"panic":        r,
-				}
-				h.errorRecovery.ReportError(ErrorTypeMessage, SeverityCritical,
-					fmt.Sprintf("sendToClient panic: %v", r), ctx)
-			}
+			h.logger.ErrorKV("sendToClient panic",
+				"client_id", client.ID,
+				"user_id", client.UserID,
+				"message_id", msg.ID,
+				"message_type", msg.MessageType,
+				"panic", r,
+			)
 		}
 	}()
 
@@ -2106,26 +1445,8 @@ func (h *Hub) sendToClient(client *Client, msg *HubMessage) {
 			"error", err,
 		)
 
-		// 记录消息错误指标
-		if h.metricsCollector != nil {
-			h.metricsCollector.IncrementMessageError()
-		}
-
-		// 报告序列化错误
-		if h.errorRecovery != nil {
-			ctx := map[string]interface{}{
-				"client_id":    client.ID,
-				"user_id":      client.UserID,
-				"message_id":   msg.ID,
-				"message_type": msg.MessageType,
-			}
-			h.errorRecovery.ReportError(ErrorTypeMessage, SeverityMedium,
-				"消息序列化失败: "+err.Error(), ctx)
-		}
-
 		return
 	}
-
 	// 再次检查，避免在序列化过程中 shutdown
 	if h.shutdown.Load() {
 		return
@@ -2133,12 +1454,14 @@ func (h *Hub) sendToClient(client *Client, msg *HubMessage) {
 
 	select {
 	case client.SendChan <- data:
-		h.messagesSent.Add(1)
+		// 同步到 Redis
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+			defer cancel()
+			_ = h.statsRepo.IncrementMessagesSent(ctx, h.nodeID, 1)
+		}()
 
 		// 更新指标收集器
-		if h.metricsCollector != nil {
-			h.metricsCollector.IncrementMessageSent(len(data))
-		}
 	case <-h.ctx.Done():
 		return
 	default:
@@ -2150,22 +1473,6 @@ func (h *Hub) sendToClient(client *Client, msg *HubMessage) {
 			"message_type", msg.MessageType,
 		)
 
-		// 记录队列溢出指标
-		if h.metricsCollector != nil {
-			h.metricsCollector.IncrementQueueOverflow()
-		}
-
-		// 报告队列满错误
-		if h.errorRecovery != nil {
-			ctx := map[string]interface{}{
-				"client_id":    client.ID,
-				"user_id":      client.UserID,
-				"message_id":   msg.ID,
-				"message_type": msg.MessageType,
-			}
-			h.errorRecovery.ReportError(ErrorTypeConcurrency, SeverityMedium,
-				"客户端发送队列已满", ctx)
-		}
 	}
 }
 
@@ -2256,7 +1563,7 @@ func (h *Hub) checkHeartbeat() {
 		}
 
 		if now.Sub(lastActive) > timeoutDuration {
-			h.logger.LogConnection(client.ID, client.UserID, "heartbeat_timeout")
+			h.logger.WarnKV("心跳超时", "client_id", client.ID, "user_id", client.UserID, "last_heartbeat", client.LastHeartbeat)
 
 			// 调用心跳超时回调函数
 			if h.heartbeatTimeoutHandler != nil {
@@ -2276,7 +1583,7 @@ func (h *Hub) checkHeartbeat() {
 	h.sseMutex.Lock()
 	for userID, conn := range h.sseClients {
 		if now.Sub(conn.LastActive) > time.Duration(h.safeConfig.GetInt("SSETimeout", 120))*time.Second {
-			h.logger.LogConnection("sse_"+userID, userID, "sse_timeout")
+			h.logger.WarnKV("SSE连接超时", "user_id", userID, "last_heartbeat", conn.LastActive)
 			close(conn.CloseCh)
 			delete(h.sseClients, userID)
 			timeoutSSE++
@@ -2467,35 +1774,6 @@ func (h *Hub) GetClientsCount() int {
 	return len(h.clients)
 }
 
-// GetOnlineUsersByType 获取特定类型的在线用户
-func (h *Hub) GetOnlineUsersByType(userType UserType) []string {
-	h.mutex.RLock()
-	defer h.mutex.RUnlock()
-
-	users := make([]string, 0)
-	for _, client := range h.clients {
-		if client.UserType == userType {
-			users = append(users, client.UserID)
-		}
-	}
-	return users
-}
-
-// IsUserOnline 检查用户是否在线
-func (h *Hub) IsUserOnline(userID string) bool {
-	h.mutex.RLock()
-	defer h.mutex.RUnlock()
-
-	if _, exists := h.userToClient[userID]; exists {
-		return true
-	}
-
-	h.sseMutex.RLock()
-	defer h.sseMutex.RUnlock()
-	_, exists := h.sseClients[userID]
-	return exists
-}
-
 // GetUserStatus 获取用户状态
 func (h *Hub) GetUserStatus(userID string) UserStatus {
 	h.mutex.RLock()
@@ -2587,12 +1865,20 @@ func (h *Hub) GetDetailedStats() *HubStats {
 		WebSocketClients: wsCount,
 		SSEClients:       sseCount,
 		AgentConnections: agentCount,
-		MessagesSent:     h.messagesSent.Load(),
-		MessagesReceived: h.messagesReceived.Load(),
-		BroadcastsSent:   h.broadcastsSent.Load(),
 		QueuedMessages:   len(h.pendingMessages),
 		OnlineUsers:      h.GetOnlineUsersCount(),
 		Uptime:           h.GetUptime(),
+	}
+
+	// 从 Redis 获取统计数据
+	if h.statsRepo != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if nodeStats, err := h.statsRepo.GetNodeStats(ctx, h.nodeID); err == nil && nodeStats != nil {
+			stats.MessagesSent = nodeStats.MessagesSent
+			stats.MessagesReceived = nodeStats.MessagesReceived
+			stats.BroadcastsSent = nodeStats.BroadcastsSent
+		}
 	}
 
 	return stats
@@ -2600,10 +1886,19 @@ func (h *Hub) GetDetailedStats() *HubStats {
 
 // GetUptime 获取Hub运行时间（秒）
 func (h *Hub) GetUptime() int64 {
-	if h.startTime == 0 {
+	if h.statsRepo == nil {
 		return 0
 	}
-	return time.Now().Unix() - h.startTime
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	nodeStats, err := h.statsRepo.GetNodeStats(ctx, h.nodeID)
+	if err != nil || nodeStats == nil || nodeStats.StartTime == 0 {
+		return 0
+	}
+
+	return time.Now().Unix() - nodeStats.StartTime
 }
 
 // GetMessageQueue 获取消息队列长度
@@ -2754,7 +2049,7 @@ func (h *Hub) KickOffUser(userID string, reason string) int {
 	)
 
 	for _, client := range clients {
-		h.logger.LogConnection(client.ID, userID, "kicked_off")
+		h.logger.InfoKV("客户端被踢下线", "client_id", client.ID, "user_id", userID)
 		if client.Conn != nil {
 			client.Conn.Close()
 		}
@@ -2793,7 +2088,7 @@ func (h *Hub) LimitUserConnections(userID string, maxConnections int) int {
 	// 保留最新的连接，断开旧的
 	kicked := 0
 	for i := 0; i < len(clients)-maxConnections; i++ {
-		h.logger.LogConnection(clients[i].ID, userID, "connection_limited")
+		h.logger.WarnKV("连接数限制踢下线", "client_id", clients[i].ID, "user_id", userID, "kicked_index", i)
 		if clients[i].Conn != nil {
 			clients[i].Conn.Close()
 			kicked++
@@ -2989,15 +2284,11 @@ func (h *Hub) GetHubHealth() map[string]interface{} {
 	isShutdown := h.shutdown.Load()
 
 	return map[string]interface{}{
-		"status":             "healthy",
-		"is_running":         !isShutdown,
-		"websocket_count":    wsCount,
-		"sse_count":          sseCount,
-		"total_connections":  wsCount + sseCount,
-		"messages_sent":      h.messagesSent.Load(),
-		"messages_received":  h.messagesReceived.Load(),
-		"active_connections": h.activeConnections.Load(),
-		"total_lifetime":     h.totalConnections.Load(),
+		"status":            "healthy",
+		"is_running":        !isShutdown,
+		"websocket_count":   wsCount,
+		"sse_count":         sseCount,
+		"total_connections": wsCount + sseCount,
 	}
 }
 
@@ -3039,10 +2330,20 @@ func (h *Hub) BroadcastPriority(ctx context.Context, msg *HubMessage, priority P
 
 // GetMessageStatisticsDetailed 获取详细的消息统计
 func (h *Hub) GetMessageStatisticsDetailed() map[string]interface{} {
-	stats := h.GetMessageStatistics()
+	// 如果设置了消息记录仓库，获取数据库统计
+	var messageStats interface{}
+	if h.messageRecordRepo != nil {
+		if dbStats, err := h.GetMessageRecordStatistics(); err == nil {
+			messageStats = dbStats
+		} else {
+			messageStats = map[string]interface{}{"error": err.Error()}
+		}
+	} else {
+		messageStats = map[string]interface{}{"enabled": false}
+	}
 
 	return map[string]interface{}{
-		"message_stats": stats,
+		"message_stats": messageStats,
 		"hub_health":    h.GetHubHealth(),
 		"agent_stats":   h.GetAgentStats(),
 	}
@@ -3195,84 +2496,6 @@ func (h *Hub) UpgradeVIPLevel(userID string, newLevel VIPLevel) bool {
 	return false
 }
 
-// ============================================================================
-// 增强功能实现
-// ============================================================================
-
-// InitializeEnhancements 初始化增强功能
-func (h *Hub) InitializeEnhancements() {
-	h.messageRouter = NewMessageRouter()
-	h.loadBalancer = NewLoadBalancer(RoundRobin)
-	h.smartQueue = NewSmartQueue(1000)
-	h.monitor = NewHubMonitor()
-	h.clusterManager = NewClusterManager(h.nodeID)
-	h.ruleEngine = NewRuleEngine()
-	h.circuitBreaker = NewCircuitBreaker("hub-main", 10, 5, 30*time.Second)
-	h.messageFilter = NewMessageFilter()
-	h.performanceTracker = NewPerformanceTracker(10000)
-}
-
-// SendWithEnhancement 使用增强功能发送消息
-func (h *Hub) SendWithEnhancement(ctx context.Context, userID string, msg *HubMessage) error {
-	span := h.performanceTracker.StartSpan("send_enhanced_message")
-	defer span.End()
-
-	// 断路器检查
-	if !h.circuitBreaker.AllowRequest() {
-		return ErrCircuitBreakerOpen
-	}
-
-	// 消息过滤
-	if !h.messageFilter.Allow(msg) {
-		return ErrMessageFiltered
-	}
-
-	// 规则引擎处理
-	variables := map[string]interface{}{
-		"userID":  userID,
-		"message": msg,
-		"hub":     h,
-	}
-	if err := h.ruleEngine.Process(variables); err != nil {
-		h.circuitBreaker.RecordFailure()
-		return err
-	}
-
-	// 智能路由
-	client := h.userToClient[userID]
-	if client != nil {
-		if err := h.messageRouter.Route(msg, client); err != nil {
-			h.circuitBreaker.RecordFailure()
-			return err
-		}
-	}
-
-	// 加入智能队列
-	if err := h.smartQueue.Enqueue(msg); err != nil {
-		h.circuitBreaker.RecordFailure()
-		return err
-	}
-
-	h.circuitBreaker.RecordSuccess()
-	return nil
-}
-
-// SendWithLoadBalance 使用负载均衡发送到客服
-func (h *Hub) SendWithLoadBalance(ctx context.Context, msg *HubMessage) error {
-	agent := h.loadBalancer.SelectAgent()
-	if agent == nil {
-		return ErrNoAvailableAgents
-	}
-
-	return h.SendToUser(ctx, agent.UserID, msg)
-}
-
-// BroadcastWithPriority 按优先级广播消息
-func (h *Hub) BroadcastWithPriority(ctx context.Context, msg *HubMessage) error {
-	// 根据消息优先级选择队列
-	return h.smartQueue.Enqueue(msg)
-}
-
 // SendToVIPWithPriority 根据VIP等级优先发送
 func (h *Hub) SendToVIPWithPriority(ctx context.Context, vipLevel VIPLevel, msg *HubMessage) int {
 	// VIP消息优先级更高
@@ -3285,452 +2508,6 @@ func (h *Hub) SendToVIPWithPriority(ctx context.Context, vipLevel VIPLevel, msg 
 	return h.SendConditional(ctx, func(c *Client) bool {
 		return c.VIPLevel.GetLevel() >= vipLevel.GetLevel()
 	}, msg)
-}
-
-// GetEnhancedMetrics 获取增强指标
-func (h *Hub) GetEnhancedMetrics() map[string]interface{} {
-	return map[string]interface{}{
-		"hub_metrics":         h.GetMessageStatistics(),
-		"queue_metrics":       h.smartQueue.GetMetrics(),
-		"monitor_metrics":     h.monitor.GetMetrics(),
-		"circuit_breaker":     h.circuitBreaker.GetState(),
-		"performance_samples": h.performanceTracker.GetSamples(),
-		"cluster_status":      h.clusterManager.GetStatus(),
-	}
-}
-
-// AddRule 添加业务规则
-func (h *Hub) AddRule(rule Rule) {
-	h.ruleEngine.AddRule(rule)
-}
-
-// AddFilter 添加消息过滤器
-func (h *Hub) AddFilter(filter Filter) {
-	h.messageFilter.AddFilter(filter)
-}
-
-// SetRateLimit 设置速率限制
-func (h *Hub) SetRateLimit(userID string, limit int, window time.Duration) {
-	h.messageFilter.SetRateLimit(userID, limit, window)
-}
-
-// ProcessHealthCheck 执行健康检查
-func (h *Hub) ProcessHealthCheck() map[string]error {
-	return h.monitor.RunHealthChecks()
-}
-
-// GetAlerts 获取警报
-func (h *Hub) GetAlerts() []Alert {
-	return h.monitor.GetAlerts()
-}
-
-// ============================================================================
-// 构造函数
-// ============================================================================
-
-// NewMessageRouter 创建消息路由器
-func NewMessageRouter() *MessageRouter {
-	return &MessageRouter{
-		routes: make(map[MessageType][]RouteRule),
-		defaultRoute: RouteRule{
-			Name: "default",
-			Handler: func(msg *HubMessage, client *Client) error {
-				return nil
-			},
-		},
-	}
-}
-
-// NewLoadBalancer 创建负载均衡器
-func NewLoadBalancer(algorithm LoadBalanceAlgorithm) *LoadBalancer {
-	return &LoadBalancer{
-		algorithm: algorithm,
-		agents:    make([]*Client, 0),
-	}
-}
-
-// NewSmartQueue 创建智能队列
-func NewSmartQueue(maxSize int) *SmartQueue {
-	return &SmartQueue{
-		highPriorityQueue: make(chan *HubMessage, maxSize/4),
-		normalQueue:       make(chan *HubMessage, maxSize/2),
-		lowPriorityQueue:  make(chan *HubMessage, maxSize/4),
-		vipQueue:          make(chan *HubMessage, maxSize/4),
-		maxSize:           maxSize,
-		metrics:           &QueueMetrics{},
-	}
-}
-
-// NewHubMonitor 创建监控系统
-func NewHubMonitor() *HubMonitor {
-	return &HubMonitor{
-		metrics:      &MonitorMetrics{},
-		alerts:       make([]Alert, 0),
-		healthChecks: make(map[string]HealthCheck),
-		alertChannel: make(chan Alert, 100),
-	}
-}
-
-// NewClusterManager 创建集群管理器
-func NewClusterManager(nodeID string) *ClusterManager {
-	return &ClusterManager{
-		nodes:     make(map[string]*NodeInfo),
-		leader:    "",
-		isLeader:  false,
-		heartbeat: 30 * time.Second,
-		election: &Election{
-			candidates: make(map[string]*Candidate),
-			votes:      make(map[string]string),
-		},
-	}
-}
-
-// NewRuleEngine 创建规则引擎
-func NewRuleEngine() *RuleEngine {
-	return &RuleEngine{
-		rules:     make([]Rule, 0),
-		rulesets:  make(map[string][]Rule),
-		variables: make(map[string]interface{}),
-	}
-}
-
-// NewCircuitBreaker 创建熔断器
-func NewCircuitBreaker(name string, failureThreshold, successThreshold int, timeout time.Duration) *CircuitBreaker {
-	return &CircuitBreaker{
-		name:             name,
-		state:            CircuitClosed,
-		failureThreshold: failureThreshold,
-		successThreshold: successThreshold,
-		timeout:          timeout,
-	}
-}
-
-// NewMessageFilter 创建消息过滤器
-func NewMessageFilter() *MessageFilter {
-	return &MessageFilter{
-		filters:   make([]Filter, 0),
-		whitelist: make(map[string]bool),
-		blacklist: make(map[string]bool),
-		rateLimit: make(map[string]*RateLimit),
-	}
-}
-
-// NewPerformanceTracker 创建性能追踪器
-func NewPerformanceTracker(maxSamples int) *PerformanceTracker {
-	return &PerformanceTracker{
-		spans:      make(map[string]*Span),
-		samples:    make([]Sample, 0),
-		maxSamples: maxSamples,
-	}
-}
-
-// ============================================================================
-// 增强功能方法实现
-// ============================================================================
-
-// MessageRouter methods
-func (mr *MessageRouter) Route(msg *HubMessage, client *Client) error {
-	mr.mutex.RLock()
-	defer mr.mutex.RUnlock()
-
-	if rules, exists := mr.routes[msg.MessageType]; exists {
-		for _, rule := range rules {
-			if rule.Condition(msg, client) {
-				return rule.Handler(msg, client)
-			}
-		}
-	}
-
-	return mr.defaultRoute.Handler(msg, client)
-}
-
-// LoadBalancer methods
-func (lb *LoadBalancer) SelectAgent() *Client {
-	lb.mutex.RLock()
-	defer lb.mutex.RUnlock()
-
-	if len(lb.agents) == 0 {
-		return nil
-	}
-
-	switch lb.algorithm {
-	case RoundRobin:
-		agent := lb.agents[lb.current%len(lb.agents)]
-		lb.current++
-		return agent
-	case LeastConnections:
-		// 选择连接数最少的客服
-		var selected *Client
-		minConnections := int(^uint(0) >> 1) // Max int
-		for _, agent := range lb.agents {
-			if connections := agent.MaxTickets; connections < minConnections {
-				minConnections = connections
-				selected = agent
-			}
-		}
-		return selected
-	default:
-		return lb.agents[0]
-	}
-}
-
-// SmartQueue methods
-func (sq *SmartQueue) Enqueue(msg *HubMessage) error {
-	sq.mutex.Lock()
-	defer sq.mutex.Unlock()
-
-	var targetQueue chan *HubMessage
-
-	// 根据消息类型和优先级选择队列
-	switch {
-	case msg.Priority == PriorityHigh:
-		targetQueue = sq.highPriorityQueue
-		sq.metrics.CurrentHigh.Add(1)
-	case msg.MessageType == MessageTypeAlert || msg.MessageType == MessageTypeSystem:
-		targetQueue = sq.vipQueue
-		sq.metrics.CurrentVIP.Add(1)
-	case msg.Priority == PriorityLow:
-		targetQueue = sq.lowPriorityQueue
-		sq.metrics.CurrentLow.Add(1)
-	default:
-		targetQueue = sq.normalQueue
-		sq.metrics.CurrentNormal.Add(1)
-	}
-
-	select {
-	case targetQueue <- msg:
-		sq.metrics.TotalEnqueued.Add(1)
-		return nil
-	default:
-		return ErrQueueFull
-	}
-}
-
-func (sq *SmartQueue) GetMetrics() *QueueMetrics {
-	return sq.metrics
-}
-
-// CircuitBreaker methods
-func (cb *CircuitBreaker) AllowRequest() bool {
-	cb.mutex.Lock()
-	defer cb.mutex.Unlock()
-
-	switch cb.state {
-	case CircuitClosed:
-		return true
-	case CircuitOpen:
-		if time.Since(cb.lastFailTime) > cb.timeout {
-			cb.state = CircuitHalfOpen
-			cb.successCount = 0
-			return true
-		}
-		return false
-	case CircuitHalfOpen:
-		return true
-	default:
-		return false
-	}
-}
-
-func (cb *CircuitBreaker) RecordSuccess() {
-	cb.mutex.Lock()
-	defer cb.mutex.Unlock()
-
-	cb.failureCount = 0
-	if cb.state == CircuitHalfOpen {
-		cb.successCount++
-		if cb.successCount >= cb.successThreshold {
-			cb.state = CircuitClosed
-		}
-	}
-}
-
-func (cb *CircuitBreaker) RecordFailure() {
-	cb.mutex.Lock()
-	defer cb.mutex.Unlock()
-
-	cb.failureCount++
-	cb.lastFailTime = time.Now()
-
-	if cb.state == CircuitClosed && cb.failureCount >= cb.failureThreshold {
-		cb.state = CircuitOpen
-	} else if cb.state == CircuitHalfOpen {
-		cb.state = CircuitOpen
-	}
-}
-
-func (cb *CircuitBreaker) GetState() map[string]interface{} {
-	cb.mutex.RLock()
-	defer cb.mutex.RUnlock()
-
-	return map[string]interface{}{
-		"name":          cb.name,
-		"state":         cb.state,
-		"failure_count": cb.failureCount,
-		"success_count": cb.successCount,
-		"last_fail":     cb.lastFailTime,
-	}
-}
-
-// MessageFilter methods
-func (mf *MessageFilter) Allow(msg *HubMessage) bool {
-	mf.mutex.RLock()
-	defer mf.mutex.RUnlock()
-
-	// 黑名单检查
-	if mf.blacklist[msg.Sender] {
-		return false
-	}
-
-	// 白名单检查
-	if len(mf.whitelist) > 0 && !mf.whitelist[msg.Sender] {
-		return false
-	}
-
-	// 速率限制检查
-	if rateLimit, exists := mf.rateLimit[msg.Sender]; exists {
-		if !rateLimit.Allow() {
-			return false
-		}
-	}
-
-	// 过滤器检查
-	for _, filter := range mf.filters {
-		if filter.Condition(msg) {
-			switch filter.Action {
-			case FilterDeny:
-				return false
-			case FilterAllow:
-				return true
-			}
-		}
-	}
-
-	return true
-}
-
-func (mf *MessageFilter) AddFilter(filter Filter) {
-	mf.mutex.Lock()
-	defer mf.mutex.Unlock()
-	mf.filters = append(mf.filters, filter)
-}
-
-func (mf *MessageFilter) SetRateLimit(userID string, limit int, window time.Duration) {
-	mf.mutex.Lock()
-	defer mf.mutex.Unlock()
-	mf.rateLimit[userID] = &RateLimit{
-		Limit:     limit,
-		Window:    window,
-		LastReset: time.Now(),
-	}
-}
-
-// RateLimit methods
-func (rl *RateLimit) Allow() bool {
-	rl.mutex.Lock()
-	defer rl.mutex.Unlock()
-
-	now := time.Now()
-	if now.Sub(rl.LastReset) > rl.Window {
-		rl.Counter = 0
-		rl.LastReset = now
-	}
-
-	if rl.Counter < rl.Limit {
-		rl.Counter++
-		return true
-	}
-
-	return false
-}
-
-// RuleEngine methods
-func (re *RuleEngine) AddRule(rule Rule) {
-	re.mutex.Lock()
-	defer re.mutex.Unlock()
-	re.rules = append(re.rules, rule)
-}
-
-func (re *RuleEngine) Process(variables map[string]interface{}) error {
-	re.mutex.RLock()
-	defer re.mutex.RUnlock()
-
-	for _, rule := range re.rules {
-		if rule.Enabled && rule.Condition(variables) {
-			if err := rule.Action(variables); err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
-}
-
-// HubMonitor methods
-func (hm *HubMonitor) GetMetrics() *MonitorMetrics {
-	hm.mutex.RLock()
-	defer hm.mutex.RUnlock()
-	return hm.metrics
-}
-
-func (hm *HubMonitor) GetAlerts() []Alert {
-	hm.mutex.RLock()
-	defer hm.mutex.RUnlock()
-	return hm.alerts
-}
-
-func (hm *HubMonitor) RunHealthChecks() map[string]error {
-	hm.mutex.RLock()
-	defer hm.mutex.RUnlock()
-
-	results := make(map[string]error)
-	for name, check := range hm.healthChecks {
-		results[name] = check.Check()
-	}
-
-	return results
-}
-
-// ClusterManager methods
-func (cm *ClusterManager) GetStatus() map[string]interface{} {
-	cm.mutex.RLock()
-	defer cm.mutex.RUnlock()
-
-	return map[string]interface{}{
-		"nodes":     len(cm.nodes),
-		"leader":    cm.leader,
-		"is_leader": cm.isLeader,
-		"heartbeat": cm.heartbeat,
-	}
-}
-
-// PerformanceTracker methods
-func (pt *PerformanceTracker) StartSpan(name string) *Span {
-	span := &Span{
-		ID:        fmt.Sprintf("%d", time.Now().UnixNano()),
-		Name:      name,
-		StartTime: time.Now(),
-		Tags:      make(map[string]string),
-		Children:  make([]*Span, 0),
-	}
-
-	pt.mutex.Lock()
-	pt.spans[span.ID] = span
-	pt.mutex.Unlock()
-
-	return span
-}
-
-func (pt *PerformanceTracker) GetSamples() []Sample {
-	pt.mutex.RLock()
-	defer pt.mutex.RUnlock()
-	return pt.samples
-}
-
-// Span methods
-func (s *Span) End() {
-	s.EndTime = time.Now()
-	s.Duration = s.EndTime.Sub(s.StartTime)
 }
 
 // 安全的查询方法，用于测试和监控
@@ -3786,350 +2563,6 @@ func (h *Hub) HasAgentClient(userID string) bool {
 	return exists
 }
 
-// initLogger 根据配置初始化日志器
-func initLogger(config *wscconfig.WSC) WSCLogger {
-	// 如果配置中有日志配置且启用，使用配置中的
-	if config.Logging != nil && config.Logging.Enabled {
-		// 转换配置到 go-logger 的配置
-		loggerConfig := logger.DefaultConfig().
-			WithLevel(parseLogLevel(config.Logging.Level)).
-			WithPrefix("[WSC] ").
-			WithShowCaller(false).
-			WithColorful(true).
-			WithTimeFormat(time.DateTime)
-
-		// 根据输出类型配置输出
-		switch config.Logging.Output {
-		case "file":
-			if config.Logging.FilePath != "" {
-				// 根据是否需要轮转决定使用哪种文件写入器
-				if config.Logging.MaxSize > 0 && config.Logging.MaxBackups > 0 {
-					// 使用轮转文件写入器
-					rotateWriter := logger.NewRotateWriter(
-						config.Logging.FilePath,
-						int64(config.Logging.MaxSize)*1024*1024, // 转换为字节
-						config.Logging.MaxBackups,
-					)
-					loggerConfig = loggerConfig.WithOutput(rotateWriter)
-				} else {
-					// 使用简单文件写入器
-					fileWriter := logger.NewFileWriter(config.Logging.FilePath)
-					loggerConfig = loggerConfig.WithOutput(fileWriter)
-				}
-			}
-		default:
-			// 默认使用控制台输出
-			loggerConfig = loggerConfig.WithOutput(logger.NewConsoleWriter(os.Stdout))
-		}
-
-		wscLogger := NewWSCLogger(loggerConfig)
-
-		// 配置 WebSocket 上下文提取器
-		if adapter, ok := wscLogger.(*WSCLoggerAdapter); ok {
-			if ultraLogger, ok := adapter.ILogger.(*logger.UltraFastLogger); ok {
-				ultraLogger.SetContextExtractor(logger.GetPresetExtractor(logger.PresetExtractorWebSocket))
-			}
-		}
-
-		return wscLogger
-	}
-
-	// 使用默认配置
-	defaultLogger := NewDefaultWSCLogger()
-
-	// 配置 WebSocket 上下文提取器
-	if adapter, ok := defaultLogger.(*WSCLoggerAdapter); ok {
-		if ultraLogger, ok := adapter.ILogger.(*logger.UltraFastLogger); ok {
-			ultraLogger.SetContextExtractor(logger.GetPresetExtractor(logger.PresetExtractorWebSocket))
-		}
-	}
-
-	return defaultLogger
-}
-
-// parseLogLevel 解析日志级别字符串
-func parseLogLevel(level string) logger.LogLevel {
-	switch level {
-	case "debug", "DEBUG":
-		return logger.DEBUG
-	case "info", "INFO":
-		return logger.INFO
-	case "warn", "WARN", "warning", "WARNING":
-		return logger.WARN
-	case "error", "ERROR":
-		return logger.ERROR
-	case "fatal", "FATAL":
-		return logger.FATAL
-	default:
-		return logger.INFO // 默认级别
-	}
-}
-
-// GetAdvancedMetrics 获取高级指标信息
-func (h *Hub) GetAdvancedMetrics() *AdvancedMetrics {
-	if h.metricsCollector == nil {
-		return nil
-	}
-
-	metrics := h.metricsCollector.GetCurrentMetrics()
-	return &metrics
-}
-
-// GetMetricsHistory 获取指标历史
-func (h *Hub) GetMetricsHistory() []AdvancedMetrics {
-	if h.metricsCollector == nil {
-		return nil
-	}
-
-	return h.metricsCollector.GetHistory()
-}
-
-// EnableMetrics 启用指标收集
-func (h *Hub) EnableMetrics() {
-	if h.metricsCollector != nil {
-		h.metricsCollector.Enable()
-	}
-}
-
-// DisableMetrics 禁用指标收集
-func (h *Hub) DisableMetrics() {
-	if h.metricsCollector != nil {
-		h.metricsCollector.Disable()
-	}
-}
-
-// recordMessageLatency 记录消息延迟
-func (h *Hub) recordMessageLatency(startTime time.Time) {
-	if h.metricsCollector != nil {
-		latency := time.Since(startTime)
-		h.metricsCollector.RecordLatency(latency)
-	}
-}
-
-// ========== 内存防护相关方法 ==========
-
-// GetMemoryStats 获取内存统计信息
-func (h *Hub) GetMemoryStats() map[string]interface{} {
-	if h.memoryGuard == nil {
-		return nil
-	}
-	return h.memoryGuard.GetMemoryStats()
-}
-
-// SetMemoryLimit 设置内存限制
-func (h *Hub) SetMemoryLimit(limitMB int64) {
-	if h.memoryGuard != nil {
-		h.memoryGuard.SetMemoryLimit(limitMB)
-	}
-}
-
-// ForceMemoryCleanup 强制执行内存清理
-func (h *Hub) ForceMemoryCleanup() {
-	if h.memoryGuard != nil {
-		h.memoryGuard.ForceCleanup()
-	}
-}
-
-// EnableMemoryGuard 启用内存防护
-func (h *Hub) EnableMemoryGuard() {
-	if h.memoryGuard != nil {
-		h.memoryGuard.Enable()
-	}
-}
-
-// DisableMemoryGuard 禁用内存防护
-func (h *Hub) DisableMemoryGuard() {
-	if h.memoryGuard != nil {
-		h.memoryGuard.Disable()
-	}
-}
-
-// IsMemoryGuardEnabled 检查内存防护是否启用
-func (h *Hub) IsMemoryGuardEnabled() bool {
-	if h.memoryGuard == nil {
-		return false
-	}
-	return h.memoryGuard.IsEnabled()
-}
-
-// ========== 错误恢复相关方法 ==========
-
-// ReportError 报告错误
-func (h *Hub) ReportError(errorType ErrorType, severity ErrorSeverity, message string, context map[string]interface{}) string {
-	if h.errorRecovery == nil {
-		return ""
-	}
-	return h.errorRecovery.ReportError(errorType, severity, message, context)
-}
-
-// GetErrorHistory 获取错误历史
-func (h *Hub) GetErrorHistory() map[string]*ErrorEntry {
-	if h.errorRecovery == nil {
-		return nil
-	}
-	return h.errorRecovery.GetErrorHistory()
-}
-
-// GetCircuitBreakerStates 获取熔断器状态
-func (h *Hub) GetCircuitBreakerStates() map[ErrorType]CircuitState {
-	if h.errorRecovery == nil {
-		return nil
-	}
-	return h.errorRecovery.GetCircuitBreakerStates()
-}
-
-// GetErrorRecoveryStatistics 获取错误恢复统计信息
-func (h *Hub) GetErrorRecoveryStatistics() map[string]interface{} {
-	if h.errorRecovery == nil {
-		return nil
-	}
-	return h.errorRecovery.GetStatistics()
-}
-
-// SetErrorRecoveryRetryConfig 设置错误恢复重试配置
-func (h *Hub) SetErrorRecoveryRetryConfig(maxRetries int, interval time.Duration, backoffMultiple float64) {
-	if h.errorRecovery != nil {
-		h.errorRecovery.SetRetryConfig(maxRetries, interval, backoffMultiple)
-	}
-}
-
-// SetCircuitBreakerConfig 设置熔断器配置
-func (h *Hub) SetCircuitBreakerConfig(errorType ErrorType, failureThreshold, successThreshold int64, timeout time.Duration) {
-	if h.errorRecovery != nil {
-		h.errorRecovery.SetCircuitBreakerConfig(errorType, failureThreshold, successThreshold, timeout)
-	}
-}
-
-// EnableErrorRecovery 启用错误恢复
-func (h *Hub) EnableErrorRecovery() {
-	if h.errorRecovery != nil {
-		h.errorRecovery.Enable()
-	}
-}
-
-// DisableErrorRecovery 禁用错误恢复
-func (h *Hub) DisableErrorRecovery() {
-	if h.errorRecovery != nil {
-		h.errorRecovery.Disable()
-	}
-}
-
-// IsErrorRecoveryEnabled 检查错误恢复是否启用
-func (h *Hub) IsErrorRecoveryEnabled() bool {
-	if h.errorRecovery == nil {
-		return false
-	}
-	return h.errorRecovery.IsEnabled()
-}
-
-// AddRecoveryStrategy 添加自定义恢复策略
-func (h *Hub) AddRecoveryStrategy(strategy RecoveryStrategy) {
-	if h.errorRecovery != nil {
-		h.errorRecovery.AddRecoveryStrategy(strategy)
-	}
-}
-
-// ========== 配置验证相关方法 ==========
-
-// ValidateConfig 验证当前配置
-func (h *Hub) ValidateConfig() []ValidationResult {
-	if h.configValidator == nil {
-		return nil
-	}
-	return h.configValidator.Validate(h.config)
-}
-
-// GetConfigValidationReport 获取配置验证报告
-func (h *Hub) GetConfigValidationReport() string {
-	if h.configValidator == nil {
-		return "配置验证器未初始化"
-	}
-	return h.configValidator.ValidateAndReport(h.config)
-}
-
-// AutoFixConfig 自动修复配置问题
-func (h *Hub) AutoFixConfig() ([]ValidationResult, error) {
-	if h.configValidator == nil {
-		return nil, errorx.NewError(ErrTypeConfigValidatorNotInitialized)
-	}
-	return h.configValidator.AutoFix(h.config)
-}
-
-// AddValidationRule 添加自定义验证规则
-func (h *Hub) AddValidationRule(rule ValidationRule) {
-	if h.configValidator != nil {
-		h.configValidator.AddRule(rule)
-	}
-}
-
-// ============ 安全管理器公共API ============
-
-// GetSecurityStats 获取安全统计信息
-func (h *Hub) GetSecurityStats() SecurityStats {
-	if h.securityManager == nil {
-		return SecurityStats{}
-	}
-	return h.securityManager.GetSecurityStats()
-}
-
-// GetSecurityEvents 获取安全事件列表
-func (h *Hub) GetSecurityEvents(limit int) []SecurityEvent {
-	if h.securityManager == nil {
-		return nil
-	}
-	return h.securityManager.GetSecurityEvents(limit)
-}
-
-// GenerateSecurityReport 生成安全报告
-func (h *Hub) GenerateSecurityReport() string {
-	if h.securityManager == nil {
-		return "安全管理器未启用"
-	}
-	return h.securityManager.GenerateSecurityReport()
-}
-
-// AddSecurityAccessRule 添加访问规则
-func (h *Hub) AddSecurityAccessRule(rule *AccessRule) {
-	if h.securityManager != nil {
-		h.securityManager.AddAccessRule(rule)
-	}
-}
-
-// RemoveSecurityAccessRule 移除访问规则
-func (h *Hub) RemoveSecurityAccessRule(ruleID string) {
-	if h.securityManager != nil {
-		h.securityManager.RemoveAccessRule(ruleID)
-	}
-}
-
-// AddSecurityThreatPattern 添加威胁模式
-func (h *Hub) AddSecurityThreatPattern(pattern *ThreatPattern) {
-	if h.securityManager != nil {
-		h.securityManager.AddThreatPattern(pattern)
-	}
-}
-
-// RemoveSecurityThreatPattern 移除威胁模式
-func (h *Hub) RemoveSecurityThreatPattern(patternID string) {
-	if h.securityManager != nil {
-		h.securityManager.RemoveThreatPattern(patternID)
-	}
-}
-
-// AddToSecurityWhitelist 添加IP到白名单
-func (h *Hub) AddToSecurityWhitelist(ip string) {
-	if h.securityManager != nil {
-		h.securityManager.AddToWhitelist(ip)
-	}
-}
-
-// AddToSecurityBlacklist 添加IP到黑名单
-func (h *Hub) AddToSecurityBlacklist(ip string) {
-	if h.securityManager != nil {
-		h.securityManager.AddToBlacklist(ip)
-	}
-}
-
 // ============================================================================
 // 回调注册方法 - Hub 级别的事件回调 (统一管理所有 OnXxx 方法)
 // ============================================================================
@@ -4154,96 +2587,382 @@ func (h *Hub) OnHeartbeatTimeout(callback HeartbeatTimeoutCallback) {
 	h.heartbeatTimeoutHandler = callback
 }
 
-// OnSecurityEvent 注册安全事件处理器
-// 当发生安全相关事件时会调用此回调
-//
+// IsUserOnline 检查用户是否在线（从 Redis 查询)
 // 参数:
-//   - handler: 安全事件处理函数，接收 SecurityEvent 参数
+//   - userID: 用户ID
 //
-// 示例:
+// 返回:
+//   - bool: 是否在线
+//   - error: 错误信息
+func (h *Hub) IsUserOnline(userID string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return h.onlineStatusRepo.IsOnline(ctx, userID)
+}
+
+// GetUserOnlineInfo 获取用户在线信息
+// 参数:
+//   - userID: 用户ID
 //
-//	hub.OnSecurityEvent(func(event SecurityEvent) {
-//	    log.Printf("安全事件: %v", event)
-//	})
-func (h *Hub) OnSecurityEvent(handler func(SecurityEvent)) {
-	if h.securityManager != nil {
-		h.securityManager.OnSecurityEvent(handler)
+// 返回:
+//   - *OnlineClientInfo: 在线信息
+//   - error: 错误信息
+func (h *Hub) GetUserOnlineInfo(userID string) (*OnlineClientInfo, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return h.onlineStatusRepo.GetOnlineInfo(ctx, userID)
+}
+
+// GetAllOnlineUserIDs 获取所有在线用户ID列表
+// 返回:
+//   - []string: 用户ID列表
+//   - error: 错误信息
+func (h *Hub) GetAllOnlineUserIDs() ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return h.onlineStatusRepo.GetAllOnlineUsers(ctx)
+}
+
+// GetOnlineUsersByNode 获取指定节点的在线用户
+// 参数:
+//   - nodeID: 节点ID
+//
+// 返回:
+//   - []string: 用户ID列表
+//   - error: 错误信息
+func (h *Hub) GetOnlineUsersByNode(nodeID string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return h.onlineStatusRepo.GetOnlineUsersByNode(ctx, nodeID)
+}
+
+// GetOnlineUsersByType 根据用户类型获取在线用户
+// 参数:
+//   - userType: 用户类型
+//
+// 返回:
+//   - []string: 用户ID列表
+//   - error: 错误信息
+func (h *Hub) GetOnlineUsersByType(userType UserType) ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return h.onlineStatusRepo.GetOnlineUsersByType(ctx, userType)
+}
+
+// GetOnlineUserCount 获取在线用户总数
+// 返回:
+//   - int64: 在线用户数量
+//   - error: 错误信息
+func (h *Hub) GetOnlineUserCount() (int64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return h.onlineStatusRepo.GetOnlineCount(ctx)
+}
+
+// UpdateUserHeartbeat 更新用户心跳时间
+// 参数:
+//   - userID: 用户ID
+//
+// 返回:
+//   - error: 错误信息
+func (h *Hub) UpdateUserHeartbeat(userID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return h.onlineStatusRepo.UpdateHeartbeat(ctx, userID)
+}
+
+// SyncOnlineStatusToRedis 同步当前所有在线用户到 Redis
+// 用于 Hub 启动时或定期同步
+func (h *Hub) SyncOnlineStatusToRedis() error {
+	h.mutex.RLock()
+	clients := make(map[string]*Client, len(h.clients))
+	for id, client := range h.clients {
+		clients[id] = client
 	}
+	h.mutex.RUnlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	users := make(map[string]*OnlineClientInfo, len(clients))
+	for _, client := range clients {
+		users[client.UserID] = &OnlineClientInfo{
+			ClientID:      client.ID,
+			UserID:        client.UserID,
+			UserType:      client.UserType,
+			NodeID:        h.nodeID,
+			NodeIP:        h.config.NodeIP,
+			ClientIP:      client.ClientIP,
+			ConnectTime:   time.Now(),
+			LastSeen:      client.LastSeen,
+			LastHeartbeat: client.LastHeartbeat,
+			ClientType:    client.ClientType,
+			Status:        client.Status,
+			Metadata:      client.Metadata,
+		}
+	}
+
+	return h.onlineStatusRepo.BatchSetOnline(ctx, users, 0)
+}
+
+// recordMessageToDatabase 将消息记录到数据库（内部方法）
+func (h *Hub) recordMessageToDatabase(msg *HubMessage, err error) {
+	// 异步记录，避免阻塞主流程
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				h.logger.ErrorKV("消息记录失败",
+					"message_id", msg.ID,
+					"panic", r,
+				)
+			}
+		}()
+
+		// 确定初始状态
+		status := MessageSendStatusPending
+		failureReason := FailureReason("")
+		errorMsg := ""
+
+		if err != nil {
+			status = MessageSendStatusFailed
+			errorMsg = err.Error()
+
+			// 根据错误类型设置失败原因
+			switch {
+			case IsQueueFullError(err):
+				failureReason = FailureReasonQueueFull
+			case IsUserOfflineError(err):
+				failureReason = FailureReasonUserOffline
+			case IsSendTimeoutError(err):
+				failureReason = FailureReasonSendTimeout
+			case IsAckTimeoutError(err):
+				failureReason = FailureReasonAckTimeout
+			default:
+				failureReason = FailureReasonUnknown
+			}
+		}
+
+		// 获取客户端IP（如果存在）
+		clientIP := ""
+		if msg.Sender != "" {
+			h.mutex.RLock()
+			if client, exists := h.userToClient[msg.Sender]; exists {
+				clientIP = client.ClientIP
+				if clientIP == "" && client.Conn != nil {
+					// 如果ClientIP未设置，从连接中获取
+					if remoteAddr := client.Conn.RemoteAddr(); remoteAddr != nil {
+						clientIP = remoteAddr.String()
+					}
+				}
+			}
+			h.mutex.RUnlock()
+		}
+
+		// 创建消息记录
+		record := &MessageSendRecord{
+			Status:        status,
+			CreateTime:    time.Now(),
+			MaxRetry:      h.config.MaxRetries,
+			FailureReason: failureReason,
+			ErrorMessage:  errorMsg,
+			NodeIP:        h.config.NodeIP, // 记录服务器节点IP
+			ClientIP:      clientIP,        // 记录客户端IP
+		}
+
+		// 设置消息数据
+		if setErr := record.SetMessage(msg); setErr != nil {
+			h.logger.ErrorKV("序列化消息失败",
+				"message_id", msg.ID,
+				"error", setErr,
+			)
+			return
+		}
+
+		// 保存到数据库
+		if createErr := h.messageRecordRepo.Create(record); createErr != nil {
+			h.logger.ErrorKV("保存消息记录失败",
+				"message_id", msg.ID,
+				"error", createErr,
+			)
+		} else {
+			h.logger.DebugKV("消息记录已保存",
+				"message_id", msg.ID,
+				"status", status,
+				"record_id", record.ID,
+			)
+		}
+	}()
 }
 
 // ============================================================================
-// Client 扩展方法 - 获取客户端信息
+// 消息记录查询接口 - 暴露给外部使用
 // ============================================================================
 
-// GetClientIP 获取客户端IP地址
-func (c *Client) GetClientIP() string {
-	// 1. 优先从WebSocket连接直接获取（内置方法）
-	if c.Conn != nil {
-		if remoteAddr := c.Conn.RemoteAddr(); remoteAddr != nil {
-			// 提取IP地址（去除端口号）
-			if host, _, err := net.SplitHostPort(remoteAddr.String()); err == nil {
-				return host
-			}
-			// 如果没有端口号，直接返回
-			return remoteAddr.String()
-		}
+// QueryMessageRecord 查询消息记录
+// 参数:
+//   - messageID: 消息ID
+//
+// 返回:
+//   - *MessageSendRecord: 消息记录
+//   - error: 错误信息
+func (h *Hub) QueryMessageRecord(messageID string) (*MessageSendRecord, error) {
+	if h.messageRecordRepo == nil {
+		return nil, ErrRecordRepositoryNotSet
 	}
-
-	// 2. 备用方案：从Metadata中获取（代理/负载均衡器设置）
-	if c.Metadata != nil {
-		// X-Forwarded-For 或 X-Real-IP 头
-		if ip, ok := c.Metadata["client_ip"].(string); ok && ip != "" {
-			return ip
-		}
-		if ip, ok := c.Metadata["x-forwarded-for"].(string); ok && ip != "" {
-			// X-Forwarded-For 可能包含多个IP，取第一个
-			if parts := strings.Split(ip, ","); len(parts) > 0 {
-				return strings.TrimSpace(parts[0])
-			}
-		}
-		if ip, ok := c.Metadata["x-real-ip"].(string); ok && ip != "" {
-			return ip
-		}
-		if ip, ok := c.Metadata["remote_addr"].(string); ok && ip != "" {
-			return ip
-		}
-	}
-
-	// 3. 最后备用：从Context中获取
-	if c.Context != nil {
-		if ip := c.Context.Value("client_ip"); ip != nil {
-			if ipStr, ok := ip.(string); ok && ipStr != "" {
-				return ipStr
-			}
-		}
-	}
-
-	return "unknown"
+	return h.messageRecordRepo.FindByMessageID(messageID)
 }
 
-// GetUserAgent 获取用户代理
-func (c *Client) GetUserAgent() string {
-	// 尝试从 Metadata 中获取用户代理
-	if c.Metadata != nil {
-		if ua, ok := c.Metadata["user_agent"].(string); ok && ua != "" {
-			return ua
-		}
-		if ua, ok := c.Metadata["user-agent"].(string); ok && ua != "" {
-			return ua
-		}
+// QueryMessageRecordsBySender 根据发送者查询消息记录
+// 参数:
+//   - sender: 发送者ID
+//   - limit: 返回结果数量限制（0 表示不限制）
+func (h *Hub) QueryMessageRecordsBySender(sender string, limit int) ([]*MessageSendRecord, error) {
+	if h.messageRecordRepo == nil {
+		return nil, ErrRecordRepositoryNotSet
 	}
-	// 尝试从 Context 中获取
-	if c.Context != nil {
-		if ua := c.Context.Value("user_agent"); ua != nil {
-			if uaStr, ok := ua.(string); ok && uaStr != "" {
-				return uaStr
-			}
-		}
-		if ua := c.Context.Value("user-agent"); ua != nil {
-			if uaStr, ok := ua.(string); ok && uaStr != "" {
-				return uaStr
-			}
-		}
+	return h.messageRecordRepo.FindBySender(sender, limit)
+}
+
+// QueryMessageRecordsByReceiver 根据接收者查询消息记录
+// 参数:
+//   - receiver: 接收者ID
+//   - limit: 返回结果数量限制（0 表示不限制）
+func (h *Hub) QueryMessageRecordsByReceiver(receiver string, limit int) ([]*MessageSendRecord, error) {
+	if h.messageRecordRepo == nil {
+		return nil, ErrRecordRepositoryNotSet
 	}
-	return "unknown"
+	return h.messageRecordRepo.FindByReceiver(receiver, limit)
+}
+
+// QueryMessageRecordsByNodeIP 根据节点IP查询消息记录
+// 参数:
+//   - nodeIP: 服务器节点IP
+//   - limit: 返回结果数量限制（0 表示不限制）
+func (h *Hub) QueryMessageRecordsByNodeIP(nodeIP string, limit int) ([]*MessageSendRecord, error) {
+	if h.messageRecordRepo == nil {
+		return nil, ErrRecordRepositoryNotSet
+	}
+	return h.messageRecordRepo.FindByNodeIP(nodeIP, limit)
+}
+
+// QueryMessageRecordsByClientIP 根据客户端IP查询消息记录
+// 参数:
+//   - clientIP: 客户端IP地址
+//   - limit: 返回结果数量限制（0 表示不限制）
+func (h *Hub) QueryMessageRecordsByClientIP(clientIP string, limit int) ([]*MessageSendRecord, error) {
+	if h.messageRecordRepo == nil {
+		return nil, ErrRecordRepositoryNotSet
+	}
+	return h.messageRecordRepo.FindByClientIP(clientIP, limit)
+}
+
+// QueryMessageRecordsByStatus 根据状态查询消息记录
+// 参数:
+//   - status: 消息状态
+//   - limit: 返回结果数量限制（0 表示不限制）
+func (h *Hub) QueryMessageRecordsByStatus(status MessageSendStatus, limit int) ([]*MessageSendRecord, error) {
+	if h.messageRecordRepo == nil {
+		return nil, ErrRecordRepositoryNotSet
+	}
+	return h.messageRecordRepo.FindByStatus(status, limit)
+}
+
+// QueryRetryableMessageRecords 查询可重试的消息记录
+// 参数:
+//   - limit: 返回结果数量限制（0 表示不限制）
+func (h *Hub) QueryRetryableMessageRecords(limit int) ([]*MessageSendRecord, error) {
+	if h.messageRecordRepo == nil {
+		return nil, ErrRecordRepositoryNotSet
+	}
+	return h.messageRecordRepo.FindRetryable(limit)
+}
+
+// QueryExpiredMessageRecords 查询过期的消息记录
+// 参数:
+//   - limit: 返回结果数量限制（0 表示不限制）
+func (h *Hub) QueryExpiredMessageRecords(limit int) ([]*MessageSendRecord, error) {
+	if h.messageRecordRepo == nil {
+		return nil, ErrRecordRepositoryNotSet
+	}
+	return h.messageRecordRepo.FindExpired(limit)
+}
+
+// ============================================================================
+// 消息记录更新接口
+// ============================================================================
+
+// UpdateMessageRecordStatus 更新消息记录状态
+// 参数:
+//   - messageID: 消息ID
+//   - status: 新状态
+//   - reason: 失败原因（可选）
+//   - errorMsg: 错误消息（可选）
+func (h *Hub) UpdateMessageRecordStatus(messageID string, status MessageSendStatus, reason FailureReason, errorMsg string) error {
+	if h.messageRecordRepo == nil {
+		return ErrRecordRepositoryNotSet
+	}
+	return h.messageRecordRepo.UpdateStatus(messageID, status, reason, errorMsg)
+}
+
+// UpdateMessageRecord 更新消息记录
+// 参数:
+//   - record: 要更新的消息记录
+func (h *Hub) UpdateMessageRecord(record *MessageSendRecord) error {
+	if h.messageRecordRepo == nil {
+		return ErrRecordRepositoryNotSet
+	}
+	return h.messageRecordRepo.Update(record)
+}
+
+// ============================================================================
+// 消息记录删除接口
+// ============================================================================
+
+// DeleteMessageRecord 删除消息记录
+// 参数:
+//   - id: 记录ID
+func (h *Hub) DeleteMessageRecord(id uint) error {
+	if h.messageRecordRepo == nil {
+		return ErrRecordRepositoryNotSet
+	}
+	return h.messageRecordRepo.Delete(id)
+}
+
+// DeleteMessageRecordByMessageID 根据消息ID删除消息记录
+// 参数:
+//   - messageID: 消息ID
+func (h *Hub) DeleteMessageRecordByMessageID(messageID string) error {
+	if h.messageRecordRepo == nil {
+		return ErrRecordRepositoryNotSet
+	}
+	return h.messageRecordRepo.DeleteByMessageID(messageID)
+}
+
+// CleanupOldMessageRecords 清理旧的消息记录
+// 参数:
+//   - before: 在此时间之前的记录会被清理
+//
+// 返回:
+//   - int64: 被清理的记录数量
+//   - error: 错误信息
+func (h *Hub) CleanupOldMessageRecords(before time.Time) (int64, error) {
+	if h.messageRecordRepo == nil {
+		return 0, ErrRecordRepositoryNotSet
+	}
+	return h.messageRecordRepo.CleanupOld(before)
+}
+
+// ============================================================================
+// 消息记录统计接口
+// ============================================================================
+
+// GetMessageRecordStatistics 获取消息记录统计信息
+// 返回:
+//   - map[string]int64: 统计数据，包含各种状态的消息数量
+//   - error: 错误信息
+func (h *Hub) GetMessageRecordStatistics() (map[string]int64, error) {
+	if h.messageRecordRepo == nil {
+		return nil, ErrRecordRepositoryNotSet
+	}
+	return h.messageRecordRepo.GetStatistics()
 }

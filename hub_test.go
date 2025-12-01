@@ -1185,19 +1185,21 @@ func TestHubExtendedAPI(t *testing.T) {
 		}
 
 		// 未注册时离线
-		assert.False(t, hub.IsUserOnline(userID))
+		isOnline, _ := hub.IsUserOnline(userID)
+		assert.False(t, isOnline)
 
 		// 注册后在线
 		hub.Register(client)
 		time.Sleep(100 * time.Millisecond)
-		assert.True(t, hub.IsUserOnline(userID))
+		isOnline, _ = hub.IsUserOnline(userID)
+		assert.True(t, isOnline)
 
 		// 注销后离线
 		hub.Unregister(client)
 		time.Sleep(100 * time.Millisecond)
-		assert.False(t, hub.IsUserOnline(userID))
+		isOnline2, _ := hub.IsUserOnline(userID)
+		assert.False(t, isOnline2)
 	})
-
 	t.Run("GetUserStatus", func(t *testing.T) {
 		userID := "status-check-user"
 		client := &Client{
@@ -1309,7 +1311,7 @@ func TestHubExtendedAPI(t *testing.T) {
 	})
 
 	t.Run("GetOnlineUsersByType", func(t *testing.T) {
-		agents := hub.GetOnlineUsersByType(UserTypeAgent)
+		agents, _ := hub.GetOnlineUsersByType(UserTypeAgent)
 		assert.NotNil(t, agents)
 		// 验证所有返回的都是agent类型
 		for _, userID := range agents {
@@ -2202,8 +2204,8 @@ func TestHubStatusTransitions(t *testing.T) {
 		hub.Unregister(client)
 		time.Sleep(100 * time.Millisecond)
 
-		// 断开后应该离线
-		assert.False(t, hub.IsUserOnline(userID))
+		isOnline, _ := hub.IsUserOnline(userID)
+		assert.False(t, isOnline)
 	})
 
 	t.Run("Multiple-Users-Different-Status", func(t *testing.T) {
@@ -2884,14 +2886,16 @@ func TestHubWaitForCondition(t *testing.T) {
 
 	t.Run("WaitForCondition-AlreadyMet", func(t *testing.T) {
 		result := hub.WaitForCondition(func() bool {
-			return hub.IsUserOnline(userID)
+			isOnline, _ := hub.IsUserOnline(userID)
+			return isOnline
 		}, 2*time.Second)
 		assert.True(t, result)
 	})
 
 	t.Run("WaitForCondition-Timeout", func(t *testing.T) {
 		result := hub.WaitForCondition(func() bool {
-			return hub.IsUserOnline("nonexistent")
+			isOnline, _ := hub.IsUserOnline("nonexistent")
+			return isOnline
 		}, 100*time.Millisecond)
 		assert.False(t, result)
 	})
@@ -2914,7 +2918,8 @@ func TestHubWaitForCondition(t *testing.T) {
 		}()
 
 		result := hub.WaitForCondition(func() bool {
-			return hub.IsUserOnline("wait-eventually-user")
+			isOnline, _ := hub.IsUserOnline("wait-eventually-user")
+			return isOnline
 		}, 2*time.Second)
 		assert.True(t, result)
 	})

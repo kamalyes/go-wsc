@@ -1,13 +1,24 @@
+/*
+ * @Author: kamalyes 501893067@qq.com
+ * @Date: 2025-09-06 09:50:55
+ * @LastEditors: kamalyes 501893067@qq.com
+ * @LastEditTime: 2025-09-06 09:50:55
+ * @FilePath: \go-wsc\websocket_test.go
+ * @Description: WebSocket结构体及其配置选项测试
+ *
+ * Copyright (c) 2025 by kamalyes, All Rights Reserved.
+ */
 package wsc
 
 import (
 	"fmt"
-	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
-	"github.com/stretchr/testify/assert"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestWebSocketServer(t *testing.T) {

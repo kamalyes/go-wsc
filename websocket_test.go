@@ -2,9 +2,9 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-09-06 09:50:55
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-09-06 09:50:55
+ * @LastEditTime: 2025-12-02 09:25:15
  * @FilePath: \go-wsc\websocket_test.go
- * @Description:
+ * @Description: WebSocket结构体及其配置选项测试
  *
  * Copyright (c) 2025 by kamalyes, All Rights Reserved.
  */
@@ -66,7 +66,7 @@ func TestWithDialer_ChainedCalls(t *testing.T) {
 	customDialer := &websocket.Dialer{
 		HandshakeTimeout: 10,
 	}
-	
+
 	ws := NewWebSocket(testURL).
 		WithDialer(customDialer).
 		WithSendBufferSize(1024).
@@ -84,7 +84,7 @@ func TestWithRequestHeader_MultipleHeaders(t *testing.T) {
 	header.Set("Authorization", "Bearer token123")
 	header.Set("X-Custom-Header", "custom-value")
 	header.Set("User-Agent", "test-client/1.0")
-	
+
 	ws.WithRequestHeader(header)
 
 	assert.Equal(t, "Bearer token123", ws.RequestHeader.Get("Authorization"))
@@ -109,7 +109,7 @@ func TestWithSendBufferSize_DifferentSizes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ws := NewWebSocket(testURL)
 			ws.WithSendBufferSize(tc.size)
-			assert.Equal(t, tc.size, cap(ws.sendChan), 
+			assert.Equal(t, tc.size, cap(ws.sendChan),
 				"Send buffer size should be %d", tc.size)
 		})
 	}
@@ -165,7 +165,7 @@ func TestWebSocket_DefaultValues(t *testing.T) {
 func TestWithDialer_NilDialer(t *testing.T) {
 	ws := NewWebSocket(testURL)
 	ws.WithDialer(nil)
-	
+
 	// 即使设置为nil，也应该被接受（调用者负责确保有效性）
 	assert.Nil(t, ws.Dialer)
 }

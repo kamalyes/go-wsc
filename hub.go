@@ -967,39 +967,41 @@ func (h *Hub) Unregister(client *Client) {
 
 // SendToUser 发送消息给指定用户（自动填充发送者信息）
 func (h *Hub) SendToUser(ctx context.Context, toUserID string, msg *HubMessage) error {
-	// 创建消息副本以避免竞态条件
-	msgCopy := *msg
-
-	// 从上下文获取发送者ID
-	if msgCopy.Sender == "" {
+	// 直接修改原始消息对象，避免引用断裂
+	if msg.Sender == "" {
 		if senderID, ok := ctx.Value(ContextKeySenderID).(string); ok {
-			msgCopy.Sender = senderID
+			msg.Sender = senderID
 		} else if userID, ok := ctx.Value(ContextKeyUserID).(string); ok {
-			msgCopy.Sender = userID
+			msg.Sender = userID
 		}
 	}
 
-	msgCopy.Receiver = toUserID
-	if msgCopy.CreateAt.IsZero() {
-		msgCopy.CreateAt = time.Now()
+	msg.Receiver = toUserID
+	if msg.CreateAt.IsZero() {
+		msg.CreateAt = time.Now()
+	}
+
+	// 确保消息ID存在
+	if msg.ID == "" {
+		msg.ID = fmt.Sprintf("%s-%d", toUserID, time.Now().UnixNano())
 	}
 
 	// 尝试发送到broadcast队列
 	select {
-	case h.broadcast <- &msgCopy:
-		h.logger.LogMessage(msgCopy.ID, msgCopy.Sender, msgCopy.Receiver, msgCopy.MessageType, true, nil)
+	case h.broadcast <- msg:
+		h.logger.LogMessage(msg.ID, msg.Sender, msg.Receiver, msg.MessageType, true, nil)
 		return nil
 	default:
 		// broadcast队列满，尝试放入待发送队列
 		select {
-		case h.pendingMessages <- &msgCopy:
+		case h.pendingMessages <- msg:
 			return nil
 		default:
 			err := ErrQueueAndPendingFull
 			// 记录消息发送失败日志
-			h.logger.LogMessage(msgCopy.ID, msgCopy.Sender, msgCopy.Receiver, msgCopy.MessageType, false, err)
+			h.logger.LogMessage(msg.ID, msg.Sender, msg.Receiver, msg.MessageType, false, err)
 			// 通知队列满处理器
-			h.notifyQueueFull(&msgCopy, toUserID, "all_queues", err)
+			h.notifyQueueFull(msg, toUserID, "all_queues", err)
 			return err
 		}
 	}
@@ -1258,8 +1260,10 @@ func (h *Hub) SendToUserViaSSE(userID string, msg *HubMessage) bool {
 
 // SendToUserWithAck 发送消息给指定用户并等待ACK确认
 func (h *Hub) SendToUserWithAck(ctx context.Context, toUserID string, msg *HubMessage, timeout time.Duration, maxRetry int) (*AckMessage, error) {
-	// 检查是否启用ACK
-	if !h.safeConfig.Field("EnableAck").Bool(false) {
+	// 临时启用ACK功能 - 绕过配置检查
+	enableAck := true // h.safeConfig.Field("EnableAck").Bool(false)
+
+	if !enableAck {
 		// 如果未启用ACK，直接发送
 		h.logger.InfoKV("ACK未启用，使用普通发送",
 			"message_id", msg.ID,
@@ -1281,6 +1285,7 @@ func (h *Hub) SendToUserWithAck(ctx context.Context, toUserID string, msg *HubMe
 		"timeout", timeout,
 		"max_retry", maxRetry,
 		"require_ack", true,
+		"enable_ack", enableAck,
 	)
 
 	// 创建消息发送记录

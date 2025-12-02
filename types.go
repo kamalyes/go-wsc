@@ -159,6 +159,12 @@ const (
 	MessageTypeCloseTicket    MessageType = "closeticket"    // 关闭工单消息
 	MessageTypeTransferTicket MessageType = "transferticket" // 转移工单消息
 	MessageTypeTest           MessageType = "test"           // 测试消息
+	MessageTypeWelcome        MessageType = "welcome"        // 欢迎消息
+	MessageTypeTransferred    MessageType = "transferred"    // 转发消息
+	MessageTypeSessionCreated MessageType = "sessioncreated" // 会话创建消息
+	MessageTypeSessionClosed  MessageType = "sessionclosed"  // 会话关闭消息
+	MessageTypeSessionQueued  MessageType = "sessionqueued"  // 会话排队消息
+	MessageTypeSessionTimeout MessageType = "sessiontimeout" // 会话超时消息
 )
 
 // String 实现Stringer接口
@@ -181,7 +187,8 @@ func (t MessageType) IsValid() bool {
 		MessageTypePing, MessageTypePong, MessageTypeTyping, MessageTypeRead, MessageTypeDelivered,
 		MessageTypeRecall, MessageTypeEdit, MessageTypeReaction, MessageTypeThread, MessageTypeReply,
 		MessageTypeMention, MessageTypeCustom, MessageTypeAssignedTicket, MessageTypeCloseTicket,
-		MessageTypeTransferTicket, MessageTypeTest:
+		MessageTypeTransferTicket, MessageTypeTest, MessageTypeWelcome, MessageTypeTransferred,
+		MessageTypeSessionCreated, MessageTypeSessionClosed, MessageTypeSessionQueued, MessageTypeSessionTimeout:
 		return true
 	default:
 		return false
@@ -278,7 +285,8 @@ func GetAllMessageTypes() []MessageType {
 		MessageTypePing, MessageTypePong, MessageTypeTyping, MessageTypeRead, MessageTypeDelivered,
 		MessageTypeRecall, MessageTypeEdit, MessageTypeReaction, MessageTypeThread, MessageTypeReply,
 		MessageTypeMention, MessageTypeCustom, MessageTypeAssignedTicket, MessageTypeCloseTicket,
-		MessageTypeTransferTicket, MessageTypeTest,
+		MessageTypeTransferTicket, MessageTypeTest, MessageTypeWelcome, MessageTypeTransferred,
+		MessageTypeSessionCreated, MessageTypeSessionClosed, MessageTypeSessionQueued, MessageTypeSessionTimeout,
 	}
 }
 
@@ -352,7 +360,9 @@ func (t MessageType) GetDefaultPriority() MessagePriority {
 	case t == MessageTypeNotice || t == MessageTypeEvent || t == MessageTypeSuccess ||
 		t == MessageTypePayment || t == MessageTypeOrder || t == MessageTypeInvite ||
 		t == MessageTypeTask || t == MessageTypeRecall || t == MessageTypeAssignedTicket ||
-		t == MessageTypeCloseTicket || t == MessageTypeTransferTicket || t == MessageTypeTest:
+		t == MessageTypeCloseTicket || t == MessageTypeTransferTicket || t == MessageTypeTest ||
+		t == MessageTypeWelcome || t == MessageTypeTransferred || t == MessageTypeSessionCreated ||
+		t == MessageTypeSessionClosed || t == MessageTypeSessionQueued || t == MessageTypeSessionTimeout:
 		return MessagePriorityHigh
 
 	// 普通优先级 - 常规交互消息

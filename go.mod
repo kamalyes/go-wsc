@@ -7,7 +7,7 @@ require (
 	github.com/jpillora/backoff v1.0.0
 	github.com/kamalyes/go-config v0.12.5
 	github.com/kamalyes/go-logger v0.4.4
-	github.com/kamalyes/go-toolbox v0.11.80
+	github.com/kamalyes/go-toolbox v0.11.82
 	github.com/redis/go-redis/v9 v9.17.2
 	github.com/stretchr/testify v1.11.1
 	gorm.io/driver/mysql v1.6.0

@@ -13,8 +13,9 @@ package wsc
 import (
 	"database/sql/driver"
 	"encoding/json"
-	"gorm.io/gorm"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 // MessageSendStatus 消息发送状态
@@ -441,19 +442,38 @@ func (r *MessageRecordGormRepository) DeleteByMessageID(messageID string) error 
 
 // UpdateStatus 更新状态
 func (r *MessageRecordGormRepository) UpdateStatus(messageID string, status MessageSendStatus, reason FailureReason, errorMsg string) error {
-	updates := map[string]interface{}{
-		"status":         status,
-		"last_send_time": time.Now(),
+	now := time.Now()
+
+	// 🔥 先查询记录，如果不存在则跳过更新（广播消息等不需要记录的场景）
+	var record MessageSendRecord
+	if err := r.db.Where("message_id = ?", messageID).First(&record).Error; err != nil {
+		// 记录不存在，静默返回（不是错误）
+		if err == gorm.ErrRecordNotFound {
+			return nil
+		}
+		return err
 	}
 
+	updates := map[string]interface{}{
+		"status":         status,
+		"last_send_time": &now,
+	}
+
+	// 🔥 如果是首次发送（first_send_time 为 NULL），设置首次发送时间
+	if record.FirstSendTime == nil {
+		updates["first_send_time"] = &now
+	}
+
+	// 设置失败原因和错误信息
 	if reason != "" {
 		updates["failure_reason"] = reason
 	}
 	if errorMsg != "" {
 		updates["error_message"] = errorMsg
 	}
+
+	// 🔥 如果发送成功，设置成功时间
 	if status == MessageSendStatusSuccess {
-		now := time.Now()
 		updates["success_time"] = &now
 	}
 
@@ -470,22 +490,38 @@ func (r *MessageRecordGormRepository) IncrementRetry(messageID string, attempt R
 		return err
 	}
 
+	now := time.Now()
 	record.RetryHistory = append(record.RetryHistory, attempt)
 	record.RetryCount = attempt.AttemptNumber
 
 	updates := map[string]interface{}{
-		"retry_count":   record.RetryCount,
-		"retry_history": record.RetryHistory,
-		"status":        MessageSendStatusRetrying,
+		"retry_count":    record.RetryCount,
+		"retry_history":  record.RetryHistory,
+		"status":         MessageSendStatusRetrying,
+		"last_send_time": &now, // 🔥 每次重试都更新最后发送时间
+	}
+
+	// 🔥 如果是首次重试（first_send_time 为 NULL），设置首次发送时间
+	if record.FirstSendTime == nil {
+		updates["first_send_time"] = &now
 	}
 
 	if attempt.Success {
-		now := time.Now()
+		// 🔥 重试成功，设置成功时间
 		updates["status"] = MessageSendStatusSuccess
 		updates["success_time"] = &now
 	} else if record.RetryCount >= record.MaxRetry {
+		// 🔥 超过最大重试次数，设置失败状态和原因
 		updates["status"] = MessageSendStatusFailed
 		updates["failure_reason"] = FailureReasonMaxRetry
+		if attempt.Error != "" {
+			updates["error_message"] = attempt.Error
+		}
+	} else {
+		// 🔥 重试中但未达到最大次数，记录错误信息
+		if attempt.Error != "" {
+			updates["error_message"] = attempt.Error
+		}
 	}
 
 	return r.db.Model(&record).Updates(updates).Error

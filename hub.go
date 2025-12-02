@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-11-13 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-12-02 09:24:05
+ * @LastEditTime: 2025-12-02 10:51:07
  * @FilePath: \go-wsc\hub.go
  * @Description: WebSocket/SSE 服务端 Hub - 统一管理实时连接
  *
@@ -1525,9 +1525,15 @@ func (h *Hub) handleClientWrite(client *Client) {
 						"error", err,
 						"message_size", len(message),
 					)
+
+					// 更新消息发送状态为失败
+					h.updateMessageSendStatus(message, MessageSendStatusFailed, FailureReasonNetworkError, err.Error())
 					return
 				}
 				messagesSent++
+
+				// 🔥 更新消息发送状态为成功
+				h.updateMessageSendStatus(message, MessageSendStatusSuccess, "", "")
 			}
 		case <-h.ctx.Done():
 			h.logger.InfoKV("客户端写入协程因Hub关闭而结束",
@@ -2256,15 +2262,18 @@ func (h *Hub) FilterClients(predicate func(*Client) bool) []*Client {
 func (h *Hub) SendToClientsWithRetry(ctx context.Context, clients []*Client, msg *HubMessage,
 	maxRetry int) (success int, failed int) {
 	for _, client := range clients {
-		var err error
-		for i := 0; i < maxRetry; i++ {
-			err = h.SendToUser(ctx, client.UserID, msg)
-			if err == nil {
-				success++
-				break
-			}
-		}
-		if err != nil {
+		retryInstance := retry.NewRetryWithCtx(ctx).
+			SetAttemptCount(maxRetry).
+			SetInterval(h.config.BaseDelay).
+			SetConditionFunc(h.isRetryableError)
+
+		err := retryInstance.Do(func() error {
+			return h.SendToUser(ctx, client.UserID, msg)
+		})
+
+		if err == nil {
+			success++
+		} else {
 			failed++
 		}
 	}
@@ -2718,6 +2727,22 @@ func (h *Hub) recordMessageToDatabase(msg *HubMessage, err error) {
 			}
 		}()
 
+		// 🔥 过滤系统消息：只记录业务消息，排除系统/控制类消息
+		systemMessageTypes := map[MessageType]bool{
+			MessageTypeHeartbeat: true,
+			MessageTypePing:      true,
+			MessageTypePong:      true,
+			MessageTypeAck:       true,
+			MessageTypeTyping:    true,
+			MessageTypeRead:      true,
+			MessageTypeDelivered: true,
+		}
+
+		if systemMessageTypes[msg.MessageType] {
+			// 系统消息不记录到数据库
+			return
+		}
+
 		// 确定初始状态
 		status := MessageSendStatusPending
 		failureReason := FailureReason("")
@@ -2789,6 +2814,60 @@ func (h *Hub) recordMessageToDatabase(msg *HubMessage, err error) {
 				"message_id", msg.ID,
 				"status", status,
 				"record_id", record.ID,
+			)
+		}
+	}()
+}
+
+// updateMessageSendStatus 解析消息并更新发送状态（内部方法）
+func (h *Hub) updateMessageSendStatus(messageData []byte, status MessageSendStatus, reason FailureReason, errorMsg string) {
+	// 异步更新，避免阻塞发送流程
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				h.logger.ErrorKV("更新消息状态失败",
+					"panic", r,
+				)
+			}
+		}()
+
+		// 解析消息获取ID
+		var msg HubMessage
+		if err := json.Unmarshal(messageData, &msg); err != nil {
+			h.logger.ErrorKV("解析消息失败",
+				"error", err,
+				"data_size", len(messageData),
+			)
+			return
+		}
+
+		// 🔥 使用 go-toolbox retry 组件：等待记录创建完成（最多重试3次，每次等待50ms）
+		ctx := context.Background()
+		retryInstance := retry.NewRetryWithCtx(ctx).
+			SetAttemptCount(3).
+			SetInterval(50 * time.Millisecond)
+
+		attemptNum := 0
+		updateErr := retryInstance.Do(func() error {
+			attemptNum++
+			err := h.messageRecordRepo.UpdateStatus(msg.ID, status, reason, errorMsg)
+			if err == nil {
+				h.logger.DebugKV("消息状态已更新",
+					"message_id", msg.ID,
+					"status", status,
+					"attempt", attemptNum,
+				)
+			}
+			return err
+		})
+
+		// 所有重试失败后，降级为 Debug 日志（某些消息如广播/系统消息可能没有记录）
+		if updateErr != nil {
+			h.logger.DebugKV("更新消息记录状态失败(记录可能不存在或为系统消息)",
+				"message_id", msg.ID,
+				"status", status,
+				"error", updateErr,
+				"attempts", attemptNum,
 			)
 		}
 	}()

@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-11-15
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-12-01
+ * @LastEditTime: 2025-12-04 15:35:36
  * @FilePath: \go-wsc\message_record.go
  * @Description: 消息发送记录管理 - 使用 GORM 数据库持久化
  *
@@ -16,6 +16,14 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+)
+
+// 数据库查询常量
+const (
+	QueryMessageIDWhere   = "message_id = ?"
+	OrderByCreateTimeDesc = "create_time DESC"
+	OrderByCreateTimeAsc  = "create_time ASC"
+	OrderByExpiresAtAsc   = "expires_at ASC"
 )
 
 // MessageSendStatus 消息发送状态
@@ -337,7 +345,7 @@ func (r *MessageRecordGormRepository) FindByID(id uint) (*MessageSendRecord, err
 // FindByMessageID 根据消息ID查找
 func (r *MessageRecordGormRepository) FindByMessageID(messageID string) (*MessageSendRecord, error) {
 	var record MessageSendRecord
-	err := r.db.Where("message_id = ?", messageID).First(&record).Error
+	err := r.db.Where(QueryMessageIDWhere, messageID).First(&record).Error
 	if err != nil {
 		return nil, err
 	}
@@ -347,7 +355,7 @@ func (r *MessageRecordGormRepository) FindByMessageID(messageID string) (*Messag
 // FindByStatus 根据状态查找
 func (r *MessageRecordGormRepository) FindByStatus(status MessageSendStatus, limit int) ([]*MessageSendRecord, error) {
 	var records []*MessageSendRecord
-	query := r.db.Where("status = ?", status).Order("create_time DESC")
+	query := r.db.Where("status = ?", status).Order(OrderByCreateTimeDesc)
 	if limit > 0 {
 		query = query.Limit(limit)
 	}
@@ -358,7 +366,7 @@ func (r *MessageRecordGormRepository) FindByStatus(status MessageSendStatus, lim
 // FindBySender 根据发送者查找
 func (r *MessageRecordGormRepository) FindBySender(sender string, limit int) ([]*MessageSendRecord, error) {
 	var records []*MessageSendRecord
-	query := r.db.Where("sender = ?", sender).Order("create_time DESC")
+	query := r.db.Where("sender = ?", sender).Order(OrderByCreateTimeDesc)
 	if limit > 0 {
 		query = query.Limit(limit)
 	}
@@ -369,7 +377,7 @@ func (r *MessageRecordGormRepository) FindBySender(sender string, limit int) ([]
 // FindByReceiver 根据接收者查找
 func (r *MessageRecordGormRepository) FindByReceiver(receiver string, limit int) ([]*MessageSendRecord, error) {
 	var records []*MessageSendRecord
-	query := r.db.Where("receiver = ?", receiver).Order("create_time DESC")
+	query := r.db.Where("receiver = ?", receiver).Order(OrderByCreateTimeDesc)
 	if limit > 0 {
 		query = query.Limit(limit)
 	}
@@ -380,7 +388,7 @@ func (r *MessageRecordGormRepository) FindByReceiver(receiver string, limit int)
 // FindByNodeIP 根据节点IP查找
 func (r *MessageRecordGormRepository) FindByNodeIP(nodeIP string, limit int) ([]*MessageSendRecord, error) {
 	var records []*MessageSendRecord
-	query := r.db.Where("node_ip = ?", nodeIP).Order("create_time DESC")
+	query := r.db.Where("node_ip = ?", nodeIP).Order(OrderByCreateTimeDesc)
 	if limit > 0 {
 		query = query.Limit(limit)
 	}
@@ -391,7 +399,7 @@ func (r *MessageRecordGormRepository) FindByNodeIP(nodeIP string, limit int) ([]
 // FindByClientIP 根据客户端IP查找
 func (r *MessageRecordGormRepository) FindByClientIP(clientIP string, limit int) ([]*MessageSendRecord, error) {
 	var records []*MessageSendRecord
-	query := r.db.Where("client_ip = ?", clientIP).Order("create_time DESC")
+	query := r.db.Where("client_ip = ?", clientIP).Order(OrderByCreateTimeDesc)
 	if limit > 0 {
 		query = query.Limit(limit)
 	}
@@ -407,7 +415,7 @@ func (r *MessageRecordGormRepository) FindRetryable(limit int) ([]*MessageSendRe
 		MessageSendStatusFailed,
 		MessageSendStatusAckTimeout,
 	}).Where("expires_at IS NULL OR expires_at > ?", now).
-		Order("create_time ASC")
+		Order(OrderByCreateTimeAsc)
 
 	if limit > 0 {
 		query = query.Limit(limit)
@@ -421,7 +429,7 @@ func (r *MessageRecordGormRepository) FindExpired(limit int) ([]*MessageSendReco
 	var records []*MessageSendRecord
 	now := time.Now()
 	query := r.db.Where("expires_at IS NOT NULL AND expires_at < ? AND status != ?",
-		now, MessageSendStatusExpired).Order("expires_at ASC")
+		now, MessageSendStatusExpired).Order(OrderByExpiresAtAsc)
 
 	if limit > 0 {
 		query = query.Limit(limit)
@@ -437,7 +445,7 @@ func (r *MessageRecordGormRepository) Delete(id uint) error {
 
 // DeleteByMessageID 根据消息ID删除
 func (r *MessageRecordGormRepository) DeleteByMessageID(messageID string) error {
-	return r.db.Where("message_id = ?", messageID).Delete(&MessageSendRecord{}).Error
+	return r.db.Where(QueryMessageIDWhere, messageID).Delete(&MessageSendRecord{}).Error
 }
 
 // UpdateStatus 更新状态
@@ -446,7 +454,7 @@ func (r *MessageRecordGormRepository) UpdateStatus(messageID string, status Mess
 
 	// 🔥 先查询记录，如果不存在则跳过更新（广播消息等不需要记录的场景）
 	var record MessageSendRecord
-	if err := r.db.Where("message_id = ?", messageID).First(&record).Error; err != nil {
+	if err := r.db.Where(QueryMessageIDWhere, messageID).First(&record).Error; err != nil {
 		// 记录不存在，静默返回（不是错误）
 		if err == gorm.ErrRecordNotFound {
 			return nil
@@ -459,8 +467,8 @@ func (r *MessageRecordGormRepository) UpdateStatus(messageID string, status Mess
 		"last_send_time": &now,
 	}
 
-	// 🔥 如果是首次发送（first_send_time 为 NULL），设置首次发送时间
-	if record.FirstSendTime == nil {
+	// 🔥 只有在状态为发送中时才设置首次发送时间（避免重复设置）
+	if record.FirstSendTime == nil && status == MessageSendStatusSending {
 		updates["first_send_time"] = &now
 	}
 
@@ -478,14 +486,14 @@ func (r *MessageRecordGormRepository) UpdateStatus(messageID string, status Mess
 	}
 
 	return r.db.Model(&MessageSendRecord{}).
-		Where("message_id = ?", messageID).
+		Where(QueryMessageIDWhere, messageID).
 		Updates(updates).Error
 }
 
 // IncrementRetry 增加重试次数
 func (r *MessageRecordGormRepository) IncrementRetry(messageID string, attempt RetryAttempt) error {
 	var record MessageSendRecord
-	err := r.db.Where("message_id = ?", messageID).First(&record).Error
+	err := r.db.Where(QueryMessageIDWhere, messageID).First(&record).Error
 	if err != nil {
 		return err
 	}

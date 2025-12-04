@@ -567,11 +567,16 @@ func (h *Hub) SendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 		// broadcast队列满，尝试放入待发送队列
 		select {
 		case h.pendingMessages <- msg:
+			h.logger.DebugKV("消息已放入待发送队列", "message_id", msg.ID, "from", msg.Sender, "to", msg.Receiver, "type", msg.MessageType)
+			// 记录消息到数据库
+			go h.recordMessageToDatabase(msg, nil)
 			return nil
 		default:
 			err := ErrQueueAndPendingFull
 			// 记录消息发送失败日志
 			h.logger.ErrorKV("消息发送失败", "message_id", msg.ID, "from", msg.Sender, "to", msg.Receiver, "type", msg.MessageType, "error", err)
+			// 记录失败消息到数据库
+			go h.recordMessageToDatabase(msg, err)
 			// 通知队列满处理器
 			h.notifyQueueFull(msg, toUserID, "all_queues", err)
 			return err
@@ -610,6 +615,31 @@ func (h *Hub) SendToUserWithRetry(ctx context.Context, toUserID string, msg *Hub
 			Success:       err == nil,
 		}
 		result.Attempts = append(result.Attempts, sendAttempt)
+
+		// 🔥 如果是重试（非首次尝试），记录重试信息到数据库
+		if attemptNumber > 1 && h.messageRecordRepo != nil {
+			retryAttempt := RetryAttempt{
+				AttemptNumber: attemptNumber,
+				Timestamp:     attemptStart,
+				Duration:      duration,
+				Error:         "",
+				Success:       err == nil,
+			}
+			if err != nil {
+				retryAttempt.Error = err.Error()
+			}
+
+			// 异步更新数据库重试记录（避免阻塞主流程）
+			go func() {
+				if updateErr := h.messageRecordRepo.IncrementRetry(msg.ID, retryAttempt); updateErr != nil {
+					h.logger.DebugKV("更新重试记录失败",
+						"message_id", msg.ID,
+						"attempt", attemptNumber,
+						"error", updateErr,
+					)
+				}
+			}()
+		}
 
 		return err
 	})
@@ -913,6 +943,32 @@ func (h *Hub) SendToUserWithAck(ctx context.Context, toUserID string, msg *HubMe
 	retryFunc := func() error {
 		attemptNum++
 		err := h.SendToUser(ctx, toUserID, msg)
+
+		// 🔥 如果是重试（非首次尝试），记录重试信息到数据库
+		if attemptNum > 1 && h.messageRecordRepo != nil {
+			retryAttempt := RetryAttempt{
+				AttemptNumber: attemptNum,
+				Timestamp:     time.Now(),
+				Duration:      0, // ACK重试的持续时间在这里无法准确计算
+				Error:         "",
+				Success:       err == nil,
+			}
+			if err != nil {
+				retryAttempt.Error = err.Error()
+			}
+
+			// 异步更新数据库重试记录（避免阻塞主流程）
+			go func() {
+				if updateErr := h.messageRecordRepo.IncrementRetry(msg.ID, retryAttempt); updateErr != nil {
+					h.logger.DebugKV("更新ACK重试记录失败",
+						"message_id", msg.ID,
+						"attempt", attemptNum,
+						"error", updateErr,
+					)
+				}
+			}()
+		}
+
 		return err
 	}
 

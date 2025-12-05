@@ -11,11 +11,13 @@
 package wsc
 
 import (
-	"github.com/gorilla/websocket"
-	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"net/http"
 	"sync"
 	"sync/atomic"
+
+	"github.com/gorilla/websocket"
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-toolbox/pkg/safe"
 )
 
 // Wsc 结构体表示 WebSocket 客户端
@@ -47,8 +49,8 @@ type Wsc struct {
 func New(url string) *Wsc {
 	// 初始化 Wsc 客户端，使用默认配置和指定的 URL
 	return &Wsc{
-		Config:    wscconfig.Default(), // 使用go-config默认配置
-		WebSocket: NewWebSocket(url),   // 创建新的 WebSocket 连接
+		Config:    safe.MergeWithDefaults[wscconfig.WSC](nil, wscconfig.Default()), // 使用safe合并默认配置
+		WebSocket: NewWebSocket(url),                                               // 创建新的 WebSocket 连接
 	}
 }
 

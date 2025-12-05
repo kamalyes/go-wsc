@@ -189,7 +189,7 @@ func TestHubWithAck(t *testing.T) {
 		}
 
 		ackMsg, err := hub.SendToUserWithAck(ctx, "user-1", msg, 0, 0)
-		t.Logf("EnableAck配置: %v, AckTimeout: %v", hub.safeConfig.Field("EnableAck").Bool(false), hub.safeConfig.Field("AckTimeout").Duration(0))
+		t.Logf("EnableAck配置: %v, AckTimeout: %v", hub.config.EnableAck, hub.config.AckTimeout)
 		assert.NoError(t, err)
 		assert.NotNil(t, ackMsg)
 		assert.Equal(t, AckStatusConfirmed, ackMsg.Status)

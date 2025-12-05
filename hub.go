@@ -22,10 +22,10 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	goconfig "github.com/kamalyes/go-config"
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"github.com/kamalyes/go-toolbox/pkg/retry"
+	"github.com/kamalyes/go-toolbox/pkg/safe"
 )
 
 // PoolManager 连接池管理器接口 - 用于解耦依赖
@@ -242,9 +242,6 @@ type Hub struct {
 	// 配置
 	config *wscconfig.WSC
 
-	// 安全配置访问器
-	safeConfig *goconfig.ConfigSafe
-
 	// 性能优化：消息字节缓存池
 	msgPool sync.Pool
 
@@ -269,9 +266,7 @@ type NodeInfo struct {
 
 // NewHub 创建新的Hub
 func NewHub(config *wscconfig.WSC) *Hub {
-	if config == nil {
-		config = wscconfig.Default()
-	}
+	config = safe.MergeWithDefaults(config, wscconfig.Default())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	nodeID := fmt.Sprintf("node-%s-%d-%d", config.NodeIP, config.NodePort, time.Now().UnixNano())
@@ -302,7 +297,6 @@ func NewHub(config *wscconfig.WSC) *Hub {
 		cancel:          cancel,
 		startCh:         make(chan struct{}),
 		config:          config,
-		safeConfig:      goconfig.SafeConfig(config),
 		logger:          initLogger(config),
 		msgPool: sync.Pool{
 			New: func() interface{} {
@@ -346,7 +340,7 @@ func (h *Hub) Run() {
 		close(h.startCh)
 	}
 
-	ticker := time.NewTicker(time.Duration(h.safeConfig.GetInt("HeartbeatInterval", 30)) * time.Second)
+	ticker := time.NewTicker(time.Duration(h.config.HeartbeatInterval) * time.Second)
 	defer ticker.Stop()
 
 	// 性能监控定时器 - 每5分钟报告一次
@@ -941,7 +935,7 @@ func (h *Hub) SendToUserWithAck(ctx context.Context, toUserID string, msg *HubMe
 	}
 
 	// 使用配置中的ACK超时时间，如果传入的timeout > 0则使用传入值
-	ackTimeout := h.safeConfig.Field("AckTimeoutMs").Duration(500 * time.Millisecond)
+	ackTimeout := h.config.AckTimeout
 	if timeout > 0 {
 		ackTimeout = timeout
 	}
@@ -1626,7 +1620,7 @@ func (h *Hub) checkHeartbeat() {
 	// 使用配置的超时时间，默认90秒
 	timeoutDuration := h.heartbeatTimeout
 	if timeoutDuration == 0 {
-		timeoutDuration = time.Duration(h.safeConfig.GetInt("ClientTimeout", 90)) * time.Second
+		timeoutDuration = time.Duration(h.config.ClientTimeout) * time.Second
 	}
 
 	for _, client := range h.clients {
@@ -1656,7 +1650,7 @@ func (h *Hub) checkHeartbeat() {
 	// 检查SSE超时
 	h.sseMutex.Lock()
 	for userID, conn := range h.sseClients {
-		if now.Sub(conn.LastActive) > time.Duration(h.safeConfig.GetInt("SSETimeout", 120))*time.Second {
+		if now.Sub(conn.LastActive) > time.Duration(h.config.SSETimeout)*time.Second {
 			h.logger.WarnKV("SSE连接超时", "user_id", userID, "last_heartbeat", conn.LastActive)
 			close(conn.CloseCh)
 			delete(h.sseClients, userID)

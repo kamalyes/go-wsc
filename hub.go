@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-11-13 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-12-02 10:51:07
+ * @LastEditTime: 2025-12-05 16:15:35
  * @FilePath: \go-wsc\hub.go
  * @Description: WebSocket/SSE 服务端 Hub - 统一管理实时连接
  *
@@ -27,6 +27,12 @@ import (
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"github.com/kamalyes/go-toolbox/pkg/retry"
 )
+
+// PoolManager 连接池管理器接口 - 用于解耦依赖
+type PoolManager interface {
+	// GetSMTPClient 获取SMTP客户端
+	GetSMTPClient() interface{}
+}
 
 // SendFailureHandler 消息发送失败处理器接口 - 通用处理器
 type SendFailureHandler interface {
@@ -241,6 +247,12 @@ type Hub struct {
 
 	// 性能优化：消息字节缓存池
 	msgPool sync.Pool
+
+	// 消息频率限制器
+	rateLimiter *RateLimiter
+
+	// 连接池管理器（可选）
+	poolManager PoolManager
 }
 
 // DefaultHubConfig 创建默认Hub配置
@@ -1667,6 +1679,34 @@ func (h *Hub) checkHeartbeat() {
 // SetWelcomeProvider 设置欢迎消息提供者
 func (h *Hub) SetWelcomeProvider(provider WelcomeMessageProvider) {
 	h.welcomeProvider = provider
+}
+
+// SetRateLimiter 设置消息频率限制器
+func (h *Hub) SetRateLimiter(limiter *RateLimiter) {
+	h.rateLimiter = limiter
+}
+
+// SetPoolManager 设置连接池管理器
+func (h *Hub) SetPoolManager(manager PoolManager) {
+	h.poolManager = manager
+}
+
+// GetPoolManager 获取连接池管理器
+func (h *Hub) GetPoolManager() PoolManager {
+	return h.poolManager
+}
+
+// GetSMTPClient 从连接池管理器获取SMTP客户端
+func (h *Hub) GetSMTPClient() interface{} {
+	if h.poolManager != nil {
+		return h.poolManager.GetSMTPClient()
+	}
+	return nil
+}
+
+// GetRateLimiter 获取消息频率限制器
+func (h *Hub) GetRateLimiter() *RateLimiter {
+	return h.rateLimiter
 }
 
 // SetHeartbeatConfig 设置心跳配置

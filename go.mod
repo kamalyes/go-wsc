@@ -5,7 +5,7 @@ go 1.24.0
 require (
 	github.com/gorilla/websocket v1.4.2
 	github.com/jpillora/backoff v1.0.0
-	github.com/kamalyes/go-config v0.12.8
+	github.com/kamalyes/go-config v0.12.9-0.20251205082256-a1dea148efa4
 	github.com/kamalyes/go-logger v0.4.4
 	github.com/kamalyes/go-toolbox v0.11.83-0.20251204113204-017bf4f6b9c6
 	github.com/redis/go-redis/v9 v9.17.2
@@ -60,7 +60,7 @@ require (
 // 本地开发替换
 // replace github.com/kamalyes/go-cachex => ../go-cachex
 
-// replace github.com/kamalyes/go-config => ./go-config
+// replace github.com/kamalyes/go-config => ../go-config
 
 // replace github.com/kamalyes/go-logger => ../go-logger
 

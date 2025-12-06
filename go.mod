@@ -5,7 +5,7 @@ go 1.24.0
 require (
 	github.com/gorilla/websocket v1.4.2
 	github.com/jpillora/backoff v1.0.0
-	github.com/kamalyes/go-config v0.12.10
+	github.com/kamalyes/go-config v0.12.12
 	github.com/kamalyes/go-logger v0.4.4
 	github.com/kamalyes/go-toolbox v0.11.84
 	github.com/redis/go-redis/v9 v9.17.2

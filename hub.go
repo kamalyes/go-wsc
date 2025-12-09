@@ -2758,6 +2758,21 @@ func (h *Hub) GetOnlineUserCount() (int64, error) {
 	return h.onlineStatusRepo.GetOnlineCount(ctx)
 }
 
+// GetOnlineUserCountByType 获取指定类型的在线用户数
+// 参数:
+//   - userType: 用户类型
+//
+// 返回:
+//   - int64: 在线用户数量
+//   - error: 错误信息
+func (h *Hub) GetOnlineUserCountByType(userType UserType) (int64, error) {
+	users, err := h.GetOnlineUsersByType(userType)
+	if err != nil {
+		return 0, err
+	}
+	return int64(len(users)), nil
+}
+
 // UpdateUserHeartbeat 更新用户心跳时间
 // 参数:
 //   - userID: 用户ID

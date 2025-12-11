@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-09-06 09:50:55
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-06 11:36:49
+ * @LastEditTime: 2025-12-11 16:06:09
  * @FilePath: \go-wsc\connection.go
  * @Description: 连接管理逻辑
  *
@@ -28,47 +28,86 @@ func (wsc *Wsc) Closed() bool {
 
 // Connect 发起连接
 func (wsc *Wsc) Connect() {
-	// 初始化/重置发送通道以及其关闭控制结构（支持断线重连后的再次关闭）
+	wsc.initSendChannel()
+	b := wsc.createBackoff()
+	for {
+		nextRec := b.Duration()
+		if err := wsc.attemptConnection(); err != nil {
+			wsc.handleConnectError(err)
+			time.Sleep(nextRec)
+			continue
+		}
+		wsc.onConnectionSuccess()
+		return
+	}
+}
+
+// initSendChannel 初始化/重置发送通道以及其关闭控制结构（支持断线重连后的再次关闭）
+func (wsc *Wsc) initSendChannel() {
 	wsc.WebSocket.sendChanMu.Lock()
-	wsc.WebSocket.sendChan = make(chan *wsMsg, wsc.Config.MessageBufferSize) // 缓冲（替换引用）
+	// 创建新的缓冲通道（替换旧引用）
+	wsc.WebSocket.sendChan = make(chan *wsMsg, wsc.Config.MessageBufferSize)
+	// 重置 sync.Once，允许重新关闭通道
 	wsc.WebSocket.sendChanOnce = sync.Once{}
+	// 重置关闭标志
 	atomic.StoreInt32(&wsc.WebSocket.sendChanClosed, 0)
 	wsc.WebSocket.sendChanMu.Unlock()
-	b := &backoff.Backoff{
+}
+
+// createBackoff 创建退避策略
+func (wsc *Wsc) createBackoff() *backoff.Backoff {
+	// 根据配置创建指数退避策略，用于连接重试
+	return &backoff.Backoff{
 		Min:    wsc.Config.MinRecTime,
 		Max:    wsc.Config.MaxRecTime,
 		Factor: wsc.Config.RecFactor,
 		Jitter: true,
 	}
-	for {
-		var err error
-		nextRec := b.Duration()
-		wsc.WebSocket.Conn, wsc.WebSocket.HttpResponse, err =
-			wsc.WebSocket.Dialer.Dial(wsc.WebSocket.Url, wsc.WebSocket.RequestHeader)
-		if err != nil {
-				if f := wsc.onConnectError.Load(); f != nil {
-					f.(func(error))(err)
-				}
-			// 重试
-			time.Sleep(nextRec)
-			continue
-		}
-		// 变更连接状态
-		wsc.WebSocket.connMu.Lock()
-		wsc.WebSocket.isConnected = true
-		wsc.WebSocket.connMu.Unlock()
-		// 连接成功回调
-			if f := wsc.onConnected.Load(); f != nil {
-				f.(func())()
-			}
-		// 设置支持接受的消息最大长度
-		wsc.WebSocket.Conn.SetReadLimit(wsc.Config.MaxMessageSize)
-		// 设置关闭、ping 和 pong 处理
-		wsc.setupHandlers()
-		// 启动读写协程
-		go wsc.readMessages()
-		go wsc.writeMessages()
-		return
+}
+
+// attemptConnection 尝试建立连接
+func (wsc *Wsc) attemptConnection() error {
+	// 使用 Dialer 建立 WebSocket 连接
+	var err error
+	wsc.WebSocket.Conn, wsc.WebSocket.HttpResponse, err =
+		wsc.WebSocket.Dialer.Dial(wsc.WebSocket.Url, wsc.WebSocket.RequestHeader)
+	return err
+}
+
+// handleConnectError 处理连接错误
+func (wsc *Wsc) handleConnectError(err error) {
+	// 调用连接错误回调（如果已设置）
+	if f := wsc.onConnectError.Load(); f != nil {
+		f.(func(error))(err)
+	}
+}
+
+// onConnectionSuccess 连接成功后的处理
+func (wsc *Wsc) onConnectionSuccess() {
+	// 变更连接状态
+	wsc.setConnectedState()
+	// 连接成功回调
+	wsc.notifyConnected()
+	// 设置支持接受的消息最大长度
+	wsc.WebSocket.Conn.SetReadLimit(wsc.Config.MaxMessageSize)
+	// 设置关闭、ping 和 pong 处理
+	wsc.setupHandlers()
+	// 启动读写协程
+	go wsc.readMessages()
+	go wsc.writeMessages()
+}
+
+// setConnectedState 设置连接状态为已连接
+func (wsc *Wsc) setConnectedState() {
+	wsc.WebSocket.connMu.Lock()
+	wsc.WebSocket.isConnected = true
+	wsc.WebSocket.connMu.Unlock()
+}
+
+// notifyConnected 通知连接成功
+func (wsc *Wsc) notifyConnected() {
+	if f := wsc.onConnected.Load(); f != nil {
+		f.(func())()
 	}
 }
 
@@ -109,31 +148,65 @@ func (wsc *Wsc) readMessages() {
 	for {
 		messageType, message, err := wsc.WebSocket.Conn.ReadMessage()
 		if err != nil {
-			// 异常断线
-			if f := wsc.onDisconnected.Load(); f != nil {
-				f.(func(error))(err)
-			}
-			// 根据配置决定是否重连
-			if wsc.Config == nil || wsc.Config.AutoReconnect {
-				wsc.closeAndRecConn()
-			} else {
-				wsc.clean()
-			}
+			wsc.handleReadError(err)
 			return
 		}
-		// 处理消息时加锁
-		wsc.mu.Lock()
-		switch messageType {
-		case websocket.TextMessage:
-			if f := wsc.onTextMessageReceived.Load(); f != nil {
-				f.(func(string))(string(message))
-			}
-		case websocket.BinaryMessage:
-			if f := wsc.onBinaryMessageReceived.Load(); f != nil {
-				f.(func([]byte))(message)
-			}
-		}
-		wsc.mu.Unlock()
+		wsc.processReceivedMessage(messageType, message)
+	}
+}
+
+// handleReadError 处理读取消息时的错误
+func (wsc *Wsc) handleReadError(err error) {
+	// 异常断线，通知断线回调
+	wsc.notifyDisconnected(err)
+	// 根据配置决定是否重连
+	wsc.handleReconnectOrClean()
+}
+
+// notifyDisconnected 通知断线
+func (wsc *Wsc) notifyDisconnected(err error) {
+	if f := wsc.onDisconnected.Load(); f != nil {
+		f.(func(error))(err)
+	}
+}
+
+// handleReconnectOrClean 根据配置决定是否重连
+func (wsc *Wsc) handleReconnectOrClean() {
+	if wsc.Config == nil || wsc.Config.AutoReconnect {
+		wsc.closeAndRecConn()
+	} else {
+		wsc.clean()
+	}
+}
+
+// processReceivedMessage 处理接收到的消息
+func (wsc *Wsc) processReceivedMessage(messageType int, message []byte) {
+	// 处理消息时加锁
+	wsc.mu.Lock()
+	defer wsc.mu.Unlock()
+
+	// 根据消息类型分发处理
+	switch messageType {
+	case websocket.TextMessage:
+		wsc.handleTextMessage(message)
+	case websocket.BinaryMessage:
+		wsc.handleBinaryMessage(message)
+	}
+}
+
+// handleTextMessage 处理文本消息
+func (wsc *Wsc) handleTextMessage(message []byte) {
+	// 调用文本消息接收回调（如果已设置）
+	if f := wsc.onTextMessageReceived.Load(); f != nil {
+		f.(func(string))(string(message))
+	}
+}
+
+// handleBinaryMessage 处理二进制消息
+func (wsc *Wsc) handleBinaryMessage(message []byte) {
+	// 调用二进制消息接收回调（如果已设置）
+	if f := wsc.onBinaryMessageReceived.Load(); f != nil {
+		f.(func([]byte))(message)
 	}
 }
 

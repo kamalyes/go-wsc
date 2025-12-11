@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-11-13 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-12-05 16:15:35
+ * @LastEditTime: 2025-12-11 16:01:15
  * @FilePath: \go-wsc\hub.go
  * @Description: WebSocket/SSE 服务端 Hub - 统一管理实时连接
  *
@@ -698,15 +698,19 @@ func (h *Hub) notifySendFailureAfterRetries(msg *HubMessage, recipient string, r
 	h.failureHandlerMutex.RUnlock()
 
 	for _, handler := range handlers {
-		go func(h SendFailureHandler) {
+		go func(handler SendFailureHandler) {
 			defer func() {
 				if r := recover(); r != nil {
-					// 防止处理器panic影响主流程
+					h.logger.ErrorKV("SendFailureHandler panic (retry exhausted)",
+						"message_id", msg.ID,
+						"recipient", recipient,
+						"panic", r,
+					)
 				}
 			}()
 			// 使用特殊的失败原因表示这是经过重试后的失败
 			reason := fmt.Sprintf("retry_exhausted_%d_attempts", result.TotalRetries+1)
-			h.HandleSendFailure(msg, recipient, reason, result.FinalError)
+			handler.HandleSendFailure(msg, recipient, reason, result.FinalError)
 		}(handler)
 	}
 }
@@ -1088,13 +1092,18 @@ func (h *Hub) notifySendFailure(msg *HubMessage, recipient string, reason string
 	h.failureHandlerMutex.RUnlock()
 
 	for _, handler := range handlers {
-		go func(h SendFailureHandler) {
+		go func(handler SendFailureHandler) {
 			defer func() {
 				if r := recover(); r != nil {
-					// 防止处理器panic影响主流程
+					h.logger.ErrorKV("SendFailureHandler panic",
+						"message_id", msg.ID,
+						"recipient", recipient,
+						"reason", reason,
+						"panic", r,
+					)
 				}
 			}()
-			h.HandleSendFailure(msg, recipient, reason, err)
+			handler.HandleSendFailure(msg, recipient, reason, err)
 		}(handler)
 	}
 }
@@ -1120,25 +1129,34 @@ func (h *Hub) notifyQueueFull(msg *HubMessage, recipient string, queueType strin
 
 	// 调用专门的队列满处理器
 	for _, handler := range queueHandlers {
-		go func(h QueueFullHandler) {
+		go func(handler QueueFullHandler) {
 			defer func() {
 				if r := recover(); r != nil {
-					// 防止处理器panic影响主流程
+					h.logger.ErrorKV("QueueFullHandler panic",
+						"message_id", msg.ID,
+						"recipient", recipient,
+						"queue_type", queueType,
+						"panic", r,
+					)
 				}
 			}()
-			h.HandleQueueFull(msg, recipient, queueType, err)
+			handler.HandleQueueFull(msg, recipient, queueType, err)
 		}(handler)
 	}
 
 	// 同时调用通用处理器
 	for _, handler := range generalHandlers {
-		go func(h SendFailureHandler) {
+		go func(handler SendFailureHandler) {
 			defer func() {
 				if r := recover(); r != nil {
-					// 防止处理器panic影响主流程
+					h.logger.ErrorKV("SendFailureHandler panic (queue full)",
+						"message_id", msg.ID,
+						"recipient", recipient,
+						"panic", r,
+					)
 				}
 			}()
-			h.HandleSendFailure(msg, recipient, SendFailureReasonQueueFull, err)
+			handler.HandleSendFailure(msg, recipient, SendFailureReasonQueueFull, err)
 		}(handler)
 	}
 }
@@ -1154,25 +1172,33 @@ func (h *Hub) notifyUserOffline(msg *HubMessage, userID string, err error) {
 
 	// 调用专门的用户离线处理器
 	for _, handler := range offlineHandlers {
-		go func(h UserOfflineHandler) {
+		go func(handler UserOfflineHandler) {
 			defer func() {
 				if r := recover(); r != nil {
-					// 防止处理器panic影响主流程
+					h.logger.ErrorKV("UserOfflineHandler panic",
+						"message_id", msg.ID,
+						"user_id", userID,
+						"panic", r,
+					)
 				}
 			}()
-			h.HandleUserOffline(msg, userID, err)
+			handler.HandleUserOffline(msg, userID, err)
 		}(handler)
 	}
 
 	// 同时调用通用处理器
 	for _, handler := range generalHandlers {
-		go func(h SendFailureHandler) {
+		go func(handler SendFailureHandler) {
 			defer func() {
 				if r := recover(); r != nil {
-					// 防止处理器panic影响主流程
+					h.logger.ErrorKV("SendFailureHandler panic (user offline)",
+						"message_id", msg.ID,
+						"user_id", userID,
+						"panic", r,
+					)
 				}
 			}()
-			h.HandleSendFailure(msg, userID, SendFailureReasonUserOffline, err)
+			handler.HandleSendFailure(msg, userID, SendFailureReasonUserOffline, err)
 		}(handler)
 	}
 }
@@ -1393,7 +1419,15 @@ func (h *Hub) removeClientUnsafe(client *Client) {
 	}()
 
 	if client.SendChan != nil {
-		defer func() { recover() }()
+		defer func() {
+			if r := recover(); r != nil {
+				h.logger.ErrorKV("关闭SendChan时panic",
+					"client_id", client.ID,
+					"user_id", client.UserID,
+					"panic", r,
+				)
+			}
+		}()
 		close(client.SendChan)
 	}
 }
@@ -2832,19 +2866,8 @@ func (h *Hub) recordMessageToDatabase(msg *HubMessage, err error) {
 			}
 		}()
 
-		// 🔥 过滤系统消息：只记录业务消息，排除系统/控制类消息
-		systemMessageTypes := map[MessageType]bool{
-			MessageTypeHeartbeat: true,
-			MessageTypePing:      true,
-			MessageTypePong:      true,
-			MessageTypeAck:       true,
-			MessageTypeTyping:    true,
-			MessageTypeRead:      true,
-			MessageTypeDelivered: true,
-		}
-
-		if systemMessageTypes[msg.MessageType] {
-			// 系统消息不记录到数据库
+		// 过滤不需要记录的消息类型
+		if msg.MessageType.ShouldSkipDatabaseRecord() {
 			return
 		}
 
@@ -2943,6 +2966,11 @@ func (h *Hub) updateMessageSendStatus(messageData []byte, status MessageSendStat
 				"error", err,
 				"data_size", len(messageData),
 			)
+			return
+		}
+
+		// 过滤不需要记录的消息类型
+		if msg.MessageType.ShouldSkipDatabaseRecord() {
 			return
 		}
 

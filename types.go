@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-01-21
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-26 19:55:53
+ * @LastEditTime: 2025-12-11 18:12:49
  * @FilePath: \go-wsc\types.go
  * @Description: WebSocket 系统类型定义
  *
@@ -270,6 +270,23 @@ func (t MessageType) IsStatusType() bool {
 	default:
 		return false
 	}
+}
+
+// IsHeartbeatType 检查是否为心跳类型消息
+func (t MessageType) IsHeartbeatType() bool {
+	switch t {
+	case MessageTypePing, MessageTypePong, MessageTypeHeartbeat:
+		return true
+	default:
+		return false
+	}
+}
+
+// ShouldSkipDatabaseRecord 判断是否应该跳过数据库记录
+// 某些消息类型（如心跳消息、状态消息）频繁发送但不需要持久化，跳过记录可以减轻数据库压力
+func (t MessageType) ShouldSkipDatabaseRecord() bool {
+	// 心跳消息和状态消息不需要记录到数据库
+	return t.IsHeartbeatType() || t.IsStatusType()
 }
 
 // GetCategory 获取消息类型分类

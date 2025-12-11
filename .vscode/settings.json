@@ -200,6 +200,7 @@
       "promlinter",
       "Randu",
       "randx",
+      "Retryable",
       "rsday",
       "sday",
       "sqlbuilderx",
@@ -214,10 +215,12 @@
       "Tiktok",
       "tmpl",
       "Twitterbot",
+      "upgrader",
       "urday",
       "varchar",
       "webp",
       "Wechat",
+      "wscconfig",
       "zipx"
     ]
 }

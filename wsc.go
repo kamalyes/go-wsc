@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-09-06 09:50:55
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-16 20:20:00
+ * @LastEditTime: 2025-12-11 16:02:30
  * @FilePath: \go-wsc\wsc.go
  * @Description: Wsc 结构体及其方法
  *
@@ -49,8 +49,8 @@ type Wsc struct {
 func New(url string) *Wsc {
 	// 初始化 Wsc 客户端，使用默认配置和指定的 URL
 	return &Wsc{
-		Config:    safe.MergeWithDefaults[wscconfig.WSC](nil, wscconfig.Default()), // 使用safe合并默认配置
-		WebSocket: NewWebSocket(url),                                               // 创建新的 WebSocket 连接
+		Config:    safe.MergeWithDefaults(nil, wscconfig.Default()), // 使用safe合并默认配置
+		WebSocket: NewWebSocket(url),                                // 创建新的 WebSocket 连接
 	}
 }
 

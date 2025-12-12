@@ -74,6 +74,9 @@ const (
 	ErrTypeMaxRetriesExceeded           ErrorType = 80704 // 超过最大重试次数
 	ErrTypeRecordManagerNotInitialized  ErrorType = 80705 // 记录管理器未初始化
 	ErrTypeMaxRetriesExceededForMessage ErrorType = 80706 // 消息重试次数超过最大限制
+	ErrTypeRecordRepositoryNotSet       ErrorType = 80707 // 消息记录仓库未设置
+	ErrTypeOnlineStatusRepositoryNotSet ErrorType = 80708 // 在线状态仓库未设置
+	ErrTypeStatsRepositoryNotSet        ErrorType = 80709 // 统计仓库未设置
 
 	// 速率限制错误 (80800-80899) - 不可重试
 	ErrTypeRateLimitExceeded     ErrorType = 80801 // 超过速率限制
@@ -100,9 +103,6 @@ const (
 	ErrTypeBruteForceDetected ErrorType = 81202 // 检测到暴力攻击
 	ErrTypeThreatDetected     ErrorType = 81203 // 检测到威胁内容
 	ErrTypeAccessDeniedByRule ErrorType = 81204 // 被访问规则拒绝
-
-	// 消息记录仓库相关错误 (81300-81399) - 不可重试
-	ErrTypeRecordRepositoryNotSet ErrorType = 81301 // 消息记录仓库未设置
 )
 
 // init 初始化所有错误类型注册
@@ -232,10 +232,12 @@ var (
 
 // 业务逻辑错误变量
 var (
-	ErrMessageFiltered        = errorx.NewError(ErrTypeMessageFiltered)
-	ErrNoAvailableAgents      = errorx.NewError(ErrTypeNoAvailableAgents)
-	ErrQueueFull              = errorx.NewError(ErrTypeQueueFull)
-	ErrRecordRepositoryNotSet = errorx.NewError(ErrTypeRecordRepositoryNotSet)
+	ErrMessageFiltered              = errorx.NewError(ErrTypeMessageFiltered)
+	ErrNoAvailableAgents            = errorx.NewError(ErrTypeNoAvailableAgents)
+	ErrQueueFull                    = errorx.NewError(ErrTypeQueueFull)
+	ErrRecordRepositoryNotSet       = errorx.NewError(ErrTypeRecordRepositoryNotSet)
+	ErrOnlineStatusRepositoryNotSet = errorx.NewError(ErrTypeOnlineStatusRepositoryNotSet)
+	ErrStatsRepositoryNotSet        = errorx.NewError(ErrTypeStatsRepositoryNotSet)
 )
 
 // IsRetryableError 判断错误是否可以重试

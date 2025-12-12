@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-12-02 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-12-02 09:24:13
+ * @LastEditTime: 2025-12-12 15:18:15
  * @FilePath: \go-wsc\message_queue_repository_test.go
  * @Description: Redis消息队列仓库集成测试
  *
@@ -22,7 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func setupMessageQueueTest(t *testing.T) (*RedisMessageQueueRepository, func()) {
+func setupMessageQueueTest(t *testing.T) (*RedisMessageQueueRepository, string, func()) {
 	// Redis配置
 	rdb := redis.NewClient(&redis.Options{
 		Addr:     "120.79.25.168:16389",
@@ -37,26 +37,29 @@ func setupMessageQueueTest(t *testing.T) (*RedisMessageQueueRepository, func()) 
 
 	repo := NewRedisMessageQueueRepository(rdb, "wsc:test:queue:", 1*time.Hour)
 
+	// 使用唯一的队列名称（包含测试名称和时间戳）
+	queueName := fmt.Sprintf("test_%s_%d", t.Name(), time.Now().UnixNano())
+
 	cleanup := func() {
 		// 清理测试数据
-		repo.Clear(ctx, "test")
-		repo.Clear(ctx, "test:processing")
-		rdb.Del(ctx, "wsc:test:queue:test:lock")
+		repo.Clear(ctx, queueName)
+		repo.Clear(ctx, queueName+":processing")
+		rdb.Del(ctx, "wsc:test:queue:"+queueName+":lock")
 		rdb.Close()
 	}
 
-	return repo, cleanup
+	return repo, queueName, cleanup
 }
 
 func TestMessageQueueBasicOperations(t *testing.T) {
-	repo, cleanup := setupMessageQueueTest(t)
+	repo, queueName, cleanup := setupMessageQueueTest(t)
 	defer cleanup()
 
 	ctx := context.Background()
 
 	// 清理之前可能残留的数据
-	repo.Clear(ctx, "test")
-	repo.Clear(ctx, "test:processing")
+	repo.Clear(ctx, queueName)
+	repo.Clear(ctx, queueName+":processing")
 	repo.Clear(ctx, "empty-queue")
 
 	t.Run("入队和出队", func(t *testing.T) {
@@ -71,23 +74,23 @@ func TestMessageQueueBasicOperations(t *testing.T) {
 		}
 
 		// 入队
-		err := repo.Enqueue(ctx, "test", msg)
+		err := repo.Enqueue(ctx, queueName, msg)
 		require.NoError(t, err)
 
 		// 检查队列长度
-		length, err := repo.GetLength(ctx, "test")
+		length, err := repo.GetLength(ctx, queueName)
 		require.NoError(t, err)
 		assert.Equal(t, int64(1), length)
 
 		// 出队
-		dequeued, err := repo.Dequeue(ctx, "test", 1*time.Second)
+		dequeued, err := repo.Dequeue(ctx, queueName, 1*time.Second)
 		require.NoError(t, err)
 		require.NotNil(t, dequeued)
 		assert.Equal(t, msg.ID, dequeued.ID)
 		assert.Equal(t, msg.Content, dequeued.Content)
 
 		// 队列应该为空
-		length, err = repo.GetLength(ctx, "test")
+		length, err = repo.GetLength(ctx, queueName)
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), length)
 	})
@@ -99,22 +102,22 @@ func TestMessageQueueBasicOperations(t *testing.T) {
 			CreateAt: time.Now(),
 		}
 
-		err := repo.Enqueue(ctx, "test", msg)
+		err := repo.Enqueue(ctx, queueName, msg)
 		require.NoError(t, err)
 
 		// Peek不会移除消息
-		peeked, err := repo.Peek(ctx, "test")
+		peeked, err := repo.Peek(ctx, queueName)
 		require.NoError(t, err)
 		require.NotNil(t, peeked)
 		assert.Equal(t, msg.ID, peeked.ID)
 
 		// 队列长度不变
-		length, err := repo.GetLength(ctx, "test")
+		length, err := repo.GetLength(ctx, queueName)
 		require.NoError(t, err)
 		assert.Equal(t, int64(1), length)
 
 		// 清理
-		repo.Clear(ctx, "test")
+		repo.Clear(ctx, queueName)
 	})
 
 	t.Run("空队列超时", func(t *testing.T) {
@@ -129,14 +132,14 @@ func TestMessageQueueBasicOperations(t *testing.T) {
 }
 
 func TestMessageQueueWatchdog(t *testing.T) {
-	repo, cleanup := setupMessageQueueTest(t)
+	repo, queueName, cleanup := setupMessageQueueTest(t)
 	defer cleanup()
 
 	ctx := context.Background()
 
 	// 清理之前可能残留的数据
-	repo.Clear(ctx, "test")
-	repo.Clear(ctx, "test:processing")
+	repo.Clear(ctx, queueName)
+	repo.Clear(ctx, queueName+":processing")
 
 	t.Run("看门狗锁正常处理", func(t *testing.T) {
 		msg := &HubMessage{
@@ -148,12 +151,12 @@ func TestMessageQueueWatchdog(t *testing.T) {
 		}
 
 		// 入队
-		err := repo.Enqueue(ctx, "test", msg)
+		err := repo.Enqueue(ctx, queueName, msg)
 		require.NoError(t, err)
 
 		// 使用看门狗处理
 		processed := false
-		err = repo.DequeueWithWatchdog(ctx, "test", 1*time.Second, func(m *HubMessage) error {
+		err = repo.DequeueWithWatchdog(ctx, queueName, 1*time.Second, func(m *HubMessage) error {
 			assert.Equal(t, msg.ID, m.ID)
 			assert.Equal(t, msg.Content, m.Content)
 			processed = true
@@ -166,12 +169,12 @@ func TestMessageQueueWatchdog(t *testing.T) {
 		assert.True(t, processed, "消息应该被处理")
 
 		// 队列应该为空
-		length, err := repo.GetLength(ctx, "test")
+		length, err := repo.GetLength(ctx, queueName)
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), length)
 
 		// 处理队列也应该为空
-		processingLength, err := repo.GetLength(ctx, "test:processing")
+		processingLength, err := repo.GetLength(ctx, queueName+":processing")
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), processingLength)
 	})
@@ -182,11 +185,11 @@ func TestMessageQueueWatchdog(t *testing.T) {
 			Content: "Watchdog Fail Test",
 		}
 
-		err := repo.Enqueue(ctx, "test", msg)
+		err := repo.Enqueue(ctx, queueName, msg)
 		require.NoError(t, err)
 
 		// 处理失败
-		err = repo.DequeueWithWatchdog(ctx, "test", 1*time.Second, func(m *HubMessage) error {
+		err = repo.DequeueWithWatchdog(ctx, queueName, 1*time.Second, func(m *HubMessage) error {
 			return fmt.Errorf("processing failed")
 		})
 
@@ -194,7 +197,7 @@ func TestMessageQueueWatchdog(t *testing.T) {
 		assert.Contains(t, err.Error(), "process message failed")
 
 		// 消息应该从处理队列中移除
-		processingLength, err := repo.GetLength(ctx, "test:processing")
+		processingLength, err := repo.GetLength(ctx, queueName+":processing")
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), processingLength)
 	})
@@ -205,11 +208,11 @@ func TestMessageQueueWatchdog(t *testing.T) {
 			Content: "Watchdog Renewal Test",
 		}
 
-		err := repo.Enqueue(ctx, "test", msg)
+		err := repo.Enqueue(ctx, queueName, msg)
 		require.NoError(t, err)
 
 		// 处理时间超过锁的过期时间,测试续期
-		err = repo.DequeueWithWatchdog(ctx, "test", 1*time.Second, func(m *HubMessage) error {
+		err = repo.DequeueWithWatchdog(ctx, queueName, 1*time.Second, func(m *HubMessage) error {
 			// 处理15秒,超过lockExpiry(30s)的一半,会触发续期
 			time.Sleep(15 * time.Second)
 			return nil
@@ -218,21 +221,21 @@ func TestMessageQueueWatchdog(t *testing.T) {
 		require.NoError(t, err)
 
 		// 验证处理成功
-		length, err := repo.GetLength(ctx, "test")
+		length, err := repo.GetLength(ctx, queueName)
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), length)
 	})
 }
 
 func TestMessageQueueConcurrency(t *testing.T) {
-	repo, cleanup := setupMessageQueueTest(t)
+	repo, queueName, cleanup := setupMessageQueueTest(t)
 	defer cleanup()
 
 	ctx := context.Background()
 
 	// 清理之前可能残留的数据
-	repo.Clear(ctx, "test")
-	repo.Clear(ctx, "test:processing")
+	repo.Clear(ctx, queueName)
+	repo.Clear(ctx, queueName+":processing")
 
 	t.Run("并发入队出队", func(t *testing.T) {
 		const numMessages = 100
@@ -244,12 +247,12 @@ func TestMessageQueueConcurrency(t *testing.T) {
 				ID:      fmt.Sprintf("msg-%d", i),
 				Content: fmt.Sprintf("Message %d", i),
 			}
-			err := repo.Enqueue(ctx, "test", msg)
+			err := repo.Enqueue(ctx, queueName, msg)
 			require.NoError(t, err)
 		}
 
 		// 验证队列长度
-		length, err := repo.GetLength(ctx, "test")
+		length, err := repo.GetLength(ctx, queueName)
 		require.NoError(t, err)
 		assert.Equal(t, int64(numMessages), length)
 
@@ -264,7 +267,7 @@ func TestMessageQueueConcurrency(t *testing.T) {
 				defer func() { done <- true }()
 
 				for {
-					err := repo.DequeueWithWatchdog(ctx, "test", 500*time.Millisecond, func(m *HubMessage) error {
+					err := repo.DequeueWithWatchdog(ctx, queueName, 500*time.Millisecond, func(m *HubMessage) error {
 						<-processMutex
 						processed[m.ID] = true
 						count := len(processed)
@@ -306,20 +309,21 @@ func TestMessageQueueConcurrency(t *testing.T) {
 		assert.Equal(t, numMessages, len(processed), "应该处理所有消息")
 
 		// 队列应该为空
-		length, err = repo.GetLength(ctx, "test")
+		length, err = repo.GetLength(ctx, queueName)
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), length)
 	})
 }
 
 func TestMessageQueueClear(t *testing.T) {
-	repo, cleanup := setupMessageQueueTest(t)
+	repo, queueName, cleanup := setupMessageQueueTest(t)
 	defer cleanup()
 
 	ctx := context.Background()
 
 	// 清理之前可能残留的数据
-	repo.Clear(ctx, "test")
+	repo.Clear(ctx, queueName)
+	repo.Clear(ctx, queueName+":processing")
 
 	// 入队多条消息
 	for i := 0; i < 10; i++ {
@@ -327,21 +331,21 @@ func TestMessageQueueClear(t *testing.T) {
 			ID:      fmt.Sprintf("msg-%d", i),
 			Content: fmt.Sprintf("Content %d", i),
 		}
-		err := repo.Enqueue(ctx, "test", msg)
+		err := repo.Enqueue(ctx, queueName, msg)
 		require.NoError(t, err)
 	}
 
 	// 验证长度
-	length, err := repo.GetLength(ctx, "test")
+	length, err := repo.GetLength(ctx, queueName)
 	require.NoError(t, err)
 	assert.Equal(t, int64(10), length)
 
 	// 清空
-	err = repo.Clear(ctx, "test")
+	err = repo.Clear(ctx, queueName)
 	require.NoError(t, err)
 
 	// 验证已清空
-	length, err = repo.GetLength(ctx, "test")
+	length, err = repo.GetLength(ctx, queueName)
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), length)
 }

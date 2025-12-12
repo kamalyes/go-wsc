@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-11-15 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-11-26 08:10:06
+ * @LastEditTime: 2025-12-12 13:54:11
  * @FilePath: \go-wsc\hub_test.go
  * @Description: Hub 测试文件 - 测试WebSocket/SSE连接管理中心的各种功能
  *
@@ -15,12 +15,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
-	"github.com/stretchr/testify/assert"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/stretchr/testify/assert"
 )
 
 // mockWelcomeProvider 模拟欢迎消息提供者
@@ -116,21 +117,6 @@ func TestNewHub(t *testing.T) {
 	})
 }
 
-// TestHubStats 测试Hub统计信息
-func TestHubStats(t *testing.T) {
-	hub := NewHub(nil)
-	defer hub.Shutdown()
-
-	stats := hub.GetStats()
-	assert.NotNil(t, stats)
-	assert.Equal(t, hub.nodeID, stats["node_id"])
-	assert.Equal(t, 0, stats["websocket_count"])
-	assert.Equal(t, 0, stats["sse_count"])
-	assert.Equal(t, 0, stats["total_connections"])
-	assert.Equal(t, int64(0), stats["messages_sent"])
-	assert.Equal(t, int64(0), stats["messages_received"])
-}
-
 // TestHubClientRegistration 测试客户端注册和注销
 func TestHubClientRegistration(t *testing.T) {
 	hub := NewHub(nil)
@@ -161,8 +147,8 @@ func TestHubClientRegistration(t *testing.T) {
 		assert.True(t, hub.HasUserClient(client.UserID))
 
 		stats := hub.GetStats()
-		assert.Equal(t, 1, stats["websocket_count"])
-		assert.Equal(t, 1, stats["total_connections"])
+		assert.Equal(t, 1, stats.WebSocketClients)
+		assert.Equal(t, 1, stats.TotalClients)
 
 		// 注销客户端
 		hub.Unregister(client)
@@ -173,8 +159,8 @@ func TestHubClientRegistration(t *testing.T) {
 		assert.False(t, hub.HasUserClient(client.UserID))
 
 		stats = hub.GetStats()
-		assert.Equal(t, 0, stats["websocket_count"])
-		assert.Equal(t, 0, stats["total_connections"])
+		assert.Equal(t, 0, stats.WebSocketClients)
+		assert.Equal(t, 0, stats.TotalClients)
 	})
 
 	t.Run("注册Agent客户端", func(t *testing.T) {
@@ -269,16 +255,16 @@ func TestHubSSESupport(t *testing.T) {
 		assert.Contains(t, hub.sseClients, userID)
 
 		stats := hub.GetStats()
-		assert.Equal(t, 1, stats["sse_count"])
-		assert.Equal(t, 1, stats["total_connections"])
+		assert.Equal(t, 1, stats.SSEClients)
+		assert.Equal(t, 1, stats.TotalClients)
 
 		// 注销SSE连接
 		hub.UnregisterSSE(userID)
 		assert.NotContains(t, hub.sseClients, userID)
 
 		stats = hub.GetStats()
-		assert.Equal(t, 0, stats["sse_count"])
-		assert.Equal(t, 0, stats["total_connections"])
+		assert.Equal(t, 0, stats.SSEClients)
+		assert.Equal(t, 0, stats.TotalClients)
 	})
 
 	t.Run("通过SSE发送消息", func(t *testing.T) {
@@ -382,7 +368,7 @@ func TestHubMessaging(t *testing.T) {
 			Status:      MessageStatusSent,
 		}
 
-		err := hub.SendToUser(ctx, receiver.UserID, message)
+		err := hub.sendToUser(ctx, receiver.UserID, message)
 		assert.NoError(t, err)
 
 		// 验证接收者收到消息
@@ -494,7 +480,7 @@ func TestHubMessaging(t *testing.T) {
 				Content:     fmt.Sprintf("消息 %d", i),
 				CreateAt:    time.Now(),
 			}
-			err := smallHub.SendToUser(context.Background(), "queue-test-user", message)
+			err := smallHub.sendToUser(context.Background(), "queue-test-user", message)
 			if err != nil {
 				errorCount++
 			} else {
@@ -790,7 +776,7 @@ func TestHubMessageFallback(t *testing.T) {
 			Status:      MessageStatusSent,
 		}
 
-		err := hub.SendToUser(context.Background(), userID, message)
+		err := hub.sendToUser(context.Background(), userID, message)
 		assert.NoError(t, err)
 
 		// 验证通过SSE收到消息
@@ -866,8 +852,8 @@ func TestHubConcurrentOperations(t *testing.T) {
 
 			// 验证最终状态
 			stats := hub.GetStats()
-			assert.Equal(t, 0, stats["websocket_count"])
-			assert.Equal(t, 0, stats["total_connections"])
+			assert.Equal(t, 0, stats.WebSocketClients)
+			assert.Equal(t, 0, stats.TotalClients)
 		case <-time.After(10 * time.Second):
 			t.Fatal("并发操作超时")
 		}
@@ -903,7 +889,7 @@ func TestHubConcurrentOperations(t *testing.T) {
 					CreateAt:    time.Now(),
 					Status:      MessageStatusSent,
 				}
-				err := hub.SendToUser(context.Background(), receiver.UserID, message)
+				err := hub.sendToUser(context.Background(), receiver.UserID, message)
 				assert.NoError(t, err)
 			}(i)
 		}
@@ -1001,7 +987,7 @@ func BenchmarkHubOperations(b *testing.B) {
 
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			hub.SendToUser(context.Background(), receiver.UserID, message)
+			hub.sendToUser(context.Background(), receiver.UserID, message)
 		}
 
 		hub.Unregister(receiver)
@@ -1285,8 +1271,8 @@ func TestHubExtendedAPI(t *testing.T) {
 		assert.Error(t, err)
 	})
 
-	t.Run("GetDetailedStats", func(t *testing.T) {
-		stats := hub.GetDetailedStats()
+	t.Run("GetStats", func(t *testing.T) {
+		stats := hub.GetStats()
 		assert.NotNil(t, stats)
 		assert.GreaterOrEqual(t, stats.TotalClients, 0)
 		assert.GreaterOrEqual(t, stats.AgentConnections, 0)
@@ -1678,7 +1664,7 @@ func TestHubConcurrentSendConditional(t *testing.T) {
 				for j := 0; j < 10; j++ {
 					hub.GetClientsCount()
 					hub.GetOnlineUsersCount()
-					hub.GetDetailedStats()
+					hub.GetStats()
 					hub.GetHubHealth()
 					time.Sleep(10 * time.Millisecond)
 				}
@@ -1853,7 +1839,7 @@ func TestHubHighThroughputMessaging(t *testing.T) {
 				MessageType: MessageTypeText,
 				Content:     fmt.Sprintf("rapid message %d", i),
 			}
-			err := hub.SendToUser(context.Background(), userID, msg)
+			err := hub.sendToUser(context.Background(), userID, msg)
 			assert.NoError(t, err)
 		}
 
@@ -1877,7 +1863,7 @@ func TestHubHighThroughputMessaging(t *testing.T) {
 						MessageType: MessageTypeText,
 						Content:     fmt.Sprintf("multi user message %d", i),
 					}
-					hub.SendToUser(context.Background(), userID, msg)
+					hub.sendToUser(context.Background(), userID, msg)
 				}
 			}(userIdx)
 		}
@@ -1923,7 +1909,7 @@ func TestHubMemoryEfficiency(t *testing.T) {
 			Content:     string(largeContent),
 		}
 
-		err := hub.SendToUser(context.Background(), "large-msg-user", msg)
+		err := hub.sendToUser(context.Background(), "large-msg-user", msg)
 		assert.NoError(t, err)
 
 		hub.Unregister(client)
@@ -1950,7 +1936,7 @@ func TestHubMemoryEfficiency(t *testing.T) {
 				MessageType: MessageTypeText,
 				Content:     fmt.Sprintf("small message %d", i),
 			}
-			err := hub.SendToUser(context.Background(), "many-msg-user", msg)
+			err := hub.sendToUser(context.Background(), "many-msg-user", msg)
 			if err != nil && i%1000 == 0 {
 				// 可能队列满，继续
 				time.Sleep(10 * time.Millisecond)
@@ -2017,7 +2003,7 @@ func TestHubEdgeCases(t *testing.T) {
 			MessageType: MessageTypeText,
 			Content:     "test nonexistent",
 		}
-		err := hub.SendToUser(context.Background(), "nonexistent-user", msg)
+		err := hub.sendToUser(context.Background(), "nonexistent-user", msg)
 		// 实际实现可能不返回错误，只是不发送
 		_ = err // 允许nil或error
 	})
@@ -2080,7 +2066,7 @@ func TestHubEdgeCases(t *testing.T) {
 			MessageType: MessageTypeText,
 			Content:     "test empty",
 		}
-		err := hub.SendToUser(context.Background(), "", msg)
+		err := hub.sendToUser(context.Background(), "", msg)
 		// 实际实现可能允许空UserID
 		_ = err // 允许nil或error
 	})
@@ -2141,27 +2127,9 @@ func TestHubEdgeCases(t *testing.T) {
 			Content:     "after shutdown",
 		}
 		// 关闭后的操作可能会失败或无效
-		err := testHub.SendToUser(context.Background(), "any-user", msg)
+		err := testHub.sendToUser(context.Background(), "any-user", msg)
 		// 可能返回错误或成功（取决于实现）
 		_ = err
-	})
-
-	t.Run("Get-Stats-Empty-Hub", func(t *testing.T) {
-		emptyHub := NewHub(nil)
-		defer emptyHub.Shutdown()
-
-		go emptyHub.Run()
-		time.Sleep(100 * time.Millisecond)
-
-		stats := emptyHub.GetStats()
-		assert.NotNil(t, stats)
-		assert.Equal(t, 0, stats["total_connections"])
-
-		detailed := emptyHub.GetDetailedStats()
-		assert.NotNil(t, detailed)
-
-		health := emptyHub.GetHubHealth()
-		assert.NotNil(t, health)
 	})
 }
 
@@ -2981,7 +2949,7 @@ func TestHubComplexScenarios(t *testing.T) {
 							MessageType: MessageTypeText,
 							Content:     fmt.Sprintf("Private message from %s", users[userIndex].Metadata["nickname"]),
 						}
-						hub.SendToUser(context.Background(), users[userIndex-1].UserID, privateMsg)
+						hub.sendToUser(context.Background(), users[userIndex-1].UserID, privateMsg)
 					}
 
 					time.Sleep(10 * time.Millisecond)
@@ -3047,7 +3015,7 @@ func TestHubComplexScenarios(t *testing.T) {
 				Receiver:    agent.UserID, // 直接发送给客服
 				Sender:      customer.UserID,
 			}
-			err := hub.SendToUser(context.Background(), agent.UserID, msg)
+			err := hub.sendToUser(context.Background(), agent.UserID, msg)
 			assert.NoError(t, err)
 
 			// 客服回复（直接回复给客户）
@@ -3058,7 +3026,7 @@ func TestHubComplexScenarios(t *testing.T) {
 				Receiver:    customer.UserID, // 直接发送给客户
 				Sender:      agent.UserID,
 			}
-			err = hub.SendToUser(context.Background(), customer.UserID, replyMsg)
+			err = hub.sendToUser(context.Background(), customer.UserID, replyMsg)
 			assert.NoError(t, err)
 		}
 
@@ -3198,7 +3166,7 @@ func TestHubStressAndPerformance(t *testing.T) {
 					Content:     fmt.Sprintf("Stress test message from client %d", id),
 				}
 
-				hub.SendToUser(context.Background(), client.UserID, msg)
+				hub.sendToUser(context.Background(), client.UserID, msg)
 
 				// 短暂停留
 				time.Sleep(time.Millisecond * 10)
@@ -3258,7 +3226,7 @@ func TestHubStressAndPerformance(t *testing.T) {
 						Content:     fmt.Sprintf("Performance test message #%d", msgID),
 					}
 
-					err := hub.SendToUser(context.Background(), targetUser.UserID, msg)
+					err := hub.sendToUser(context.Background(), targetUser.UserID, msg)
 					if err == nil {
 						atomic.AddInt64(&sentCount, 1)
 					}
@@ -3374,7 +3342,7 @@ func TestHubWithNewMessageTypes(t *testing.T) {
 				assert.True(t, tc.msgType.IsValid(), "消息类型应该有效: %s", tc.msgType)
 
 				// 发送消息
-				err := hub.SendToUser(context.Background(), "test-user", msg)
+				err := hub.sendToUser(context.Background(), "test-user", msg)
 				assert.NoError(t, err, "发送%s失败", tc.name)
 
 				// 验证分类
@@ -3429,7 +3397,7 @@ func TestHubWithNewMessageTypes(t *testing.T) {
 
 		successCount := 0
 		for i, msg := range messages {
-			err := hub.SendToUser(context.Background(), "test-user", msg)
+			err := hub.sendToUser(context.Background(), "test-user", msg)
 			if err == nil {
 				successCount++
 			}

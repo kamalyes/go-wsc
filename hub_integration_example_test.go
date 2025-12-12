@@ -132,7 +132,7 @@ func TestHubWithRedisAndMySQL(t *testing.T) {
 		Status:      MessageStatusSent,
 	}
 
-	err = hub.SendToUser(ctx, "test-user-001", msg)
+	err = hub.sendToUser(ctx, "test-user-001", msg)
 	assert.NoError(t, err)
 	time.Sleep(500 * time.Millisecond) // 等待异步记录完成
 
@@ -233,7 +233,7 @@ func TestHubBatchOperations(t *testing.T) {
 			CreateAt:    time.Now(),
 			Priority:    PriorityNormal,
 		}
-		hub.SendToUser(ctx, msg.Receiver, msg)
+		hub.sendToUser(ctx, msg.Receiver, msg)
 	}
 
 	time.Sleep(1 * time.Second) // 等待所有消息记录完成

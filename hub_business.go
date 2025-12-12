@@ -14,8 +14,9 @@ package wsc
 import (
 	"context"
 	"errors"
-	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"time"
+
+	"github.com/kamalyes/go-toolbox/pkg/errorx"
 )
 
 // ============================================================================
@@ -54,9 +55,9 @@ func (h *Hub) SendToUserWithOfflineCallback(ctx context.Context, userID string, 
 		return false, nil
 	}
 
-	// 用户在线，发送消息
-	err = h.SendToUser(ctx, userID, msg)
-	return true, err
+	// 用户在线，发送消息（带重试）
+	result := h.SendToUserWithRetry(ctx, userID, msg)
+	return true, result.FinalError
 }
 
 // SendToUserWithOfflineFallback 智能发送消息 - 失败时自动降级
@@ -92,14 +93,14 @@ func (h *Hub) SendToUserWithOfflineFallback(ctx context.Context, userID string, 
 		return false, nil
 	}
 
-	// 用户在线，尝试发送
-	err = h.SendToUser(ctx, userID, msg)
-	if err != nil {
+	// 用户在线，尝试发送（带重试）
+	result := h.SendToUserWithRetry(ctx, userID, msg)
+	if result.FinalError != nil {
 		// 发送失败，调用回调
 		if offlineCallback != nil {
-			offlineCallback(msg, err)
+			offlineCallback(msg, result.FinalError)
 		}
-		return false, err
+		return false, result.FinalError
 	}
 
 	return true, nil
@@ -213,11 +214,11 @@ func (h *Hub) BroadcastToUserType(ctx context.Context, userType UserType, msg *H
 	}
 
 	for _, userID := range onlineUsers {
-		err := h.SendToUser(ctx, userID, msg)
-		if err != nil {
+		sendResult := h.SendToUserWithRetry(ctx, userID, msg)
+		if sendResult.FinalError != nil {
 			result.Failed++
 			result.FailedIDs = append(result.FailedIDs, userID)
-			result.Errors[userID] = err
+			result.Errors[userID] = sendResult.FinalError
 			// 即使在线，发送也可能失败，调用离线回调
 			if offlineCallback != nil {
 				offlineCallback(userID, msg)
@@ -490,7 +491,8 @@ func (h *Hub) SendToUsersWithPredicate(ctx context.Context, predicate func(*Clie
 
 	successCount := 0
 	for _, client := range clients {
-		if err := h.SendToUser(ctx, client.UserID, msg); err == nil {
+		result := h.SendToUserWithRetry(ctx, client.UserID, msg)
+		if result.Success {
 			successCount++
 		}
 	}

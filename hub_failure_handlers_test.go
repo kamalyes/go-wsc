@@ -14,13 +14,14 @@ package wsc
 import (
 	"context"
 	"fmt"
-	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
-	"github.com/stretchr/testify/assert"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/stretchr/testify/assert"
 )
 
 // 测试用的失败处理器实现
@@ -255,7 +256,7 @@ func TestHubFailureHandlers(t *testing.T) {
 		for i := 0; i < 2000; i++ {
 			testMsg := *msg
 			testMsg.ID = fmt.Sprintf("queue-full-test-%d", i)
-			err := hub.SendToUser(context.Background(), "nonexistent-user", &testMsg)
+			err := hub.sendToUser(context.Background(), "nonexistent-user", &testMsg)
 			if err != nil {
 				lastErr = err
 				break
@@ -483,9 +484,9 @@ func TestHubRetryMechanism(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 
 		msg := &HubMessage{
-			ID:      "success-test",
-			MessageType:    MessageTypeText,
-			Content: "Test success on first attempt",
+			ID:          "success-test",
+			MessageType: MessageTypeText,
+			Content:     "Test success on first attempt",
 		}
 
 		result := hub.SendToUserWithRetry(context.Background(), "success-user", msg)
@@ -511,9 +512,9 @@ func TestHubRetryMechanism(t *testing.T) {
 		defer cancel()
 
 		msg := &HubMessage{
-			ID:      "context-cancel-test",
-			MessageType:    MessageTypeText,
-			Content: "Test context cancellation",
+			ID:          "context-cancel-test",
+			MessageType: MessageTypeText,
+			Content:     "Test context cancellation",
 		}
 
 		result := cancelHub.SendToUserWithRetry(ctx, "cancel-test-user", msg)
@@ -545,9 +546,9 @@ func TestHubRetryMechanism(t *testing.T) {
 
 		// 测试不可重试的错误（如用户离线）
 		msg := &HubMessage{
-			ID:      "non-retry-test",
-			MessageType:    MessageTypeText,
-			Content: "Test non-retryable error",
+			ID:          "non-retry-test",
+			MessageType: MessageTypeText,
+			Content:     "Test non-retryable error",
 		}
 
 		// 使用带ACK的方法触发用户离线错误，使用更短的超时

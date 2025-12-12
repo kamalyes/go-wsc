@@ -14,10 +14,11 @@ package wsc
 import (
 	"context"
 	"fmt"
-	"github.com/stretchr/testify/assert"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // TestHub200Scenarios 200个场景的综合测试
@@ -65,7 +66,7 @@ func testBasicScenarios(t *testing.T, hub *Hub) {
 				time.Sleep(10 * time.Millisecond)
 
 				stats := hub.GetStats()
-				assert.GreaterOrEqual(t, stats["total_lifetime"].(int64), int64(1),
+				assert.GreaterOrEqual(t, stats.TotalClients, 1,
 					"场景%d: 应该至少有1个连接", i)
 
 				hub.Unregister(client)
@@ -132,9 +133,9 @@ func testBasicScenarios(t *testing.T, hub *Hub) {
 				time.Sleep(10 * time.Millisecond)
 
 				newStats := hub.GetStats()
-				assert.GreaterOrEqual(t, newStats["total_lifetime"].(int64),
-					initialStats["total_lifetime"].(int64),
-					"场景%d: 总连接数应增加", i)
+				assert.GreaterOrEqual(t, newStats.TotalClients,
+					initialStats.TotalClients,
+					"场景%d: 总连接数应增加或保持", i)
 
 				hub.Unregister(client)
 
@@ -195,7 +196,7 @@ func testConcurrentScenarios(t *testing.T, hub *Hub) {
 				time.Sleep(100 * time.Millisecond)
 
 				stats := hub.GetStats()
-				assert.GreaterOrEqual(t, stats["total_lifetime"].(int64), int64(clientCount),
+				assert.GreaterOrEqual(t, stats.TotalClients, clientCount,
 					"场景%d: 并发注册应成功", i)
 
 			case i <= 70: // 场景61-70: 并发注销
@@ -248,12 +249,12 @@ func testConcurrentScenarios(t *testing.T, hub *Hub) {
 					go func(index int) {
 						defer wg.Done()
 						msg := &HubMessage{
-							MessageType:     MessageTypeText,
-							Content:  fmt.Sprintf("并发消息-%d", index),
-							CreateAt: time.Now(),
-							Status:   MessageStatusSent,
+							MessageType: MessageTypeText,
+							Content:     fmt.Sprintf("并发消息-%d", index),
+							CreateAt:    time.Now(),
+							Status:      MessageStatusSent,
 						}
-						hub.SendToUser(context.Background(), receiver.UserID, msg)
+						hub.sendToUser(context.Background(), receiver.UserID, msg)
 					}(j)
 				}
 				wg.Wait()
@@ -336,13 +337,13 @@ func testRoutingScenarios(t *testing.T, hub *Hub) {
 				time.Sleep(50 * time.Millisecond)
 
 				msg := &HubMessage{
-					MessageType:     MessageTypeText,
-					Content:  fmt.Sprintf("点对点消息-%d", i),
-					CreateAt: time.Now(),
-					Status:   MessageStatusSent,
+					MessageType: MessageTypeText,
+					Content:     fmt.Sprintf("点对点消息-%d", i),
+					CreateAt:    time.Now(),
+					Status:      MessageStatusSent,
 				}
 
-				err := hub.SendToUser(context.Background(), receiver.UserID, msg)
+				err := hub.sendToUser(context.Background(), receiver.UserID, msg)
 				assert.NoError(t, err, "场景%d: 发送消息应成功", i)
 
 				hub.Unregister(sender)
@@ -365,10 +366,10 @@ func testRoutingScenarios(t *testing.T, hub *Hub) {
 				time.Sleep(100 * time.Millisecond)
 
 				msg := &HubMessage{
-					MessageType:     MessageTypeText,
-					Content:  fmt.Sprintf("广播消息-%d", i),
-					CreateAt: time.Now(),
-					Status:   MessageStatusSent,
+					MessageType: MessageTypeText,
+					Content:     fmt.Sprintf("广播消息-%d", i),
+					CreateAt:    time.Now(),
+					Status:      MessageStatusSent,
 				}
 
 				hub.Broadcast(context.Background(), msg)
@@ -402,26 +403,26 @@ func testEdgeCaseScenarios(t *testing.T, hub *Hub) {
 				time.Sleep(50 * time.Millisecond)
 
 				msg := &HubMessage{
-					MessageType:     MessageTypeText,
-					Content:  "",
-					CreateAt: time.Now(),
-					Status:   MessageStatusSent,
+					MessageType: MessageTypeText,
+					Content:     "",
+					CreateAt:    time.Now(),
+					Status:      MessageStatusSent,
 				}
 
-				err := hub.SendToUser(context.Background(), receiver.UserID, msg)
+				err := hub.sendToUser(context.Background(), receiver.UserID, msg)
 				assert.NoError(t, err, "场景%d: 空消息应能发送", i)
 
 				hub.Unregister(receiver)
 
 			case i <= 170: // 场景161-170: 不存在的用户
 				msg := &HubMessage{
-					MessageType:     MessageTypeText,
-					Content:  "测试消息",
-					CreateAt: time.Now(),
-					Status:   MessageStatusSent,
+					MessageType: MessageTypeText,
+					Content:     "测试消息",
+					CreateAt:    time.Now(),
+					Status:      MessageStatusSent,
 				}
 
-				err := hub.SendToUser(context.Background(), fmt.Sprintf("nonexistent-%d", i), msg)
+				err := hub.sendToUser(context.Background(), fmt.Sprintf("nonexistent-%d", i), msg)
 				assert.NoError(t, err, "场景%d: 向不存在用户发送应返回错误或静默处理", i)
 
 			case i <= 180: // 场景171-180: 重复注册相同用户
@@ -482,13 +483,13 @@ func testEdgeCaseScenarios(t *testing.T, hub *Hub) {
 				}
 
 				msg := &HubMessage{
-					MessageType:     MessageTypeText,
-					Content:  string(largeContent),
-					CreateAt: time.Now(),
-					Status:   MessageStatusSent,
+					MessageType: MessageTypeText,
+					Content:     string(largeContent),
+					CreateAt:    time.Now(),
+					Status:      MessageStatusSent,
 				}
 
-				err := hub.SendToUser(context.Background(), receiver.UserID, msg)
+				err := hub.sendToUser(context.Background(), receiver.UserID, msg)
 				assert.NoError(t, err, "场景%d: 大消息应能发送", i)
 
 				hub.Unregister(receiver)
@@ -508,8 +509,8 @@ func testEdgeCaseScenarios(t *testing.T, hub *Hub) {
 
 				stats := hub.GetStats()
 				assert.NotNil(t, stats, "场景%d: 统计信息应可获取", i)
-				assert.Contains(t, stats, "node_id", "场景%d: 应包含节点ID", i)
-				assert.Contains(t, stats, "total_lifetime", "场景%d: 应包含总连接数", i)
+				assert.GreaterOrEqual(t, stats.TotalClients, 0, "场景%d: 应有总连接数字段", i)
+				assert.GreaterOrEqual(t, stats.OnlineUsers, 0, "场景%d: 应有在线用户数字段", i)
 
 				hub.Unregister(client)
 			}

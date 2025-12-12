@@ -100,7 +100,7 @@ func TestHubRedisStatistics(t *testing.T) {
 		CreateAt:    time.Now(),
 	}
 
-	err = hub.SendToUser(ctx, "stats-user-B", msg)
+	err = hub.sendToUser(ctx, "stats-user-B", msg)
 	require.NoError(t, err)
 
 	time.Sleep(1 * time.Second) // 等待统计同步
@@ -145,8 +145,8 @@ func TestHubRedisStatistics(t *testing.T) {
 	assert.Greater(t, uptime, int64(0), "运行时间应大于0")
 	t.Logf("✅ Hub运行时间: %d秒", uptime)
 
-	// 11. 测试:GetDetailedStats 方法
-	detailedStats := hub.GetDetailedStats()
+	// 11. 测试:GetStats 方法
+	detailedStats := hub.GetStats()
 	assert.NotNil(t, detailedStats)
 	assert.GreaterOrEqual(t, detailedStats.MessagesSent, int64(1))
 	assert.GreaterOrEqual(t, detailedStats.BroadcastsSent, int64(1))

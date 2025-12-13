@@ -48,8 +48,8 @@ github.com/jpillora/backoff v1.0.0 h1:uvFg412JmmHBHw7iwprIxkPMI+sGQ4kzOWsMeHnm2E
 github.com/jpillora/backoff v1.0.0/go.mod h1:J/6gKK9jxlEcS3zixgDgUAsiuZ7yrSoa/FX5e0EB2j4=
 github.com/json-iterator/go v1.1.12 h1:PV8peI4a0ysnczrg+LtxykD8LfKY9ML6u2jnxaEnrnM=
 github.com/json-iterator/go v1.1.12/go.mod h1:e30LSqwooZae/UwlEbR2852Gd8hjQvJoHmT4TnhNGBo=
-github.com/kamalyes/go-config v0.12.12-0.20251213120051-039f6cf1ead3 h1:nCWmN1m3/HGT+NYMvaquT5HClAh17f+Rd70Ha0urW2Q=
-github.com/kamalyes/go-config v0.12.12-0.20251213120051-039f6cf1ead3/go.mod h1:BQI/jtujyQeMX5FI/esPi7gFWeLn2CPL3BuTqEIANmE=
+github.com/kamalyes/go-config v0.12.12 h1:+3XEcIERPNKX5DhiVhOcBdgOVCBqKyQ9vthU+nyBkpI=
+github.com/kamalyes/go-config v0.12.12/go.mod h1:xGwDCeQ6FysamO5HxvyzUtmijm/Jpq8qTq1EJM6+3UY=
 github.com/kamalyes/go-logger v0.4.4 h1:IbmbXPqUSHz8CG3YosGvtSQlYg9x2nw94khsPi6fQUA=
 github.com/kamalyes/go-logger v0.4.4/go.mod h1:9eXFORVnQvdS7CB3IfEoBJCNZKlprVRaiWdDkaHbi7o=
 github.com/kamalyes/go-toolbox v0.11.85-0.20251212152757-509d1b1e8d3e h1:sOkgxR0SBZEFXrG+kTUQ1q2Z5IGMgSfdLsJ4U2QAaas=

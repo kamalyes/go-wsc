@@ -5,9 +5,9 @@ go 1.24.0
 require (
 	github.com/gorilla/websocket v1.4.2
 	github.com/jpillora/backoff v1.0.0
-	github.com/kamalyes/go-config v0.12.12-0.20251213120051-039f6cf1ead3
-	github.com/kamalyes/go-logger v0.4.4
-	github.com/kamalyes/go-toolbox v0.11.85-0.20251212152757-509d1b1e8d3e
+	github.com/kamalyes/go-config v0.12.13
+	github.com/kamalyes/go-logger v0.4.5
+	github.com/kamalyes/go-toolbox v0.11.86
 	github.com/redis/go-redis/v9 v9.17.2
 	github.com/stretchr/testify v1.11.1
 	gorm.io/driver/mysql v1.6.0

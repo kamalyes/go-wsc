@@ -103,28 +103,37 @@ func (r *RedisWorkloadRepository) GetWorkloadKey(agentID string) string {
 	return fmt.Sprintf("%s%s:agent:%s", r.keyPrefix, dateKey, agentID)
 }
 
-// getZSetKey 获取今天的 ZSet key
-func (r *RedisWorkloadRepository) getZSetKey() string {
+// GetZSetKey 获取今天的 ZSet key
+func (r *RedisWorkloadRepository) GetZSetKey() string {
 	dateKey := r.GetTodayKey()
 	return fmt.Sprintf("%s%s:zset", r.keyPrefix, dateKey)
 }
 
 // SetAgentWorkload 设置客服工作负载
 func (r *RedisWorkloadRepository) SetAgentWorkload(ctx context.Context, agentID string, workload int64) error {
-	workloadKey := r.GetWorkloadKey(agentID)
+	// 使用 Lua 脚本保证原子性
+	luaScript := `
+		local workloadKey = KEYS[1]
+		local zsetKey = KEYS[2]
+		local agentID = ARGV[1]
+		local workload = tonumber(ARGV[2])
+		local ttl = tonumber(ARGV[3])
+		
+		-- 设置工作负载
+		redis.call('SET', workloadKey, workload, 'EX', ttl)
+		-- 更新 ZSet
+		redis.call('ZADD', zsetKey, workload, agentID)
+		
+		return workload
+	`
 
-	err := r.client.Set(ctx, workloadKey, workload, r.defaultTTL).Err()
+	workloadKey := r.GetWorkloadKey(agentID)
+	zsetKey := r.GetZSetKey()
+	ttlSeconds := int64(r.defaultTTL.Seconds())
+
+	_, err := r.client.Eval(ctx, luaScript, []string{workloadKey, zsetKey}, agentID, workload, ttlSeconds).Result()
 	if err != nil {
 		return fmt.Errorf("failed to set agent workload: %w", err)
-	}
-
-	// 同步更新到Sorted Set
-	zsetKey := r.getZSetKey()
-	if err := r.client.ZAdd(ctx, zsetKey, redis.Z{
-		Score:  float64(workload),
-		Member: agentID,
-	}).Err(); err != nil {
-		r.logger.Warnf(logMsgUpdateZSetFailed, err)
 	}
 
 	r.logger.Debugf("✅ 已设置客服 %s 工作负载: %d", agentID, workload)
@@ -154,21 +163,38 @@ func (r *RedisWorkloadRepository) GetAgentWorkload(ctx context.Context, agentID 
 
 // IncrementAgentWorkload 增加客服工作负载
 func (r *RedisWorkloadRepository) IncrementAgentWorkload(ctx context.Context, agentID string) error {
-	workloadKey := r.GetWorkloadKey(agentID)
+	// 使用 Lua 脚本保证原子性
+	luaScript := `
+		local workloadKey = KEYS[1]
+		local zsetKey = KEYS[2]
+		local agentID = ARGV[1]
+		local ttl = tonumber(ARGV[2])
+		
+		-- 递增工作负载
+		local newWorkload = redis.call('INCR', workloadKey)
+		-- 刷新TTL
+		redis.call('EXPIRE', workloadKey, ttl)
+		-- 更新 ZSet
+		redis.call('ZINCRBY', zsetKey, 1, agentID)
+		
+		return newWorkload
+	`
 
-	// 使用Redis原子操作
-	newWorkload, err := r.client.Incr(ctx, workloadKey).Result()
+	workloadKey := r.GetWorkloadKey(agentID)
+	zsetKey := r.GetZSetKey()
+	ttlSeconds := int64(r.defaultTTL.Seconds())
+
+	result, err := r.client.Eval(ctx, luaScript, []string{workloadKey, zsetKey}, agentID, ttlSeconds).Result()
 	if err != nil {
 		return fmt.Errorf("failed to increment agent workload: %w", err)
 	}
 
-	// 刷新TTL，只要有业务活动就保持存活
-	r.client.Expire(ctx, workloadKey, r.defaultTTL)
-
-	// 同步更新到Sorted Set (使用ZINCRBY原子操作)
-	zsetKey := r.getZSetKey()
-	if err := r.client.ZIncrBy(ctx, zsetKey, 1, agentID).Err(); err != nil {
-		r.logger.Warnf(logMsgUpdateZSetFailed, err)
+	var newWorkload int64
+	switch v := result.(type) {
+	case int64:
+		newWorkload = v
+	case float64:
+		newWorkload = int64(v)
 	}
 
 	r.logger.Debugf("📈 客服 %s 工作负载增加至: %d", agentID, newWorkload)
@@ -177,29 +203,44 @@ func (r *RedisWorkloadRepository) IncrementAgentWorkload(ctx context.Context, ag
 
 // DecrementAgentWorkload 减少客服工作负载
 func (r *RedisWorkloadRepository) DecrementAgentWorkload(ctx context.Context, agentID string) error {
-	workloadKey := r.GetWorkloadKey(agentID)
+	// 使用 Lua 脚本保证原子性，且不低于0
+	luaScript := `
+		local workloadKey = KEYS[1]
+		local zsetKey = KEYS[2]
+		local agentID = ARGV[1]
+		local ttl = tonumber(ARGV[2])
+		
+		-- 递减工作负载
+		local newWorkload = redis.call('DECR', workloadKey)
+		
+		-- 如果小于0，重置为0
+		if newWorkload < 0 then
+			newWorkload = 0
+			redis.call('SET', workloadKey, 0, 'EX', ttl)
+			redis.call('ZADD', zsetKey, 0, agentID)
+		else
+			-- 更新 ZSet
+			redis.call('ZINCRBY', zsetKey, -1, agentID)
+		end
+		
+		return newWorkload
+	`
 
-	// 使用Redis原子操作，但不低于0
-	newWorkload, err := r.client.Decr(ctx, workloadKey).Result()
+	workloadKey := r.GetWorkloadKey(agentID)
+	zsetKey := r.GetZSetKey()
+	ttlSeconds := int64(r.defaultTTL.Seconds())
+
+	result, err := r.client.Eval(ctx, luaScript, []string{workloadKey, zsetKey}, agentID, ttlSeconds).Result()
 	if err != nil {
 		return fmt.Errorf("failed to decrement agent workload: %w", err)
 	}
 
-	// 如果小于0，重置为0
-	if newWorkload < 0 {
-		r.client.Set(ctx, workloadKey, 0, r.defaultTTL)
-		newWorkload = 0
-	}
-
-	// 同步更新到Sorted Set (使用ZINCRBY原子操作, -1表示减少)
-	finalWorkload := newWorkload
-	zsetKey := r.getZSetKey()
-	if err := r.client.ZIncrBy(ctx, zsetKey, -1, agentID).Err(); err != nil {
-		r.logger.Warnf(logMsgUpdateZSetFailed, err)
-	} else if newWorkload < 0 {
-		// 如果负载被重置为0，同步到ZSet
-		r.client.ZAdd(ctx, zsetKey, redis.Z{Score: 0, Member: agentID})
-		finalWorkload = 0
+	var finalWorkload int64
+	switch v := result.(type) {
+	case int64:
+		finalWorkload = v
+	case float64:
+		finalWorkload = int64(v)
 	}
 
 	r.logger.Debugf("📉 客服 %s 工作负载减少至: %d", agentID, finalWorkload)
@@ -212,26 +253,62 @@ func (r *RedisWorkloadRepository) GetLeastLoadedAgent(ctx context.Context, onlin
 		return "", 0, fmt.Errorf("no online agents available")
 	}
 
-	// 使用ZRANGE获取分数最低的成员 (O(log(N)+M), M为返回数量)
-	// 只取前10个最低负载的客服进行筛选
-	zsetKey := r.getZSetKey()
-	results, err := r.client.ZRangeWithScores(ctx, zsetKey, 0, 9).Result()
+	// 使用 Lua 脚本在 Redis 端完成筛选，减少网络传输
+	luaScript := `
+		local zsetKey = KEYS[1]
+		local onlineAgents = {}
+		
+		-- 构建在线客服集合
+		for i = 1, #ARGV do
+			onlineAgents[ARGV[i]] = true
+		end
+		
+		-- 获取前50个最低负载的客服（平衡性能和命中率）
+		local results = redis.call('ZRANGE', zsetKey, 0, 49, 'WITHSCORES')
+		
+		-- 遍历结果，找到第一个在线的客服
+		for i = 1, #results, 2 do
+			local agentID = results[i]
+			local workload = tonumber(results[i+1])
+			
+			if onlineAgents[agentID] then
+				return {agentID, workload}
+			end
+		end
+		
+		-- 如果ZSet中没有找到，返回空
+		return nil
+	`
+
+	zsetKey := r.GetZSetKey()
+
+	// 准备参数：所有在线客服ID
+	args := make([]interface{}, len(onlineAgents))
+	for i, agentID := range onlineAgents {
+		args[i] = agentID
+	}
+
+	// 执行 Lua 脚本
+	result, err := r.client.Eval(ctx, luaScript, []string{zsetKey}, args...).Result()
 	if err != nil && err != redis.Nil {
 		return "", 0, fmt.Errorf("failed to get least loaded agent from zset: %w", err)
 	}
 
-	// 构建在线客服映射
-	onlineMap := make(map[string]bool, len(onlineAgents))
-	for _, agentID := range onlineAgents {
-		onlineMap[agentID] = true
-	}
-
-	// 从ZSet结果中找到第一个在线的客服
-	for _, z := range results {
-		agentID := z.Member.(string)
-		if onlineMap[agentID] {
-			workload := int64(z.Score)
-			r.logger.Debugf("🎯 通过ZSet快速找到负载最小的在线客服: %s (负载: %d)", agentID, workload)
+	// 解析结果
+	if result != nil {
+		if resultArray, ok := result.([]interface{}); ok && len(resultArray) == 2 {
+			agentID := resultArray[0].(string)
+			var workload int64
+			// Redis Lua 返回的数字可能是 int64 或 float64
+			switch v := resultArray[1].(type) {
+			case int64:
+				workload = v
+			case float64:
+				workload = int64(v)
+			default:
+				r.logger.Warnf("⚠️ 无法解析负载值类型: %T", v)
+			}
+			r.logger.Debugf("🎯 通过Lua脚本快速找到负载最小的在线客服: %s (负载: %d)", agentID, workload)
 			return agentID, workload, nil
 		}
 	}
@@ -260,7 +337,7 @@ func (r *RedisWorkloadRepository) RemoveAgentWorkload(ctx context.Context, agent
 	}
 
 	// 从ZSet中移除
-	zsetKey := r.getZSetKey()
+	zsetKey := r.GetZSetKey()
 	err := r.client.ZRem(ctx, zsetKey, agentID).Err()
 	if err != nil {
 		return fmt.Errorf("failed to remove agent from workload zset: %w", err)
@@ -274,7 +351,7 @@ func (r *RedisWorkloadRepository) GetAllAgentWorkloads(ctx context.Context, limi
 	var results []redis.Z
 	var err error
 
-	zsetKey := r.getZSetKey()
+	zsetKey := r.GetZSetKey()
 	if limit <= 0 {
 		// 获取全部
 		results, err = r.client.ZRangeWithScores(ctx, zsetKey, 0, -1).Result()

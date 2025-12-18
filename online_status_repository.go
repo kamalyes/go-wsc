@@ -14,8 +14,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/redis/go-redis/v9"
 	"time"
+
+	"github.com/kamalyes/go-toolbox/pkg/mathx"
+	"github.com/redis/go-redis/v9"
 )
 
 // OnlineClientInfo 在线客户端信息
@@ -84,38 +86,32 @@ type RedisOnlineStatusRepository struct {
 // 参数:
 //   - client: Redis 客户端 (github.com/redis/go-redis/v9)
 //   - keyPrefix: key 前缀，默认为 "wsc:online:"
-//   - defaultTTL: 默认过期时间，建议设置为心跳间隔的 2-3 倍
-func NewRedisOnlineStatusRepository(client *redis.Client, keyPrefix string, defaultTTL time.Duration) OnlineStatusRepository {
-	if keyPrefix == "" {
-		keyPrefix = "wsc:online:"
-	}
-	if defaultTTL == 0 {
-		defaultTTL = 5 * time.Minute // 默认 5 分钟
-	}
+//   - ttl: 默认过期时间，建议设置为心跳间隔的 2-3 倍
+func NewRedisOnlineStatusRepository(client *redis.Client, keyPrefix string, ttl time.Duration) OnlineStatusRepository {
 	return &RedisOnlineStatusRepository{
 		client:     client,
-		keyPrefix:  keyPrefix,
-		defaultTTL: defaultTTL,
+		keyPrefix:  mathx.IF(keyPrefix == "", "wsc:online:", keyPrefix),
+		defaultTTL: mathx.IF(ttl == 0, 5*time.Minute, ttl),
 	}
 }
 
-// getUserKey 获取用户在线状态的 key
-func (r *RedisOnlineStatusRepository) getUserKey(userID string) string {
+// GetUserKey 获取用户在线状态的 key
+func (r *RedisOnlineStatusRepository) GetUserKey(userID string) string {
 	return fmt.Sprintf("%suser:%s", r.keyPrefix, userID)
 }
 
-// getNodeSetKey 获取节点在线用户集合的 key
-func (r *RedisOnlineStatusRepository) getNodeSetKey(nodeID string) string {
+// GetNodeSetKey 获取节点在线用户集合的 key
+func (r *RedisOnlineStatusRepository) GetNodeSetKey(nodeID string) string {
 	return fmt.Sprintf("%snode:%s", r.keyPrefix, nodeID)
 }
 
-// getTypeSetKey 获取用户类型在线用户集合的 key
-func (r *RedisOnlineStatusRepository) getTypeSetKey(userType UserType) string {
-	return fmt.Sprintf("%stype:%s", r.keyPrefix, userType)
+// GetUserTypeSetKey 获取用户类型在线用户集合的 key
+func (r *RedisOnlineStatusRepository) GetUserTypeSetKey(userType UserType) string {
+	return fmt.Sprintf("%s%s", r.keyPrefix, userType)
 }
 
-// getAllUsersSetKey 获取所有在线用户集合的 key
-func (r *RedisOnlineStatusRepository) getAllUsersSetKey() string {
+// GetAllUsersSetKey 获取所有在线用户集合的 key
+func (r *RedisOnlineStatusRepository) GetAllUsersSetKey() string {
 	return fmt.Sprintf("%sall", r.keyPrefix)
 }
 
@@ -135,21 +131,21 @@ func (r *RedisOnlineStatusRepository) SetOnline(ctx context.Context, userID stri
 	pipe := r.client.Pipeline()
 
 	// 1. 设置用户在线信息
-	pipe.Set(ctx, r.getUserKey(userID), data, ttl)
+	pipe.Set(ctx, r.GetUserKey(userID), data, ttl)
 
 	// 2. 添加到全局在线用户集合
-	pipe.SAdd(ctx, r.getAllUsersSetKey(), userID)
-	pipe.Expire(ctx, r.getAllUsersSetKey(), ttl)
+	pipe.SAdd(ctx, r.GetAllUsersSetKey(), userID)
+	pipe.Expire(ctx, r.GetAllUsersSetKey(), ttl)
 
 	// 3. 添加到节点在线用户集合
 	if info.NodeID != "" {
-		pipe.SAdd(ctx, r.getNodeSetKey(info.NodeID), userID)
-		pipe.Expire(ctx, r.getNodeSetKey(info.NodeID), ttl)
+		pipe.SAdd(ctx, r.GetNodeSetKey(info.NodeID), userID)
+		pipe.Expire(ctx, r.GetNodeSetKey(info.NodeID), ttl)
 	}
 
 	// 4. 添加到用户类型集合
-	pipe.SAdd(ctx, r.getTypeSetKey(info.UserType), userID)
-	pipe.Expire(ctx, r.getTypeSetKey(info.UserType), ttl)
+	pipe.SAdd(ctx, r.GetUserTypeSetKey(info.UserType), userID)
+	pipe.Expire(ctx, r.GetUserTypeSetKey(info.UserType), ttl)
 
 	_, err = pipe.Exec(ctx)
 	return err
@@ -166,19 +162,19 @@ func (r *RedisOnlineStatusRepository) SetOffline(ctx context.Context, userID str
 	pipe := r.client.Pipeline()
 
 	// 1. 删除用户在线信息
-	pipe.Del(ctx, r.getUserKey(userID))
+	pipe.Del(ctx, r.GetUserKey(userID))
 
 	// 2. 从全局在线用户集合中移除
-	pipe.SRem(ctx, r.getAllUsersSetKey(), userID)
+	pipe.SRem(ctx, r.GetAllUsersSetKey(), userID)
 
 	// 3. 从节点集合中移除
 	if info != nil && info.NodeID != "" {
-		pipe.SRem(ctx, r.getNodeSetKey(info.NodeID), userID)
+		pipe.SRem(ctx, r.GetNodeSetKey(info.NodeID), userID)
 	}
 
 	// 4. 从用户类型集合中移除
 	if info != nil {
-		pipe.SRem(ctx, r.getTypeSetKey(info.UserType), userID)
+		pipe.SRem(ctx, r.GetUserTypeSetKey(info.UserType), userID)
 	}
 
 	_, err = pipe.Exec(ctx)
@@ -187,7 +183,7 @@ func (r *RedisOnlineStatusRepository) SetOffline(ctx context.Context, userID str
 
 // IsOnline 检查用户是否在线
 func (r *RedisOnlineStatusRepository) IsOnline(ctx context.Context, userID string) (bool, error) {
-	exists, err := r.client.Exists(ctx, r.getUserKey(userID)).Result()
+	exists, err := r.client.Exists(ctx, r.GetUserKey(userID)).Result()
 	if err != nil {
 		return false, err
 	}
@@ -196,7 +192,7 @@ func (r *RedisOnlineStatusRepository) IsOnline(ctx context.Context, userID strin
 
 // GetOnlineInfo 获取在线用户信息
 func (r *RedisOnlineStatusRepository) GetOnlineInfo(ctx context.Context, userID string) (*OnlineClientInfo, error) {
-	data, err := r.client.Get(ctx, r.getUserKey(userID)).Result()
+	data, err := r.client.Get(ctx, r.GetUserKey(userID)).Result()
 	if err != nil {
 		return nil, err
 	}
@@ -211,17 +207,17 @@ func (r *RedisOnlineStatusRepository) GetOnlineInfo(ctx context.Context, userID 
 
 // GetAllOnlineUsers 获取所有在线用户ID列表
 func (r *RedisOnlineStatusRepository) GetAllOnlineUsers(ctx context.Context) ([]string, error) {
-	return r.client.SMembers(ctx, r.getAllUsersSetKey()).Result()
+	return r.client.SMembers(ctx, r.GetAllUsersSetKey()).Result()
 }
 
 // GetOnlineUsersByNode 获取指定节点的在线用户
 func (r *RedisOnlineStatusRepository) GetOnlineUsersByNode(ctx context.Context, nodeID string) ([]string, error) {
-	return r.client.SMembers(ctx, r.getNodeSetKey(nodeID)).Result()
+	return r.client.SMembers(ctx, r.GetNodeSetKey(nodeID)).Result()
 }
 
 // GetOnlineCount 获取在线用户总数
 func (r *RedisOnlineStatusRepository) GetOnlineCount(ctx context.Context) (int64, error) {
-	return r.client.SCard(ctx, r.getAllUsersSetKey()).Result()
+	return r.client.SCard(ctx, r.GetAllUsersSetKey()).Result()
 }
 
 // UpdateHeartbeat 更新心跳时间
@@ -254,18 +250,18 @@ func (r *RedisOnlineStatusRepository) BatchSetOnline(ctx context.Context, users 
 			return fmt.Errorf("failed to marshal online info for user %s: %w", userID, err)
 		}
 
-		pipe.Set(ctx, r.getUserKey(userID), data, ttl)
-		pipe.SAdd(ctx, r.getAllUsersSetKey(), userID)
+		pipe.Set(ctx, r.GetUserKey(userID), data, ttl)
+		pipe.SAdd(ctx, r.GetAllUsersSetKey(), userID)
 
 		if info.NodeID != "" {
-			pipe.SAdd(ctx, r.getNodeSetKey(info.NodeID), userID)
+			pipe.SAdd(ctx, r.GetNodeSetKey(info.NodeID), userID)
 		}
 
-		pipe.SAdd(ctx, r.getTypeSetKey(info.UserType), userID)
+		pipe.SAdd(ctx, r.GetUserTypeSetKey(info.UserType), userID)
 	}
 
 	// 设置集合过期时间
-	pipe.Expire(ctx, r.getAllUsersSetKey(), ttl)
+	pipe.Expire(ctx, r.GetAllUsersSetKey(), ttl)
 
 	_, err := pipe.Exec(ctx)
 	return err
@@ -279,14 +275,14 @@ func (r *RedisOnlineStatusRepository) BatchSetOffline(ctx context.Context, userI
 		// 获取用户信息以便从集合中移除
 		info, _ := r.GetOnlineInfo(ctx, userID)
 
-		pipe.Del(ctx, r.getUserKey(userID))
-		pipe.SRem(ctx, r.getAllUsersSetKey(), userID)
+		pipe.Del(ctx, r.GetUserKey(userID))
+		pipe.SRem(ctx, r.GetAllUsersSetKey(), userID)
 
 		if info != nil {
 			if info.NodeID != "" {
-				pipe.SRem(ctx, r.getNodeSetKey(info.NodeID), userID)
+				pipe.SRem(ctx, r.GetNodeSetKey(info.NodeID), userID)
 			}
-			pipe.SRem(ctx, r.getTypeSetKey(info.UserType), userID)
+			pipe.SRem(ctx, r.GetUserTypeSetKey(info.UserType), userID)
 		}
 	}
 
@@ -296,7 +292,7 @@ func (r *RedisOnlineStatusRepository) BatchSetOffline(ctx context.Context, userI
 
 // GetOnlineUsersByType 根据用户类型获取在线用户
 func (r *RedisOnlineStatusRepository) GetOnlineUsersByType(ctx context.Context, userType UserType) ([]string, error) {
-	return r.client.SMembers(ctx, r.getTypeSetKey(userType)).Result()
+	return r.client.SMembers(ctx, r.GetUserTypeSetKey(userType)).Result()
 }
 
 // CleanupExpired 清理过期的在线状态
@@ -315,14 +311,14 @@ func (r *RedisOnlineStatusRepository) CleanupExpired(ctx context.Context) (int64
 
 	// 检查每个用户是否真的在线
 	for _, userID := range allUsers {
-		exists, err := r.client.Exists(ctx, r.getUserKey(userID)).Result()
+		exists, err := r.client.Exists(ctx, r.GetUserKey(userID)).Result()
 		if err != nil {
 			continue
 		}
 		if exists == 0 {
 			// 用户信息已过期，但还在集合中
 			toRemove = append(toRemove, userID)
-			pipe.SRem(ctx, r.getAllUsersSetKey(), userID)
+			pipe.SRem(ctx, r.GetAllUsersSetKey(), userID)
 		}
 	}
 

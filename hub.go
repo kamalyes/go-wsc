@@ -211,6 +211,9 @@ type Hub struct {
 	// Hub 统计仓库（Redis 分布式统计，支持多节点）
 	statsRepo HubStatsRepository
 
+	// 负载管理仓库（Redis 分布式存储）
+	workloadRepo WorkloadRepository
+
 	// 并发控制
 	wg       sync.WaitGroup
 	shutdown atomic.Bool
@@ -274,7 +277,7 @@ func NewHub(config *wscconfig.WSC) *Hub {
 	config = safe.MergeWithDefaults(config, wscconfig.Default())
 
 	ctx, cancel := context.WithCancel(context.Background())
-	nodeID := fmt.Sprintf("node-%s-%d-%d", config.NodeIP, config.NodePort, time.Now().UnixNano())
+	nodeID := fmt.Sprintf("%s-%d", config.NodeIP, config.NodePort)
 
 	hub := &Hub{
 		nodeID:    nodeID,
@@ -1028,6 +1031,12 @@ func (h *Hub) SetOnlineStatusRepository(repo OnlineStatusRepository) {
 	h.logger.InfoKV("在线状态仓库已设置", "repository_type", "redis")
 }
 
+// SetWorkloadRepository 设置负载管理仓库（Redis）
+func (h *Hub) SetWorkloadRepository(repo WorkloadRepository) {
+	h.workloadRepo = repo
+	h.logger.InfoKV("负载管理仓库已设置", "repository_type", "redis")
+}
+
 // SetMessageRecordRepository 设置消息记录仓库（MySQL）
 func (h *Hub) SetMessageRecordRepository(repo MessageRecordRepository) {
 	h.messageRecordRepo = repo
@@ -1456,6 +1465,23 @@ func (h *Hub) removeClientUnsafe(client *Client) {
 					"user_id", client.UserID,
 					"error", err,
 				)
+			}
+		}()
+	}
+
+	// 如果是客服离线，从负载管理中移除
+	if (client.UserType == UserTypeAgent || client.UserType == UserTypeBot) && h.workloadRepo != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			if err := h.workloadRepo.RemoveAgentWorkload(ctx, client.UserID); err != nil {
+				h.logger.ErrorKV("从负载管理移除客服失败",
+					"user_id", client.UserID,
+					"error", err,
+				)
+			} else {
+				h.logger.InfoKV("已从负载管理移除客服", "user_id", client.UserID)
 			}
 		}()
 	}
@@ -1934,15 +1960,17 @@ func (h *Hub) GetClientsByRole(role UserRole) []*Client {
 // GetClientByID 根据客户端ID获取客户端信息
 func (h *Hub) GetClientByID(clientID string) *Client {
 	h.mutex.RLock()
-	defer h.mutex.RUnlock()
-	return h.clients[clientID]
+	client := h.clients[clientID]
+	h.mutex.RUnlock()
+	return client
 }
 
 // GetClientByUserID 根据用户ID获取客户端信息
 func (h *Hub) GetClientByUserID(userID string) *Client {
 	h.mutex.RLock()
-	defer h.mutex.RUnlock()
-	return h.userToClient[userID]
+	client := h.userToClient[userID]
+	h.mutex.RUnlock()
+	return client
 }
 
 // GetClientsCount 获取总客户端连接数
@@ -2038,7 +2066,7 @@ func (h *Hub) GetUptime() int64 {
 			return time.Now().Unix() - nodeStats.StartTime
 		}
 	}
-	
+
 	// 如果没有 statsRepo 或获取失败，使用 Hub 启动时间
 	if h.startTime.IsZero() {
 		return 0
@@ -3314,4 +3342,149 @@ func (h *Hub) GetMessageRecordStatistics() (map[string]int64, error) {
 		return nil, ErrRecordRepositoryNotSet
 	}
 	return h.messageRecordRepo.GetStatistics()
+}
+
+// ============================================================================
+// 负载管理接口
+// ============================================================================
+
+// SetAgentWorkload 设置客服工作负载
+// 参数:
+//   - agentID: 客服ID
+//   - workload: 工作负载值
+//
+// 返回:
+//   - error: 错误信息
+func (h *Hub) SetAgentWorkload(agentID string, workload int64) error {
+	if h.workloadRepo == nil {
+		h.logger.Warn("负载管理仓库未设置，跳过设置客服负载")
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return h.workloadRepo.SetAgentWorkload(ctx, agentID, workload)
+}
+
+// GetAgentWorkload 获取客服工作负载
+// 参数:
+//   - agentID: 客服ID
+//
+// 返回:
+//   - int64: 工作负载值
+//   - error: 错误信息
+func (h *Hub) GetAgentWorkload(agentID string) (int64, error) {
+	if h.workloadRepo == nil {
+		h.logger.Warn("负载管理仓库未设置，返回0")
+		return 0, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return h.workloadRepo.GetAgentWorkload(ctx, agentID)
+}
+
+// IncrementAgentWorkload 增加客服工作负载
+// 参数:
+//   - agentID: 客服ID
+//
+// 返回:
+//   - error: 错误信息
+func (h *Hub) IncrementAgentWorkload(agentID string) error {
+	if h.workloadRepo == nil {
+		h.logger.Warn("负载管理仓库未设置，跳过增加客服负载")
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return h.workloadRepo.IncrementAgentWorkload(ctx, agentID)
+}
+
+// DecrementAgentWorkload 减少客服工作负载
+// 参数:
+//   - agentID: 客服ID
+//
+// 返回:
+//   - error: 错误信息
+func (h *Hub) DecrementAgentWorkload(agentID string) error {
+	if h.workloadRepo == nil {
+		h.logger.Warn("负载管理仓库未设置，跳过减少客服负载")
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return h.workloadRepo.DecrementAgentWorkload(ctx, agentID)
+}
+
+// GetLeastLoadedAgent 获取负载最小的在线客服
+// 返回:
+//   - string: 客服ID
+//   - int64: 工作负载值
+//   - error: 错误信息
+func (h *Hub) GetLeastLoadedAgent() (string, int64, error) {
+	if h.workloadRepo == nil {
+		h.logger.Warn("负载管理仓库未设置")
+		return "", 0, fmt.Errorf("workload repository not set")
+	}
+
+	// 获取在线客服列表
+	onlineAgents, err := h.GetOnlineUsersByType(UserTypeAgent)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to get online agents: %w", err)
+	}
+
+	if len(onlineAgents) == 0 {
+		return "", 0, fmt.Errorf("no online agents available")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return h.workloadRepo.GetLeastLoadedAgent(ctx, onlineAgents)
+}
+
+// RemoveAgentWorkload 移除客服负载记录（客服离线时调用）
+// 参数:
+//   - agentID: 客服ID
+//
+// 返回:
+//   - error: 错误信息
+func (h *Hub) RemoveAgentWorkload(agentID string) error {
+	if h.workloadRepo == nil {
+		h.logger.Warn("负载管理仓库未设置，跳过移除客服负载")
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return h.workloadRepo.RemoveAgentWorkload(ctx, agentID)
+}
+
+// GetAllAgentWorkloads 获取所有客服的负载信息
+// 参数:
+//   - limit: 返回数量限制，0表示返回全部
+//
+// 返回:
+//   - []WorkloadInfo: 负载信息列表
+//   - error: 错误信息
+func (h *Hub) GetAllAgentWorkloads(limit int64) ([]WorkloadInfo, error) {
+	if h.workloadRepo == nil {
+		h.logger.Warn("负载管理仓库未设置")
+		return nil, fmt.Errorf("workload repository not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return h.workloadRepo.GetAllAgentWorkloads(ctx, limit)
+}
+
+// BatchSetAgentWorkload 批量设置客服负载
+// 参数:
+//   - workloads: 客服ID到负载值的映射
+//
+// 返回:
+//   - error: 错误信息
+func (h *Hub) BatchSetAgentWorkload(workloads map[string]int64) error {
+	if h.workloadRepo == nil {
+		h.logger.Warn("负载管理仓库未设置，跳过批量设置客服负载")
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return h.workloadRepo.BatchSetAgentWorkload(ctx, workloads)
 }

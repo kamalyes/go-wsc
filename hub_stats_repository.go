@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -74,15 +75,15 @@ type NodeStats struct {
 
 // ClusterStats 集群统计信息
 type ClusterStats struct {
-	TotalNodes        int              `json:"total_nodes"`
-	ActiveNodes       int              `json:"active_nodes"`
-	TotalConnections  int64            `json:"total_connections"`
-	ActiveConnections int64            `json:"active_connections"`
-	MessagesSent      int64            `json:"messages_sent"`
-	MessagesReceived  int64            `json:"messages_received"`
-	BroadcastsSent    int64            `json:"broadcasts_sent"`
-	NodesStats        []*NodeStats     `json:"nodes_stats"`
-	UpdateTime        time.Time        `json:"update_time"`
+	TotalNodes        int          `json:"total_nodes"`
+	ActiveNodes       int          `json:"active_nodes"`
+	TotalConnections  int64        `json:"total_connections"`
+	ActiveConnections int64        `json:"active_connections"`
+	MessagesSent      int64        `json:"messages_sent"`
+	MessagesReceived  int64        `json:"messages_received"`
+	BroadcastsSent    int64        `json:"broadcasts_sent"`
+	NodesStats        []*NodeStats `json:"nodes_stats"`
+	UpdateTime        time.Time    `json:"update_time"`
 }
 
 // RedisHubStatsRepository Redis 实现的 Hub 统计仓库
@@ -93,50 +94,50 @@ type RedisHubStatsRepository struct {
 }
 
 // NewRedisHubStatsRepository 创建 Redis Hub 统计仓库
-func NewRedisHubStatsRepository(client *redis.Client, keyPrefix string, statsExpire time.Duration) *RedisHubStatsRepository {
-	if keyPrefix == "" {
-		keyPrefix = "wsc:stats:"
-	}
-	if statsExpire <= 0 {
-		statsExpire = 7 * 24 * time.Hour // 默认保留 7 天
-	}
+// 参数:
+//   - client: Redis 客户端 (github.com/redis/go-redis/v9)
+//   - keyPrefix: key 前缀，默认为 "wsc:stats:"
+//   - ttl: 统计数据过期时间，默认 7 天
+func NewRedisHubStatsRepository(client *redis.Client, keyPrefix string, ttl time.Duration) *RedisHubStatsRepository {
+	keyPrefix = mathx.IF(keyPrefix == "", "wsc:stats:", keyPrefix)
+	ttl = mathx.IF(ttl == 0, 7*24*time.Hour, ttl)
 
 	return &RedisHubStatsRepository{
 		client:      client,
 		keyPrefix:   keyPrefix,
-		statsExpire: statsExpire,
+		statsExpire: ttl,
 	}
 }
 
-// getNodeKey 获取节点统计的 Redis key
-func (r *RedisHubStatsRepository) getNodeKey(nodeID string) string {
+// GetNodeKey 获取节点统计的 Redis key
+func (r *RedisHubStatsRepository) GetNodeKey(nodeID string) string {
 	return r.keyPrefix + "node:" + nodeID
 }
 
-// getHeartbeatKey 获取节点心跳的 Redis key
-func (r *RedisHubStatsRepository) getHeartbeatKey(nodeID string) string {
+// GetHeartbeatKey 获取节点心跳的 Redis key
+func (r *RedisHubStatsRepository) GetHeartbeatKey(nodeID string) string {
 	return r.keyPrefix + "heartbeat:" + nodeID
 }
 
-// getNodesSetKey 获取节点集合的 Redis key
-func (r *RedisHubStatsRepository) getNodesSetKey() string {
+// GetNodesSetKey 获取节点集合的 Redis key
+func (r *RedisHubStatsRepository) GetNodesSetKey() string {
 	return r.keyPrefix + "nodes"
 }
 
 // IncrementTotalConnections 增加总连接数
 func (r *RedisHubStatsRepository) IncrementTotalConnections(ctx context.Context, nodeID string, delta int64) error {
-	key := r.getNodeKey(nodeID)
+	key := r.GetNodeKey(nodeID)
 	pipe := r.client.Pipeline()
 	pipe.HIncrBy(ctx, key, "total_connections", delta)
 	pipe.Expire(ctx, key, r.statsExpire)
-	pipe.SAdd(ctx, r.getNodesSetKey(), nodeID)
+	pipe.SAdd(ctx, r.GetNodesSetKey(), nodeID)
 	_, err := pipe.Exec(ctx)
 	return err
 }
 
 // SetActiveConnections 设置当前活跃连接数
 func (r *RedisHubStatsRepository) SetActiveConnections(ctx context.Context, nodeID string, count int64) error {
-	key := r.getNodeKey(nodeID)
+	key := r.GetNodeKey(nodeID)
 	pipe := r.client.Pipeline()
 	pipe.HSet(ctx, key, "active_connections", count)
 	pipe.Expire(ctx, key, r.statsExpire)
@@ -146,7 +147,7 @@ func (r *RedisHubStatsRepository) SetActiveConnections(ctx context.Context, node
 
 // IncrementMessagesSent 增加已发送消息数
 func (r *RedisHubStatsRepository) IncrementMessagesSent(ctx context.Context, nodeID string, delta int64) error {
-	key := r.getNodeKey(nodeID)
+	key := r.GetNodeKey(nodeID)
 	pipe := r.client.Pipeline()
 	pipe.HIncrBy(ctx, key, "messages_sent", delta)
 	pipe.Expire(ctx, key, r.statsExpire)
@@ -156,7 +157,7 @@ func (r *RedisHubStatsRepository) IncrementMessagesSent(ctx context.Context, nod
 
 // IncrementMessagesReceived 增加已接收消息数
 func (r *RedisHubStatsRepository) IncrementMessagesReceived(ctx context.Context, nodeID string, delta int64) error {
-	key := r.getNodeKey(nodeID)
+	key := r.GetNodeKey(nodeID)
 	pipe := r.client.Pipeline()
 	pipe.HIncrBy(ctx, key, "messages_received", delta)
 	pipe.Expire(ctx, key, r.statsExpire)
@@ -166,7 +167,7 @@ func (r *RedisHubStatsRepository) IncrementMessagesReceived(ctx context.Context,
 
 // IncrementBroadcastsSent 增加已发送广播数
 func (r *RedisHubStatsRepository) IncrementBroadcastsSent(ctx context.Context, nodeID string, delta int64) error {
-	key := r.getNodeKey(nodeID)
+	key := r.GetNodeKey(nodeID)
 	pipe := r.client.Pipeline()
 	pipe.HIncrBy(ctx, key, "broadcasts_sent", delta)
 	pipe.Expire(ctx, key, r.statsExpire)
@@ -176,7 +177,7 @@ func (r *RedisHubStatsRepository) IncrementBroadcastsSent(ctx context.Context, n
 
 // SetStartTime 设置 Hub 启动时间
 func (r *RedisHubStatsRepository) SetStartTime(ctx context.Context, nodeID string, startTime int64) error {
-	key := r.getNodeKey(nodeID)
+	key := r.GetNodeKey(nodeID)
 	pipe := r.client.Pipeline()
 	pipe.HSet(ctx, key, "start_time", startTime)
 	pipe.Expire(ctx, key, r.statsExpire)
@@ -186,13 +187,13 @@ func (r *RedisHubStatsRepository) SetStartTime(ctx context.Context, nodeID strin
 
 // UpdateNodeHeartbeat 更新节点心跳时间
 func (r *RedisHubStatsRepository) UpdateNodeHeartbeat(ctx context.Context, nodeID string) error {
-	key := r.getHeartbeatKey(nodeID)
+	key := r.GetHeartbeatKey(nodeID)
 	return r.client.Set(ctx, key, time.Now().Unix(), r.statsExpire).Err()
 }
 
 // GetNodeStats 获取指定节点的统计信息
 func (r *RedisHubStatsRepository) GetNodeStats(ctx context.Context, nodeID string) (*NodeStats, error) {
-	key := r.getNodeKey(nodeID)
+	key := r.GetNodeKey(nodeID)
 	result, err := r.client.HGetAll(ctx, key).Result()
 	if err != nil {
 		return nil, err
@@ -229,7 +230,7 @@ func (r *RedisHubStatsRepository) GetNodeStats(ctx context.Context, nodeID strin
 	}
 
 	// 获取心跳时间
-	heartbeatKey := r.getHeartbeatKey(nodeID)
+	heartbeatKey := r.GetHeartbeatKey(nodeID)
 	if heartbeatVal, err := r.client.Get(ctx, heartbeatKey).Result(); err == nil {
 		if ts, err := strconv.ParseInt(heartbeatVal, 10, 64); err == nil {
 			stats.LastHeartbeat = time.Unix(ts, 0)
@@ -242,7 +243,7 @@ func (r *RedisHubStatsRepository) GetNodeStats(ctx context.Context, nodeID strin
 // GetAllNodesStats 获取所有节点的统计信息
 func (r *RedisHubStatsRepository) GetAllNodesStats(ctx context.Context) (map[string]*NodeStats, error) {
 	// 获取所有节点ID
-	nodeIDs, err := r.client.SMembers(ctx, r.getNodesSetKey()).Result()
+	nodeIDs, err := r.client.SMembers(ctx, r.GetNodesSetKey()).Result()
 	if err != nil {
 		return nil, err
 	}
@@ -267,9 +268,9 @@ func (r *RedisHubStatsRepository) GetTotalStats(ctx context.Context) (*ClusterSt
 	}
 
 	clusterStats := &ClusterStats{
-		TotalNodes:  len(allStats),
-		NodesStats:  make([]*NodeStats, 0, len(allStats)),
-		UpdateTime:  time.Now(),
+		TotalNodes: len(allStats),
+		NodesStats: make([]*NodeStats, 0, len(allStats)),
+		UpdateTime: time.Now(),
 	}
 
 	// 汇总所有节点的统计数据
@@ -296,7 +297,7 @@ func (r *RedisHubStatsRepository) GetActiveNodes(ctx context.Context, timeout ti
 		timeout = 5 * time.Minute // 默认 5 分钟
 	}
 
-	nodeIDs, err := r.client.SMembers(ctx, r.getNodesSetKey()).Result()
+	nodeIDs, err := r.client.SMembers(ctx, r.GetNodesSetKey()).Result()
 	if err != nil {
 		return nil, err
 	}
@@ -305,7 +306,7 @@ func (r *RedisHubStatsRepository) GetActiveNodes(ctx context.Context, timeout ti
 	now := time.Now()
 
 	for _, nodeID := range nodeIDs {
-		heartbeatKey := r.getHeartbeatKey(nodeID)
+		heartbeatKey := r.GetHeartbeatKey(nodeID)
 		heartbeatVal, err := r.client.Get(ctx, heartbeatKey).Result()
 		if err != nil {
 			continue
@@ -328,9 +329,9 @@ func (r *RedisHubStatsRepository) GetActiveNodes(ctx context.Context, timeout ti
 // CleanupNodeStats 清理已下线节点的统计数据
 func (r *RedisHubStatsRepository) CleanupNodeStats(ctx context.Context, nodeID string) error {
 	pipe := r.client.Pipeline()
-	pipe.Del(ctx, r.getNodeKey(nodeID))
-	pipe.Del(ctx, r.getHeartbeatKey(nodeID))
-	pipe.SRem(ctx, r.getNodesSetKey(), nodeID)
+	pipe.Del(ctx, r.GetNodeKey(nodeID))
+	pipe.Del(ctx, r.GetHeartbeatKey(nodeID))
+	pipe.SRem(ctx, r.GetNodesSetKey(), nodeID)
 	_, err := pipe.Exec(ctx)
 	return err
 }

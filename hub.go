@@ -361,21 +361,25 @@ func (h *Hub) Run() {
 	h.wg.Add(1)
 	defer h.wg.Done()
 
-	// 记录Hub启动日志
-	h.logger.InfoKV("Hub启动中",
-		"node_id", h.nodeID,
-		"node_ip", h.config.NodeIP,
-		"node_port", h.config.NodePort,
-	)
+	// 使用 Console 分组记录 Hub 启动日志
+	cg := h.logger.NewConsoleGroup()
+	cg.Group("🚀 WebSocket Hub 启动")
+	
+	startTimer := cg.Time("Hub 启动耗时")
+	
+	// 显示启动配置
+	config := map[string]interface{}{
+		"节点ID":       h.nodeID,
+		"节点IP":       h.config.NodeIP,
+		"节点端口":      h.config.NodePort,
+		"消息缓冲大小":    h.config.MessageBufferSize,
+		"心跳间隔(秒)":   h.config.HeartbeatInterval,
+		"客户端超时(秒)": h.config.ClientTimeout,
+	}
+	cg.Table(config)
 
 	// 设置已启动标志并通知等待的goroutine
 	if h.started.CompareAndSwap(false, true) {
-		h.logger.InfoKV("Hub启动成功",
-			"node_id", h.nodeID,
-			"message_buffer", h.config.MessageBufferSize,
-			"heartbeat_interval", h.config.HeartbeatInterval,
-		)
-
 		// 设置启动时间到 Redis
 		if h.statsRepo != nil {
 			go func() {
@@ -385,6 +389,10 @@ func (h *Hub) Run() {
 			}()
 		}
 
+		startTimer.End()
+		cg.Info("✅ Hub 启动成功")
+		cg.GroupEnd()
+		
 		// 启动指标收集器（如果已配置）
 		close(h.startCh)
 	}
@@ -444,16 +452,27 @@ func (h *Hub) reportPerformanceMetrics() {
 		return
 	}
 
-	// 记录性能指标日志
-	h.logger.InfoKV("Hub性能指标",
-		"active_websocket_clients", activeClients,
-		"active_sse_clients", sseClients,
-		"total_connections", stats.TotalConnections,
-		"total_messages_sent", stats.MessagesSent,
-		"total_broadcasts_sent", stats.BroadcastsSent,
-		"node_id", h.nodeID,
-		"uptime_seconds", stats.Uptime,
-	)
+	// 使用 Console 表格展示性能指标
+	cg := h.logger.NewConsoleGroup()
+	cg.Group("📊 Hub 性能指标报告 [节点: %s]", h.nodeID)
+	
+	// 连接统计
+	connectionStats := map[string]interface{}{
+		"WebSocket 连接数": activeClients,
+		"SSE 连接数":       sseClients,
+		"历史总连接数":       stats.TotalConnections,
+	}
+	cg.Table(connectionStats)
+	
+	// 消息统计
+	messageStats := map[string]interface{}{
+		"已发送消息数": stats.MessagesSent,
+		"已广播消息数": stats.BroadcastsSent,
+		"运行时长(秒)": stats.Uptime,
+	}
+	cg.Table(messageStats)
+	
+	cg.GroupEnd()
 }
 
 // cleanupExpiredAck 清理过期的ACK消息
@@ -508,23 +527,34 @@ func (h *Hub) SafeShutdown() error {
 	// 安全获取客户端数量
 	h.mutex.RLock()
 	clientCount := len(h.clients)
+	sseClientCount := len(h.sseClients)
 	h.mutex.RUnlock()
 
-	// 记录关闭开始日志
-	h.logger.InfoKV("Hub开始安全关闭",
-		"node_id", h.nodeID,
-		"connected_clients", clientCount,
-	)
+	// 使用 Console 分组记录关闭流程
+	cg := h.logger.NewConsoleGroup()
+	cg.Group("🛑 WebSocket Hub 安全关闭流程")
+	shutdownTimer := cg.Time("Hub 关闭耗时")
+
+	// 显示当前连接状态
+	cg.Info("开始安全关闭 Hub [节点: %s]", h.nodeID)
+	currentStatus := map[string]interface{}{
+		"WebSocket 连接": clientCount,
+		"SSE 连接":       sseClientCount,
+	}
+	cg.Table(currentStatus)
 
 	// 设置关闭标志
 	if !h.shutdown.CompareAndSwap(false, true) {
+		cg.GroupEnd()
 		return nil // 已经在关闭中
 	}
 
 	// 取消context
+	cg.Info("→ 取消所有上下文...")
 	h.cancel()
 
 	// 等待所有goroutine完成，带超时保护
+	cg.Info("→ 等待所有协程完成...")
 	done := make(chan struct{})
 	go func() {
 		h.wg.Wait()
@@ -558,19 +588,24 @@ func (h *Hub) SafeShutdown() error {
 			}
 		}
 
-		h.logger.InfoKV("Hub安全关闭成功",
-			"node_id", h.nodeID,
-			"shutdown_timeout", timeout,
-			"final_stats", finalStats,
-		)
+		shutdownTimer.End()
+		cg.Info("→ 显示最终统计...")
+		cg.Table(finalStats)
+		cg.Info("✅ Hub 安全关闭成功")
+		cg.GroupEnd()
 	case <-time.After(timeout):
 		// 强制关闭所有客户端连接
-		h.logger.WarnKV("Hub关闭超时，强制关闭所有连接",
-			"node_id", h.nodeID,
-			"timeout", timeout,
-			"remaining_clients", len(h.clients),
-			"remaining_sse_clients", len(h.sseClients),
-		)
+		shutdownTimer.End()
+		cg.Warn("⚠️  Hub 关闭超时，强制关闭所有连接")
+		
+		remainingStats := map[string]interface{}{
+			"超时时间(秒)":       timeout.Seconds(),
+			"剩余 WebSocket": len(h.clients),
+			"剩余 SSE":       len(h.sseClients),
+		}
+		cg.Table(remainingStats)
+		cg.GroupEnd()
+		
 		h.mutex.Lock()
 		for _, client := range h.clients {
 			if client.Conn != nil {
@@ -1466,12 +1501,18 @@ func (h *Hub) syncClientStats() {
 
 // logClientConnection 记录客户端连接日志
 func (h *Hub) logClientConnection(client *Client) {
-	h.logger.InfoKV("客户端连接成功",
-		"client_id", client.ID,
-		"user_id", client.UserID,
-		"user_type", client.UserType,
-		"active_connections", len(h.clients),
-	)
+	cg := h.logger.NewConsoleGroup()
+	cg.Group("👤 客户端连接成功 [%s]", client.UserID)
+	
+	clientInfo := map[string]interface{}{
+		"客户端ID":   client.ID,
+		"用户ID":    client.UserID,
+		"用户类型":   client.UserType,
+		"客户端IP":  client.ClientIP,
+		"活跃连接数": len(h.clients),
+	}
+	cg.Table(clientInfo)
+	cg.GroupEnd()
 }
 
 // syncOnlineStatus 同步在线状态到 Redis
@@ -1687,7 +1728,6 @@ func (h *Hub) sendViaSSEIfPossible(msg *HubMessage) bool {
 
 // logUserOffline 记录用户离线日志
 func (h *Hub) logUserOffline(msg *HubMessage) {
-	h.logger.WarnKV("用户离线", "message_id", msg.ID, "from", msg.Sender, "to", msg.Receiver, "type", msg.MessageType)
 	h.logger.WarnKV("用户离线，消息发送失败",
 		"message_id", msg.ID,
 		"sender", msg.Sender,
@@ -3722,6 +3762,22 @@ func (h *Hub) updateMessageSendStatus(messageData []byte, status MessageSendStat
 			return
 		}
 
+		// 使用 Console Group 展示更新流程
+		cg := h.logger.NewConsoleGroup()
+		cg.Group("📝 更新消息发送状态 [%s]", msg.ID)
+		updateTimer := cg.Time("状态更新耗时")
+		
+		// 展示消息信息
+		msgInfo := map[string]interface{}{
+			"消息ID":   msg.ID,
+			"目标状态":  status,
+			"失败原因":  reason,
+			"发送者":   msg.Sender,
+			"接收者":   msg.Receiver,
+			"消息类型":  msg.MessageType,
+		}
+		cg.Table(msgInfo)
+
 		// 🔥 使用 go-toolbox retry 组件：等待记录创建完成（最多重试3次，每次等待50ms）
 		ctx := context.Background()
 		retryInstance := retry.NewRetryWithCtx(ctx).
@@ -3731,26 +3787,28 @@ func (h *Hub) updateMessageSendStatus(messageData []byte, status MessageSendStat
 		attemptNum := 0
 		updateErr := retryInstance.Do(func() error {
 			attemptNum++
+			cg.Info("→ 尝试更新状态 (第 %d 次)", attemptNum)
 			err := h.messageRecordRepo.UpdateStatus(msg.ID, status, reason, errorMsg)
 			if err == nil {
-				h.logger.DebugKV("消息状态已更新",
-					"message_id", msg.ID,
-					"status", status,
-					"attempt", attemptNum,
-				)
+				cg.Info("✅ 状态更新成功")
 			}
 			return err
 		})
 
 		// 所有重试失败后，降级为 Debug 日志（某些消息如广播/系统消息可能没有记录）
 		if updateErr != nil {
-			h.logger.DebugKV("更新消息记录状态失败(记录可能不存在或为系统消息)",
-				"message_id", msg.ID,
-				"status", status,
-				"error", updateErr,
-				"attempts", attemptNum,
-			)
+			cg.Debug("⚠️  更新失败(记录可能不存在或为系统消息): %v", updateErr)
+			
+			retryResult := map[string]interface{}{
+				"总尝试次数": attemptNum,
+				"最终结果":  "失败",
+				"错误信息":  updateErr.Error(),
+			}
+			cg.Table(retryResult)
 		}
+		
+		updateTimer.End()
+		cg.GroupEnd()
 	}()
 }
 

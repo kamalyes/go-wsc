@@ -6,7 +6,7 @@ require (
 	github.com/gorilla/websocket v1.4.2
 	github.com/jpillora/backoff v1.0.0
 	github.com/kamalyes/go-config v0.12.14-0.20251219082246-a83b076b88a4
-	github.com/kamalyes/go-logger v0.4.6-0.20251219143816-dd726da9e2a6
+	github.com/kamalyes/go-logger v0.4.6-0.20251219155802-bb8dca9ad6e6
 	github.com/kamalyes/go-toolbox v0.11.87-0.20251216094930-f2529b5d7c79
 	github.com/redis/go-redis/v9 v9.17.2
 	github.com/stretchr/testify v1.11.1

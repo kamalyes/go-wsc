@@ -50,8 +50,8 @@ github.com/json-iterator/go v1.1.12 h1:PV8peI4a0ysnczrg+LtxykD8LfKY9ML6u2jnxaEnr
 github.com/json-iterator/go v1.1.12/go.mod h1:e30LSqwooZae/UwlEbR2852Gd8hjQvJoHmT4TnhNGBo=
 github.com/kamalyes/go-config v0.12.14-0.20251219082246-a83b076b88a4 h1:SVqimTKx1ULPEh29WL1LnNaTjNObVl2v61fDBzFQuWA=
 github.com/kamalyes/go-config v0.12.14-0.20251219082246-a83b076b88a4/go.mod h1:nOdld9odCXHsvmpvLPp6jcKVtGG3g3tUQoYUaJivfkY=
-github.com/kamalyes/go-logger v0.4.6-0.20251219143816-dd726da9e2a6 h1:mi57Do1+Mf7iZcsbEXLVFrkfQlHArpEbjXxeABItl4k=
-github.com/kamalyes/go-logger v0.4.6-0.20251219143816-dd726da9e2a6/go.mod h1:rYwSnNu8HSq3ivm6Mwy2r+6ebYSSzo5lyD7nTY2SWFg=
+github.com/kamalyes/go-logger v0.4.6-0.20251219155802-bb8dca9ad6e6 h1:WxBpWxj6qE06/XGsA7WKKj5UNOor7GQT7wLJu8zu4No=
+github.com/kamalyes/go-logger v0.4.6-0.20251219155802-bb8dca9ad6e6/go.mod h1:rYwSnNu8HSq3ivm6Mwy2r+6ebYSSzo5lyD7nTY2SWFg=
 github.com/kamalyes/go-toolbox v0.11.87-0.20251216094930-f2529b5d7c79 h1:S4swAHbdIbQLMBgqg3dhK0df+q8rPl5Gl6MfgLmy2ng=
 github.com/kamalyes/go-toolbox v0.11.87-0.20251216094930-f2529b5d7c79/go.mod h1:l151q/zt/GaBgKrghaY6eb0EbUMdi9a109kgXXYLV4Q=
 github.com/klauspost/cpuid/v2 v2.3.0 h1:S4CRMLnYUhGeDFDqkGriYKdfoFlDnMtqTiI/sFzhA9Y=

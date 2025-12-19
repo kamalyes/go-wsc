@@ -13,18 +13,13 @@ package wsc
 import (
 	"context"
 	"fmt"
-	"github.com/jpillora/backoff"
-	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"sync"
 	"time"
-)
 
-// OfflineMessageHandler 离线消息处理器接口
-type OfflineMessageHandler interface {
-	// HandleOfflineMessage 处理离线用户的消息
-	// 返回值：是否成功处理（例如存储到数据库）
-	HandleOfflineMessage(msg *HubMessage) error
-}
+	"github.com/jpillora/backoff"
+	"github.com/kamalyes/go-toolbox/pkg/errorx"
+	"github.com/kamalyes/go-toolbox/pkg/mathx"
+)
 
 // AckStatus ACK状态
 type AckStatus string
@@ -58,13 +53,13 @@ type PendingMessage struct {
 
 // AckManager ACK管理器
 type AckManager struct {
-	pending           map[string]*PendingMessage // 待确认消息映射
-	mu                sync.RWMutex               // 读写锁
-	defaultAckTimeout time.Duration              // 默认ACK超时时间
-	maxRetry          int                        // 最大重试次数
-	backoff           *backoff.Backoff           // 重试退避策略
-	expireDuration    time.Duration              // 消息过期时间（超过此时间自动清理）
-	offlineHandler    OfflineMessageHandler      // 离线消息处理器
+	pending        map[string]*PendingMessage // 待确认消息映射
+	mu             sync.RWMutex               // 读写锁
+	timeout        time.Duration              // 默认ACK超时时间
+	maxRetry       int                        // 最大重试次数
+	backoff        *backoff.Backoff           // 重试退避策略
+	expireDuration time.Duration              // 消息过期时间（超过此时间自动清理）
+	offlineRepo    OfflineMessageRepository   // 离线消息处理器
 }
 
 // NewAckManager 创建ACK管理器
@@ -73,21 +68,15 @@ func NewAckManager(ackTimeout time.Duration, maxRetry int) *AckManager {
 }
 
 // NewAckManagerWithOptions 创建ACK管理器（带选项）
-func NewAckManagerWithOptions(ackTimeout time.Duration, maxRetry int, expireDuration time.Duration, offlineHandler OfflineMessageHandler) *AckManager {
+func NewAckManagerWithOptions(ackTimeout time.Duration, maxRetry int, expireDuration time.Duration, offlineRepo OfflineMessageRepository) *AckManager {
 	// 设置合理的默认ACK超时时间
-	if ackTimeout <= 0 {
-		ackTimeout = 5 * time.Second
-	}
+	ackTimeout = mathx.IF(ackTimeout > 0, ackTimeout, 5*time.Second)
 
-	// 设置合理的默认最大重试次数
-	if maxRetry < 0 {
-		maxRetry = 3
-	}
+	// 设置合理的最大重试次数
+	maxRetry = mathx.IF(maxRetry >= 0, maxRetry, 3)
 
-	// 设置合理的默认过期时间
-	if expireDuration <= 0 {
-		expireDuration = 5 * time.Minute // 默认5分钟过期
-	}
+	// 设置合理的消息过期时间（默认 5 分钟）
+	expireDuration = mathx.IF(expireDuration > 0, expireDuration, 5*time.Minute)
 
 	// 创建退避策略
 	b := &backoff.Backoff{
@@ -98,41 +87,41 @@ func NewAckManagerWithOptions(ackTimeout time.Duration, maxRetry int, expireDura
 	}
 
 	return &AckManager{
-		pending:           make(map[string]*PendingMessage),
-		defaultAckTimeout: ackTimeout,
-		maxRetry:          maxRetry,
-		backoff:           b,
-		expireDuration:    expireDuration,
-		offlineHandler:    offlineHandler,
+		pending:        make(map[string]*PendingMessage),
+		timeout:        ackTimeout,
+		maxRetry:       maxRetry,
+		backoff:        b,
+		expireDuration: expireDuration,
+		offlineRepo:    offlineRepo,
 	}
 }
 
 // AddPendingMessage 添加待确认消息
-func (am *AckManager) AddPendingMessage(msg *HubMessage, timeout time.Duration, maxRetry int) *PendingMessage {
-	return am.AddPendingMessageWithExpire(msg, timeout, maxRetry, 0)
+func (am *AckManager) AddPendingMessage(msg *HubMessage) *PendingMessage {
+	return am.AddPendingMessageWithExpire(msg, am.timeout, am.maxRetry)
 }
 
 // AddPendingMessageWithExpire 添加待确认消息(带过期时间)
-func (am *AckManager) AddPendingMessageWithExpire(msg *HubMessage, timeout time.Duration, maxRetry int, expireDuration time.Duration) *PendingMessage {
-	if timeout <= 0 {
-		timeout = am.defaultAckTimeout
-	}
-	if maxRetry < 0 {
-		maxRetry = am.maxRetry
-	}
-	if expireDuration <= 0 {
-		expireDuration = am.expireDuration
+func (am *AckManager) AddPendingMessageWithExpire(msg *HubMessage, timeout time.Duration, maxRetry int) *PendingMessage {
+	// 设置合理的默认ACK超时时间
+	timeout = mathx.IF(timeout > 0, timeout, am.timeout)
+
+	// 设置合理的最大重试次数
+	maxRetry = mathx.IF(maxRetry >= 0, maxRetry, am.maxRetry)
+
+	// 计算 context 超时时间：timeout * (maxRetry + 1) + 额外缓冲时间
+	contextTimeout := timeout*time.Duration(maxRetry+1) + 1*time.Second
+	if am.expireDuration > 0 && contextTimeout > am.expireDuration {
+		contextTimeout = am.expireDuration
 	}
 
-	// 使用expireDuration作为context超时(给予足够时间进行重试)
-	ctx, cancel := context.WithTimeout(context.Background(), expireDuration)
+	ctx, cancel := context.WithTimeout(context.Background(), contextTimeout)
 
 	pm := &PendingMessage{
 		Message:   msg,
 		AckChan:   make(chan *AckMessage, 1),
 		Timestamp: time.Now(),
 		Timeout:   timeout,
-		Retry:     0,
 		MaxRetry:  maxRetry,
 		ctx:       ctx,
 		cancel:    cancel,
@@ -258,8 +247,8 @@ func (am *AckManager) CleanupExpired() int {
 		select {
 		case <-pm.ctx.Done():
 			// Context已过期,清理消息
-			if am.offlineHandler != nil {
-				_ = am.offlineHandler.HandleOfflineMessage(pm.Message)
+			if am.offlineRepo != nil {
+				_ = am.offlineRepo.StoreOfflineMessage(context.Background(), pm.Message.Receiver, pm.Message)
 			}
 			pm.cancel()
 			delete(am.pending, msgID)
@@ -277,6 +266,14 @@ func (am *AckManager) GetPendingCount() int {
 	am.mu.RLock()
 	defer am.mu.RUnlock()
 	return len(am.pending)
+}
+
+// SetofflineRepo 设置离线消息处理器
+// 用于统一使用 Hub 的离线消息处理器
+func (am *AckManager) SetofflineRepo(handler OfflineMessageRepository) {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+	am.offlineRepo = handler
 }
 
 // Shutdown 关闭ACK管理器

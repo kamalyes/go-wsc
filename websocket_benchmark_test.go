@@ -48,8 +48,8 @@ func setupBenchServer(b *testing.B) (*httptest.Server, *Wsc) {
 	return server, ws
 }
 
-// BenchmarkSendTextMessage_Small 测试发送小文本消息的性能
-func BenchmarkSendTextMessage_Small(b *testing.B) {
+// BenchmarkSendTextMessageSmall 测试发送小文本消息的性能
+func BenchmarkSendTextMessageSmall(b *testing.B) {
 	server, ws := setupBenchServer(b)
 	defer server.Close()
 	defer ws.Close()
@@ -75,8 +75,8 @@ func BenchmarkSendTextMessage_Small(b *testing.B) {
 	}
 }
 
-// BenchmarkSendTextMessage_Medium 测试发送中等文本消息的性能
-func BenchmarkSendTextMessage_Medium(b *testing.B) {
+// BenchmarkSendTextMessageMedium 测试发送中等文本消息的性能
+func BenchmarkSendTextMessageMedium(b *testing.B) {
 	server, ws := setupBenchServer(b)
 	defer server.Close()
 	defer ws.Close()
@@ -97,8 +97,8 @@ func BenchmarkSendTextMessage_Medium(b *testing.B) {
 	}
 }
 
-// BenchmarkSendTextMessage_Large 测试发送大文本消息的性能
-func BenchmarkSendTextMessage_Large(b *testing.B) {
+// BenchmarkSendTextMessageLarge 测试发送大文本消息的性能
+func BenchmarkSendTextMessageLarge(b *testing.B) {
 	server, ws := setupBenchServer(b)
 	defer server.Close()
 	defer ws.Close()
@@ -141,8 +141,8 @@ func BenchmarkSendBinaryMessage(b *testing.B) {
 	}
 }
 
-// BenchmarkSendTextMessage_Parallel 测试并发发送消息的性能
-func BenchmarkSendTextMessage_Parallel(b *testing.B) {
+// BenchmarkSendTextMessageParallel 测试并发发送消息的性能
+func BenchmarkSendTextMessageParallel(b *testing.B) {
 	server, ws := setupBenchServer(b)
 	defer server.Close()
 	defer ws.Close()

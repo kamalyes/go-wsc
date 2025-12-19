@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"time"
 
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/redis/go-redis/v9"
 )
@@ -96,11 +97,10 @@ type RedisHubStatsRepository struct {
 // NewRedisHubStatsRepository 创建 Redis Hub 统计仓库
 // 参数:
 //   - client: Redis 客户端 (github.com/redis/go-redis/v9)
-//   - keyPrefix: key 前缀，默认为 "wsc:stats:"
-//   - ttl: 统计数据过期时间，默认 7 天
-func NewRedisHubStatsRepository(client *redis.Client, keyPrefix string, ttl time.Duration) *RedisHubStatsRepository {
-	keyPrefix = mathx.IF(keyPrefix == "", "wsc:stats:", keyPrefix)
-	ttl = mathx.IF(ttl == 0, 7*24*time.Hour, ttl)
+//   - config: 统计配置对象
+func NewRedisHubStatsRepository(client *redis.Client, config *wscconfig.Stats) *RedisHubStatsRepository {
+	keyPrefix := mathx.IF(config.KeyPrefix == "", "wsc:stats:", config.KeyPrefix)
+	ttl := mathx.IF(config.TTL == 0, 7*24*time.Hour, config.TTL)
 
 	return &RedisHubStatsRepository{
 		client:      client,

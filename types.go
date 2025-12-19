@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-01-21
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-12-12 16:23:55
+ * @LastEditTime: 2025-12-19 17:12:29
  * @FilePath: \go-wsc\types.go
  * @Description: WebSocket 系统类型定义
  *
@@ -88,6 +88,93 @@ func (s UserStatus) String() string {
 func (s UserStatus) IsValid() bool {
 	switch s {
 	case UserStatusOnline, UserStatusOffline, UserStatusBusy, UserStatusAway, UserStatusInvisible:
+		return true
+	default:
+		return false
+	}
+}
+
+// DisconnectReason 断开连接原因
+type DisconnectReason string
+
+const (
+	DisconnectReasonReadError      DisconnectReason = "read_error"      // 读取错误
+	DisconnectReasonWriteError     DisconnectReason = "write_error"     // 写入错误
+	DisconnectReasonContextDone    DisconnectReason = "context_done"    // 上下文结束
+	DisconnectReasonCloseMessage   DisconnectReason = "close_message"   // 关闭消息
+	DisconnectReasonHeartbeatFail  DisconnectReason = "heartbeat_fail"  // 心跳失败
+	DisconnectReasonKickOut        DisconnectReason = "kick_out"        // 被踢出
+	DisconnectReasonForceOffline   DisconnectReason = "force_offline"   // 强制下线
+	DisconnectReasonTimeout        DisconnectReason = "timeout"         // 超时
+	DisconnectReasonClientRequest  DisconnectReason = "client_request"  // 客户端主动断开
+	DisconnectReasonServerShutdown DisconnectReason = "server_shutdown" // 服务器关闭
+	DisconnectReasonUnknown        DisconnectReason = "unknown"         // 未知原因
+)
+
+// String 实现Stringer接口
+func (r DisconnectReason) String() string {
+	return string(r)
+}
+
+// IsValid 检查断开原因是否有效
+func (r DisconnectReason) IsValid() bool {
+	switch r {
+	case DisconnectReasonReadError, DisconnectReasonWriteError, DisconnectReasonContextDone,
+		DisconnectReasonCloseMessage, DisconnectReasonHeartbeatFail, DisconnectReasonKickOut,
+		DisconnectReasonForceOffline, DisconnectReasonTimeout, DisconnectReasonClientRequest,
+		DisconnectReasonServerShutdown, DisconnectReasonUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// ErrorSeverity 错误严重程度
+type ErrorSeverity string
+
+const (
+	ErrorSeverityInfo     ErrorSeverity = "info"     // 信息
+	ErrorSeverityWarning  ErrorSeverity = "warning"  // 警告
+	ErrorSeverityError    ErrorSeverity = "error"    // 错误
+	ErrorSeverityCritical ErrorSeverity = "critical" // 严重错误
+	ErrorSeverityFatal    ErrorSeverity = "fatal"    // 致命错误
+)
+
+// String 实现Stringer接口
+func (s ErrorSeverity) String() string {
+	return string(s)
+}
+
+// IsValid 检查严重程度是否有效
+func (s ErrorSeverity) IsValid() bool {
+	switch s {
+	case ErrorSeverityInfo, ErrorSeverityWarning, ErrorSeverityError, ErrorSeverityCritical, ErrorSeverityFatal:
+		return true
+	default:
+		return false
+	}
+}
+
+// QueueType 队列类型
+type QueueType string
+
+const (
+	QueueTypeBroadcast    QueueType = "broadcast_full" // 广播队列
+	QueueTypePending      QueueType = "pending_full"   // 待发送队列
+	QueueTypeAllQueues    QueueType = "all_queues"     // 所有队列
+	QueueTypeMessageQueue QueueType = "message_queue"  // 消息队列
+	QueueTypeClientBuffer QueueType = "client_buffer"  // 客户端缓冲区
+)
+
+// String 实现Stringer接口
+func (q QueueType) String() string {
+	return string(q)
+}
+
+// IsValid 检查队列类型是否有效
+func (q QueueType) IsValid() bool {
+	switch q {
+	case QueueTypeBroadcast, QueueTypePending, QueueTypeAllQueues, QueueTypeMessageQueue, QueueTypeClientBuffer:
 		return true
 	default:
 		return false

@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-12-01 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-12-01 23:00:00
+ * @LastEditTime: 2025-12-19 13:58:07
  * @FilePath: \go-wsc\hub_integration_example_test.go
  * @Description: Hub 集成 Redis 和 MySQL 示例测试
  *
@@ -60,7 +60,10 @@ func TestHubWithRedisAndMySQL(t *testing.T) {
 	require.NoError(t, err, "数据库迁移失败")
 
 	// 3. 创建仓库实例
-	onlineStatusRepo := NewRedisOnlineStatusRepository(redisClient, "wsc:test:online:", 5*time.Minute)
+	onlineStatusRepo := NewRedisOnlineStatusRepository(redisClient, &wscconfig.OnlineStatus{
+		KeyPrefix: "wsc:test:hubintegration:online:",
+		TTL:       5 * time.Minute,
+	})
 	messageRecordRepo := NewMessageRecordRepository(db)
 
 	// 4. 创建 Hub 配置
@@ -79,7 +82,10 @@ func TestHubWithRedisAndMySQL(t *testing.T) {
 	hub := NewHub(config)
 
 	// 创建统计仓库
-	statsRepo := NewRedisHubStatsRepository(redisClient, "wsc:test:stats:", 24*time.Hour)
+	statsRepo := NewRedisHubStatsRepository(redisClient, &wscconfig.Stats{
+		KeyPrefix: "wsc:test:hubintegration:stats:",
+		TTL:       24 * time.Hour,
+	})
 	hub.SetHubStatsRepository(statsRepo)
 
 	hub.SetOnlineStatusRepository(onlineStatusRepo)
@@ -179,9 +185,15 @@ func TestHubBatchOperations(t *testing.T) {
 	require.NoError(t, err)
 
 	// 创建仓库
-	onlineStatusRepo := NewRedisOnlineStatusRepository(redisClient, "wsc:test:batch:", 5*time.Minute)
+	onlineStatusRepo := NewRedisOnlineStatusRepository(redisClient, &wscconfig.OnlineStatus{
+		KeyPrefix: "wsc:test:batch:online:",
+		TTL:       5 * time.Minute,
+	})
 	messageRecordRepo := NewMessageRecordRepository(db)
-	statsRepo := NewRedisHubStatsRepository(redisClient, "wsc:test:stats:", 24*time.Hour)
+	statsRepo := NewRedisHubStatsRepository(redisClient, &wscconfig.Stats{
+		KeyPrefix: "wsc:test:batch:stats:",
+		TTL:       24 * time.Hour,
+	})
 
 	// 创建 Hub
 	config := wscconfig.Default()
@@ -261,8 +273,14 @@ func TestHubOnlineStatusQuery(t *testing.T) {
 	})
 	defer redisClient.Close()
 
-	onlineStatusRepo := NewRedisOnlineStatusRepository(redisClient, "wsc:test:query:", 5*time.Minute)
-	statsRepo := NewRedisHubStatsRepository(redisClient, "wsc:test:stats:", 24*time.Hour)
+	onlineStatusRepo := NewRedisOnlineStatusRepository(redisClient, &wscconfig.OnlineStatus{
+		KeyPrefix: "wsc:test:query:online:",
+		TTL:       5 * time.Minute,
+	})
+	statsRepo := NewRedisHubStatsRepository(redisClient, &wscconfig.Stats{
+		KeyPrefix: "wsc:test:query:stats:",
+		TTL:       24 * time.Hour,
+	})
 	config := wscconfig.Default()
 	hub := NewHub(config)
 	hub.SetHubStatsRepository(statsRepo)

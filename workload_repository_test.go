@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-12-18
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-12-18 17:55:39
+ * @LastEditTime: 2025-12-19 13:57:33
  * @FilePath: \go-wsc\workload_repository_test.go
  * @Description: 负载管理仓库单元测试
  *
@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,7 +34,10 @@ func TestRedisWorkloadRepositorySetAndGetAgentWorkload(t *testing.T) {
 	client := setupWorkloadTestRedis(t)
 	defer client.Close()
 
-	repo := NewRedisWorkloadRepository(client, testWorkloadKeyPrefix, 5*time.Minute)
+	repo := NewRedisWorkloadRepository(client, &wscconfig.Workload{
+		KeyPrefix: testWorkloadKeyPrefix,
+		TTL:       5 * time.Minute,
+	})
 	ctx := context.Background()
 
 	// 测试设置和获取负载
@@ -53,7 +57,10 @@ func TestRedisWorkloadRepositoryIncrementAndDecrement(t *testing.T) {
 	client := setupWorkloadTestRedis(t)
 	defer client.Close()
 
-	repo := NewRedisWorkloadRepository(client, testWorkloadKeyPrefix, 5*time.Minute)
+	repo := NewRedisWorkloadRepository(client, &wscconfig.Workload{
+		KeyPrefix: testWorkloadKeyPrefix,
+		TTL:       5 * time.Minute,
+	})
 	ctx := context.Background()
 
 	agentID := "agent002"
@@ -87,7 +94,10 @@ func TestRedisWorkloadRepositoryDecrementBelowZero(t *testing.T) {
 	client := setupWorkloadTestRedis(t)
 	defer client.Close()
 
-	repo := NewRedisWorkloadRepository(client, testWorkloadKeyPrefix, 5*time.Minute)
+	repo := NewRedisWorkloadRepository(client, &wscconfig.Workload{
+		KeyPrefix: testWorkloadKeyPrefix,
+		TTL:       5 * time.Minute,
+	})
 	ctx := context.Background()
 
 	agentID := "agent003"
@@ -110,7 +120,10 @@ func TestRedisWorkloadRepositoryGetLeastLoadedAgent(t *testing.T) {
 	client := setupWorkloadTestRedis(t)
 	defer client.Close()
 
-	repo := NewRedisWorkloadRepository(client, testWorkloadKeyPrefix, 5*time.Minute)
+	repo := NewRedisWorkloadRepository(client, &wscconfig.Workload{
+		KeyPrefix: testWorkloadKeyPrefix,
+		TTL:       5 * time.Minute,
+	})
 	ctx := context.Background()
 
 	// 设置多个客服的负载
@@ -138,7 +151,10 @@ func TestRedisWorkloadRepositoryGetLeastLoadedAgentWithOfflineAgents(t *testing.
 	client := setupWorkloadTestRedis(t)
 	defer client.Close()
 
-	repo := NewRedisWorkloadRepository(client, testWorkloadKeyPrefix, 5*time.Minute)
+	repo := NewRedisWorkloadRepository(client, &wscconfig.Workload{
+		KeyPrefix: testWorkloadKeyPrefix,
+		TTL:       5 * time.Minute,
+	})
 	ctx := context.Background()
 
 	// 设置多个客服的负载（包括不在线的）
@@ -166,7 +182,10 @@ func TestRedisWorkloadRepositoryRemoveAgentWorkload(t *testing.T) {
 	client := setupWorkloadTestRedis(t)
 	defer client.Close()
 
-	repo := NewRedisWorkloadRepository(client, testWorkloadKeyPrefix, 5*time.Minute)
+	repo := NewRedisWorkloadRepository(client, &wscconfig.Workload{
+		KeyPrefix: testWorkloadKeyPrefix,
+		TTL:       5 * time.Minute,
+	})
 	ctx := context.Background()
 
 	agentID := "agent005"
@@ -194,7 +213,10 @@ func TestRedisWorkloadRepositoryGetAllAgentWorkloads(t *testing.T) {
 	client := setupWorkloadTestRedis(t)
 	defer client.Close()
 
-	repo := NewRedisWorkloadRepository(client, testWorkloadKeyPrefix, 5*time.Minute)
+	repo := NewRedisWorkloadRepository(client, &wscconfig.Workload{
+		KeyPrefix: testWorkloadKeyPrefix,
+		TTL:       5 * time.Minute,
+	})
 	ctx := context.Background()
 
 	// 设置多个客服的负载
@@ -227,7 +249,10 @@ func TestRedisWorkloadRepositoryGetAllAgentWorkloadsWithLimit(t *testing.T) {
 	client := setupWorkloadTestRedis(t)
 	defer client.Close()
 
-	repo := NewRedisWorkloadRepository(client, testWorkloadKeyPrefix, 5*time.Minute)
+	repo := NewRedisWorkloadRepository(client, &wscconfig.Workload{
+		KeyPrefix: testWorkloadKeyPrefix,
+		TTL:       5 * time.Minute,
+	})
 	ctx := context.Background()
 
 	// 设置多个客服的负载
@@ -259,7 +284,10 @@ func TestRedisWorkloadRepositoryBatchSetAgentWorkload(t *testing.T) {
 	client := setupWorkloadTestRedis(t)
 	defer client.Close()
 
-	repo := NewRedisWorkloadRepository(client, testWorkloadKeyPrefix, 5*time.Minute)
+	repo := NewRedisWorkloadRepository(client, &wscconfig.Workload{
+		KeyPrefix: testWorkloadKeyPrefix,
+		TTL:       5 * time.Minute,
+	})
 	ctx := context.Background()
 
 	// 批量设置负载
@@ -284,7 +312,10 @@ func TestRedisWorkloadRepositoryConcurrency(t *testing.T) {
 	client := setupWorkloadTestRedis(t)
 	defer client.Close()
 
-	repo := NewRedisWorkloadRepository(client, testWorkloadKeyPrefix, 5*time.Minute)
+	repo := NewRedisWorkloadRepository(client, &wscconfig.Workload{
+		KeyPrefix: testWorkloadKeyPrefix,
+		TTL:       5 * time.Minute,
+	})
 	ctx := context.Background()
 
 	agentID := "agent_concurrent"
@@ -320,7 +351,10 @@ func TestRedisWorkloadRepositoryBatchSet1000Agents(t *testing.T) {
 	client := setupWorkloadTestRedis(t)
 	defer client.Close()
 
-	repo := NewRedisWorkloadRepository(client, testWorkloadKeyPrefix, 5*time.Minute)
+	repo := NewRedisWorkloadRepository(client, &wscconfig.Workload{
+		KeyPrefix: testWorkloadKeyPrefix,
+		TTL:       5 * time.Minute,
+	})
 	ctx := context.Background()
 
 	// 构建1000个客服数据
@@ -361,7 +395,10 @@ func TestRedisWorkloadRepositoryGetLeastLoadedFrom1000Agents(t *testing.T) {
 	client := setupWorkloadTestRedis(t)
 	defer client.Close()
 
-	repo := NewRedisWorkloadRepository(client, testWorkloadKeyPrefix, 5*time.Minute)
+	repo := NewRedisWorkloadRepository(client, &wscconfig.Workload{
+		KeyPrefix: testWorkloadKeyPrefix,
+		TTL:       5 * time.Minute,
+	})
 	ctx := context.Background()
 
 	// 设置1000个客服
@@ -395,7 +432,10 @@ func TestRedisWorkloadRepositoryGetAllWorkloadsPagination(t *testing.T) {
 	client := setupWorkloadTestRedis(t)
 	defer client.Close()
 
-	repo := NewRedisWorkloadRepository(client, testWorkloadKeyPrefix, 5*time.Minute)
+	repo := NewRedisWorkloadRepository(client, &wscconfig.Workload{
+		KeyPrefix: testWorkloadKeyPrefix,
+		TTL:       5 * time.Minute,
+	})
 	ctx := context.Background()
 
 	// 设置500个客服
@@ -428,7 +468,10 @@ func TestRedisWorkloadRepositoryConcurrentOperationsStressTest(t *testing.T) {
 	client := setupWorkloadTestRedis(t)
 	defer client.Close()
 
-	repo := NewRedisWorkloadRepository(client, testWorkloadKeyPrefix, 5*time.Minute)
+	repo := NewRedisWorkloadRepository(client, &wscconfig.Workload{
+		KeyPrefix: testWorkloadKeyPrefix,
+		TTL:       5 * time.Minute,
+	})
 	ctx := context.Background()
 
 	agentID := "stress_agent"
@@ -473,7 +516,10 @@ func TestRedisWorkloadRepositoryDailyKeySeparation(t *testing.T) {
 	client := setupWorkloadTestRedis(t)
 	defer client.Close()
 
-	repo := NewRedisWorkloadRepository(client, testWorkloadKeyPrefix, 5*time.Minute)
+	repo := NewRedisWorkloadRepository(client, &wscconfig.Workload{
+		KeyPrefix: testWorkloadKeyPrefix,
+		TTL:       5 * time.Minute,
+	})
 	ctx := context.Background()
 
 	agentID := "daily_agent"

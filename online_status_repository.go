@@ -1,8 +1,8 @@
 /*
  * @Author: kamalyes 501893067@qq.com
- * @Date: 2025-12-01
+ * @Date: 2025-12-19 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-12-01
+ * @LastEditTime: 2025-12-19 22:01:00
  * @FilePath: \go-wsc\online_status_repository.go
  * @Description: 客户端在线状态管理 - 支持 Redis 分布式存储
  *
@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"time"
 
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/redis/go-redis/v9"
 )
@@ -85,13 +86,12 @@ type RedisOnlineStatusRepository struct {
 // NewRedisOnlineStatusRepository 创建 Redis 在线状态仓库
 // 参数:
 //   - client: Redis 客户端 (github.com/redis/go-redis/v9)
-//   - keyPrefix: key 前缀，默认为 "wsc:online:"
-//   - ttl: 默认过期时间，建议设置为心跳间隔的 2-3 倍
-func NewRedisOnlineStatusRepository(client *redis.Client, keyPrefix string, ttl time.Duration) OnlineStatusRepository {
+//   - config: 在线状态配置对象
+func NewRedisOnlineStatusRepository(client *redis.Client, config *wscconfig.OnlineStatus) OnlineStatusRepository {
 	return &RedisOnlineStatusRepository{
 		client:     client,
-		keyPrefix:  mathx.IF(keyPrefix == "", "wsc:online:", keyPrefix),
-		defaultTTL: mathx.IF(ttl == 0, 5*time.Minute, ttl),
+		keyPrefix:  mathx.IF(config.KeyPrefix == "", "wsc:online:", config.KeyPrefix),
+		defaultTTL: mathx.IF(config.TTL == 0, 5*time.Minute, config.TTL),
 	}
 }
 

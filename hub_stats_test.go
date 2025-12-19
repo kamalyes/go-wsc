@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-12-01 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-12-02 09:23:47
+ * @LastEditTime: 2025-12-19 13:58:17
  * @FilePath: \go-wsc\hub_stats_test.go
  * @Description: Hub 统计信息 Redis 集成测试
  *
@@ -37,7 +37,10 @@ func TestHubRedisStatistics(t *testing.T) {
 	require.NoError(t, err, "Redis连接失败")
 
 	// 2. 创建统计仓库
-	statsRepo := NewRedisHubStatsRepository(redisClient, "wsc:test:hubstats:", 24*time.Hour)
+	statsRepo := NewRedisHubStatsRepository(redisClient, &wscconfig.Stats{
+		KeyPrefix: "wsc:test:hubstats:",
+		TTL:       24 * time.Hour,
+	})
 
 	// 3. 创建 Hub
 	config := &wscconfig.WSC{
@@ -48,7 +51,10 @@ func TestHubRedisStatistics(t *testing.T) {
 	}
 	hub := NewHub(config)
 	hub.SetHubStatsRepository(statsRepo)
-	hub.SetOnlineStatusRepository(NewRedisOnlineStatusRepository(redisClient, "wsc:test:hubstats:online:", 5*time.Minute))
+	hub.SetOnlineStatusRepository(NewRedisOnlineStatusRepository(redisClient, &wscconfig.OnlineStatus{
+		KeyPrefix: "wsc:test:hubstats:online:",
+		TTL:       5 * time.Minute,
+	}))
 	hub.SetMessageRecordRepository(NewMessageRecordRepository(nil)) // 占位
 
 	// 4. 启动 Hub
@@ -168,7 +174,10 @@ func TestHubClusterStatistics(t *testing.T) {
 	defer redisClient.Close()
 
 	ctx := context.Background()
-	statsRepo := NewRedisHubStatsRepository(redisClient, "wsc:test:cluster:", 24*time.Hour)
+	statsRepo := NewRedisHubStatsRepository(redisClient, &wscconfig.Stats{
+		KeyPrefix: "wsc:test:cluster:hubstats:",
+		TTL:       24 * time.Hour,
+	})
 
 	// 2. 模拟两个节点
 	node1Config := &wscconfig.WSC{
@@ -179,7 +188,10 @@ func TestHubClusterStatistics(t *testing.T) {
 	}
 	hub1 := NewHub(node1Config)
 	hub1.SetHubStatsRepository(statsRepo)
-	hub1.SetOnlineStatusRepository(NewRedisOnlineStatusRepository(redisClient, "wsc:test:cluster:online:", 5*time.Minute))
+	hub1.SetOnlineStatusRepository(NewRedisOnlineStatusRepository(redisClient, &wscconfig.OnlineStatus{
+		KeyPrefix: "wsc:test:cluster:online:",
+		TTL:       5 * time.Minute,
+	}))
 	hub1.SetMessageRecordRepository(NewMessageRecordRepository(nil))
 
 	node2Config := &wscconfig.WSC{
@@ -190,7 +202,10 @@ func TestHubClusterStatistics(t *testing.T) {
 	}
 	hub2 := NewHub(node2Config)
 	hub2.SetHubStatsRepository(statsRepo)
-	hub2.SetOnlineStatusRepository(NewRedisOnlineStatusRepository(redisClient, "wsc:test:cluster:online:", 5*time.Minute))
+	hub2.SetOnlineStatusRepository(NewRedisOnlineStatusRepository(redisClient, &wscconfig.OnlineStatus{
+		KeyPrefix: "wsc:test:cluster:online:",
+		TTL:       5 * time.Minute,
+	}))
 	hub2.SetMessageRecordRepository(NewMessageRecordRepository(nil))
 
 	// 3. 启动两个节点

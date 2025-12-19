@@ -71,7 +71,7 @@ func createTestHubMessage(id, sender, receiver string, msgType MessageType) *Hub
 	}
 }
 
-func TestMessageSendRecord_SetAndGetMessage(t *testing.T) {
+func TestMessageSendRecordSetAndGetMessage(t *testing.T) {
 	record := &MessageSendRecord{}
 	msg := createTestHubMessage("msg-001", "user-001", "user-002", MessageTypeText)
 
@@ -94,7 +94,7 @@ func TestMessageSendRecord_SetAndGetMessage(t *testing.T) {
 	assert.Equal(t, msg.MessageType, retrievedMsg.MessageType)
 }
 
-func TestMessageRecordRepository_Create(t *testing.T) {
+func TestMessageRecordRepositoryCreate(t *testing.T) {
 	db := getTestDB(t)
 	repo := NewMessageRecordRepository(db)
 
@@ -123,7 +123,7 @@ func TestMessageRecordRepository_Create(t *testing.T) {
 	assert.NotZero(t, record.ID)
 }
 
-func TestMessageRecordRepository_CreateFromMessage(t *testing.T) {
+func TestMessageRecordRepositoryCreateFromMessage(t *testing.T) {
 	db := getTestDB(t)
 	repo := NewMessageRecordRepository(db)
 
@@ -145,7 +145,7 @@ func TestMessageRecordRepository_CreateFromMessage(t *testing.T) {
 	assert.Equal(t, msgID, record.MessageID)
 }
 
-func TestMessageRecordRepository_FindByMessageID(t *testing.T) {
+func TestMessageRecordRepositoryFindByMessageID(t *testing.T) {
 	db := getTestDB(t)
 	repo := NewMessageRecordRepository(db)
 
@@ -167,7 +167,7 @@ func TestMessageRecordRepository_FindByMessageID(t *testing.T) {
 	assert.Equal(t, msgID, found.MessageID)
 }
 
-func TestMessageRecordRepository_UpdateStatus(t *testing.T) {
+func TestMessageRecordRepositoryUpdateStatus(t *testing.T) {
 	db := getTestDB(t)
 	repo := NewMessageRecordRepository(db)
 
@@ -214,7 +214,7 @@ func TestMessageRecordRepository_UpdateStatus(t *testing.T) {
 	_ = created
 }
 
-func TestMessageRecordRepository_IncrementRetry(t *testing.T) {
+func TestMessageRecordRepositoryIncrementRetry(t *testing.T) {
 	db := getTestDB(t)
 	repo := NewMessageRecordRepository(db)
 
@@ -281,7 +281,7 @@ func TestMessageRecordRepository_IncrementRetry(t *testing.T) {
 	assert.NotNil(t, record.SuccessTime)
 }
 
-func TestMessageRecordRepository_FindByStatus(t *testing.T) {
+func TestMessageRecordRepositoryFindByStatus(t *testing.T) {
 	db := getTestDB(t)
 	repo := NewMessageRecordRepository(db)
 
@@ -333,7 +333,7 @@ func TestMessageRecordRepository_FindByStatus(t *testing.T) {
 	assert.GreaterOrEqual(t, len(failed), 1)
 }
 
-func TestMessageRecordRepository_FindBySenderAndReceiver(t *testing.T) {
+func TestMessageRecordRepositoryFindBySenderAndReceiver(t *testing.T) {
 	db := getTestDB(t)
 	repo := NewMessageRecordRepository(db)
 
@@ -374,7 +374,7 @@ func TestMessageRecordRepository_FindBySenderAndReceiver(t *testing.T) {
 	assert.True(t, found)
 }
 
-func TestMessageRecordRepository_FindByNodeIPAndClientIP(t *testing.T) {
+func TestMessageRecordRepositoryFindByNodeIPAndClientIP(t *testing.T) {
 	db := getTestDB(t)
 	repo := NewMessageRecordRepository(db)
 
@@ -426,7 +426,7 @@ func TestMessageRecordRepository_FindByNodeIPAndClientIP(t *testing.T) {
 	assert.True(t, found)
 }
 
-func TestMessageRecordRepository_FindRetryable(t *testing.T) {
+func TestMessageRecordRepositoryFindRetryable(t *testing.T) {
 	db := getTestDB(t)
 	repo := NewMessageRecordRepository(db)
 
@@ -472,7 +472,7 @@ func TestMessageRecordRepository_FindRetryable(t *testing.T) {
 	assert.True(t, found)
 }
 
-func TestMessageRecordRepository_FindExpired(t *testing.T) {
+func TestMessageRecordRepositoryFindExpired(t *testing.T) {
 	db := getTestDB(t)
 	repo := NewMessageRecordRepository(db)
 
@@ -507,7 +507,7 @@ func TestMessageRecordRepository_FindExpired(t *testing.T) {
 	_ = record
 }
 
-func TestMessageRecordRepository_GetStatistics(t *testing.T) {
+func TestMessageRecordRepositoryGetStatistics(t *testing.T) {
 	db := getTestDB(t)
 	repo := NewMessageRecordRepository(db)
 
@@ -520,7 +520,7 @@ func TestMessageRecordRepository_GetStatistics(t *testing.T) {
 	assert.Contains(t, stats, string(MessageSendStatusFailed))
 }
 
-func TestMessageRecordRepository_CleanupOld(t *testing.T) {
+func TestMessageRecordRepositoryCleanupOld(t *testing.T) {
 	db := getTestDB(t)
 	repo := NewMessageRecordRepository(db)
 
@@ -552,7 +552,7 @@ func TestMessageRecordRepository_CleanupOld(t *testing.T) {
 	assert.Error(t, err) // 应该找不到
 }
 
-func TestMessageSendRecord_JSONFields(t *testing.T) {
+func TestMessageSendRecordJSONFields(t *testing.T) {
 	db := getTestDB(t)
 	repo := NewMessageRecordRepository(db)
 
@@ -596,7 +596,7 @@ func TestMessageSendRecord_JSONFields(t *testing.T) {
 	assert.Contains(t, found.Tags, "urgent")
 }
 
-func TestMessageRecordRepository_Concurrency(t *testing.T) {
+func TestMessageRecordRepositoryConcurrency(t *testing.T) {
 	db := getTestDB(t)
 	repo := NewMessageRecordRepository(db)
 

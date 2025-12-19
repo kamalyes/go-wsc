@@ -1,8 +1,8 @@
 /*
  * @Author: kamalyes 501893067@qq.com
- * @Date: 2025-12-01
+ * @Date: 2025-12-01 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-12-01
+ * @LastEditTime: 2025-12-01 17:15:17
  * @FilePath: \go-wsc\online_status_repository_test.go
  * @Description: 客户端在线状态管理 - 支持 Redis 分布式存储
  *
@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -87,7 +88,7 @@ func TestRedisOnlineStatusRepositorySetOnline(t *testing.T) {
 	client := getTestRedisClient(t)
 	defer client.Close()
 
-	repo := NewRedisOnlineStatusRepository(client, "test:", 5*time.Minute)
+	repo := NewRedisOnlineStatusRepository(client, &wscconfig.OnlineStatus{KeyPrefix: "test:", TTL: 5 * time.Minute})
 	ctx := context.Background()
 
 	info := createTestOnlineClientInfo("test-client-1", testUser001, UserTypeCustomer, testNode1)
@@ -117,7 +118,7 @@ func TestRedisOnlineStatusRepositorySetOffline(t *testing.T) {
 	client := getTestRedisClient(t)
 	defer client.Close()
 
-	repo := NewRedisOnlineStatusRepository(client, "test:", 5*time.Minute)
+	repo := NewRedisOnlineStatusRepository(client, &wscconfig.OnlineStatus{KeyPrefix: "test:", TTL: 5 * time.Minute})
 	ctx := context.Background()
 
 	info := createTestOnlineClientInfo("test-client-2", testCountUser002, UserTypeAgent, testNode1)
@@ -145,7 +146,7 @@ func TestRedisOnlineStatusRepositoryGetOnlineUsersByType(t *testing.T) {
 	client := getTestRedisClient(t)
 	defer client.Close()
 
-	repo := NewRedisOnlineStatusRepository(client, "test:", 5*time.Minute)
+	repo := NewRedisOnlineStatusRepository(client, &wscconfig.OnlineStatus{KeyPrefix: "test:", TTL: 5 * time.Minute})
 	ctx := context.Background()
 
 	// 清理测试数据
@@ -185,7 +186,7 @@ func TestRedisOnlineStatusRepositoryGetOnlineUsersByNode(t *testing.T) {
 	client := getTestRedisClient(t)
 	defer client.Close()
 
-	repo := NewRedisOnlineStatusRepository(client, "test:", 5*time.Minute)
+	repo := NewRedisOnlineStatusRepository(client, &wscconfig.OnlineStatus{KeyPrefix: "test:", TTL: 5 * time.Minute})
 	ctx := context.Background()
 
 	// 清理测试数据
@@ -225,7 +226,7 @@ func TestRedisOnlineStatusRepositoryGetAllOnlineUserIDs(t *testing.T) {
 	client := getTestRedisClient(t)
 	defer client.Close()
 
-	repo := NewRedisOnlineStatusRepository(client, "test:", 5*time.Minute)
+	repo := NewRedisOnlineStatusRepository(client, &wscconfig.OnlineStatus{KeyPrefix: "test:", TTL: 5 * time.Minute})
 	ctx := context.Background()
 
 	// 清理测试数据
@@ -259,7 +260,7 @@ func TestRedisOnlineStatusRepositoryUpdateHeartbeat(t *testing.T) {
 	client := getTestRedisClient(t)
 	defer client.Close()
 
-	repo := NewRedisOnlineStatusRepository(client, "test:", 5*time.Minute)
+	repo := NewRedisOnlineStatusRepository(client, &wscconfig.OnlineStatus{KeyPrefix: "test:", TTL: 5 * time.Minute})
 	ctx := context.Background()
 
 	info := createTestOnlineClientInfo("heartbeat-client", testHeartbeatUser, UserTypeCustomer, testNode1)
@@ -291,7 +292,7 @@ func TestRedisOnlineStatusRepositoryGetOnlineCount(t *testing.T) {
 	client := getTestRedisClient(t)
 	defer client.Close()
 
-	repo := NewRedisOnlineStatusRepository(client, "test:", 5*time.Minute)
+	repo := NewRedisOnlineStatusRepository(client, &wscconfig.OnlineStatus{KeyPrefix: "test:", TTL: 5 * time.Minute})
 	ctx := context.Background()
 
 	// 清理测试数据
@@ -323,7 +324,7 @@ func TestRedisOnlineStatusRepositoryBatchSetOnline(t *testing.T) {
 	client := getTestRedisClient(t)
 	defer client.Close()
 
-	repo := NewRedisOnlineStatusRepository(client, "test:", 5*time.Minute)
+	repo := NewRedisOnlineStatusRepository(client, &wscconfig.OnlineStatus{KeyPrefix: "test:", TTL: 5 * time.Minute})
 	ctx := context.Background()
 
 	// 清理测试数据
@@ -355,7 +356,7 @@ func TestRedisOnlineStatusRepositoryTimeout(t *testing.T) {
 	client := getTestRedisClient(t)
 	defer client.Close()
 
-	repo := NewRedisOnlineStatusRepository(client, "test:", 5*time.Minute)
+	repo := NewRedisOnlineStatusRepository(client, &wscconfig.OnlineStatus{KeyPrefix: "test:", TTL: 5 * time.Minute})
 
 	// 使用已取消的 context 测试超时
 	ctx, cancel := context.WithCancel(context.Background())
@@ -372,7 +373,7 @@ func TestRedisOnlineStatusRepositoryConcurrency(t *testing.T) {
 	client := getTestRedisClient(t)
 	defer client.Close()
 
-	repo := NewRedisOnlineStatusRepository(client, "test:", 5*time.Minute)
+	repo := NewRedisOnlineStatusRepository(client, &wscconfig.OnlineStatus{KeyPrefix: "test:", TTL: 5 * time.Minute})
 	ctx := context.Background()
 
 	// 并发测试

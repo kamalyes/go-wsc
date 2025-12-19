@@ -1236,7 +1236,7 @@ func TestHubExtendedAPI(t *testing.T) {
 		assert.Equal(t, "custom_value", val)
 
 		// 不存在的元数据
-		val, exists = hub.GetClientMetadata(clientID, "nonexistent_key")
+		_, exists = hub.GetClientMetadata(clientID, "nonexistent_key")
 		assert.False(t, exists)
 
 		// 不存在的客户端

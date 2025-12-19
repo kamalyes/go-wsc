@@ -11,18 +11,19 @@
 package wsc
 
 import (
-	"github.com/gorilla/websocket"
-	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
-	"github.com/stretchr/testify/assert"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/stretchr/testify/assert"
 )
 
 // Test text and binary sent callbacks to cover handleSentMessage branches.
-func TestConnection_TextAndBinarySentCallbacks(t *testing.T) {
+func TestConnectionTextAndBinarySentCallbacks(t *testing.T) {
 	var textCount, binCount atomic.Int32
 	upgrader := websocket.Upgrader{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -66,7 +67,7 @@ func TestConnection_TextAndBinarySentCallbacks(t *testing.T) {
 }
 
 // Test onSentError callback firing when underlying connection is closed mid-send.
-func TestConnection_OnSentErrorTriggered(t *testing.T) {
+func TestConnectionOnSentErrorTriggered(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	// 稳定的回显服务器，后续由测试主动关闭客户端底层连接制造发送错误
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -121,7 +122,7 @@ func TestConnection_OnSentErrorTriggered(t *testing.T) {
 }
 
 // Test CloseWithMsg invokes onClose callback with provided message.
-func TestConnection_CloseWithMsg_Callback(t *testing.T) {
+func TestConnectionCloseWithMsg_Callback(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, err := upgrader.Upgrade(w, r, nil)

@@ -13,10 +13,11 @@ package wsc
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
+	"github.com/kamalyes/go-toolbox/pkg/mathx"
+	"github.com/kamalyes/go-toolbox/pkg/zipx"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -50,12 +51,9 @@ type RedisMessageQueueRepository struct {
 
 // NewRedisMessageQueueRepository 创建Redis消息队列仓库
 func NewRedisMessageQueueRepository(client redis.UniversalClient, prefix string, ttl time.Duration) *RedisMessageQueueRepository {
-	if prefix == "" {
-		prefix = "wsc:queue:"
-	}
-	if ttl == 0 {
-		ttl = 24 * time.Hour // 默认24小时
-	}
+	prefix = mathx.IF(prefix == "", "wsc:queue:", prefix)
+	ttl = mathx.IF(ttl < 0, 24 * time.Hour, ttl)
+	
 	return &RedisMessageQueueRepository{
 		client: client,
 		prefix: prefix,
@@ -71,15 +69,15 @@ func (r *RedisMessageQueueRepository) Enqueue(ctx context.Context, queueName str
 
 	key := r.prefix + queueName
 
-	// 序列化消息
-	data, err := json.Marshal(msg)
+	// 使用 Zlib 压缩消息
+	compressedData, err := zipx.ZlibCompressObject(msg)
 	if err != nil {
-		return fmt.Errorf("marshal message failed: %w", err)
+		return fmt.Errorf("compress message failed: %w", err)
 	}
 
 	// 使用 RPUSH 添加到队列尾部
 	pipe := r.client.Pipeline()
-	pipe.RPush(ctx, key, data)
+	pipe.RPush(ctx, key, compressedData)
 	pipe.Expire(ctx, key, r.ttl)
 
 	_, err = pipe.Exec(ctx)
@@ -108,13 +106,13 @@ func (r *RedisMessageQueueRepository) Dequeue(ctx context.Context, queueName str
 		return nil, fmt.Errorf("invalid blpop result")
 	}
 
-	// 反序列化消息
-	var msg HubMessage
-	if err := json.Unmarshal([]byte(result[1]), &msg); err != nil {
-		return nil, fmt.Errorf("unmarshal message failed: %w", err)
+	// 使用 Zlib 解压缩消息
+	msg, err := zipx.ZlibDecompressObject[*HubMessage]([]byte(result[1]))
+	if err != nil {
+		return nil, fmt.Errorf(ErrMsgDecompressFailed, err)
 	}
 
-	return &msg, nil
+	return msg, nil
 }
 
 // DequeueWithWatchdog 出队消息并启动看门狗锁
@@ -134,10 +132,10 @@ func (r *RedisMessageQueueRepository) DequeueWithWatchdog(ctx context.Context, q
 		return fmt.Errorf("brpoplpush failed: %w", err)
 	}
 
-	// 2. 反序列化消息
-	var msg HubMessage
-	if err := json.Unmarshal([]byte(result), &msg); err != nil {
-		return fmt.Errorf("unmarshal message failed: %w", err)
+	// 2. 使用 Zlib 解压缩消息
+	msg, err := zipx.ZlibDecompressObject[*HubMessage]([]byte(result))
+	if err != nil {
+		return fmt.Errorf(ErrMsgDecompressFailed, err)
 	}
 
 	// 3. 启动看门狗锁
@@ -173,7 +171,7 @@ func (r *RedisMessageQueueRepository) DequeueWithWatchdog(ctx context.Context, q
 	}()
 
 	// 4. 处理消息
-	processErr := processFunc(&msg)
+	processErr := processFunc(msg)
 
 	// 5. 停止看门狗
 	cancelLock()
@@ -226,11 +224,11 @@ func (r *RedisMessageQueueRepository) Peek(ctx context.Context, queueName string
 		return nil, fmt.Errorf("peek failed: %w", err)
 	}
 
-	// 反序列化消息
-	var msg HubMessage
-	if err := json.Unmarshal([]byte(result), &msg); err != nil {
-		return nil, fmt.Errorf("unmarshal message failed: %w", err)
+	// 使用 Zlib 解压缩消息
+	msg, err := zipx.ZlibDecompressObject[*HubMessage]([]byte(result))
+	if err != nil {
+		return nil, fmt.Errorf(ErrMsgDecompressFailed, err)
 	}
 
-	return &msg, nil
+	return msg, nil
 }

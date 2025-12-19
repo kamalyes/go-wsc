@@ -138,40 +138,43 @@ func (s StringArray) Value() (driver.Value, error) {
 
 // MessageSendRecord 消息发送记录（GORM 模型）
 type MessageSendRecord struct {
-	ID            uint              `gorm:"primarykey" json:"id"`
-	MessageID     string            `gorm:"uniqueIndex;size:255;not null" json:"message_id"`        // 消息ID
-	MessageData   string            `gorm:"type:text" json:"message_data"`                          // 原始消息JSON（完整的HubMessage）
-	Sender        string            `gorm:"index;size:255" json:"sender"`                           // 发送者ID（冗余字段，便于查询）
-	Receiver      string            `gorm:"index;size:255" json:"receiver"`                         // 接收者ID（冗余字段，便于查询）
-	MessageType   MessageType       `gorm:"index;size:50" json:"message_type"`                      // 消息类型（冗余字段，便于查询）
-	NodeIP        string            `gorm:"index;size:100" json:"node_ip"`                          // 服务器节点IP
-	ClientIP      string            `gorm:"index;size:100" json:"client_ip"`                        // 客户端IP地址
-	Status        MessageSendStatus `gorm:"index;size:50;not null;default:'pending'" json:"status"` // 当前状态
-	CreateTime    time.Time         `gorm:"index;not null" json:"create_time"`                      // 创建时间
-	FirstSendTime *time.Time        `gorm:"index" json:"first_send_time"`                           // 首次发送时间
-	LastSendTime  *time.Time        `gorm:"index" json:"last_send_time"`                            // 最后发送时间
-	SuccessTime   *time.Time        `gorm:"index" json:"success_time"`                              // 成功时间
-	RetryCount    int               `gorm:"default:0" json:"retry_count"`                           // 重试次数
-	MaxRetry      int               `gorm:"default:3" json:"max_retry"`                             // 最大重试次数
-	FailureReason FailureReason     `gorm:"size:50" json:"failure_reason"`                          // 失败原因
-	ErrorMessage  string            `gorm:"type:text" json:"error_message"`                         // 错误详情
-	RetryHistory  RetryAttemptList  `gorm:"type:json" json:"retry_history"`                         // 重试历史
-	ExpiresAt     *time.Time        `gorm:"index" json:"expires_at"`                                // 过期时间
-	UserOffline   bool              `gorm:"default:false" json:"user_offline"`                      // 用户是否离线
-	Metadata      JSONMap           `gorm:"type:json" json:"metadata"`                              // 扩展元数据
-	CustomFields  JSONMap           `gorm:"type:json" json:"custom_fields"`                         // 用户自定义字段
-	Tags          StringArray       `gorm:"type:json" json:"tags"`                                  // 标签
-	ExtraData     string            `gorm:"type:text" json:"extra_data"`                            // 额外数据
-
-	// GORM 标准字段
-	CreatedAt time.Time      `json:"created_at"`
-	UpdatedAt time.Time      `json:"updated_at"`
-	DeletedAt gorm.DeletedAt `gorm:"index" json:"deleted_at,omitempty"`
+	ID            uint              `gorm:"primaryKey;autoIncrement;comment:主键,唯一标识消息发送记录" json:"id"`                 // 主键
+	MessageID     string            `gorm:"uniqueIndex;size:255;not null;comment:消息ID,唯一索引,不能为空" json:"message_id"`   // 消息ID
+	MessageData   string            `gorm:"type:text;comment:原始消息数据,类型为文本" json:"message_data"`                       // 原始消息数据
+	Sender        string            `gorm:"index;size:255;comment:发送者ID" json:"sender"`                               // 发送者ID
+	Receiver      string            `gorm:"index;size:255;comment:接收者ID" json:"receiver"`                             // 接收者ID
+	MessageType   MessageType       `gorm:"index;size:50;comment:消息类型" json:"message_type"`                           // 消息类型
+	NodeIP        string            `gorm:"index;size:100;comment:服务器节点IP地址" json:"node_ip"`                          // 服务器节点IP地址
+	ClientIP      string            `gorm:"index;size:100;comment:客户端IP地址" json:"client_ip"`                          // 客户端IP地址
+	Status        MessageSendStatus `gorm:"index;size:50;not null;default:'pending';comment:当前状态,不能为空" json:"status"` // 当前状态
+	CreateTime    time.Time         `gorm:"index;not null;comment:创建时间" json:"create_time"`                           // 创建时间
+	FirstSendTime *time.Time        `gorm:"index;comment:首次发送时间" json:"first_send_time"`                              // 首次发送时间
+	LastSendTime  *time.Time        `gorm:"index;comment:最后发送时间" json:"last_send_time"`                               // 最后发送时间
+	SuccessTime   *time.Time        `gorm:"index;comment:成功时间" json:"success_time"`                                   // 成功时间
+	RetryCount    int               `gorm:"default:0;comment:重试次数" json:"retry_count"`                                // 重试次数
+	MaxRetry      int               `gorm:"default:3;comment:最大重试次数" json:"max_retry"`                                // 最大重试次数
+	FailureReason FailureReason     `gorm:"size:50;comment:失败原因" json:"failure_reason"`                               // 失败原因
+	ErrorMessage  string            `gorm:"type:text;comment:错误信息,类型为文本" json:"error_message"`                        // 错误信息
+	RetryHistory  RetryAttemptList  `gorm:"type:json;comment:重试历史,类型为JSON" json:"retry_history"`                      // 重试历史
+	ExpiresAt     *time.Time        `gorm:"index;comment:过期时间" json:"expires_at"`                                     // 过期时间
+	UserOffline   bool              `gorm:"default:false;comment:用户是否离线,默认值为false" json:"user_offline"`               // 用户是否离线
+	Metadata      JSONMap           `gorm:"type:json;comment:扩展元数据,类型为JSON" json:"metadata"`                          // 扩展元数据
+	CustomFields  JSONMap           `gorm:"type:json;comment:用户自定义字段,类型为JSON" json:"custom_fields"`                   // 用户自定义字段
+	Tags          StringArray       `gorm:"type:json;comment:标签,类型为JSON" json:"tags"`                                 // 标签
+	ExtraData     string            `gorm:"type:text;comment:额外数据,类型为文本" json:"extra_data"`                           // 额外数据
+	CreatedAt     time.Time         `gorm:"comment:记录创建时间" json:"created_at"`                                         // 创建时间
+	UpdatedAt     time.Time         `gorm:"comment:记录最后更新时间" json:"updated_at"`                                       // 最后更新时间
+	DeletedAt     gorm.DeletedAt    `gorm:"index;comment:记录删除时间,支持软删除" json:"deleted_at,omitempty"`                   // 删除时间
 }
 
 // TableName 指定表名
 func (MessageSendRecord) TableName() string {
 	return "wsc_message_send_records"
+}
+
+// TableComment 表注释
+func (MessageSendRecord) TableComment() string {
+	return "WebSocket消息发送记录表-存储每条消息的发送状态和历史用于审计和重试"
 }
 
 // BeforeCreate GORM 钩子：创建前
@@ -452,10 +455,10 @@ func (r *MessageRecordGormRepository) DeleteByMessageID(messageID string) error 
 func (r *MessageRecordGormRepository) UpdateStatus(messageID string, status MessageSendStatus, reason FailureReason, errorMsg string) error {
 	now := time.Now()
 
-	// 🔥 先查询记录，如果不存在则跳过更新（广播消息等不需要记录的场景）
+	// 🔥 先查询记录,如果不存在则跳过更新（广播消息等不需要记录的场景）
 	var record MessageSendRecord
 	if err := r.db.Where(QueryMessageIDWhere, messageID).First(&record).Error; err != nil {
-		// 记录不存在，静默返回（不是错误）
+		// 记录不存在,静默返回（不是错误）
 		if err == gorm.ErrRecordNotFound {
 			return nil
 		}
@@ -480,7 +483,7 @@ func (r *MessageRecordGormRepository) UpdateStatus(messageID string, status Mess
 		updates["error_message"] = errorMsg
 	}
 
-	// 🔥 如果发送成功，设置成功时间
+	// 🔥 如果发送成功,设置成功时间
 	if status == MessageSendStatusSuccess {
 		updates["success_time"] = &now
 	}
@@ -509,24 +512,24 @@ func (r *MessageRecordGormRepository) IncrementRetry(messageID string, attempt R
 		"last_send_time": &now, // 🔥 每次重试都更新最后发送时间
 	}
 
-	// 🔥 如果是首次重试（first_send_time 为 NULL），设置首次发送时间
+	// 🔥 如果是首次重试（first_send_time 为 NULL）,设置首次发送时间
 	if record.FirstSendTime == nil {
 		updates["first_send_time"] = &now
 	}
 
 	if attempt.Success {
-		// 🔥 重试成功，设置成功时间
+		// 🔥 重试成功,设置成功时间
 		updates["status"] = MessageSendStatusSuccess
 		updates["success_time"] = &now
 	} else if record.RetryCount >= record.MaxRetry {
-		// 🔥 超过最大重试次数，设置失败状态和原因
+		// 🔥 超过最大重试次数,设置失败状态和原因
 		updates["status"] = MessageSendStatusFailed
 		updates["failure_reason"] = FailureReasonMaxRetry
 		if attempt.Error != "" {
 			updates["error_message"] = attempt.Error
 		}
 	} else {
-		// 🔥 重试中但未达到最大次数，记录错误信息
+		// 🔥 重试中但未达到最大次数,记录错误信息
 		if attempt.Error != "" {
 			updates["error_message"] = attempt.Error
 		}

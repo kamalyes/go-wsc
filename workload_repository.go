@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"time"
 
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-logger"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/random"
@@ -73,11 +74,10 @@ type RedisWorkloadRepository struct {
 // NewRedisWorkloadRepository 创建 Redis 负载管理仓库
 // 参数:
 //   - client: Redis 客户端 (github.com/redis/go-redis/v9)
-//   - keyPrefix: key 前缀，默认为 "wsc:workload:"
-//   - ttl: 过期时间，建议设置为 72 小时（保留历史数据）
-func NewRedisWorkloadRepository(client *redis.Client, keyPrefix string, ttl time.Duration) WorkloadRepository {
-	keyPrefix = mathx.IF(keyPrefix == "", "wsc:workload:", keyPrefix)
-	ttl = mathx.IF(ttl == 0, 72*time.Hour, ttl) // 默认保留3天
+//   - config: 负载管理配置对象
+func NewRedisWorkloadRepository(client *redis.Client, config *wscconfig.Workload) WorkloadRepository {
+	keyPrefix := mathx.IF(config.KeyPrefix == "", "wsc:workload:", config.KeyPrefix)
+	ttl := mathx.IF(config.TTL == 0, 72*time.Hour, config.TTL)
 
 	return &RedisWorkloadRepository{
 		client:     client,

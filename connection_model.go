@@ -13,6 +13,8 @@ package wsc
 
 import (
 	"time"
+
+	"github.com/kamalyes/go-sqlbuilder"
 )
 
 // ConnectionRecord WebSocket连接记录模型 - 详细记录每次连接的完整信息
@@ -28,34 +30,11 @@ type ConnectionRecord struct {
 	NodePort int    `gorm:"column:node_port;comment:服务器端口" json:"node_port"`
 
 	// ========== 客户端信息 ==========
-	ClientIP   string `gorm:"column:client_ip;size:45;index;comment:客户端IP地址" json:"client_ip"`
-	ClientPort int    `gorm:"column:client_port;comment:客户端端口" json:"client_port,omitempty"`
+	ClientIP   string `gorm:"column:client_ip;size:45;index;comment:客户端IP地址(用于索引查询)" json:"client_ip"`
 	ClientType string `gorm:"column:client_type;size:20;comment:客户端类型(web/mobile/desktop/sdk)" json:"client_type"`
-	UserAgent  string `gorm:"column:user_agent;type:text;comment:User-Agent字符串" json:"user_agent"`
-
-	// ========== 设备与浏览器信息 ==========
-	DeviceType     string `gorm:"column:device_type;size:20;comment:设备类型(mobile/tablet/desktop)" json:"device_type,omitempty"`
-	DeviceBrand    string `gorm:"column:device_brand;size:50;comment:设备品牌(Apple/Samsung/Huawei)" json:"device_brand,omitempty"`
-	DeviceModel    string `gorm:"column:device_model;size:100;comment:设备型号" json:"device_model,omitempty"`
-	OSName         string `gorm:"column:os_name;size:50;comment:操作系统名称" json:"os_name,omitempty"`
-	OSVersion      string `gorm:"column:os_version;size:50;comment:操作系统版本" json:"os_version,omitempty"`
-	BrowserName    string `gorm:"column:browser_name;size:50;comment:浏览器名称" json:"browser_name,omitempty"`
-	BrowserVersion string `gorm:"column:browser_version;size:50;comment:浏览器版本" json:"browser_version,omitempty"`
-
-	// ========== 地理位置信息 ==========
-	Country   string  `gorm:"column:country;size:100;comment:国家" json:"country,omitempty"`
-	Region    string  `gorm:"column:region;size:100;comment:地区/省份" json:"region,omitempty"`
-	City      string  `gorm:"column:city;size:100;comment:城市" json:"city,omitempty"`
-	Latitude  float64 `gorm:"column:latitude;comment:纬度" json:"latitude,omitempty"`
-	Longitude float64 `gorm:"column:longitude;comment:经度" json:"longitude,omitempty"`
-	Timezone  string  `gorm:"column:timezone;size:50;comment:时区" json:"timezone,omitempty"`
-	ISP       string  `gorm:"column:isp;size:100;comment:网络服务提供商" json:"isp,omitempty"`
 
 	// ========== 连接协议信息 ==========
-	Protocol        string `gorm:"column:protocol;size:20;default:websocket;comment:协议类型(websocket/sse/http)" json:"protocol"`
-	ProtocolVersion string `gorm:"column:protocol_version;size:20;comment:协议版本" json:"protocol_version,omitempty"`
-	Scheme          string `gorm:"column:scheme;size:10;comment:连接方案(ws/wss)" json:"scheme,omitempty"`
-	Compression     string `gorm:"column:compression;size:20;comment:压缩算法(gzip/deflate)" json:"compression,omitempty"`
+	Protocol string `gorm:"column:protocol;size:20;default:websocket;comment:协议类型(websocket/sse/http)" json:"protocol"`
 
 	// ========== 连接时间信息 ==========
 	ConnectedAt    time.Time  `gorm:"column:connected_at;index;not null;comment:连接建立时间" json:"connected_at"`
@@ -89,6 +68,9 @@ type ConnectionRecord struct {
 	IsActive        bool `gorm:"column:is_active;default:true;index;comment:是否活跃连接" json:"is_active"`
 	IsForcedOffline bool `gorm:"column:is_forced_offline;default:false;comment:是否被强制下线" json:"is_forced_offline"`
 	IsAbnormal      bool `gorm:"column:is_abnormal;default:false;index;comment:是否异常断开" json:"is_abnormal"`
+
+	// ========== 元数据 ==========
+	Metadata sqlbuilder.MapAny `gorm:"column:metadata;type:json;comment:请求元数据JSON(包含所有HTTP头信息)" json:"metadata,omitempty"`
 
 	// ========== 系统字段 ==========
 	CreatedAt time.Time `gorm:"autoCreateTime;comment:记录创建时间" json:"created_at"`

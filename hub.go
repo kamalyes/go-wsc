@@ -23,7 +23,12 @@ import (
 
 	"github.com/gorilla/websocket"
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-sqlbuilder"
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
+	"github.com/kamalyes/go-toolbox/pkg/idgen"
+	"github.com/kamalyes/go-toolbox/pkg/mathx"
+	"github.com/kamalyes/go-toolbox/pkg/metadata"
+	"github.com/kamalyes/go-toolbox/pkg/osx"
 	"github.com/kamalyes/go-toolbox/pkg/retry"
 	"github.com/kamalyes/go-toolbox/pkg/safe"
 )
@@ -146,28 +151,6 @@ const (
 	ContextKeySenderID ContextKey = "sender_id"
 )
 
-// HubMessage Hub消息结构（复用 go-wsc 类型）
-type HubMessage struct {
-	ID             string                 `json:"id"`                        // 消息ID（用于ACK）
-	MessageType    MessageType            `json:"message_type"`              // 消息类型
-	Sender         string                 `json:"sender"`                    // 发送者 (从上下文获取)
-	SenderType     UserType               `json:"sender_type"`               // 发送者类型
-	Receiver       string                 `json:"receiver"`                  // 接收者用户ID
-	ReceiverType   UserType               `json:"receiver_type"`             // 接收者用户类型
-	ReceiverClient string                 `json:"receiver_client,omitempty"` // 接收者客户端ID
-	ReceiverNode   string                 `json:"receiver_node,omitempty"`   // 接收者所在节点ID
-	SessionID      string                 `json:"session_id"`                // 会话ID
-	Content        string                 `json:"content"`                   // 消息内容
-	Data           map[string]interface{} `json:"data,omitempty"`            // 扩展数据
-	CreateAt       time.Time              `json:"create_at"`                 // 创建时间
-	MessageID      string                 `json:"message_id"`                // 业务消息ID
-	SeqNo          int64                  `json:"seq_no"`                    // 消息序列号
-	Priority       Priority               `json:"priority"`                  // 优先级
-	ReplyToMsgID   string                 `json:"reply_to_msg_id,omitempty"` // 回复的消息ID
-	Status         MessageStatus          `json:"status"`                    // 消息状态
-	RequireAck     bool                   `json:"require_ack,omitempty"`     // 是否需要ACK确认
-}
-
 // Client 客户端连接（服务端视角）
 type Client struct {
 	ID            string                 // 客户端ID
@@ -249,6 +232,10 @@ type Hub struct {
 	// 连接记录仓库（数据库持久化连接历史）
 	connectionRecordRepo ConnectionRecordRepository
 
+	// ID 生成器（用于生成消息ID等）
+	idGenerator IDGenerator
+	workerID    int64 // WorkerID 用于 ID 生成器
+
 	// 消息回调函数
 	offlineMessagePushCallback OfflineMessagePushCallback // 离线消息推送回调
 	messageSendCallback        MessageSendCallback        // 消息发送完成回调
@@ -317,9 +304,15 @@ func NewHub(config *wscconfig.WSC) *Hub {
 	ctx, cancel := context.WithCancel(context.Background())
 	nodeID := fmt.Sprintf("%s-%d", config.NodeIP, config.NodePort)
 
+	// 初始化 WorkerID 和 ID 生成器
+	workerID := newDefaultWorkerID()
+	idGenerator := newDefaultIDGenerator(workerID)
+
 	hub := &Hub{
-		nodeID:    nodeID,
-		startTime: time.Now(),
+		nodeID:      nodeID,
+		workerID:    workerID,
+		idGenerator: idGenerator,
+		startTime:   time.Now(),
 		nodeInfo: &NodeInfo{
 			ID:        nodeID,
 			IPAddress: config.NodeIP,
@@ -364,16 +357,16 @@ func (h *Hub) Run() {
 	// 使用 Console 分组记录 Hub 启动日志
 	cg := h.logger.NewConsoleGroup()
 	cg.Group("🚀 WebSocket Hub 启动")
-	
+
 	startTimer := cg.Time("Hub 启动耗时")
-	
+
 	// 显示启动配置
 	config := map[string]interface{}{
-		"节点ID":       h.nodeID,
-		"节点IP":       h.config.NodeIP,
-		"节点端口":      h.config.NodePort,
-		"消息缓冲大小":    h.config.MessageBufferSize,
-		"心跳间隔(秒)":   h.config.HeartbeatInterval,
+		"节点ID":     h.nodeID,
+		"节点IP":     h.config.NodeIP,
+		"节点端口":     h.config.NodePort,
+		"消息缓冲大小":   h.config.MessageBufferSize,
+		"心跳间隔(秒)":  h.config.HeartbeatInterval,
 		"客户端超时(秒)": h.config.ClientTimeout,
 	}
 	cg.Table(config)
@@ -392,7 +385,7 @@ func (h *Hub) Run() {
 		startTimer.End()
 		cg.Info("✅ Hub 启动成功")
 		cg.GroupEnd()
-		
+
 		// 启动指标收集器（如果已配置）
 		close(h.startCh)
 	}
@@ -455,23 +448,23 @@ func (h *Hub) reportPerformanceMetrics() {
 	// 使用 Console 表格展示性能指标
 	cg := h.logger.NewConsoleGroup()
 	cg.Group("📊 Hub 性能指标报告 [节点: %s]", h.nodeID)
-	
+
 	// 连接统计
 	connectionStats := map[string]interface{}{
 		"WebSocket 连接数": activeClients,
 		"SSE 连接数":       sseClients,
-		"历史总连接数":       stats.TotalConnections,
+		"历史总连接数":        stats.TotalConnections,
 	}
 	cg.Table(connectionStats)
-	
+
 	// 消息统计
 	messageStats := map[string]interface{}{
-		"已发送消息数": stats.MessagesSent,
-		"已广播消息数": stats.BroadcastsSent,
+		"已发送消息数":  stats.MessagesSent,
+		"已广播消息数":  stats.BroadcastsSent,
 		"运行时长(秒)": stats.Uptime,
 	}
 	cg.Table(messageStats)
-	
+
 	cg.GroupEnd()
 }
 
@@ -597,15 +590,15 @@ func (h *Hub) SafeShutdown() error {
 		// 强制关闭所有客户端连接
 		shutdownTimer.End()
 		cg.Warn("⚠️  Hub 关闭超时，强制关闭所有连接")
-		
+
 		remainingStats := map[string]interface{}{
-			"超时时间(秒)":       timeout.Seconds(),
+			"超时时间(秒)":      timeout.Seconds(),
 			"剩余 WebSocket": len(h.clients),
 			"剩余 SSE":       len(h.sseClients),
 		}
 		cg.Table(remainingStats)
 		cg.GroupEnd()
-		
+
 		h.mutex.Lock()
 		for _, client := range h.clients {
 			if client.Conn != nil {
@@ -670,13 +663,13 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 	}
 
 	// 确保消息ID存在
-	if msg.ID == "" {
-		msg.ID = fmt.Sprintf("%s-%d", toUserID, time.Now().UnixNano())
-	}
+	msg.ID = mathx.IF(msg.ID == "", fmt.Sprintf("%s-%s", toUserID, h.idGenerator.GenerateRequestID()), msg.ID)
 
 	// 填充接收者详细信息
 	targetClient := h.GetClientByUserID(toUserID)
-	msg.ReceiverClient = targetClient.ID
+	if targetClient != nil {
+		msg.ReceiverClient = targetClient.ID
+	}
 	msg.ReceiverNode = h.nodeID
 
 	// 尝试发送到broadcast队列
@@ -789,8 +782,9 @@ func (h *Hub) executeSendAttempt(ctx context.Context, toUserID string, msg *HubM
 	result.Attempts = append(result.Attempts, sendAttempt)
 
 	// 如果是重试（非首次尝试），记录重试信息到数据库
+	// 🔥 使用 MessageID (业务消息ID) 而不是 ID (Hub 内部ID)
 	if attemptNumber > 1 && h.messageRecordRepo != nil {
-		h.recordRetryAttemptAsync(msg.ID, attemptNumber, attemptStart, duration, err)
+		h.recordRetryAttemptAsync(msg.MessageID, attemptNumber, attemptStart, duration, err)
 	}
 
 	return err
@@ -839,6 +833,11 @@ func (h *Hub) invokeMessageSendCallback(msg *HubMessage, result *SendResult) {
 		return
 	}
 
+	// 仅对人类用户类型调用回调，忽略系统/机器人消息
+	if !msg.ReceiverType.IsHumanType() {
+		return
+	}
+
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -860,11 +859,6 @@ func (h *Hub) isRetryableError(err error) bool {
 
 	// 使用errors包进行类型判断
 	return IsRetryableError(err)
-}
-
-// shouldRetryBasedOnErrorPattern 基于错误模式决定是否重试（推荐使用 isRetryableError）
-func (h *Hub) shouldRetryBasedOnErrorPattern(err error) bool {
-	return h.isRetryableError(err)
 }
 
 // Broadcast 广播消息
@@ -1078,8 +1072,9 @@ func (h *Hub) createAckRetryFunc(ctx context.Context, toUserID string, msg *HubM
 		*attemptNum++
 		err := h.sendToUser(ctx, toUserID, msg)
 
+		// 🔥 使用 MessageID (业务消息ID) 而不是 ID (Hub 内部ID)
 		if *attemptNum > 1 && h.messageRecordRepo != nil {
-			h.recordAckRetryAttempt(msg.ID, *attemptNum, err)
+			h.recordAckRetryAttempt(msg.MessageID, *attemptNum, err)
 		}
 
 		return err
@@ -1124,9 +1119,8 @@ func (h *Hub) SendToUserWithAck(ctx context.Context, toUserID string, msg *HubMe
 	}
 
 	// 生成消息ID
-	if msg.ID == "" {
-		msg.ID = fmt.Sprintf("%s-%d", toUserID, time.Now().UnixNano())
-	}
+	msg.ID = mathx.IF(msg.ID == "", fmt.Sprintf("%s-%s", toUserID, h.idGenerator.GenerateRequestID()), msg.ID)
+
 	msg.RequireAck = true
 
 	// 记录ACK发送开始
@@ -1246,6 +1240,12 @@ func (h *Hub) SetMessageRecordRepository(repo MessageRecordRepository) {
 func (h *Hub) SetConnectionRecordRepository(repo ConnectionRecordRepository) {
 	h.connectionRecordRepo = repo
 	h.logger.InfoKV("连接记录仓库已设置", "repository_type", "mysql")
+}
+
+// SetIDGenerator 设置 ID 生成器
+func (h *Hub) SetIDGenerator(generator idgen.IDGenerator) {
+	h.idGenerator = generator
+	h.logger.InfoKV("ID生成器已设置", "generator_type", "idgen")
 }
 
 // SetHubStatsRepository 设置 Hub 统计仓库（Redis）
@@ -1375,6 +1375,16 @@ func (h *Hub) GetNodeID() string {
 	return h.nodeID
 }
 
+// GetWorkerID 获取 WorkerID
+func (h *Hub) GetWorkerID() int64 {
+	return h.workerID
+}
+
+// GetIDGenerator 获取 ID 生成器
+func (h *Hub) GetIDGenerator() IDGenerator {
+	return h.idGenerator
+}
+
 // Shutdown 关闭Hub（保持向后兼容）
 func (h *Hub) Shutdown() {
 	_ = h.SafeShutdown() // 忽略错误，保持原有行为
@@ -1425,12 +1435,13 @@ func (h *Hub) handleRegister(client *Client) {
 
 	// 异步任务
 	go h.syncOnlineStatus(client)
-	go h.pushOfflineMessagesIfNeeded(client)
+	go h.pushOfflineMessagesOnConnect(client)
 
 	h.sendWelcomeMessage(client)
 
 	if client.Conn != nil {
 		go h.handleClientWrite(client)
+		go h.handleClientRead(client)
 	}
 }
 
@@ -1503,12 +1514,12 @@ func (h *Hub) syncClientStats() {
 func (h *Hub) logClientConnection(client *Client) {
 	cg := h.logger.NewConsoleGroup()
 	cg.Group("👤 客户端连接成功 [%s]", client.UserID)
-	
+
 	clientInfo := map[string]interface{}{
-		"客户端ID":   client.ID,
-		"用户ID":    client.UserID,
-		"用户类型":   client.UserType,
-		"客户端IP":  client.ClientIP,
+		"客户端ID": client.ID,
+		"用户ID":  client.UserID,
+		"用户类型":  client.UserType,
+		"客户端IP": client.ClientIP,
 		"活跃连接数": len(h.clients),
 	}
 	cg.Table(clientInfo)
@@ -1544,13 +1555,6 @@ func (h *Hub) syncOnlineStatus(client *Client) {
 			"user_id", client.UserID,
 			"error", err,
 		)
-	}
-}
-
-// pushOfflineMessagesIfNeeded 推送离线消息（如果需要）
-func (h *Hub) pushOfflineMessagesIfNeeded(client *Client) {
-	if h.offlineMessageRepo != nil {
-		h.pushOfflineMessagesOnConnect(client)
 	}
 }
 
@@ -1742,7 +1746,7 @@ func (h *Hub) handleBroadcastMessage(msg *HubMessage) {
 	h.logBroadcastMessage(msg)
 
 	// 获取客户端列表
-	clients := h.getClientsCopy()
+	clients := h.GetClientsCopy()
 
 	// 发送到所有WebSocket客户端
 	for _, client := range clients {
@@ -1780,8 +1784,8 @@ func (h *Hub) logBroadcastMessage(msg *HubMessage) {
 	)
 }
 
-// getClientsCopy 获取客户端列表副本
-func (h *Hub) getClientsCopy() []*Client {
+// GetClientsCopy 获取客户端列表副本
+func (h *Hub) GetClientsCopy() []*Client {
 	h.mutex.RLock()
 	defer h.mutex.RUnlock()
 
@@ -1949,6 +1953,193 @@ func (h *Hub) handleClientWrite(client *Client) {
 	}
 }
 
+// handleClientRead 处理客户端消息读取
+func (h *Hub) handleClientRead(client *Client) {
+	h.wg.Add(1)
+	defer h.wg.Done()
+	defer func() {
+		h.logger.InfoKV("客户端读取协程结束",
+			"client_id", client.ID,
+			"user_id", client.UserID,
+		)
+		if client.Conn != nil {
+			client.Conn.Close()
+		}
+		h.Unregister(client)
+	}()
+
+	h.logger.InfoKV("客户端读取协程启动",
+		"client_id", client.ID,
+		"user_id", client.UserID,
+		"user_type", client.UserType,
+	)
+
+	for {
+		messageType, data, err := client.Conn.ReadMessage()
+		if err != nil {
+			h.logger.InfoKV("客户端连接读取错误",
+				"client_id", client.ID,
+				"user_id", client.UserID,
+				"error", err,
+			)
+			return
+		}
+
+		// 更新最后活跃时间
+		client.LastSeen = time.Now()
+
+		// 处理不同类型的 WebSocket 消息
+		switch messageType {
+		case websocket.TextMessage:
+			h.handleTextMessage(client, data)
+		case websocket.BinaryMessage:
+			h.handleBinaryMessage(client, data)
+		case websocket.CloseMessage:
+			h.logger.InfoKV("收到关闭消息",
+				"client_id", client.ID,
+				"user_id", client.UserID,
+			)
+			return
+		case websocket.PingMessage:
+			// WebSocket 协议层的 ping，直接响应 pong
+			_ = client.Conn.WriteMessage(websocket.PongMessage, nil)
+		case websocket.PongMessage:
+			// 忽略 WebSocket 协议层的 pong
+		default:
+			h.logger.DebugKV("收到未知类型的消息",
+				"client_id", client.ID,
+				"type", messageType,
+			)
+		}
+	}
+}
+
+// handleTextMessage 处理文本消息
+func (h *Hub) handleTextMessage(client *Client, data []byte) {
+	var msg HubMessage
+	if err := json.Unmarshal(data, &msg); err != nil {
+		// 不是 JSON 格式，当作纯文本处理
+		msg = HubMessage{
+			ID:          fmt.Sprintf("text_%s_%d", client.UserID, time.Now().UnixNano()),
+			Sender:      client.UserID,
+			SenderType:  client.UserType,
+			Content:     string(data),
+			MessageType: MessageTypeText,
+			CreateAt:    time.Now(),
+		}
+	} else {
+		// 补充必要字段
+		h.normalizeMessageFields(client, &msg)
+	}
+
+	// 调用消息接收回调
+	ctx := context.Background()
+	if err := h.InvokeMessageReceivedCallback(ctx, client, &msg); err != nil {
+		h.logger.WarnKV("消息接收回调执行失败",
+			"client_id", client.ID,
+			"user_id", client.UserID,
+			"message_id", msg.ID,
+			"error", err,
+		)
+		_ = h.InvokeErrorCallback(ctx, err, ErrorSeverityWarning)
+	}
+
+	// 处理心跳消息
+	if msg.MessageType == MessageTypeHeartbeat {
+		h.handleHeartbeatMessage(client)
+		return
+	}
+
+	// 转发消息
+	h.forwardMessage(ctx, &msg)
+}
+
+// handleBinaryMessage 处理二进制消息
+func (h *Hub) handleBinaryMessage(client *Client, data []byte) {
+	ctx := context.Background()
+	msg := &HubMessage{
+		ID:          fmt.Sprintf("binary_%s_%d", client.UserID, time.Now().UnixNano()),
+		Sender:      client.UserID,
+		SenderType:  client.UserType,
+		Content:     string(data),
+		MessageType: MessageTypeBinary,
+		CreateAt:    time.Now(),
+		Data: map[string]interface{}{
+			"binary_length": len(data),
+		},
+	}
+
+	// 调用消息接收回调
+	if err := h.InvokeMessageReceivedCallback(ctx, client, msg); err != nil {
+		h.logger.WarnKV("二进制消息接收回调执行失败",
+			"client_id", client.ID,
+			"user_id", client.UserID,
+			"message_id", msg.ID,
+			"error", err,
+		)
+		_ = h.InvokeErrorCallback(ctx, err, ErrorSeverityWarning)
+	}
+
+	// 转发消息
+	if msg.Receiver != "" {
+		_ = h.SendToUserWithRetry(ctx, msg.Receiver, msg)
+	}
+}
+
+// normalizeMessageFields 规范化消息字段
+func (h *Hub) normalizeMessageFields(client *Client, msg *HubMessage) {
+	if msg.Sender == "" {
+		msg.Sender = client.UserID
+	}
+	if msg.SenderType == "" {
+		msg.SenderType = client.UserType
+	}
+	if msg.CreateAt.IsZero() {
+		msg.CreateAt = time.Now()
+	}
+	if msg.MessageType == "" {
+		msg.MessageType = MessageTypeText
+	}
+	if msg.ID == "" {
+		msg.ID = fmt.Sprintf("json_%s_%d", client.UserID, time.Now().UnixNano())
+	}
+}
+
+// handleHeartbeatMessage 处理心跳消息
+func (h *Hub) handleHeartbeatMessage(client *Client) {
+	// 更新心跳时间（内存）
+	h.UpdateHeartbeat(client.ID)
+
+	// 同步更新 Redis 中的在线状态和心跳时间
+	if err := h.UpdateUserHeartbeat(client.UserID); err != nil {
+		h.logger.DebugKV("更新 Redis 心跳失败",
+			"client_id", client.ID,
+			"user_id", client.UserID,
+			"error", err,
+		)
+	}
+
+	// 使用内部方法直接发送 pong 响应
+	if err := h.SendPongResponse(client.ID); err != nil {
+		h.logger.WarnKV("心跳 pong 响应发送失败",
+			"client_id", client.ID,
+			"user_id", client.UserID,
+			"error", err,
+		)
+	}
+}
+
+// forwardMessage 转发消息到 Hub
+func (h *Hub) forwardMessage(ctx context.Context, msg *HubMessage) {
+	if msg.Receiver != "" {
+		// 点对点消息
+		_ = h.SendToUserWithRetry(ctx, msg.Receiver, msg)
+	} else {
+		// 广播消息（没有指定接收者）
+		h.Broadcast(ctx, msg)
+	}
+}
+
 func (h *Hub) checkHeartbeat() {
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
@@ -1976,12 +2167,11 @@ func (h *Hub) CreateConnectionRecord(client *Client) *ConnectionRecord {
 	record := &ConnectionRecord{
 		ConnectionID: client.ID,
 		UserID:       client.UserID,
-		NodeID:       client.NodeID,
-		ClientIP:     client.ClientIP,
+		NodeID:       h.GetNodeID(), // 使用 Hub 的 NodeID
 		ClientType:   string(client.ClientType),
 		ConnectedAt:  now,
 		IsActive:     true,
-		Protocol:     "websocket",
+		Metadata:     sqlbuilder.MapAny(client.Metadata), // 转换为 sqlbuilder.MapAny
 	}
 
 	// 设置节点信息
@@ -1990,7 +2180,51 @@ func (h *Hub) CreateConnectionRecord(client *Client) *ConnectionRecord {
 		record.NodePort = h.config.NodePort
 	}
 
+	// 从 Metadata 转换为 RequestMetadata 提取索引字段
+	if client.Metadata != nil {
+		meta := metadata.FromMap(client.Metadata)
+		record.ClientIP = meta.ClientIP
+		if meta.Protocol != "" {
+			record.Protocol = meta.Protocol
+		} else {
+			record.Protocol = "websocket"
+		}
+	} else {
+		record.Protocol = "websocket"
+	}
 	return record
+}
+
+// GetClientIP 获取客户端IP（降级策略：Metadata > ClientIP > 连接地址）
+func (h *Hub) GetClientIP(userID string) string {
+	h.mutex.RLock()
+	defer h.mutex.RUnlock()
+
+	client, exists := h.userToClient[userID]
+	if !exists {
+		return ""
+	}
+
+	// 优先从 Metadata 获取（最准确，包含代理头信息）
+	if client.Metadata != nil {
+		if ip, ok := client.Metadata["client_ip"].(string); ok && ip != "" {
+			return ip
+		}
+	}
+
+	// 降级到 Client.ClientIP
+	if client.ClientIP != "" {
+		return client.ClientIP
+	}
+
+	// 最后降级到连接地址
+	if client.Conn != nil {
+		if remoteAddr := client.Conn.RemoteAddr(); remoteAddr != nil {
+			return remoteAddr.String()
+		}
+	}
+
+	return ""
 }
 
 // saveConnectionRecord 保存连接记录到数据库
@@ -2193,6 +2427,43 @@ func (h *Hub) UpdateHeartbeat(clientID string) {
 	}
 }
 
+// SendPongResponse 发送 pong 响应给客户端
+// 这是心跳机制的内部方法，直接发送不经过重试、离线存储等复杂流程
+func (h *Hub) SendPongResponse(clientID string) error {
+	h.mutex.RLock()
+	client, exists := h.clients[clientID]
+	h.mutex.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("client not found: %s", clientID)
+	}
+
+	pongMsg := &HubMessage{
+		ID:           fmt.Sprintf("pong_%s_%d", client.UserID, time.Now().UnixNano()),
+		MessageType:  MessageTypePong,
+		Sender:       UserTypeSystem.String(),
+		SenderType:   UserTypeSystem,
+		Receiver:     client.UserID,
+		ReceiverType: client.UserType,
+		CreateAt:     time.Now(),
+		Priority:     PriorityNormal,
+	}
+
+	// 序列化消息
+	data, err := json.Marshal(pongMsg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal pong message: %w", err)
+	}
+
+	// 直接发送，不经过 SendToUserWithRetry
+	select {
+	case client.SendChan <- data:
+		return nil
+	default:
+		return fmt.Errorf("client send channel is full")
+	}
+}
+
 func (h *Hub) sendWelcomeMessage(client *Client) {
 	provider := h.welcomeProvider
 
@@ -2219,13 +2490,12 @@ func (h *Hub) sendWelcomeMessage(client *Client) {
 
 	msg := &HubMessage{
 		MessageType: welcomeMsg.MessageType,
-		Sender:      "system",
+		Sender:      UserTypeSystem.String(),
 		Receiver:    client.UserID,
 		Content:     welcomeMsg.Content,
 		Data:        welcomeMsg.Data,
 		CreateAt:    time.Now(),
 		Priority:    welcomeMsg.Priority,
-		Status:      MessageStatusSent,
 	}
 
 	if msg.Data == nil {
@@ -2254,14 +2524,13 @@ func (h *Hub) SendToMultipleUsers(ctx context.Context, userIDs []string, msg *Hu
 
 // BroadcastToGroup 发送消息给特定用户组（按用户类型）
 func (h *Hub) BroadcastToGroup(ctx context.Context, userType UserType, msg *HubMessage) int {
-	h.mutex.RLock()
-	clients := make([]*Client, 0)
-	for _, client := range h.clients {
-		if client.UserType == userType {
-			clients = append(clients, client)
-		}
-	}
-	h.mutex.RUnlock()
+	// 获取所有客户端副本
+	allClients := h.GetClientsCopy()
+
+	// 过滤指定类型的客户端
+	clients := mathx.FilterSlice(allClients, func(client *Client) bool {
+		return client.UserType == userType
+	})
 
 	count := 0
 	for _, client := range clients {
@@ -2275,14 +2544,13 @@ func (h *Hub) BroadcastToGroup(ctx context.Context, userType UserType, msg *HubM
 
 // BroadcastToRole 发送消息给特定角色用户
 func (h *Hub) BroadcastToRole(ctx context.Context, role UserRole, msg *HubMessage) int {
-	h.mutex.RLock()
-	clients := make([]*Client, 0)
-	for _, client := range h.clients {
-		if client.Role == role {
-			clients = append(clients, client)
-		}
-	}
-	h.mutex.RUnlock()
+	// 获取所有客户端副本
+	allClients := h.GetClientsCopy()
+
+	// 过滤指定角色的客户端
+	clients := mathx.FilterSlice(allClients, func(client *Client) bool {
+		return client.Role == role
+	})
 
 	count := 0
 	for _, client := range clients {
@@ -2296,30 +2564,24 @@ func (h *Hub) BroadcastToRole(ctx context.Context, role UserRole, msg *HubMessag
 
 // GetClientsByUserType 获取特定用户类型的所有客户端
 func (h *Hub) GetClientsByUserType(userType UserType) []*Client {
-	h.mutex.RLock()
-	defer h.mutex.RUnlock()
+	// 获取所有客户端副本
+	allClients := h.GetClientsCopy()
 
-	clients := make([]*Client, 0)
-	for _, client := range h.clients {
-		if client.UserType == userType {
-			clients = append(clients, client)
-		}
-	}
-	return clients
+	// 过滤指定类型的客户端
+	return mathx.FilterSlice(allClients, func(client *Client) bool {
+		return client.UserType == userType
+	})
 }
 
 // GetClientsByRole 获取特定角色的所有客户端
 func (h *Hub) GetClientsByRole(role UserRole) []*Client {
-	h.mutex.RLock()
-	defer h.mutex.RUnlock()
+	// 获取所有客户端副本
+	allClients := h.GetClientsCopy()
 
-	clients := make([]*Client, 0)
-	for _, client := range h.clients {
-		if client.Role == role {
-			clients = append(clients, client)
-		}
-	}
-	return clients
+	// 过滤指定角色的客户端
+	return mathx.FilterSlice(allClients, func(client *Client) bool {
+		return client.Role == role
+	})
 }
 
 // GetClientByID 根据客户端ID获取客户端信息
@@ -2446,16 +2708,13 @@ func (h *Hub) GetMessageQueue() int {
 
 // GetClientsByDepartment 按部门获取客户端
 func (h *Hub) GetClientsByDepartment(dept Department) []*Client {
-	h.mutex.RLock()
-	defer h.mutex.RUnlock()
+	// 获取所有客户端副本
+	allClients := h.GetClientsCopy()
 
-	clients := make([]*Client, 0)
-	for _, client := range h.clients {
-		if client.Department == dept {
-			clients = append(clients, client)
-		}
-	}
-	return clients
+	// 过滤指定部门的客户端
+	return mathx.FilterSlice(allClients, func(client *Client) bool {
+		return client.Department == dept
+	})
 }
 
 // GetAgentStats 获取座席统计
@@ -2493,14 +2752,11 @@ func (h *Hub) GetAgentStats() map[string]interface{} {
 
 // SendConditional 条件发送消息 - 根据自定义条件发送给匹配的用户
 func (h *Hub) SendConditional(ctx context.Context, condition func(*Client) bool, msg *HubMessage) int {
-	h.mutex.RLock()
-	clients := make([]*Client, 0)
-	for _, client := range h.clients {
-		if condition(client) {
-			clients = append(clients, client)
-		}
-	}
-	h.mutex.RUnlock()
+	// 获取所有客户端副本
+	allClients := h.GetClientsCopy()
+
+	// 过滤满足条件的客户端
+	clients := mathx.FilterSlice(allClients, condition)
 
 	count := 0
 	for _, client := range clients {
@@ -2625,13 +2881,12 @@ func (h *Hub) createKickNotification(userID, reason, notificationMsg string, kic
 	return &HubMessage{
 		ID:          fmt.Sprintf("kick_%s_%d", userID, time.Now().UnixNano()),
 		MessageType: MessageTypeSystem,
-		Sender:      "system",
+		Sender:      UserTypeSystem.String(),
 		SenderType:  UserTypeSystem,
 		Receiver:    userID,
 		Content:     kickMessage,
 		CreateAt:    time.Now(),
 		Priority:    PriorityHigh,
-		Status:      MessageStatusSent,
 		Data: map[string]interface{}{
 			"kick_reason": reason,
 			"kicked_at":   kickedAt,
@@ -2900,12 +3155,8 @@ func (h *Hub) GetConnectionInfo(clientID string) map[string]interface{} {
 
 // GetAllConnectionsInfo 获取所有连接详细信息
 func (h *Hub) GetAllConnectionsInfo() []map[string]interface{} {
-	h.mutex.RLock()
-	clients := make([]*Client, 0, len(h.clients))
-	for _, client := range h.clients {
-		clients = append(clients, client)
-	}
-	h.mutex.RUnlock()
+	// 获取所有客户端副本
+	clients := h.GetClientsCopy()
 
 	infos := make([]map[string]interface{}, 0)
 	for _, client := range clients {
@@ -3681,26 +3932,17 @@ func (h *Hub) recordMessageToDatabase(msg *HubMessage, err error) {
 			}
 		}
 
-		// 获取客户端IP（如果存在）
-		clientIP := ""
-		if msg.Sender != "" {
-			h.mutex.RLock()
-			if client, exists := h.userToClient[msg.Sender]; exists {
-				clientIP = client.ClientIP
-				if clientIP == "" && client.Conn != nil {
-					// 如果ClientIP未设置，从连接中获取
-					if remoteAddr := client.Conn.RemoteAddr(); remoteAddr != nil {
-						clientIP = remoteAddr.String()
-					}
-				}
-			}
-			h.mutex.RUnlock()
-		}
+		// 获取客户端IP
+		clientIP := h.GetClientIP(msg.Sender)
 
 		// 创建消息记录
+		now := time.Now()
 		record := &MessageSendRecord{
 			Status:        status,
-			CreateTime:    time.Now(),
+			CreateTime:    now,
+			FirstSendTime: &now, // 首次发送时间
+			LastSendTime:  &now, // 最后发送时间
+			RetryCount:    0,    // 初始重试次数为0
 			MaxRetry:      h.config.MaxRetries,
 			FailureReason: failureReason,
 			ErrorMessage:  errorMsg,
@@ -3711,7 +3953,8 @@ func (h *Hub) recordMessageToDatabase(msg *HubMessage, err error) {
 		// 设置消息数据
 		if setErr := record.SetMessage(msg); setErr != nil {
 			h.logger.ErrorKV("序列化消息失败",
-				"message_id", msg.ID,
+				"hub_id", msg.ID,
+				"message_id", msg.MessageID,
 				"error", setErr,
 			)
 			return
@@ -3721,12 +3964,14 @@ func (h *Hub) recordMessageToDatabase(msg *HubMessage, err error) {
 		if h.messageRecordRepo != nil {
 			if createErr := h.messageRecordRepo.Create(record); createErr != nil {
 				h.logger.ErrorKV("保存消息记录失败",
-					"message_id", msg.ID,
+					"hub_id", msg.ID,
+					"message_id", msg.MessageID,
 					"error", createErr,
 				)
 			} else {
 				h.logger.DebugKV("消息记录已保存",
-					"message_id", msg.ID,
+					"hub_id", msg.ID,
+					"message_id", msg.MessageID,
 					"status", status,
 					"record_id", record.ID,
 				)
@@ -3766,15 +4011,15 @@ func (h *Hub) updateMessageSendStatus(messageData []byte, status MessageSendStat
 		cg := h.logger.NewConsoleGroup()
 		cg.Group("📝 更新消息发送状态 [%s]", msg.ID)
 		updateTimer := cg.Time("状态更新耗时")
-		
+
 		// 展示消息信息
 		msgInfo := map[string]interface{}{
-			"消息ID":   msg.ID,
-			"目标状态":  status,
-			"失败原因":  reason,
-			"发送者":   msg.Sender,
-			"接收者":   msg.Receiver,
-			"消息类型":  msg.MessageType,
+			"消息ID": msg.ID,
+			"目标状态": status,
+			"失败原因": reason,
+			"发送者":  msg.Sender,
+			"接收者":  msg.Receiver,
+			"消息类型": msg.MessageType,
 		}
 		cg.Table(msgInfo)
 
@@ -3788,7 +4033,8 @@ func (h *Hub) updateMessageSendStatus(messageData []byte, status MessageSendStat
 		updateErr := retryInstance.Do(func() error {
 			attemptNum++
 			cg.Info("→ 尝试更新状态 (第 %d 次)", attemptNum)
-			err := h.messageRecordRepo.UpdateStatus(msg.ID, status, reason, errorMsg)
+			// 🔥 使用 MessageID (业务消息ID) 而不是 ID (Hub 内部ID)
+			err := h.messageRecordRepo.UpdateStatus(msg.MessageID, status, reason, errorMsg)
 			if err == nil {
 				cg.Info("✅ 状态更新成功")
 			}
@@ -3798,7 +4044,7 @@ func (h *Hub) updateMessageSendStatus(messageData []byte, status MessageSendStat
 		// 所有重试失败后，降级为 Debug 日志（某些消息如广播/系统消息可能没有记录）
 		if updateErr != nil {
 			cg.Debug("⚠️  更新失败(记录可能不存在或为系统消息): %v", updateErr)
-			
+
 			retryResult := map[string]interface{}{
 				"总尝试次数": attemptNum,
 				"最终结果":  "失败",
@@ -3806,7 +4052,7 @@ func (h *Hub) updateMessageSendStatus(messageData []byte, status MessageSendStat
 			}
 			cg.Table(retryResult)
 		}
-		
+
 		updateTimer.End()
 		cg.GroupEnd()
 	}()
@@ -4102,16 +4348,17 @@ func (h *Hub) RemoveAgentWorkload(agentID string) error {
 // ============================================================================
 
 // pushOfflineMessagesOnConnect 连线时自动推送离线消息
+// 分批从 Redis/MySQL 获取所有离线消息，并发推送，避免重复推送
 func (h *Hub) pushOfflineMessagesOnConnect(client *Client) {
 	if h.offlineMessageRepo == nil {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	// 获取离线消息数量
-	count, err := h.offlineMessageRepo.GetOfflineMessageCount(ctx, client.UserID)
+	totalCount, err := h.offlineMessageRepo.GetOfflineMessageCount(ctx, client.UserID)
 	if err != nil {
 		h.logger.ErrorKV("获取离线消息数量失败",
 			"user_id", client.UserID,
@@ -4120,83 +4367,158 @@ func (h *Hub) pushOfflineMessagesOnConnect(client *Client) {
 		return
 	}
 
-	if count == 0 {
+	if totalCount == 0 {
 		h.logger.DebugKV("用户无离线消息",
 			"user_id", client.UserID,
 		)
 		return
 	}
 
-	// 获取离线消息
-	messages, err := h.offlineMessageRepo.GetOfflineMessages(ctx, client.UserID, 100)
-	if err != nil {
-		h.logger.ErrorKV("获取离线消息失败",
-			"user_id", client.UserID,
-			"error", err,
-		)
-		return
-	}
-
-	if len(messages) == 0 {
-		return
-	}
-
 	h.logger.InfoKV("开始推送离线消息",
 		"user_id", client.UserID,
-		"total_count", count,
-		"message_count", len(messages),
+		"total_count", totalCount,
 	)
 
-	// 推送离线消息
-	successCount := 0
-	failedCount := 0
-	pushedMessageIDs := make([]string, 0, len(messages))
-	failedMessageIDs := make([]string, 0)
+	const batchSize = 100
+	totalSuccess := 0
+	totalFailed := 0
+	allFailedMessageIDs := make([]string, 0)
+	cursor := "" // 游标，用于分页
 
-	for _, msg := range messages {
-		// 标记为离线消息
-		if msg.Data == nil {
-			msg.Data = make(map[string]interface{})
-		}
-		msg.Data["offline"] = true
-
-		// 发送消息
-		if err := h.sendToUser(ctx, client.UserID, msg); err != nil {
-			h.logger.ErrorKV("离线消息推送失败",
+	// 分批获取并推送所有离线消息
+	for {
+		// 获取一批离线消息（使用游标保证时序）
+		messages, nextCursor, err := h.offlineMessageRepo.GetOfflineMessages(ctx, client.UserID, batchSize, cursor)
+		if err != nil {
+			h.logger.ErrorKV("获取离线消息失败",
 				"user_id", client.UserID,
-				"message_id", msg.ID,
+				"cursor", cursor,
 				"error", err,
 			)
-			failedCount++
-			failedMessageIDs = append(failedMessageIDs, msg.ID)
-			continue
+			break
 		}
 
-		pushedMessageIDs = append(pushedMessageIDs, msg.ID)
-		successCount++
-	}
+		if len(messages) == 0 {
+			break
+		}
 
-	h.logger.InfoKV("离线消息推送完成",
-		"user_id", client.UserID,
-		"total", len(messages),
-		"success", successCount,
-		"failed", failedCount,
-	)
+		cursor = nextCursor // 更新游标
 
-	// 通过回调通知上游推送结果，由上游决定是否删除消息
-	if h.offlineMessagePushCallback != nil && (len(pushedMessageIDs) > 0 || len(failedMessageIDs) > 0) {
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					h.logger.ErrorKV("离线消息推送回调panic",
-						"user_id", client.UserID,
-						"panic", r,
-					)
+		h.logger.DebugKV("获取到一批离线消息",
+			"user_id", client.UserID,
+			"batch_count", len(messages),
+			"cursor", cursor,
+			"next_cursor", nextCursor,
+		)
+
+		// 并发推送这批消息
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		pushedMessageIDs := make([]string, 0, len(messages))
+		failedMessageIDs := make([]string, 0)
+
+		for _, msg := range messages {
+			wg.Add(1)
+			go func(message *HubMessage) {
+				defer wg.Done()
+
+				// 标记为离线消息
+				if message.Data == nil {
+					message.Data = make(map[string]interface{})
 				}
+				message.Data["offline"] = true
+
+				// 使用 go-toolbox retry 进行重试
+				var lastErr error
+				retryInstance := retry.NewRetryWithCtx(ctx).
+					SetAttemptCount(h.config.MaxRetries + 1).
+					SetInterval(h.config.BaseDelay).
+					SetConditionFunc(h.isRetryableError)
+
+				err := retryInstance.Do(func() error {
+					lastErr = h.sendToUser(ctx, client.UserID, message)
+					return lastErr
+				})
+
+				mu.Lock()
+				if err == nil {
+					// 🔥 使用 MessageID (业务消息ID) 而不是 ID (Hub 内部ID)
+					pushedMessageIDs = append(pushedMessageIDs, message.MessageID)
+				} else {
+					h.logger.ErrorKV("离线消息推送失败",
+						"user_id", client.UserID,
+						"message_id", message.MessageID,
+						"hub_id", message.ID,
+						"error", err,
+					)
+					// 🔥 使用 MessageID (业务消息ID) 而不是 ID (Hub 内部ID)
+					failedMessageIDs = append(failedMessageIDs, message.MessageID)
+				}
+				mu.Unlock()
+			}(msg)
+		}
+
+		// 等待这批消息推送完成
+		wg.Wait()
+
+		// 统计本批次结果
+		batchSuccess := len(pushedMessageIDs)
+		batchFailed := len(failedMessageIDs)
+		totalSuccess += batchSuccess
+		totalFailed += batchFailed
+		allFailedMessageIDs = append(allFailedMessageIDs, failedMessageIDs...)
+
+		h.logger.DebugKV("批次推送完成",
+			"user_id", client.UserID,
+			"batch_success", batchSuccess,
+			"batch_failed", batchFailed,
+		)
+
+		// 标记成功推送的消息
+		if len(pushedMessageIDs) > 0 {
+			if err := h.offlineMessageRepo.MarkAsPushed(ctx, pushedMessageIDs); err != nil {
+				h.logger.ErrorKV("标记消息为已推送失败",
+					"user_id", client.UserID,
+					"count", len(pushedMessageIDs),
+					"error", err,
+				)
+			} else {
+				h.logger.DebugKV("已标记消息为已推送",
+					"user_id", client.UserID,
+					"count", len(pushedMessageIDs),
+				)
+			}
+		}
+
+		// 通过回调通知上游推送结果，由上游决定是否删除消息
+		if h.offlineMessagePushCallback != nil && (len(pushedMessageIDs) > 0 || len(failedMessageIDs) > 0) {
+			allPushedIDs := pushedMessageIDs
+			allFailedIDs := failedMessageIDs
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						h.logger.ErrorKV("离线消息推送回调panic",
+							"user_id", client.UserID,
+							"panic", r,
+						)
+					}
+				}()
+				h.offlineMessagePushCallback(client.UserID, allPushedIDs, allFailedIDs)
 			}()
-			h.offlineMessagePushCallback(client.UserID, pushedMessageIDs, failedMessageIDs)
-		}()
+		}
+
+		// 如果没有下一页游标，说明没有更多消息了
+		if nextCursor == "" {
+			break
+		}
 	}
+
+	h.logger.InfoKV("离线消息推送全部完成",
+		"user_id", client.UserID,
+		"total_count", totalCount,
+		"total_success", totalSuccess,
+		"total_failed", totalFailed,
+	)
 }
 
 // GetAllAgentWorkloads 获取所有客服的负载信息
@@ -4214,6 +4536,25 @@ func (h *Hub) GetAllAgentWorkloads(limit int64) ([]WorkloadInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	return h.workloadRepo.GetAllAgentWorkloads(ctx, limit)
+}
+
+// ============================================================================
+// ID 生成器辅助函数
+// ============================================================================
+
+// newDefaultWorkerID 创建默认 WorkerID（基于主机信息）
+// 返回范围: 0-63（ShortFlake 支持的最大范围）
+func newDefaultWorkerID() int64 {
+	// 使用 osx.GetWorkerIdForSnowflake 获取 WorkerID (0-31)
+	// ShortFlake 支持 0-63,这里使用 0-31 保证兼容性
+	return osx.GetWorkerIdForSnowflake()
+}
+
+// newDefaultIDGenerator 创建默认的 ID 生成器
+// 使用 ShortFlake 算法（推荐用于 MySQL）
+func newDefaultIDGenerator(workerID int64) idgen.IDGenerator {
+	// 直接使用 go-toolbox 的 ShortFlake 生成器
+	return idgen.NewShortFlakeGenerator(workerID)
 }
 
 // BatchSetAgentWorkload 批量设置客服负载

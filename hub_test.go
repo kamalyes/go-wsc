@@ -285,7 +285,6 @@ func TestHubSSESupport(t *testing.T) {
 			Receiver:    userID,
 			Content:     "SSE测试消息",
 			CreateAt:    time.Now(),
-			Status:      MessageStatusSent,
 		}
 
 		// 发送消息
@@ -365,7 +364,6 @@ func TestHubMessaging(t *testing.T) {
 			MessageType: MessageTypeText,
 			Receiver:    receiver.UserID,
 			Content:     "点对点测试消息",
-			Status:      MessageStatusSent,
 		}
 
 		err := hub.sendToUser(ctx, receiver.UserID, message)
@@ -420,7 +418,6 @@ func TestHubMessaging(t *testing.T) {
 			Sender:      "system",
 			Content:     "系统广播消息",
 			CreateAt:    time.Now(),
-			Status:      MessageStatusSent,
 		}
 
 		hub.Broadcast(context.Background(), message)
@@ -773,7 +770,6 @@ func TestHubMessageFallback(t *testing.T) {
 			Receiver:    userID,
 			Content:     "降级测试消息",
 			CreateAt:    time.Now(),
-			Status:      MessageStatusSent,
 		}
 
 		err := hub.sendToUser(context.Background(), userID, message)
@@ -887,7 +883,6 @@ func TestHubConcurrentOperations(t *testing.T) {
 					Receiver:    receiver.UserID,
 					Content:     fmt.Sprintf("并发消息 %d", msgNum),
 					CreateAt:    time.Now(),
-					Status:      MessageStatusSent,
 				}
 				err := hub.sendToUser(context.Background(), receiver.UserID, message)
 				assert.NoError(t, err)
@@ -982,7 +977,6 @@ func BenchmarkHubOperations(b *testing.B) {
 			Receiver:    receiver.UserID,
 			Content:     "基准测试消息",
 			CreateAt:    time.Now(),
-			Status:      MessageStatusSent,
 		}
 
 		b.ResetTimer()

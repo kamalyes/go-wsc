@@ -88,10 +88,7 @@ func createTestRecord(userID, nodeID string, isActive bool) *ConnectionRecord {
 		NodeIP:           "127.0.0.1",
 		NodePort:         8080,
 		ClientIP:         "192.168.1.100",
-		ClientPort:       12345,
 		ClientType:       "web",
-		UserAgent:        "Mozilla/5.0",
-		DeviceType:       "desktop",
 		Protocol:         "websocket",
 		ConnectedAt:      now,
 		IsActive:         isActive,
@@ -416,6 +413,50 @@ func TestGetByUserID(t *testing.T) {
 	assert.Len(t, records, 3) // limit为3
 
 	records, err = repo.GetByUserID(ctx, "user1", 3, 3)
+	assert.NoError(t, err)
+	assert.Len(t, records, 2) // offset为3，剩余2条
+}
+
+// TestGetActiveByNodeID 测试获取节点的活跃连接
+func TestGetActiveByNodeID(t *testing.T) {
+	db := getConnectTestDB(t)
+	repo := NewConnectionRecordRepository(db)
+	ctx := context.Background()
+
+	// 创建3个连接，2个活跃，1个非活跃
+	repo.Create(ctx, createTestRecord("user1", "node1", true))
+	repo.Create(ctx, createTestRecord("user2", "node1", true))
+	inactiveRecord := createTestRecord("user3", "node1", false)
+	repo.Create(ctx, inactiveRecord)
+	// 手动更新 IsActive 为 false
+	db.WithContext(ctx).Model(inactiveRecord).Update("is_active", false)
+	repo.Create(ctx, createTestRecord("user4", "node2", true))
+
+	records, err := repo.GetActiveByNodeID(ctx, "node1")
+	assert.NoError(t, err)
+	assert.Len(t, records, 2)
+	for _, r := range records {
+		assert.True(t, r.IsActive)
+		assert.Equal(t, "node1", r.NodeID)
+	}
+}
+
+// TestGetByNodeID 测试获取节点的所有连接记录
+func TestGetByNodeID(t *testing.T) {
+	db := getConnectTestDB(t)
+	repo := NewConnectionRecordRepository(db)
+	ctx := context.Background()
+
+	// 创建5个连接
+	for i := 0; i < 5; i++ {
+		repo.Create(ctx, createTestRecord(fmt.Sprintf("user%d", i), "node1", i%2 == 0))
+	}
+
+	records, err := repo.GetByNodeID(ctx, "node1", 3, 0)
+	assert.NoError(t, err)
+	assert.Len(t, records, 3) // limit为3
+
+	records, err = repo.GetByNodeID(ctx, "node1", 3, 3)
 	assert.NoError(t, err)
 	assert.Len(t, records, 2) // offset为3，剩余2条
 }

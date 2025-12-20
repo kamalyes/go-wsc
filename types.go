@@ -16,6 +16,15 @@ import (
 	"time"
 )
 
+// IDGenerator ID生成器接口
+// 用于生成消息ID、请求ID等唯一标识符
+type IDGenerator interface {
+	GenerateTraceID() string
+	GenerateSpanID() string
+	GenerateRequestID() string
+	GenerateCorrelationID() string
+}
+
 // UserRole 用户角色类型
 type UserRole string
 
@@ -66,6 +75,51 @@ func (t UserType) IsValid() bool {
 	default:
 		return false
 	}
+}
+
+// IsCustomerType 检查是否为客户类型（访客、普通客户、VIP客户）
+func (t UserType) IsCustomerType() bool {
+	switch t {
+	case UserTypeVisitor, UserTypeCustomer, UserTypeVIP:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsAgentType 检查是否为客服类型
+func (t UserType) IsAgentType() bool {
+	switch t {
+	case UserTypeAgent:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsSystemType 检查是否为系统类型（系统用户、管理员）
+func (t UserType) IsSystemType() bool {
+	switch t {
+	case UserTypeSystem:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsHumanType 检查是否为人类用户（排除机器人和系统）
+func (t UserType) IsHumanType() bool {
+	switch t {
+	case UserTypeVisitor, UserTypeCustomer, UserTypeAgent, UserTypeAdmin, UserTypeVIP:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsVIPType 检查是否为VIP用户
+func (t UserType) IsVIPType() bool {
+	return t == UserTypeVIP
 }
 
 // UserStatus 用户状态
@@ -181,6 +235,8 @@ func (q QueueType) IsValid() bool {
 	}
 }
 
+// PushType 推送类型
+
 // MessageType 消息类型
 type MessageType string
 
@@ -245,6 +301,7 @@ const (
 	MessageTypeTicketAssigned       MessageType = "ticket_assigned"        // 分配工单消息
 	MessageTypeTicketClosed         MessageType = "ticket_closed"          // 关闭工单消息
 	MessageTypeTicketTransfer       MessageType = "ticket_transfer"        // 转移工单消息
+	MessageTypeTicketActive         MessageType = "ticket_active"          // 活跃工单列表
 	MessageTypeTest                 MessageType = "test"                   // 测试消息
 	MessageTypeWelcome              MessageType = "welcome"                // 欢迎消息
 	MessageTypeTerminate            MessageType = "terminate"              // 结束消息
@@ -290,6 +347,55 @@ func (t MessageType) String() string {
 	return string(t)
 }
 
+// PushType 推送类型
+type PushType string
+
+const (
+	PushTypeDirect  PushType = "direct"  // 在线直推 (尝试WebSocket，失败转离线)
+	PushTypeQueue   PushType = "queue"   // 队列推送 (推送到Redis Stream)
+	PushTypeOffline PushType = "offline" // 离线推送
+	PushTypeNone    PushType = "none"    // 不推送 (仅保存/处理业务)
+)
+
+// String 实现Stringer接口
+func (p PushType) String() string {
+	return string(p)
+}
+
+// IsValid 检查推送类型是否有效
+func (p PushType) IsValid() bool {
+	switch p {
+	case PushTypeDirect, PushTypeQueue, PushTypeOffline, PushTypeNone:
+		return true
+	default:
+		return false
+	}
+}
+
+// BroadcastType 广播类型
+type BroadcastType string
+
+const (
+	BroadcastTypeNone    BroadcastType = "none"    // 不广播（单播）
+	BroadcastTypeSession BroadcastType = "session" // 会话成员广播
+	BroadcastTypeGlobal  BroadcastType = "global"  // 全站广播
+)
+
+// String 实现Stringer接口
+func (b BroadcastType) String() string {
+	return string(b)
+}
+
+// IsValid 检查广播类型是否有效
+func (b BroadcastType) IsValid() bool {
+	switch b {
+	case BroadcastTypeNone, BroadcastTypeSession, BroadcastTypeGlobal:
+		return true
+	default:
+		return false
+	}
+}
+
 // IsValid 检查消息类型是否有效
 func (t MessageType) IsValid() bool {
 	switch t {
@@ -305,7 +411,7 @@ func (t MessageType) IsValid() bool {
 		MessageTypePing, MessageTypePong, MessageTypeTyping, MessageTypeRead, MessageTypeDelivered,
 		MessageTypeRecall, MessageTypeEdit, MessageTypeReaction, MessageTypeThread, MessageTypeReply,
 		MessageTypeMention, MessageTypeCustom, MessageTypeTicketAssigned, MessageTypeTicketClosed,
-		MessageTypeTicketTransfer, MessageTypeTest, MessageTypeWelcome, MessageTypeTerminate, MessageTypeTransferred,
+		MessageTypeTicketTransfer, MessageTypeTicketActive, MessageTypeTest, MessageTypeWelcome, MessageTypeTerminate, MessageTypeTransferred,
 		MessageTypeSessionCreated, MessageTypeSessionClosed, MessageTypeSessionQueued, MessageTypeSessionTimeout,
 		MessageTypeSessionPaused, MessageTypeSessionResumed, MessageTypeSessionTransferred, MessageTypeSessionMemberJoined,
 		MessageTypeSessionMemberLeft, MessageTypeSessionStatusChanged,
@@ -411,10 +517,10 @@ func (t MessageType) IsConnectionType() bool {
 }
 
 // ShouldSkipDatabaseRecord 判断是否应该跳过数据库记录
-// 某些消息类型（如心跳消息、状态消息）频繁发送但不需要持久化，跳过记录可以减轻数据库压力
+// 某些消息类型（如心跳消息、状态消息、系统消息）频繁发送但不需要持久化，跳过记录可以减轻数据库压力
 func (t MessageType) ShouldSkipDatabaseRecord() bool {
-	// 心跳消息、状态消息和连接消息不需要记录到数据库
-	return t.IsHeartbeatType() || t.IsStatusType() || t.IsConnectionType()
+	// 状态消息、连接消息和系统消息(含心跳)不需要记录到数据库
+	return t.IsStatusType() || t.IsConnectionType() || t.IsSystemType()
 }
 
 // GetCategory 获取消息类型分类
@@ -452,7 +558,7 @@ func GetAllMessageTypes() []MessageType {
 		MessageTypePing, MessageTypePong, MessageTypeTyping, MessageTypeRead, MessageTypeDelivered,
 		MessageTypeRecall, MessageTypeEdit, MessageTypeReaction, MessageTypeThread, MessageTypeReply,
 		MessageTypeMention, MessageTypeCustom, MessageTypeTicketAssigned, MessageTypeTicketClosed,
-		MessageTypeTicketTransfer, MessageTypeTest, MessageTypeWelcome, MessageTypeTerminate, MessageTypeTransferred,
+		MessageTypeTicketTransfer, MessageTypeTicketActive, MessageTypeTest, MessageTypeWelcome, MessageTypeTerminate, MessageTypeTransferred,
 		MessageTypeSessionCreated, MessageTypeSessionClosed, MessageTypeSessionQueued, MessageTypeSessionTimeout,
 		MessageTypeCheckUserStatus, MessageTypeUserStatusResponse, MessageTypeGetOnlineUsers, MessageTypeOnlineUsersList,
 		MessageTypeGetUserInfo, MessageTypeUserInfoResponse, MessageTypeSystemQuery, MessageTypeSystemResponse,
@@ -532,7 +638,7 @@ func (t MessageType) GetDefaultPriority() MessagePriority {
 	case t == MessageTypeNotice || t == MessageTypeEvent || t == MessageTypeSuccess ||
 		t == MessageTypePayment || t == MessageTypeOrder || t == MessageTypeInvite ||
 		t == MessageTypeTask || t == MessageTypeRecall || t == MessageTypeTicketAssigned ||
-		t == MessageTypeTicketClosed || t == MessageTypeTicketTransfer || t == MessageTypeTest ||
+		t == MessageTypeTicketClosed || t == MessageTypeTicketTransfer || t == MessageTypeTicketActive || t == MessageTypeTest ||
 		t == MessageTypeWelcome || t == MessageTypeTerminate || t == MessageTypeTransferred || t == MessageTypeSessionCreated ||
 		t == MessageTypeSessionClosed || t == MessageTypeSessionQueued || t == MessageTypeSessionTimeout ||
 		t == MessageTypeSessionPaused || t == MessageTypeSessionResumed || t == MessageTypeSessionTransferred ||

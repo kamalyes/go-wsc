@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-12-19 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-12-19 17:13:17
+ * @LastEditTime: 2025-12-20 10:55:18
  * @FilePath: \go-wsc\offline_message_handler.go
  * @Description: 离线消息处理器扩展 - 自动存储和推送离线消息
  *
@@ -33,7 +33,15 @@ type OfflineMessageRepository interface {
 	StoreOfflineMessage(ctx context.Context, userID string, msg *HubMessage) error
 
 	// GetOfflineMessages 获取用户的离线消息
-	GetOfflineMessages(ctx context.Context, userID string, limit int) ([]*HubMessage, error)
+	// limit: 限制返回数量
+	//   - > 0: 最多返回指定数量
+	//   - <= 0: Redis全部读取，MySQL最多1万条
+	// cursor: 游标，用于分页和保证时序
+	//   - Redis: 传空字符串表示从头开始
+	//   - MySQL: 传上次返回的最后一条消息ID
+	// 返回: messages, nextCursor, error
+	//   - nextCursor为空表示没有更多数据
+	GetOfflineMessages(ctx context.Context, userID string, limit int, cursor string) ([]*HubMessage, string, error)
 
 	// DeleteOfflineMessages 删除已推送的离线消息
 	DeleteOfflineMessages(ctx context.Context, userID string, messageIDs []string) error
@@ -43,6 +51,9 @@ type OfflineMessageRepository interface {
 
 	// ClearOfflineMessages 清空用户的所有离线消息
 	ClearOfflineMessages(ctx context.Context, userID string) error
+
+	// MarkAsPushed 标记消息为已推送
+	MarkAsPushed(ctx context.Context, messageIDs []string) error
 }
 
 // ============================================================================
@@ -148,7 +159,8 @@ func (h *HybridOfflineMessageHandler) storeToRedis(ctx context.Context, userID s
 	if err := h.queueRepo.Enqueue(ctx, userID, msg); err != nil {
 		h.logger.ErrorKV("存储离线消息到 Redis 失败",
 			"user_id", userID,
-			"message_id", msg.ID,
+			"id", msg.ID,
+			"message_id", msg.MessageID,
 			"error", err,
 		)
 		return fmt.Errorf("redis queue: %w", err)
@@ -156,7 +168,8 @@ func (h *HybridOfflineMessageHandler) storeToRedis(ctx context.Context, userID s
 
 	h.logger.DebugKV("离线消息已存储到 Redis",
 		"user_id", userID,
-		"message_id", msg.ID,
+		"id", msg.ID,
+		"message_id", msg.MessageID,
 	)
 	return nil
 }
@@ -167,7 +180,8 @@ func (h *HybridOfflineMessageHandler) storeToDatabase(ctx context.Context, msg *
 	if err != nil {
 		h.logger.ErrorKV("压缩消息失败",
 			"user_id", msg.Receiver,
-			"message_id", msg.ID,
+			"id", msg.ID,
+			"message_id", msg.MessageID,
 			"error", err,
 		)
 		return fmt.Errorf("compress message: %w", err)
@@ -177,7 +191,8 @@ func (h *HybridOfflineMessageHandler) storeToDatabase(ctx context.Context, msg *
 	compressionRatio := float64(compressedSize) / float64(dataSize) * 100
 
 	record := &OfflineMessageRecord{
-		MessageID:      msg.ID,
+		MessageID:      msg.MessageID, // 业务消息ID
+		HubID:          msg.ID,        // Hub 内部ID
 		Sender:         msg.Sender,
 		Receiver:       msg.Receiver,
 		SessionID:      msg.SessionID,
@@ -190,7 +205,8 @@ func (h *HybridOfflineMessageHandler) storeToDatabase(ctx context.Context, msg *
 	if err := h.dbRepo.Save(ctx, record); err != nil {
 		h.logger.ErrorKV("持久化离线消息到 MySQL offline_messages 表失败",
 			"user_id", msg.Receiver,
-			"message_id", msg.ID,
+			"id", msg.ID,
+			"message_id", msg.MessageID,
 			"error", err,
 		)
 		return fmt.Errorf("mysql: %w", err)
@@ -198,7 +214,8 @@ func (h *HybridOfflineMessageHandler) storeToDatabase(ctx context.Context, msg *
 
 	h.logger.DebugKV("离线消息已持久化到 MySQL offline_messages 表",
 		"user_id", msg.Receiver,
-		"message_id", msg.ID,
+		"id", msg.ID,
+		"message_id", msg.MessageID,
 		"data_size", dataSize,
 		"compressed_size", compressedSize,
 		"compression_ratio", fmt.Sprintf("%.2f%%", compressionRatio),
@@ -207,86 +224,113 @@ func (h *HybridOfflineMessageHandler) storeToDatabase(ctx context.Context, msg *
 }
 
 // GetOfflineMessages 获取用户的离线消息
-func (h *HybridOfflineMessageHandler) GetOfflineMessages(ctx context.Context, userID string, limit int) ([]*HubMessage, error) {
-	if limit <= 0 {
-		limit = 100 // 默认每次最多获取 100 条
-	}
-
+// 参数:
+//   - userID: 用户ID
+//   - limit: 限制返回数量
+//   - > 0: 最多返回指定数量的消息
+//   - <= 0: Redis 全部读取, MySQL 最多返回 1 万条
+//   - cursor: 游标，用于分页
+//   - Redis: 忽略（Redis是FIFO队列，始终从头取）
+//   - MySQL: 传上次返回的最后一条消息ID，继续向后读取
+//
+// 返回:
+//   - messages: 消息列表
+//   - nextCursor: 下一页游标，空字符串表示没有更多数据
+//   - error: 错误信息
+func (h *HybridOfflineMessageHandler) GetOfflineMessages(ctx context.Context, userID string, limit int, cursor string) ([]*HubMessage, string, error) {
 	messages := make([]*HubMessage, 0)
+	nextCursor := ""
 
 	// 1. 优先从 Redis 队列读取（性能更好）
-	// 获取队列长度
+	// Redis 是 FIFO 队列，不支持游标，始终从头取
 	length, err := h.queueRepo.GetLength(ctx, userID)
 	if err != nil {
 		h.logger.ErrorKV("获取离线消息队列长度失败",
 			"user_id", userID,
 			"error", err,
 		)
-		return messages, err
+		return messages, nextCursor, err
 	}
 
-	// 读取消息（不超过 limit）
-	count := int(length)
-	if count > limit {
-		count = limit
-	}
+	// 如果 Redis 有消息，忽略 cursor，直接从队列头部读取
+	if length > 0 {
+		count := mathx.IF(limit > 0, min(int(length), limit), int(length))
 
-	for i := 0; i < count; i++ {
-		msg, err := h.queueRepo.Dequeue(ctx, userID, 1*time.Second)
-		if err != nil {
-			h.logger.ErrorKV("从队列读取离线消息失败",
-				"user_id", userID,
-				"error", err,
-			)
-			break
-		}
-		if msg != nil {
-			messages = append(messages, msg)
-		}
-	}
-
-	h.logger.InfoKV("从 Redis 读取离线消息",
-		"user_id", userID,
-		"count", len(messages),
-	)
-
-	// 2. 如果 Redis 没有消息，从 MySQL offline_messages 表读取
-	if len(messages) == 0 {
-		h.logger.DebugKV("Redis 无离线消息，尝试从 MySQL offline_messages 表读取",
-			"user_id", userID,
-		)
-
-		records, err := h.dbRepo.GetByReceiver(ctx, userID, limit)
-		if err != nil {
-			h.logger.ErrorKV("从 MySQL 读取离线消息失败",
-				"user_id", userID,
-				"error", err,
-			)
-			return messages, err
-		}
-
-		// 转换 OfflineMessageRecord 为 HubMessage
-		for _, record := range records {
-			// 使用 Zlib 解压缩（泛型调用）
-			msg, err := zipx.ZlibDecompressObject[*HubMessage](record.CompressedData)
+		for i := 0; i < count; i++ {
+			msg, err := h.queueRepo.Dequeue(ctx, userID, 1*time.Second)
 			if err != nil {
-				h.logger.ErrorKV("解压离线消息失败",
-					"message_id", record.MessageID,
+				h.logger.ErrorKV("从队列读取离线消息失败",
 					"user_id", userID,
 					"error", err,
 				)
-				continue
+				break
 			}
-			messages = append(messages, msg)
+			if msg != nil {
+				messages = append(messages, msg)
+			}
 		}
 
-		h.logger.InfoKV("从 MySQL 读取离线消息",
+		// Redis 队列还有剩余，返回特殊游标 "redis:continue"
+		remaining := length - int64(len(messages))
+		if remaining > 0 {
+			nextCursor = "redis:continue"
+		}
+
+		h.logger.InfoKV("从 Redis 读取离线消息",
 			"user_id", userID,
 			"count", len(messages),
+			"remaining", remaining,
+			"next_cursor", nextCursor,
 		)
+
+		return messages, nextCursor, nil
 	}
 
-	return messages, nil
+	// 2. Redis 无消息，从 MySQL offline_messages 表读取
+	h.logger.DebugKV("Redis 无离线消息，尝试从 MySQL offline_messages 表读取",
+		"user_id", userID,
+		"cursor", cursor,
+	)
+
+	records, err := h.dbRepo.GetByReceiver(ctx, userID, limit, cursor)
+	if err != nil {
+		h.logger.ErrorKV("从 MySQL 读取离线消息失败",
+			"user_id", userID,
+			"cursor", cursor,
+			"error", err,
+		)
+		return messages, nextCursor, err
+	}
+
+	// 转换 OfflineMessageRecord 为 HubMessage
+	for _, record := range records {
+		msg, err := zipx.ZlibDecompressObject[*HubMessage](record.CompressedData)
+		if err != nil {
+			h.logger.ErrorKV("解压离线消息失败",
+				"message_id", record.MessageID,
+				"user_id", userID,
+				"error", err,
+			)
+			continue
+		}
+		messages = append(messages, msg)
+	}
+
+	// 如果返回数量等于 limit，说明可能还有更多数据
+	if len(records) >= limit && len(messages) > 0 {
+		// 使用最后一条消息的 message_id 作为下一页游标
+		nextCursor = records[len(records)-1].MessageID
+	}
+
+	h.logger.InfoKV("从 MySQL 读取离线消息",
+		"user_id", userID,
+		"count", len(messages),
+		"limit", limit,
+		"cursor", cursor,
+		"next_cursor", nextCursor,
+	)
+
+	return messages, nextCursor, nil
 }
 
 // DeleteOfflineMessages 删除已推送的离线消息
@@ -366,5 +410,29 @@ func (h *HybridOfflineMessageHandler) ClearOfflineMessages(ctx context.Context, 
 		return fmt.Errorf("clear offline messages failed: %v", errs)
 	}
 
+	return nil
+}
+
+// MarkAsPushed 标记消息为已推送
+// 注意：此方法应该在消息成功推送给用户后调用
+// 由于消息已通过 GetOfflineMessages 从 Redis 出队,这里只需标记 MySQL
+func (h *HybridOfflineMessageHandler) MarkAsPushed(ctx context.Context, messageIDs []string) error {
+	if len(messageIDs) == 0 {
+		return nil
+	}
+
+	// 标记 MySQL 中的消息为已推送
+	// 这样即使推送失败,消息仍在 MySQL 中,下次连接时可以从 MySQL 读取并重试
+	if err := h.dbRepo.MarkAsPushed(ctx, messageIDs); err != nil {
+		h.logger.ErrorKV("标记 MySQL 消息为已推送失败",
+			"count", len(messageIDs),
+			"error", err,
+		)
+		return fmt.Errorf("mysql: %w", err)
+	}
+
+	h.logger.DebugKV("标记消息为已推送成功",
+		"count", len(messageIDs),
+	)
 	return nil
 }

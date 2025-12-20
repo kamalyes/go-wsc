@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kamalyes/go-sqlbuilder"
 	"github.com/kamalyes/go-toolbox/pkg/osx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -56,10 +57,13 @@ func getTestDB(t *testing.T) *gorm.DB {
 }
 
 // 创建测试用的 HubMessage
-func createTestHubMessage(id, sender, receiver string, msgType MessageType) *HubMessage {
+// 🔥 注意：ID 是 Hub 内部ID，MessageID 是业务消息ID，两者应该不同
+func createTestHubMessage(messageID, sender, receiver string, msgType MessageType) *HubMessage {
+	// Hub 内部ID格式：msg_{nodeID}_{sequence}
+	hubID := "msg_test_node_" + messageID
 	return &HubMessage{
-		ID:          id,
-		MessageID:   id,
+		ID:          hubID,     // Hub 内部ID（用于ACK确认和日志追踪）
+		MessageID:   messageID, // 业务消息ID（用于数据库查询和状态更新）
 		Sender:      sender,
 		Receiver:    receiver,
 		MessageType: msgType,
@@ -67,18 +71,24 @@ func createTestHubMessage(id, sender, receiver string, msgType MessageType) *Hub
 		Data:        map[string]interface{}{"content": "test data"},
 		CreateAt:    time.Now(),
 		Priority:    PriorityNormal,
-		Status:      MessageStatusDelivered,
 	}
 }
 
 func TestMessageSendRecordSetAndGetMessage(t *testing.T) {
 	record := &MessageSendRecord{}
-	msg := createTestHubMessage("msg-001", "user-001", "user-002", MessageTypeText)
+	msgID := "test-business-msg-001"
+	msg := createTestHubMessage(msgID, "user-001", "user-002", MessageTypeText)
 
 	// 设置消息
 	err := record.SetMessage(msg)
 	assert.NoError(t, err)
-	assert.Equal(t, "msg-001", record.MessageID)
+
+	// 🔥 校验：MessageID 应该是业务消息ID
+	assert.Equal(t, msgID, record.MessageID, "MessageID 应该是业务消息ID")
+	// 🔥 校验：HubID 应该是 Hub 内部ID
+	assert.Equal(t, msg.ID, record.HubID, "HubID 应该是 Hub 内部ID")
+	assert.NotEqual(t, record.MessageID, record.HubID, "MessageID 和 HubID 应该不同")
+
 	assert.Equal(t, "user-001", record.Sender)
 	assert.Equal(t, "user-002", record.Receiver)
 	assert.Equal(t, MessageTypeText, record.MessageType)
@@ -88,7 +98,10 @@ func TestMessageSendRecordSetAndGetMessage(t *testing.T) {
 	retrievedMsg, err := record.GetMessage()
 	assert.NoError(t, err)
 	assert.NotNil(t, retrievedMsg)
-	assert.Equal(t, msg.ID, retrievedMsg.ID)
+
+	// 🔥 校验：反序列化后 ID 和 MessageID 应该保持正确
+	assert.Equal(t, msg.ID, retrievedMsg.ID, "Hub ID 应该一致")
+	assert.Equal(t, msgID, retrievedMsg.MessageID, "业务消息ID 应该一致")
 	assert.Equal(t, msg.Sender, retrievedMsg.Sender)
 	assert.Equal(t, msg.Receiver, retrievedMsg.Receiver)
 	assert.Equal(t, msg.MessageType, retrievedMsg.MessageType)
@@ -159,12 +172,18 @@ func TestMessageRecordRepositoryFindByMessageID(t *testing.T) {
 	created, err := repo.CreateFromMessage(msg, 3, nil)
 	require.NoError(t, err)
 
-	// 查找记录
+	// 🔥 校验创建的记录有正确的ID
+	assert.Equal(t, msgID, created.MessageID, "创建的记录应该有业务消息ID")
+	assert.Equal(t, msg.ID, created.HubID, "创建的记录应该有Hub内部ID")
+	assert.NotEqual(t, created.MessageID, created.HubID, "MessageID 和 HubID 应该不同")
+
+	// 🔥 查找记录：使用业务消息ID查询
 	found, err := repo.FindByMessageID(msgID)
 	assert.NoError(t, err)
 	assert.NotNil(t, found)
 	assert.Equal(t, created.ID, found.ID)
-	assert.Equal(t, msgID, found.MessageID)
+	assert.Equal(t, msgID, found.MessageID, "查询应该使用业务消息ID")
+	assert.Equal(t, msg.ID, found.HubID, "记录应该保存Hub内部ID")
 }
 
 func TestMessageRecordRepositoryUpdateStatus(t *testing.T) {
@@ -181,7 +200,7 @@ func TestMessageRecordRepositoryUpdateStatus(t *testing.T) {
 	created, err := repo.CreateFromMessage(msg, 3, nil)
 	require.NoError(t, err)
 
-	// 更新为发送中
+	// 🔥 更新为发送中：使用业务消息ID
 	err = repo.UpdateStatus(msgID, MessageSendStatusSending, "", "")
 	assert.NoError(t, err)
 
@@ -189,8 +208,9 @@ func TestMessageRecordRepositoryUpdateStatus(t *testing.T) {
 	updated, err := repo.FindByMessageID(msgID)
 	assert.NoError(t, err)
 	assert.Equal(t, MessageSendStatusSending, updated.Status)
+	assert.Equal(t, msgID, updated.MessageID, "更新后 MessageID 应该保持不变")
 
-	// 更新为成功
+	// 🔥 更新为成功：使用业务消息ID
 	err = repo.UpdateStatus(msgID, MessageSendStatusSuccess, "", "")
 	assert.NoError(t, err)
 
@@ -199,8 +219,9 @@ func TestMessageRecordRepositoryUpdateStatus(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, MessageSendStatusSuccess, success.Status)
 	assert.NotNil(t, success.SuccessTime)
+	assert.Equal(t, msgID, success.MessageID, "MessageID 应该始终是业务消息ID")
 
-	// 更新为失败
+	// 🔥 更新为失败：使用业务消息ID
 	err = repo.UpdateStatus(msgID, MessageSendStatusFailed, FailureReasonNetworkError, "Network timeout")
 	assert.NoError(t, err)
 
@@ -210,6 +231,7 @@ func TestMessageRecordRepositoryUpdateStatus(t *testing.T) {
 	assert.Equal(t, MessageSendStatusFailed, failed.Status)
 	assert.Equal(t, FailureReasonNetworkError, failed.FailureReason)
 	assert.Equal(t, "Network timeout", failed.ErrorMessage)
+	assert.Equal(t, msgID, failed.MessageID, "失败后 MessageID 应该仍是业务消息ID")
 
 	_ = created
 }
@@ -228,7 +250,7 @@ func TestMessageRecordRepositoryIncrementRetry(t *testing.T) {
 	_, err := repo.CreateFromMessage(msg, 3, nil)
 	require.NoError(t, err)
 
-	// 第一次重试
+	// 🔥 第一次重试：使用业务消息ID
 	attempt1 := RetryAttempt{
 		AttemptNumber: 1,
 		Timestamp:     time.Now(),
@@ -245,6 +267,7 @@ func TestMessageRecordRepositoryIncrementRetry(t *testing.T) {
 	assert.Equal(t, 1, record.RetryCount)
 	assert.Len(t, record.RetryHistory, 1)
 	assert.Equal(t, MessageSendStatusRetrying, record.Status)
+	assert.Equal(t, msgID, record.MessageID, "重试时 MessageID 应该保持不变")
 
 	// 第二次重试
 	attempt2 := RetryAttempt{
@@ -567,16 +590,16 @@ func TestMessageSendRecordJSONFields(t *testing.T) {
 		Status:     MessageSendStatusPending,
 		CreateTime: time.Now(),
 		MaxRetry:   3,
-		Metadata: JSONMap{
+		Metadata: sqlbuilder.MapAny{
 			"priority": "high",
 			"source":   "mobile_app",
 			"version":  1.5,
 		},
-		CustomFields: JSONMap{
+		CustomFields: sqlbuilder.MapAny{
 			"user_level": "vip",
 			"region":     "asia",
 		},
-		Tags: StringArray{"urgent", "support", "vip"},
+		Tags: sqlbuilder.StringSlice{"urgent", "support", "vip"},
 	}
 	err := record.SetMessage(msg)
 	require.NoError(t, err)

@@ -135,7 +135,6 @@ func TestHubWithRedisAndMySQL(t *testing.T) {
 		Data:        map[string]interface{}{"test": true},
 		CreateAt:    time.Now(),
 		Priority:    PriorityNormal,
-		Status:      MessageStatusSent,
 	}
 
 	err = hub.sendToUser(ctx, "test-user-001", msg)

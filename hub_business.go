@@ -14,97 +14,15 @@ package wsc
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
-	"github.com/kamalyes/go-toolbox/pkg/errorx"
+	"github.com/kamalyes/go-toolbox/pkg/mathx"
 )
 
 // ============================================================================
 // 高阶业务函数 - 智能消息发送（自动处理在线/离线）
 // ============================================================================
-
-// SendToUserWithOfflineCallback 智能发送消息 - 自动处理在线/离线逻辑
-// 如果用户在线则发送，离线则调用回调函数（用于存储离线消息）
-//
-// 参数:
-//   - ctx: 上下文
-//   - userID: 用户ID
-//   - msg: 消息
-//   - offlineCallback: 用户离线时的回调函数（用于存储离线消息）
-//
-// 返回:
-//   - isOnline: 用户是否在线
-//   - err: 错误信息（仅在线发送时可能有错误）
-//
-// 示例:
-//
-//	isOnline, err := hub.SendToUserWithOfflineCallback(ctx, userID, msg, func(msg *HubMessage) {
-//	   存储离线消息到数据库
-//	    saveOfflineMessage(userID, msg)
-//	})
-func (h *Hub) SendToUserWithOfflineCallback(ctx context.Context, userID string, msg *HubMessage,
-	offlineCallback func(*HubMessage)) (isOnline bool, err error) {
-
-	// 检查用户是否在线
-	isOnline, checkErr := h.IsUserOnline(userID)
-	if checkErr != nil || !isOnline {
-		// 用户离线，调用回调
-		if offlineCallback != nil {
-			offlineCallback(msg)
-		}
-		return false, nil
-	}
-
-	// 用户在线，发送消息（带重试）
-	result := h.SendToUserWithRetry(ctx, userID, msg)
-	return true, result.FinalError
-}
-
-// SendToUserWithOfflineFallback 智能发送消息 - 失败时自动降级
-// 尝试发送给在线用户，如果失败（或离线）则调用离线回调
-//
-// 参数:
-//   - ctx: 上下文
-//   - userID: 用户ID
-//   - msg: 消息
-//   - offlineCallback: 离线或发送失败时的回调函数
-//
-// 返回:
-//   - delivered: 消息是否成功投递（在线发送成功为true）
-//   - err: 错误信息
-//
-// 示例:
-//
-//	delivered, err := hub.SendToUserWithOfflineFallback(ctx, userID, msg, func(msg *HubMessage, sendErr error) {
-//	    log.Printf("消息投递失败: %v, 存储离线消息", sendErr)
-//	    saveOfflineMessage(userID, msg)
-//	})
-func (h *Hub) SendToUserWithOfflineFallback(ctx context.Context, userID string, msg *HubMessage,
-	offlineCallback func(*HubMessage, error)) (delivered bool, err error) {
-
-	// 检查用户是否在线
-	isOnline, _ := h.IsUserOnline(userID)
-
-	if !isOnline {
-		// 用户离线，直接调用回调
-		if offlineCallback != nil {
-			offlineCallback(msg, errorx.NewError(ErrTypeUserOffline, "user_id: %s", userID))
-		}
-		return false, nil
-	}
-
-	// 用户在线，尝试发送（带重试）
-	result := h.SendToUserWithRetry(ctx, userID, msg)
-	if result.FinalError != nil {
-		// 发送失败，调用回调
-		if offlineCallback != nil {
-			offlineCallback(msg, result.FinalError)
-		}
-		return false, result.FinalError
-	}
-
-	return true, nil
-}
 
 // ============================================================================
 // 批量发送 - 智能处理在线/离线
@@ -119,116 +37,6 @@ type BroadcastResult struct {
 	Errors     map[string]error // 错误详情 map[userID]error
 	OfflineIDs []string         // 离线用户ID列表
 	FailedIDs  []string         // 发送失败的用户ID列表
-}
-
-// BroadcastToUsers 批量发送消息给多个用户 - 智能处理在线/离线
-//
-// 参数:
-//   - ctx: 上下文
-//   - userIDs: 用户ID列表
-//   - msg: 消息
-//   - offlineCallback: 用户离线时的回调函数（可选）
-//
-// 返回:
-//   - result: 发送结果统计
-//
-// 示例:
-//
-//	result := hub.BroadcastToUsers(ctx, []string{"user1", "user2"}, msg, func(userID string, msg *HubMessage) {
-//	    saveOfflineMessage(userID, msg)
-//	})
-//	log.Printf("成功: %d, 离线: %d, 失败: %d", result.Success, result.Offline, result.Failed)
-func (h *Hub) BroadcastToUsers(ctx context.Context, userIDs []string, msg *HubMessage,
-	offlineCallback func(string, *HubMessage)) *BroadcastResult {
-
-	result := &BroadcastResult{
-		Total:      len(userIDs),
-		Success:    0,
-		Offline:    0,
-		Failed:     0,
-		Errors:     make(map[string]error),
-		OfflineIDs: make([]string, 0),
-		FailedIDs:  make([]string, 0),
-	}
-
-	for _, userID := range userIDs {
-		isOnline, err := h.SendToUserWithOfflineCallback(ctx, userID, msg, func(m *HubMessage) {
-			result.Offline++
-			if offlineCallback != nil {
-				offlineCallback(userID, m)
-			}
-		})
-
-		if !isOnline {
-			continue
-		}
-
-		if err != nil {
-			result.Failed++
-			result.FailedIDs = append(result.FailedIDs, userID)
-			result.Errors[userID] = err
-		} else {
-			result.Success++
-		}
-	}
-
-	return result
-}
-
-// BroadcastToUserType 向指定类型用户批量发送 - 智能处理在线/离线
-//
-// 参数:
-//   - ctx: 上下文
-//   - userType: 用户类型
-//   - msg: 消息
-//   - offlineCallback: 用户离线时的回调函数（可选，对于GetOnlineUsersByType已过滤在线用户，通常不需要）
-//
-// 返回:
-//   - result: 发送结果统计
-//
-// 示例:
-//
-//	result := hub.BroadcastToUserType(ctx, UserTypeAgent, msg, nil)
-//	log.Printf("成功向 %d 个客服发送消息", result.Success)
-func (h *Hub) BroadcastToUserType(ctx context.Context, userType UserType, msg *HubMessage,
-	offlineCallback func(string, *HubMessage)) *BroadcastResult {
-
-	// 获取该类型的所有在线用户
-	onlineUsers, err := h.GetOnlineUsersByType(userType)
-	if err != nil {
-		return &BroadcastResult{
-			Total:  0,
-			Errors: map[string]error{"query_error": err},
-		}
-	}
-
-	// 使用 BroadcastToUsers 批量发送（这些用户都是在线的）
-	result := &BroadcastResult{
-		Total:      len(onlineUsers),
-		Success:    0,
-		Offline:    0,
-		Failed:     0,
-		Errors:     make(map[string]error),
-		OfflineIDs: make([]string, 0),
-		FailedIDs:  make([]string, 0),
-	}
-
-	for _, userID := range onlineUsers {
-		sendResult := h.SendToUserWithRetry(ctx, userID, msg)
-		if sendResult.FinalError != nil {
-			result.Failed++
-			result.FailedIDs = append(result.FailedIDs, userID)
-			result.Errors[userID] = sendResult.FinalError
-			// 即使在线，发送也可能失败，调用离线回调
-			if offlineCallback != nil {
-				offlineCallback(userID, msg)
-			}
-		} else {
-			result.Success++
-		}
-	}
-
-	return result
 }
 
 // ============================================================================
@@ -387,16 +195,10 @@ func (h *Hub) FilterOnlineUsers(userIDs []string) []string {
 //	    saveOfflineMessage(userID, msg)
 //	}
 func (h *Hub) FilterOfflineUsers(userIDs []string) []string {
-	offlineUsers := make([]string, 0, len(userIDs))
 	onlineMap := h.BatchGetUserOnlineStatus(userIDs)
-
-	for _, userID := range userIDs {
-		if !onlineMap[userID] {
-			offlineUsers = append(offlineUsers, userID)
-		}
-	}
-
-	return offlineUsers
+	return mathx.FilterSlice(userIDs, func(userID string) bool {
+		return !onlineMap[userID]
+	})
 }
 
 // GetOnlineUsersWithDetails 获取所有在线用户的详细信息
@@ -504,14 +306,13 @@ func (h *Hub) SendToUsersWithPredicate(ctx context.Context, predicate func(*Clie
 // 会话成员管理 - 高阶函数
 // ============================================================================
 
-// SendToGroupMembers 向群组/会话成员发送消息 - 智能处理在线/离线
+// SendToGroupMembers 向群组/会话成员发送消息 - 智能处理在线/离线（并发发送）
 //
 // 参数:
 //   - ctx: 上下文
 //   - memberIDs: 成员ID列表
 //   - msg: 消息
 //   - excludeSender: 是否排除发送者（避免自己给自己发）
-//   - offlineCallback: 离线回调
 //
 // 返回:
 //   - result: 发送结果统计
@@ -519,25 +320,72 @@ func (h *Hub) SendToUsersWithPredicate(ctx context.Context, predicate func(*Clie
 // 示例:
 //
 //	向会话成员广播，排除发送者自己
-//	result := hub.SendToGroupMembers(ctx, memberIDs, msg, true, func(userID string, msg *HubMessage) {
-//	    saveOfflineMessage(userID, msg)
-//	})
-func (h *Hub) SendToGroupMembers(ctx context.Context, memberIDs []string, msg *HubMessage,
-	excludeSender bool, offlineCallback func(string, *HubMessage)) *BroadcastResult {
-
+//	result := hub.SendToGroupMembers(ctx, memberIDs, msg, true)
+//	简单批量发送（不排除发送者）
+//	result := hub.SendToGroupMembers(ctx, userIDs, msg, false)
+func (h *Hub) SendToGroupMembers(ctx context.Context, memberIDs []string, msg *HubMessage, excludeSender bool) *BroadcastResult {
 	// 如果需要排除发送者，从列表中移除
 	filteredIDs := memberIDs
 	if excludeSender && msg.Sender != "" {
-		filteredIDs = make([]string, 0, len(memberIDs))
-		for _, id := range memberIDs {
-			if id != msg.Sender {
-				filteredIDs = append(filteredIDs, id)
-			}
-		}
+		filteredIDs = mathx.FilterSlice(memberIDs, func(id string) bool {
+			return id != msg.Sender
+		})
+		h.logger.DebugKV("🔄 过滤发送者后的成员列表",
+			"original_count", len(memberIDs),
+			"filtered_count", len(filteredIDs),
+			"excluded_sender", msg.Sender,
+			"filtered_members", filteredIDs,
+		)
 	}
 
-	// 使用 BroadcastToUsers 批量发送
-	return h.BroadcastToUsers(ctx, filteredIDs, msg, offlineCallback)
+	// 并发批量发送
+	result := &BroadcastResult{
+		Total:      len(filteredIDs),
+		Success:    0,
+		Offline:    0,
+		Failed:     0,
+		Errors:     make(map[string]error),
+		OfflineIDs: make([]string, 0),
+		FailedIDs:  make([]string, 0),
+	}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	for _, userID := range filteredIDs {
+		wg.Add(1)
+		go func(uid string) {
+			defer wg.Done()
+
+			// SendToUserWithRetry 内部已经处理了在线/离线逻辑
+			// - 在线用户：直接发送
+			// - 离线用户：自动存储到离线队列，上线后推送
+			sendResult := h.SendToUserWithRetry(ctx, uid, msg)
+
+			mu.Lock()
+			if sendResult.Success {
+				result.Success++
+			} else if sendResult.FinalError != nil {
+				result.Failed++
+				result.FailedIDs = append(result.FailedIDs, uid)
+				result.Errors[uid] = sendResult.FinalError
+			}
+			mu.Unlock()
+		}(userID)
+	}
+
+	wg.Wait()
+
+	h.logger.DebugKV("✅ 会话消息发送完成",
+		"session_id", msg.SessionID,
+		"message_id", msg.MessageID,
+		"total", result.Total,
+		"success", result.Success,
+		"offline", result.Offline,
+		"failed", result.Failed,
+	)
+
+	return result
 }
 
 // PartitionUsersByOnlineStatus 将用户列表分区为在线和离线两组
@@ -597,14 +445,15 @@ func (h *Hub) FilterUsersByType(userType UserType) []string {
 	h.mutex.RLock()
 	defer h.mutex.RUnlock()
 
-	result := make([]string, 0)
+	// 收集所有符合条件的 userID
+	allUserIDs := make([]string, 0, len(h.clients))
 	for userID, client := range h.clients {
 		if client != nil && client.UserType == userType && client.Status == UserStatusOnline {
-			result = append(result, userID)
+			allUserIDs = append(allUserIDs, userID)
 		}
 	}
 
-	return result
+	return allUserIDs
 }
 
 // GetOnlineAgents 获取所有在线客服
@@ -691,64 +540,6 @@ func (h *Hub) GetUserConnectionInfo(userID string) (client *Client, hasWebSocket
 // ============================================================================
 // 高阶业务函数 - 批量发送与重试
 // ============================================================================
-
-// SendToUsersWithRetry 批量发送消息并自动重试
-//
-// 参数:
-//   - ctx: 上下文
-//   - userIDs: 用户ID列表
-//   - msg: 消息
-//   - maxRetries: 最大重试次数
-//   - offlineCallback: 离线用户回调
-//
-// 返回:
-//   - result: 发送结果统计
-//
-// 示例:
-//
-//	result := hub.SendToUsersWithRetry(ctx, userIDs, msg, 3, func(userID string, msg *HubMessage) {
-//	    saveOfflineMessage(userID, msg)
-//	})
-func (h *Hub) SendToUsersWithRetry(ctx context.Context, userIDs []string, msg *HubMessage,
-	maxRetries int, offlineCallback func(string, *HubMessage)) *BroadcastResult {
-
-	result := &BroadcastResult{
-		Total:      len(userIDs),
-		Success:    0,
-		Offline:    0,
-		Failed:     0,
-		Errors:     make(map[string]error),
-		OfflineIDs: make([]string, 0),
-		FailedIDs:  make([]string, 0),
-	}
-
-	for _, userID := range userIDs {
-		// 检查是否在线
-		isOnline, err := h.IsUserOnline(userID)
-		if err != nil || !isOnline {
-			result.Offline++
-			result.OfflineIDs = append(result.OfflineIDs, userID)
-			if offlineCallback != nil {
-				offlineCallback(userID, msg)
-			}
-			continue
-		}
-
-		// 发送消息（带重试）
-		sendResult := h.SendToUserWithRetry(ctx, userID, msg)
-		if sendResult.Success {
-			result.Success++
-		} else {
-			result.Failed++
-			result.FailedIDs = append(result.FailedIDs, userID)
-			if sendResult.FinalError != nil {
-				result.Errors[userID] = sendResult.FinalError
-			}
-		}
-	}
-
-	return result
-}
 
 // BroadcastToOnlineUsers 向所有在线用户广播消息
 //
@@ -926,6 +717,7 @@ func (h *Hub) FindUsersByPredicate(predicate func(userID string, client *Client)
 	h.mutex.RLock()
 	defer h.mutex.RUnlock()
 
+	// 收集所有符合条件的 userID
 	result := make([]string, 0)
 	for userID, client := range h.clients {
 		if predicate(userID, client) {
@@ -1078,17 +870,15 @@ func (h *Hub) DistributeMessagesToAgents(ctx context.Context, messages []*HubMes
 //   - memberIDs: 会话成员ID列表
 //   - msg: 消息
 //   - excludeUserIDs: 要排除的用户ID列表
-//   - offlineCallback: 离线回调
 //
 // 返回:
 //   - result: 广播结果
 //
 // 示例:
 //
-//	result := hub.BroadcastToSessionWithExclusion(ctx, members, msg,
-//	    []string{senderID, botID}, offlineCallback)
+//	result := hub.BroadcastToSessionWithExclusion(ctx, members, msg, []string{senderID, botID})
 func (h *Hub) BroadcastToSessionWithExclusion(ctx context.Context, memberIDs []string,
-	msg *HubMessage, excludeUserIDs []string, offlineCallback func(string, *HubMessage)) *BroadcastResult {
+	msg *HubMessage, excludeUserIDs []string) *BroadcastResult {
 
 	// 构建排除集合
 	excludeSet := make(map[string]bool, len(excludeUserIDs))
@@ -1097,15 +887,12 @@ func (h *Hub) BroadcastToSessionWithExclusion(ctx context.Context, memberIDs []s
 	}
 
 	// 过滤成员列表
-	filteredMembers := make([]string, 0, len(memberIDs))
-	for _, uid := range memberIDs {
-		if !excludeSet[uid] {
-			filteredMembers = append(filteredMembers, uid)
-		}
-	}
+	filteredMembers := mathx.FilterSlice(memberIDs, func(uid string) bool {
+		return !excludeSet[uid]
+	})
 
-	// 使用 BroadcastToUsers 批量发送
-	return h.BroadcastToUsers(ctx, filteredMembers, msg, offlineCallback)
+	// 使用 SendToGroupMembers 批量发送（不排除发送者，因为已经过滤了）
+	return h.SendToGroupMembers(ctx, filteredMembers, msg, false)
 }
 
 // MulticastToUserTypes 向多种用户类型组播消息
@@ -1233,6 +1020,7 @@ func (h *Hub) GetUsersWithStatus(status UserStatus, userTypeFilter *UserType) []
 	h.mutex.RLock()
 	defer h.mutex.RUnlock()
 
+	// 收集所有符合条件的 userID
 	result := make([]string, 0)
 	for userID, client := range h.clients {
 		if client.Status != status {

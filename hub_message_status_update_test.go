@@ -27,7 +27,7 @@ func TestHubUpdateMessageSendStatusSuccess(t *testing.T) {
 	repo := NewMessageRecordRepository(db)
 	hub := NewHub(nil)
 	hub.messageRecordRepo = repo
-	
+
 	go hub.Run()
 	time.Sleep(100 * time.Millisecond)
 	defer hub.cancel()
@@ -38,19 +38,26 @@ func TestHubUpdateMessageSendStatusSuccess(t *testing.T) {
 	}()
 
 	msg := createTestHubMessage(msgID, "sender-001", "receiver-001", MessageTypeText)
-	_, err := repo.CreateFromMessage(msg, 3, nil)
+	created, err := repo.CreateFromMessage(msg, 3, nil)
 	require.NoError(t, err)
+
+	// 🔥 校验创建的记录有正确的ID
+	assert.Equal(t, msgID, created.MessageID, "创建的记录应该使用业务消息ID")
+	assert.Equal(t, msg.ID, created.HubID, "创建的记录应该保存Hub内部ID")
 
 	messageData, err := json.Marshal(msg)
 	require.NoError(t, err)
 
+	// 🔥 Hub 内部通过 MessageID 更新状态
 	hub.updateMessageSendStatus(messageData, MessageSendStatusSuccess, "", "")
 	time.Sleep(200 * time.Millisecond)
 
+	// 🔥 使用业务消息ID查询
 	record, err := repo.FindByMessageID(msgID)
 	require.NoError(t, err)
 	assert.Equal(t, MessageSendStatusSuccess, record.Status)
 	assert.NotNil(t, record.SuccessTime)
+	assert.Equal(t, msgID, record.MessageID, "状态更新后 MessageID 应该保持不变")
 }
 
 // TestHubUpdateMessageSendStatusFailed 测试消息状态更新为失败
@@ -59,7 +66,7 @@ func TestHubUpdateMessageSendStatusFailed(t *testing.T) {
 	repo := NewMessageRecordRepository(db)
 	hub := NewHub(nil)
 	hub.messageRecordRepo = repo
-	
+
 	go hub.Run()
 	time.Sleep(100 * time.Millisecond)
 	defer hub.cancel()
@@ -70,22 +77,29 @@ func TestHubUpdateMessageSendStatusFailed(t *testing.T) {
 	}()
 
 	msg := createTestHubMessage(msgID, "sender-002", "receiver-002", MessageTypeText)
-	_, err := repo.CreateFromMessage(msg, 3, nil)
+	created, err := repo.CreateFromMessage(msg, 3, nil)
 	require.NoError(t, err)
+
+	// 🔥 校验 ID 正确性
+	assert.Equal(t, msgID, created.MessageID, "业务消息ID")
+	assert.Equal(t, msg.ID, created.HubID, "Hub内部ID")
 
 	messageData, err := json.Marshal(msg)
 	require.NoError(t, err)
 
 	errorMsg := "network timeout"
+	// 🔥 使用 MessageID 更新状态
 	hub.updateMessageSendStatus(messageData, MessageSendStatusFailed, FailureReasonNetworkError, errorMsg)
 	time.Sleep(200 * time.Millisecond)
 
+	// 🔥 使用业务消息ID查询
 	record, err := repo.FindByMessageID(msgID)
 	require.NoError(t, err)
 	assert.Equal(t, MessageSendStatusFailed, record.Status)
 	assert.Equal(t, FailureReasonNetworkError, record.FailureReason)
 	assert.Equal(t, errorMsg, record.ErrorMessage)
-}
+	assert.Equal(t, msgID, record.MessageID, "失败状态下 MessageID 应该不变")
+} 
 
 // TestHubUpdateMessageSendStatusRecordNotExist 测试记录不存在时的处理
 func TestHubUpdateMessageSendStatusRecordNotExist(t *testing.T) {
@@ -93,7 +107,7 @@ func TestHubUpdateMessageSendStatusRecordNotExist(t *testing.T) {
 	repo := NewMessageRecordRepository(db)
 	hub := NewHub(nil)
 	hub.messageRecordRepo = repo
-	
+
 	go hub.Run()
 	time.Sleep(100 * time.Millisecond)
 	defer hub.cancel()
@@ -116,7 +130,7 @@ func TestHubUpdateMessageSendStatusRetryMechanism(t *testing.T) {
 	repo := NewMessageRecordRepository(db)
 	hub := NewHub(nil)
 	hub.messageRecordRepo = repo
-	
+
 	go hub.Run()
 	time.Sleep(100 * time.Millisecond)
 	defer hub.cancel()
@@ -132,7 +146,7 @@ func TestHubUpdateMessageSendStatusRetryMechanism(t *testing.T) {
 
 	hub.updateMessageSendStatus(messageData, MessageSendStatusPending, "", "")
 	time.Sleep(50 * time.Millisecond)
-	
+
 	_, err = repo.CreateFromMessage(msg, 3, nil)
 	require.NoError(t, err)
 	time.Sleep(200 * time.Millisecond)
@@ -148,7 +162,7 @@ func TestHubUpdateMessageSendStatusConcurrent(t *testing.T) {
 	repo := NewMessageRecordRepository(db)
 	hub := NewHub(nil)
 	hub.messageRecordRepo = repo
-	
+
 	go hub.Run()
 	time.Sleep(100 * time.Millisecond)
 	defer hub.cancel()
@@ -195,7 +209,7 @@ func TestHubUpdateMessageSendStatusMultipleMessages(t *testing.T) {
 	repo := NewMessageRecordRepository(db)
 	hub := NewHub(nil)
 	hub.messageRecordRepo = repo
-	
+
 	go hub.Run()
 	time.Sleep(100 * time.Millisecond)
 	defer hub.cancel()

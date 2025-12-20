@@ -72,7 +72,6 @@ func createTestOfflineMessageRecord(messageID, userID, sessionID string) *Offlin
 		SessionID:    sessionID,
 		Content:      "这是一条测试离线消息",
 		Data:         map[string]interface{}{"key": "value"},
-		Status:       MessageStatusPending,
 		CreateAt:     now,
 	}
 
@@ -388,4 +387,357 @@ func TestOfflineMessageRepositoryEmptyDeleteByMessageIDs(t *testing.T) {
 	// 删除空数组应该不报错
 	err := repo.DeleteByMessageIDs(ctx, "any-user", []string{})
 	assert.NoError(t, err)
+}
+
+func TestOfflineMessageRepositoryGetBySender(t *testing.T) {
+	db := getTestOfflineDB(t)
+	repo := NewGormOfflineMessageRepository(db)
+	ctx := context.Background()
+
+	senderID := "sender-010"
+	userID := "user-010"
+	sessionID := "session-010"
+
+	// 创建多条测试数据
+	messageIDs := []string{
+		osx.HashUnixMicroCipherText(),
+		osx.HashUnixMicroCipherText(),
+	}
+
+	// 清理测试数据
+	defer func() {
+		_ = repo.DeleteByMessageIDs(ctx, userID, messageIDs)
+	}()
+
+	// 保存测试记录
+	for _, msgID := range messageIDs {
+		record := createTestOfflineMessageRecord(msgID, userID, sessionID)
+		record.Sender = senderID
+		err := repo.Save(ctx, record)
+		require.NoError(t, err)
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// 查询发送者的离线消息
+	records, err := repo.GetBySender(ctx, senderID, 10)
+	assert.NoError(t, err)
+	assert.Len(t, records, 2)
+
+	// 验证所有记录的发送者都是指定的senderID
+	for _, record := range records {
+		assert.Equal(t, senderID, record.Sender)
+	}
+}
+
+func TestOfflineMessageRepositoryGetCountBySender(t *testing.T) {
+	db := getTestOfflineDB(t)
+	repo := NewGormOfflineMessageRepository(db)
+	ctx := context.Background()
+
+	senderID := "sender-011"
+	userID := "user-011"
+	sessionID := "session-011"
+
+	messageIDs := []string{
+		osx.HashUnixMicroCipherText(),
+		osx.HashUnixMicroCipherText(),
+		osx.HashUnixMicroCipherText(),
+	}
+
+	// 清理测试数据
+	defer func() {
+		_ = repo.DeleteByMessageIDs(ctx, userID, messageIDs)
+	}()
+
+	// 保存测试记录
+	for _, msgID := range messageIDs {
+		record := createTestOfflineMessageRecord(msgID, userID, sessionID)
+		record.Sender = senderID
+		err := repo.Save(ctx, record)
+		require.NoError(t, err)
+	}
+
+	// 获取发送者的消息数量
+	count, err := repo.GetCountBySender(ctx, senderID)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(3), count)
+}
+
+func TestOfflineMessageRepositoryMarkAsPushed(t *testing.T) {
+	db := getTestOfflineDB(t)
+	repo := NewGormOfflineMessageRepository(db)
+	ctx := context.Background()
+
+	userID := "user-012"
+	sessionID := "session-012"
+
+	messageIDs := []string{
+		osx.HashUnixMicroCipherText(),
+		osx.HashUnixMicroCipherText(),
+	}
+
+	// 清理测试数据
+	defer func() {
+		_ = repo.DeleteByMessageIDs(ctx, userID, messageIDs)
+	}()
+
+	// 保存测试记录
+	for _, msgID := range messageIDs {
+		record := createTestOfflineMessageRecord(msgID, userID, sessionID)
+		err := repo.Save(ctx, record)
+		require.NoError(t, err)
+	}
+
+	// 验证初始状态：PushedAt 应该为 nil
+	beforePush, err := repo.GetByReceiver(ctx, userID, 10)
+	assert.NoError(t, err)
+	assert.Len(t, beforePush, 2)
+	for _, record := range beforePush {
+		assert.Nil(t, record.PushedAt)
+	}
+
+	// 标记第一条消息为已推送
+	err = repo.MarkAsPushed(ctx, []string{messageIDs[0]})
+	assert.NoError(t, err)
+
+	// 验证：只有未推送的消息才会被查询到
+	afterPush, err := repo.GetByReceiver(ctx, userID, 10)
+	assert.NoError(t, err)
+	assert.Len(t, afterPush, 1, "应该只有1条未推送的消息")
+	assert.Equal(t, messageIDs[1], afterPush[0].MessageID)
+
+	// 标记所有消息为已推送
+	err = repo.MarkAsPushed(ctx, messageIDs)
+	assert.NoError(t, err)
+
+	// 验证：所有消息都已推送，查询结果为空
+	allPushed, err := repo.GetByReceiver(ctx, userID, 10)
+	assert.NoError(t, err)
+	assert.Len(t, allPushed, 0, "所有消息都已推送，应该返回空列表")
+}
+
+func TestOfflineMessageRepositoryMarkAsPushedEmptyList(t *testing.T) {
+	db := getTestOfflineDB(t)
+	repo := NewGormOfflineMessageRepository(db)
+	ctx := context.Background()
+
+	// 空数组应该不报错
+	err := repo.MarkAsPushed(ctx, []string{})
+	assert.NoError(t, err)
+}
+
+func TestOfflineMessageRepositoryExpiredMessageNotRetrieved(t *testing.T) {
+	db := getTestOfflineDB(t)
+	repo := NewGormOfflineMessageRepository(db)
+	ctx := context.Background()
+
+	userID := "user-013"
+	sessionID := "session-013"
+
+	// 创建已过期的消息
+	expiredMsgID := osx.HashUnixMicroCipherText()
+	expiredRecord := createTestOfflineMessageRecord(expiredMsgID, userID, sessionID)
+	expiredRecord.ExpireAt = time.Now().Add(-1 * time.Hour)
+	err := repo.Save(ctx, expiredRecord)
+	require.NoError(t, err)
+
+	// 创建未过期的消息
+	validMsgID := osx.HashUnixMicroCipherText()
+	validRecord := createTestOfflineMessageRecord(validMsgID, userID, sessionID)
+	err = repo.Save(ctx, validRecord)
+	require.NoError(t, err)
+
+	// 清理测试数据
+	defer func() {
+		_ = repo.DeleteByMessageIDs(ctx, userID, []string{expiredMsgID, validMsgID})
+	}()
+
+	// 查询：只应该返回未过期的消息
+	records, err := repo.GetByReceiver(ctx, userID, 10)
+	assert.NoError(t, err)
+	assert.Len(t, records, 1, "只应该返回未过期的消息")
+	assert.Equal(t, validMsgID, records[0].MessageID)
+
+	// 统计：也只应该计算未过期的消息
+	count, err := repo.GetCountByReceiver(ctx, userID)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(1), count, "统计时只应该包含未过期的消息")
+}
+
+func TestOfflineMessageRepositoryPushedMessageNotRetrieved(t *testing.T) {
+	db := getTestOfflineDB(t)
+	repo := NewGormOfflineMessageRepository(db)
+	ctx := context.Background()
+
+	userID := "user-014"
+	sessionID := "session-014"
+
+	messageIDs := []string{
+		osx.HashUnixMicroCipherText(),
+		osx.HashUnixMicroCipherText(),
+	}
+
+	// 清理测试数据
+	defer func() {
+		_ = repo.DeleteByMessageIDs(ctx, userID, messageIDs)
+	}()
+
+	// 保存测试记录
+	for _, msgID := range messageIDs {
+		record := createTestOfflineMessageRecord(msgID, userID, sessionID)
+		err := repo.Save(ctx, record)
+		require.NoError(t, err)
+	}
+
+	// 标记第一条消息为已推送
+	err := repo.MarkAsPushed(ctx, []string{messageIDs[0]})
+	assert.NoError(t, err)
+
+	// GetByReceiver 不应该返回已推送的消息
+	records, err := repo.GetByReceiver(ctx, userID, 10)
+	assert.NoError(t, err)
+	assert.Len(t, records, 1)
+	assert.Equal(t, messageIDs[1], records[0].MessageID)
+
+	// GetCountByReceiver 也不应该计算已推送的消息
+	count, err := repo.GetCountByReceiver(ctx, userID)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(1), count)
+}
+
+func TestOfflineMessageRepositoryConcurrentMarkAsPushed(t *testing.T) {
+	db := getTestOfflineDB(t)
+	repo := NewGormOfflineMessageRepository(db)
+	ctx := context.Background()
+
+	userID := "user-015"
+	sessionID := "session-015"
+	concurrency := 10
+
+	messageIDs := make([]string, concurrency)
+	for i := 0; i < concurrency; i++ {
+		messageIDs[i] = osx.HashUnixMicroCipherText()
+	}
+
+	// 清理测试数据
+	defer func() {
+		_ = repo.DeleteByMessageIDs(ctx, userID, messageIDs)
+	}()
+
+	// 保存测试记录
+	for _, msgID := range messageIDs {
+		record := createTestOfflineMessageRecord(msgID, userID, sessionID)
+		err := repo.Save(ctx, record)
+		require.NoError(t, err)
+	}
+
+	// 并发标记为已推送
+	var wg sync.WaitGroup
+	errChan := make(chan error, concurrency)
+
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			if err := repo.MarkAsPushed(ctx, []string{messageIDs[idx]}); err != nil {
+				errChan <- err
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errChan)
+
+	// 检查是否有错误
+	for err := range errChan {
+		assert.NoError(t, err)
+	}
+
+	// 验证所有消息都已标记为推送
+	count, err := repo.GetCountByReceiver(ctx, userID)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(0), count, "所有消息都应该已推送")
+}
+
+func TestOfflineMessageRepositoryDeleteNonExistentMessage(t *testing.T) {
+	db := getTestOfflineDB(t)
+	repo := NewGormOfflineMessageRepository(db)
+	ctx := context.Background()
+
+	// 删除不存在的消息应该不报错
+	err := repo.DeleteByMessageIDs(ctx, "non-existent-user", []string{"non-existent-id"})
+	assert.NoError(t, err)
+}
+
+func TestOfflineMessageRepositoryGetByReceiverNoResults(t *testing.T) {
+	db := getTestOfflineDB(t)
+	repo := NewGormOfflineMessageRepository(db)
+	ctx := context.Background()
+
+	// 查询不存在的用户
+	records, err := repo.GetByReceiver(ctx, "non-existent-user", 10)
+	assert.NoError(t, err)
+	assert.Len(t, records, 0)
+}
+
+func TestOfflineMessageRepositoryGetCountByReceiverZero(t *testing.T) {
+	db := getTestOfflineDB(t)
+	repo := NewGormOfflineMessageRepository(db)
+	ctx := context.Background()
+
+	// 查询不存在的用户
+	count, err := repo.GetCountByReceiver(ctx, "non-existent-user")
+	assert.NoError(t, err)
+	assert.Equal(t, int64(0), count)
+}
+
+func TestOfflineMessageRepositoryClearNonExistentUser(t *testing.T) {
+	db := getTestOfflineDB(t)
+	repo := NewGormOfflineMessageRepository(db)
+	ctx := context.Background()
+
+	// 清空不存在的用户应该不报错
+	err := repo.ClearByReceiver(ctx, "non-existent-user")
+	assert.NoError(t, err)
+}
+
+func TestOfflineMessageRepositoryBatchMarkAsPushed(t *testing.T) {
+	db := getTestOfflineDB(t)
+	repo := NewGormOfflineMessageRepository(db)
+	ctx := context.Background()
+
+	userID := "user-016"
+	sessionID := "session-016"
+
+	// 创建5条消息
+	messageIDs := make([]string, 5)
+	for i := 0; i < 5; i++ {
+		messageIDs[i] = osx.HashUnixMicroCipherText()
+	}
+
+	// 清理测试数据
+	defer func() {
+		_ = repo.DeleteByMessageIDs(ctx, userID, messageIDs)
+	}()
+
+	// 保存测试记录
+	for _, msgID := range messageIDs {
+		record := createTestOfflineMessageRecord(msgID, userID, sessionID)
+		err := repo.Save(ctx, record)
+		require.NoError(t, err)
+	}
+
+	// 批量标记前3条为已推送
+	err := repo.MarkAsPushed(ctx, messageIDs[:3])
+	assert.NoError(t, err)
+
+	// 验证：只有2条未推送的消息
+	records, err := repo.GetByReceiver(ctx, userID, 10)
+	assert.NoError(t, err)
+	assert.Len(t, records, 2, "应该有2条未推送的消息")
+
+	// 验证未推送的消息ID
+	unpushedIDs := []string{records[0].MessageID, records[1].MessageID}
+	assert.Contains(t, unpushedIDs, messageIDs[3])
+	assert.Contains(t, unpushedIDs, messageIDs[4])
 }

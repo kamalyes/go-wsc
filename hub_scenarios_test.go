@@ -252,7 +252,6 @@ func testConcurrentScenarios(t *testing.T, hub *Hub) {
 							MessageType: MessageTypeText,
 							Content:     fmt.Sprintf("并发消息-%d", index),
 							CreateAt:    time.Now(),
-							Status:      MessageStatusSent,
 						}
 						hub.sendToUser(context.Background(), receiver.UserID, msg)
 					}(j)
@@ -340,7 +339,6 @@ func testRoutingScenarios(t *testing.T, hub *Hub) {
 					MessageType: MessageTypeText,
 					Content:     fmt.Sprintf("点对点消息-%d", i),
 					CreateAt:    time.Now(),
-					Status:      MessageStatusSent,
 				}
 
 				err := hub.sendToUser(context.Background(), receiver.UserID, msg)
@@ -369,7 +367,6 @@ func testRoutingScenarios(t *testing.T, hub *Hub) {
 					MessageType: MessageTypeText,
 					Content:     fmt.Sprintf("广播消息-%d", i),
 					CreateAt:    time.Now(),
-					Status:      MessageStatusSent,
 				}
 
 				hub.Broadcast(context.Background(), msg)
@@ -406,7 +403,6 @@ func testEdgeCaseScenarios(t *testing.T, hub *Hub) {
 					MessageType: MessageTypeText,
 					Content:     "",
 					CreateAt:    time.Now(),
-					Status:      MessageStatusSent,
 				}
 
 				err := hub.sendToUser(context.Background(), receiver.UserID, msg)
@@ -419,7 +415,6 @@ func testEdgeCaseScenarios(t *testing.T, hub *Hub) {
 					MessageType: MessageTypeText,
 					Content:     "测试消息",
 					CreateAt:    time.Now(),
-					Status:      MessageStatusSent,
 				}
 
 				err := hub.sendToUser(context.Background(), fmt.Sprintf("nonexistent-%d", i), msg)
@@ -486,7 +481,6 @@ func testEdgeCaseScenarios(t *testing.T, hub *Hub) {
 					MessageType: MessageTypeText,
 					Content:     string(largeContent),
 					CreateAt:    time.Now(),
-					Status:      MessageStatusSent,
 				}
 
 				err := hub.sendToUser(context.Background(), receiver.UserID, msg)

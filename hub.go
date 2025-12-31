@@ -343,8 +343,8 @@ func NewHub(config *wscconfig.WSC) *Hub {
 				return &b
 			},
 		},
-		heartbeatInterval: time.Duration(config.HeartbeatInterval) * time.Second,
-		heartbeatTimeout:  time.Duration(config.ClientTimeout) * time.Second,
+		heartbeatInterval: config.HeartbeatInterval,
+		heartbeatTimeout:  config.ClientTimeout,
 	}
 	return hub
 }
@@ -390,15 +390,15 @@ func (h *Hub) Run() {
 		close(h.startCh)
 	}
 
-	ticker := time.NewTicker(time.Duration(h.config.HeartbeatInterval) * time.Second)
+	ticker := time.NewTicker(h.config.HeartbeatInterval)
 	defer ticker.Stop()
 
-	// 性能监控定时器 - 每5分钟报告一次
-	perfTicker := time.NewTicker(5 * time.Minute)
+	// 性能监控定时器
+	perfTicker := time.NewTicker(h.config.PerformanceMetricsInterval)
 	defer perfTicker.Stop()
 
-	// ACK 过期清理定时器 - 每1分钟清理一次
-	ackCleanupTicker := time.NewTicker(1 * time.Minute)
+	// ACK 过期清理定时器
+	ackCleanupTicker := time.NewTicker(h.config.AckCleanupInterval)
 	defer ackCleanupTicker.Stop()
 
 	// 启动待发送消息处理goroutine
@@ -2380,7 +2380,7 @@ func (h *Hub) checkSSETimeout(now time.Time) int {
 	defer h.sseMutex.Unlock()
 
 	timeoutCount := 0
-	sseTimeout := time.Duration(h.config.SSETimeout) * time.Second
+	sseTimeout := h.config.SSETimeout
 
 	for userID, conn := range h.sseClients {
 		if now.Sub(conn.LastActive) > sseTimeout {

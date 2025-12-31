@@ -1571,7 +1571,7 @@ func (h *Hub) syncOnlineStatus(client *Client) {
 		Metadata:      client.Metadata,
 	}
 
-	if err := h.onlineStatusRepo.SetOnline(ctx, client.UserID, onlineInfo, 0); err != nil {
+	if err := h.onlineStatusRepo.SetOnline(ctx, client.UserID, onlineInfo); err != nil {
 		h.logger.ErrorKV("同步在线状态到Redis失败",
 			"user_id", client.UserID,
 			"error", err,
@@ -3898,7 +3898,7 @@ func (h *Hub) SyncOnlineStatusToRedis() error {
 		}
 	}
 
-	return h.onlineStatusRepo.BatchSetOnline(ctx, users, 0)
+	return h.onlineStatusRepo.BatchSetOnline(ctx, users)
 }
 
 // recordMessageToDatabase 将消息记录到数据库（内部方法）

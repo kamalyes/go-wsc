@@ -40,7 +40,7 @@ type OnlineClientInfo struct {
 // OnlineStatusRepository 在线状态仓库接口
 type OnlineStatusRepository interface {
 	// SetOnline 设置用户在线
-	SetOnline(ctx context.Context, userID string, info *OnlineClientInfo, ttl time.Duration) error
+	SetOnline(ctx context.Context, userID string, info *OnlineClientInfo) error
 
 	// SetOffline 设置用户离线
 	SetOffline(ctx context.Context, userID string) error
@@ -64,7 +64,7 @@ type OnlineStatusRepository interface {
 	UpdateHeartbeat(ctx context.Context, userID string) error
 
 	// BatchSetOnline 批量设置用户在线
-	BatchSetOnline(ctx context.Context, users map[string]*OnlineClientInfo, ttl time.Duration) error
+	BatchSetOnline(ctx context.Context, users map[string]*OnlineClientInfo) error
 
 	// BatchSetOffline 批量设置用户离线
 	BatchSetOffline(ctx context.Context, userIDs []string) error
@@ -78,9 +78,9 @@ type OnlineStatusRepository interface {
 
 // RedisOnlineStatusRepository Redis 实现
 type RedisOnlineStatusRepository struct {
-	client     *redis.Client
-	keyPrefix  string        // key 前缀
-	defaultTTL time.Duration // 默认过期时间
+	client    *redis.Client
+	keyPrefix string        // key 前缀
+	ttl       time.Duration // 默认过期时间
 }
 
 // NewRedisOnlineStatusRepository 创建 Redis 在线状态仓库
@@ -89,9 +89,9 @@ type RedisOnlineStatusRepository struct {
 //   - config: 在线状态配置对象
 func NewRedisOnlineStatusRepository(client *redis.Client, config *wscconfig.OnlineStatus) OnlineStatusRepository {
 	return &RedisOnlineStatusRepository{
-		client:     client,
-		keyPrefix:  mathx.IF(config.KeyPrefix == "", "wsc:online:", config.KeyPrefix),
-		defaultTTL: mathx.IF(config.TTL == 0, 5*time.Minute, config.TTL),
+		client:    client,
+		keyPrefix: mathx.IF(config.KeyPrefix == "", "wsc:online:", config.KeyPrefix),
+		ttl:       mathx.IF(config.TTL == 0, 5*time.Minute, config.TTL),
 	}
 }
 
@@ -116,10 +116,7 @@ func (r *RedisOnlineStatusRepository) GetAllUsersSetKey() string {
 }
 
 // SetOnline 设置用户在线
-func (r *RedisOnlineStatusRepository) SetOnline(ctx context.Context, userID string, info *OnlineClientInfo, ttl time.Duration) error {
-	if ttl == 0 {
-		ttl = r.defaultTTL
-	}
+func (r *RedisOnlineStatusRepository) SetOnline(ctx context.Context, userID string, info *OnlineClientInfo) error {
 
 	// 序列化用户信息
 	data, err := json.Marshal(info)
@@ -131,21 +128,18 @@ func (r *RedisOnlineStatusRepository) SetOnline(ctx context.Context, userID stri
 	pipe := r.client.Pipeline()
 
 	// 1. 设置用户在线信息
-	pipe.Set(ctx, r.GetUserKey(userID), data, ttl)
+	pipe.Set(ctx, r.GetUserKey(userID), data, r.ttl)
 
 	// 2. 添加到全局在线用户集合
 	pipe.SAdd(ctx, r.GetAllUsersSetKey(), userID)
-	pipe.Expire(ctx, r.GetAllUsersSetKey(), ttl)
 
 	// 3. 添加到节点在线用户集合
 	if info.NodeID != "" {
 		pipe.SAdd(ctx, r.GetNodeSetKey(info.NodeID), userID)
-		pipe.Expire(ctx, r.GetNodeSetKey(info.NodeID), ttl)
 	}
 
 	// 4. 添加到用户类型集合
 	pipe.SAdd(ctx, r.GetUserTypeSetKey(info.UserType), userID)
-	pipe.Expire(ctx, r.GetUserTypeSetKey(info.UserType), ttl)
 
 	_, err = pipe.Exec(ctx)
 	return err
@@ -233,15 +227,11 @@ func (r *RedisOnlineStatusRepository) UpdateHeartbeat(ctx context.Context, userI
 	info.LastSeen = time.Now()
 
 	// 重新设置（会刷新 TTL）
-	return r.SetOnline(ctx, userID, info, r.defaultTTL)
+	return r.SetOnline(ctx, userID, info)
 }
 
 // BatchSetOnline 批量设置用户在线
-func (r *RedisOnlineStatusRepository) BatchSetOnline(ctx context.Context, users map[string]*OnlineClientInfo, ttl time.Duration) error {
-	if ttl == 0 {
-		ttl = r.defaultTTL
-	}
-
+func (r *RedisOnlineStatusRepository) BatchSetOnline(ctx context.Context, users map[string]*OnlineClientInfo) error {
 	pipe := r.client.Pipeline()
 
 	for userID, info := range users {
@@ -250,7 +240,7 @@ func (r *RedisOnlineStatusRepository) BatchSetOnline(ctx context.Context, users 
 			return fmt.Errorf("failed to marshal online info for user %s: %w", userID, err)
 		}
 
-		pipe.Set(ctx, r.GetUserKey(userID), data, ttl)
+		pipe.Set(ctx, r.GetUserKey(userID), data, r.ttl)
 		pipe.SAdd(ctx, r.GetAllUsersSetKey(), userID)
 
 		if info.NodeID != "" {
@@ -260,8 +250,7 @@ func (r *RedisOnlineStatusRepository) BatchSetOnline(ctx context.Context, users 
 		pipe.SAdd(ctx, r.GetUserTypeSetKey(info.UserType), userID)
 	}
 
-	// 设置集合过期时间
-	pipe.Expire(ctx, r.GetAllUsersSetKey(), ttl)
+	// 注意：不对共享集合设置过期时间，集合成员通过定期清理维护
 
 	_, err := pipe.Exec(ctx)
 	return err
@@ -308,6 +297,8 @@ func (r *RedisOnlineStatusRepository) CleanupExpired(ctx context.Context) (int64
 
 	pipe := r.client.Pipeline()
 	var toRemove []string
+	userTypeMap := make(map[UserType][]string) // 记录需要从各类型集合中移除的用户
+	nodeMap := make(map[string][]string)       // 记录需要从各节点集合中移除的用户
 
 	// 检查每个用户是否真的在线
 	for _, userID := range allUsers {
@@ -317,8 +308,33 @@ func (r *RedisOnlineStatusRepository) CleanupExpired(ctx context.Context) (int64
 		}
 		if exists == 0 {
 			// 用户信息已过期，但还在集合中
+			// 先获取用户信息，确定需要从哪些集合中移除
+			info, _ := r.GetOnlineInfo(ctx, userID)
+
 			toRemove = append(toRemove, userID)
 			pipe.SRem(ctx, r.GetAllUsersSetKey(), userID)
+
+			// 如果能获取到用户信息，从对应的类型和节点集合中移除
+			if info != nil {
+				userTypeMap[info.UserType] = append(userTypeMap[info.UserType], userID)
+				if info.NodeID != "" {
+					nodeMap[info.NodeID] = append(nodeMap[info.NodeID], userID)
+				}
+			}
+		}
+	}
+
+	// 从用户类型集合中移除过期用户
+	for userType, users := range userTypeMap {
+		for _, userID := range users {
+			pipe.SRem(ctx, r.GetUserTypeSetKey(userType), userID)
+		}
+	}
+
+	// 从节点集合中移除过期用户
+	for nodeID, users := range nodeMap {
+		for _, userID := range users {
+			pipe.SRem(ctx, r.GetNodeSetKey(nodeID), userID)
 		}
 	}
 

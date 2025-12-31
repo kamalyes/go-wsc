@@ -67,16 +67,15 @@ func TestHubWithRedisAndMySQL(t *testing.T) {
 	messageRecordRepo := NewMessageRecordRepository(db)
 
 	// 4. 创建 Hub 配置
-	config := &wscconfig.WSC{
-		NodeIP:            "127.0.0.1",
-		NodePort:          8080,
-		MessageBufferSize: 256,
-		HeartbeatInterval: 30,
-		AckTimeout:        500,
-		AckMaxRetries:     3,
-		MaxRetries:        3,
-		BaseDelay:         100,
-	}
+	config := wscconfig.Default().
+		WithNodeInfo("127.0.0.1", 8080).
+		WithMessageBufferSize(256).
+		WithHeartbeatInterval(30 * time.Second).
+		WithAckTimeout(500 * time.Millisecond).
+		WithAckMaxRetries(3).
+		WithRetryPolicy(wscconfig.DefaultRetryPolicy().
+			WithMaxRetries(3).
+			WithDelay(100*time.Millisecond, 5*time.Second))
 
 	// 5. 创建 Hub 并设置仓库
 	hub := NewHub(config)

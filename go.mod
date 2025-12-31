@@ -5,10 +5,10 @@ go 1.24.0
 require (
 	github.com/gorilla/websocket v1.4.2
 	github.com/jpillora/backoff v1.0.0
-	github.com/kamalyes/go-config v0.12.14-0.20251219082246-a83b076b88a4
+	github.com/kamalyes/go-config v0.12.14-0.20251231015325-cddd937aeb57
 	github.com/kamalyes/go-logger v0.4.6-0.20251220131326-ff4bf447209b
 	github.com/kamalyes/go-sqlbuilder v0.3.6-0.20251216095122-d53c45afd826
-	github.com/kamalyes/go-toolbox v0.11.87-0.20251220131055-a848b26b8f42
+	github.com/kamalyes/go-toolbox v0.11.87-0.20251230083658-c9ec29f53a4b
 	github.com/redis/go-redis/v9 v9.17.2
 	github.com/stretchr/testify v1.11.1
 	gorm.io/driver/mysql v1.6.0
@@ -27,7 +27,7 @@ require (
 	github.com/gabriel-vasile/mimetype v1.4.12 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect
-	github.com/go-playground/validator/v10 v10.29.0 // indirect
+	github.com/go-playground/validator/v10 v10.30.1 // indirect
 	github.com/go-sql-driver/mysql v1.8.1 // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect
@@ -44,7 +44,7 @@ require (
 	golang.org/x/crypto v0.46.0 // indirect
 	golang.org/x/sys v0.39.0 // indirect
 	golang.org/x/text v0.32.0 // indirect
-	google.golang.org/grpc v1.77.0 // indirect
+	google.golang.org/grpc v1.78.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

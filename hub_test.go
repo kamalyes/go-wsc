@@ -1436,12 +1436,6 @@ func TestHubExtendedAPI(t *testing.T) {
 		hub.Unregister(client)
 	})
 
-	t.Run("GetAllConnectionsInfo", func(t *testing.T) {
-		infos := hub.GetAllConnectionsInfo()
-		assert.NotNil(t, infos)
-		assert.IsType(t, []map[string]interface{}{}, infos)
-	})
-
 	t.Run("FilterClients", func(t *testing.T) {
 		// 创建一些测试客户端
 		for i := 0; i < 5; i++ {
@@ -2766,7 +2760,7 @@ func TestHubGetConnectionInfo(t *testing.T) {
 		assert.Contains(t, info, "client_id")
 		assert.Contains(t, info, "user_id")
 		assert.Contains(t, info, "status")
-		assert.Equal(t, clientID, info["client_id"])
+		assert.Equal(t, clientID, info.ID)
 	})
 
 	t.Run("GetConnectionInfo-InvalidClient", func(t *testing.T) {

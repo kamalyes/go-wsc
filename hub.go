@@ -703,7 +703,7 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 // SendToUserWithRetry 带重试机制的发送消息给指定用户
 func (h *Hub) SendToUserWithRetry(ctx context.Context, toUserID string, msg *HubMessage) *SendResult {
 	result := &SendResult{
-		Attempts: make([]SendAttempt, 0, h.config.MaxRetries+1),
+		Attempts: make([]SendAttempt, 0, h.config.RetryPolicy.MaxRetries+1),
 	}
 
 	startTime := time.Now()
@@ -745,9 +745,13 @@ func (h *Hub) SendToUserWithRetry(ctx context.Context, toUserID string, msg *Hub
 	// 用户在线 - 执行发送逻辑
 	// 创建 go-toolbox retry 实例用于延迟计算和条件判断
 	retryInstance := retry.NewRetryWithCtx(ctx).
-		SetAttemptCount(h.config.MaxRetries + 1). // +1 因为第一次不是重试
-		SetInterval(h.config.BaseDelay).
-		SetConditionFunc(h.isRetryableError)
+		SetAttemptCount(h.config.RetryPolicy.MaxRetries + 1).     // +1 因为第一次不是重试
+		SetInterval(h.config.RetryPolicy.BaseDelay).              // 基础延迟
+		SetMaxInterval(h.config.RetryPolicy.MaxDelay).            // 最大延迟
+		SetBackoffMultiplier(h.config.RetryPolicy.BackoffFactor). // 退避倍数
+		SetJitter(h.config.RetryPolicy.Jitter).                   // 是否启用抖动
+		SetJitterPercent(h.config.RetryPolicy.JitterPercent).     // 抖动百分比
+		SetConditionFunc(h.isRetryableError)                      // 重试条件判断
 
 	// 执行带详细记录的重试逻辑
 	finalErr := retryInstance.Do(func() error {
@@ -1450,7 +1454,23 @@ func (h *Hub) closeExistingConnection(userID string) {
 	if existingClient, exists := h.userToClient[userID]; exists {
 		h.logger.InfoKV("断开旧连接", "client_id", existingClient.ID, "user_id", existingClient.UserID)
 
-		// 先调用断开回调（因为是被新连接踢下线）
+		// 1. 发送强制下线通知给旧连接
+		if existingClient.Conn != nil {
+			forceOfflineMsg := NewHubMessage().
+				SetMessageType(MessageTypeForceOffline).
+				SetSender(UserTypeSystem.String()).
+				SetSenderType(UserTypeSystem).
+				SetReceiver(existingClient.UserID).
+				SetReceiverType(existingClient.UserType).
+				SetContent("您的账号在其他设备登录，当前连接将被断开")
+
+			// 同步发送通知（确保在断开前送达）
+			h.sendToClient(existingClient, forceOfflineMsg)
+			// 等待消息发送完成
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		// 2. 调用断开回调（因为是被新连接踢下线）
 		if h.clientDisconnectCallback != nil {
 			go func(client *Client) {
 				ctx := context.Background()
@@ -1467,9 +1487,10 @@ func (h *Hub) closeExistingConnection(userID string) {
 			}(existingClient)
 		}
 
-		// 更新连接断开记录
+		// 3. 更新连接断开记录
 		h.updateConnectionOnDisconnect(existingClient, DisconnectReasonForceOffline)
 
+		// 4. 关闭连接并移除客户端
 		if existingClient.Conn != nil {
 			existingClient.Conn.Close()
 		}
@@ -2064,10 +2085,8 @@ func (h *Hub) handleBinaryMessage(client *Client, data []byte) {
 		Content:     string(data),
 		MessageType: MessageTypeBinary,
 		CreateAt:    time.Now(),
-		Data: map[string]interface{}{
-			"binary_length": len(data),
-		},
 	}
+	msg.WithContentExtra("binary_length", len(data))
 
 	// 调用消息接收回调
 	if err := h.InvokeMessageReceivedCallback(ctx, client, msg); err != nil {
@@ -2878,21 +2897,19 @@ func (h *Hub) createKickNotification(userID, reason, notificationMsg string, kic
 		kickMessage = fmt.Sprintf("您已被系统踢出，原因：%s", reason)
 	}
 
-	return &HubMessage{
+	msg := &HubMessage{
 		ID:          fmt.Sprintf("kick_%s_%d", userID, time.Now().UnixNano()),
-		MessageType: MessageTypeSystem,
+		MessageType: MessageTypeKickOut,
 		Sender:      UserTypeSystem.String(),
 		SenderType:  UserTypeSystem,
 		Receiver:    userID,
 		Content:     kickMessage,
 		CreateAt:    time.Now(),
 		Priority:    PriorityHigh,
-		Data: map[string]interface{}{
-			"kick_reason": reason,
-			"kicked_at":   kickedAt,
-			"action":      "kicked",
-		},
 	}
+	msg.WithContentExtra("kick_reason", reason)
+	msg.WithContentExtra("kicked_at", kickedAt)
+	return msg
 }
 
 // sendKickNotificationToClients 向客户端发送踢出通知
@@ -3077,6 +3094,19 @@ func (h *Hub) LimitUserConnections(userID string, maxConnections int) int {
 	for i := 0; i < len(clients)-maxConnections; i++ {
 		h.logger.WarnKV("连接数限制踢下线", "client_id", clients[i].ID, "user_id", userID, "kicked_index", i)
 		if clients[i].Conn != nil {
+			// 发送强制下线通知
+			forceOfflineMsg := NewHubMessage().
+				SetMessageType(MessageTypeForceOffline).
+				SetSender("system").
+				SetSenderType(UserTypeSystem).
+				SetReceiver(clients[i].UserID).
+				SetReceiverType(clients[i].UserType).
+				SetContent("连接数超限，旧连接已被断开")
+
+			h.sendToClient(clients[i], forceOfflineMsg)
+			// 等待消息发送完成
+			time.Sleep(100 * time.Millisecond)
+
 			clients[i].Conn.Close()
 			kicked++
 		}
@@ -3130,7 +3160,7 @@ func (h *Hub) GetClientsByClientType(clientType ClientType) []*Client {
 }
 
 // GetConnectionInfo 获取连接详细信息
-func (h *Hub) GetConnectionInfo(clientID string) map[string]interface{} {
+func (h *Hub) GetConnectionInfo(clientID string) *Client {
 	h.mutex.RLock()
 	client, exists := h.clients[clientID]
 	h.mutex.RUnlock()
@@ -3139,30 +3169,7 @@ func (h *Hub) GetConnectionInfo(clientID string) map[string]interface{} {
 		return nil
 	}
 
-	return map[string]interface{}{
-		"client_id":   client.ID,
-		"user_id":     client.UserID,
-		"user_type":   client.UserType.String(),
-		"role":        client.Role.String(),
-		"status":      client.Status.String(),
-		"department":  client.Department.String(),
-		"client_type": client.ClientType.String(),
-		"last_seen":   client.LastSeen,
-		"node_id":     client.NodeID,
-		"max_tickets": client.MaxTickets,
-	}
-}
-
-// GetAllConnectionsInfo 获取所有连接详细信息
-func (h *Hub) GetAllConnectionsInfo() []map[string]interface{} {
-	// 获取所有客户端副本
-	clients := h.GetClientsCopy()
-
-	infos := make([]map[string]interface{}, 0)
-	for _, client := range clients {
-		infos = append(infos, h.GetConnectionInfo(client.ID))
-	}
-	return infos
+	return client
 }
 
 // SendWithCallback 发送消息并注册回调（用于处理ACK或超时）
@@ -3217,7 +3224,7 @@ func (h *Hub) GetClientStats(clientID string) map[string]interface{} {
 
 	return map[string]interface{}{
 		"connection_info":     info,
-		"connection_duration": time.Since(info["last_seen"].(time.Time)),
+		"connection_duration": time.Since(info.LastSeen),
 	}
 }
 
@@ -3241,7 +3248,11 @@ func (h *Hub) SendToClientsWithRetry(ctx context.Context, clients []*Client, msg
 	for _, client := range clients {
 		retryInstance := retry.NewRetryWithCtx(ctx).
 			SetAttemptCount(maxRetry).
-			SetInterval(h.config.BaseDelay).
+			SetInterval(h.config.RetryPolicy.BaseDelay).
+			SetMaxInterval(h.config.RetryPolicy.MaxDelay).
+			SetBackoffMultiplier(h.config.RetryPolicy.BackoffFactor).
+			SetJitter(h.config.RetryPolicy.Jitter).
+			SetJitterPercent(h.config.RetryPolicy.JitterPercent).
 			SetConditionFunc(h.isRetryableError)
 
 		err := retryInstance.Do(func() error {
@@ -3943,7 +3954,7 @@ func (h *Hub) recordMessageToDatabase(msg *HubMessage, err error) {
 			FirstSendTime: &now, // 首次发送时间
 			LastSendTime:  &now, // 最后发送时间
 			RetryCount:    0,    // 初始重试次数为0
-			MaxRetry:      h.config.MaxRetries,
+			MaxRetry:      h.config.RetryPolicy.MaxRetries,
 			FailureReason: failureReason,
 			ErrorMessage:  errorMsg,
 			NodeIP:        h.config.NodeIP, // 记录服务器节点IP
@@ -4431,8 +4442,12 @@ func (h *Hub) pushOfflineMessagesOnConnect(client *Client) {
 				// 使用 go-toolbox retry 进行重试
 				var lastErr error
 				retryInstance := retry.NewRetryWithCtx(ctx).
-					SetAttemptCount(h.config.MaxRetries + 1).
-					SetInterval(h.config.BaseDelay).
+					SetAttemptCount(h.config.RetryPolicy.MaxRetries + 1).
+					SetInterval(h.config.RetryPolicy.BaseDelay).
+					SetMaxInterval(h.config.RetryPolicy.MaxDelay).
+					SetBackoffMultiplier(h.config.RetryPolicy.BackoffFactor).
+					SetJitter(h.config.RetryPolicy.Jitter).
+					SetJitterPercent(h.config.RetryPolicy.JitterPercent).
 					SetConditionFunc(h.isRetryableError)
 
 				err := retryInstance.Do(func() error {

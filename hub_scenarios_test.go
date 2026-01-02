@@ -18,13 +18,14 @@ import (
 	"testing"
 	"time"
 
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/stretchr/testify/assert"
 )
 
 // TestHub200Scenarios 200个场景的综合测试
 func TestHub200Scenarios(t *testing.T) {
 	// 禁用欢迎消息以避免干扰测试
-	hub := NewHub(nil)
+	hub := NewHub(wscconfig.Default())
 	go hub.Run()
 	defer hub.Shutdown()
 
@@ -253,7 +254,7 @@ func testConcurrentScenarios(t *testing.T, hub *Hub) {
 							Content:     fmt.Sprintf("并发消息-%d", index),
 							CreateAt:    time.Now(),
 						}
-						hub.sendToUser(context.Background(), receiver.UserID, msg)
+						hub.SendToUserWithRetry(context.Background(), receiver.UserID, msg)
 					}(j)
 				}
 				wg.Wait()
@@ -341,9 +342,8 @@ func testRoutingScenarios(t *testing.T, hub *Hub) {
 					CreateAt:    time.Now(),
 				}
 
-				err := hub.sendToUser(context.Background(), receiver.UserID, msg)
-				assert.NoError(t, err, "场景%d: 发送消息应成功", i)
-
+				result := hub.SendToUserWithRetry(context.Background(), receiver.UserID, msg)
+				assert.NoError(t, result.FinalError, "场景%d: 发送消息应成功", i)
 				hub.Unregister(sender)
 				hub.Unregister(receiver)
 
@@ -405,9 +405,8 @@ func testEdgeCaseScenarios(t *testing.T, hub *Hub) {
 					CreateAt:    time.Now(),
 				}
 
-				err := hub.sendToUser(context.Background(), receiver.UserID, msg)
-				assert.NoError(t, err, "场景%d: 空消息应能发送", i)
-
+				result := hub.SendToUserWithRetry(context.Background(), receiver.UserID, msg)
+				assert.NoError(t, result.FinalError, "场景%d: 空消息应能发送", i)
 				hub.Unregister(receiver)
 
 			case i <= 170: // 场景161-170: 不存在的用户
@@ -417,9 +416,8 @@ func testEdgeCaseScenarios(t *testing.T, hub *Hub) {
 					CreateAt:    time.Now(),
 				}
 
-				err := hub.sendToUser(context.Background(), fmt.Sprintf("nonexistent-%d", i), msg)
-				assert.NoError(t, err, "场景%d: 向不存在用户发送应返回错误或静默处理", i)
-
+				result := hub.SendToUserWithRetry(context.Background(), fmt.Sprintf("nonexistent-%d", i), msg)
+				assert.Error(t, result.FinalError, "场景%d: 向不存在用户发送应返回错误", i)
 			case i <= 180: // 场景171-180: 重复注册相同用户
 				userID := fmt.Sprintf("duplicate-user-%d", i)
 
@@ -483,8 +481,8 @@ func testEdgeCaseScenarios(t *testing.T, hub *Hub) {
 					CreateAt:    time.Now(),
 				}
 
-				err := hub.sendToUser(context.Background(), receiver.UserID, msg)
-				assert.NoError(t, err, "场景%d: 大消息应能发送", i)
+				result := hub.SendToUserWithRetry(context.Background(), receiver.UserID, msg)
+				assert.NoError(t, result.FinalError, "场景%d: 大消息应能发送", i)
 
 				hub.Unregister(receiver)
 

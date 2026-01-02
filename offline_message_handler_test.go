@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-12-20 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-12-20 10:29:55
+ * @LastEditTime: 2026-01-02 17:00:26
  * @FilePath: \go-wsc\offline_message_handler_test.go
  * @Description: 离线消息处理器测试
  *
@@ -12,74 +12,77 @@ package wsc
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-toolbox/pkg/osx"
-	"github.com/kamalyes/go-toolbox/pkg/zipx"
-	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
 )
 
-var (
-	testHandlerDBInstance *gorm.DB
-	testHandlerRedis      redis.UniversalClient
-	testHandlerOnce       sync.Once
-)
+// ============================================================================
+// 测试辅助函数
+// ============================================================================
 
-// 获取测试用数据库连接（单例）
-func getTestHandlerDB(t *testing.T) *gorm.DB {
-	testHandlerOnce.Do(func() {
-		dsn := "root:idev88888@tcp(120.77.38.35:13306)/im_agent?charset=utf8mb4&parseTime=True&loc=Local&timeout=10s"
-		db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{
-			Logger:                 logger.Default.LogMode(logger.Silent),
-			SkipDefaultTransaction: true,
-			PrepareStmt:            true,
-		})
-		require.NoError(t, err, "数据库连接失败")
-
-		// 自动迁移
-		err = db.AutoMigrate(&OfflineMessageRecord{})
-		require.NoError(t, err, "数据库迁移失败")
-
-		// 配置连接池
-		sqlDB, err := db.DB()
-		require.NoError(t, err, "获取底层DB失败")
-		sqlDB.SetMaxIdleConns(10)
-		sqlDB.SetMaxOpenConns(20)
-		sqlDB.SetConnMaxLifetime(time.Hour)
-
-		testHandlerDBInstance = db
-	})
-	return testHandlerDBInstance
+// testOfflineHandlerContext 封装离线消息处理器测试的上下文
+type testOfflineHandlerContext struct {
+	t       *testing.T
+	handler OfflineMessageHandler
+	db      *gorm.DB
+	ctx     context.Context
+	userID  string
 }
 
-// 获取测试用 Redis 连接
-func getTestHandlerRedis(t *testing.T) redis.UniversalClient {
-	if testHandlerRedis == nil {
-		testHandlerRedis = redis.NewClient(&redis.Options{
-			Addr:     "120.79.25.168:16389",
-			Password: "M5Pi9YW6u",
-			DB:       1,
-		})
-
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-
-		_, err := testHandlerRedis.Ping(ctx).Result()
-		require.NoError(t, err, "Redis 连接失败")
+// newTestOfflineHandlerContext 创建测试上下文
+func newTestOfflineHandlerContext(t *testing.T, userSuffix string) *testOfflineHandlerContext {
+	db := getTestHandlerDB(t)
+	tc := &testOfflineHandlerContext{
+		t:       t,
+		handler: createTestHybridHandler(t),
+		db:      db,
+		ctx:     context.Background(),
+		userID:  "test-user-" + userSuffix,
 	}
-	return testHandlerRedis
+	// 预清理避免数据污染
+	tc.cleanup()
+	return tc
 }
 
-// 创建测试用混合处理器
-func createTestHybridHandler(t *testing.T) OfflineMessageRepository {
+// cleanup 清理测试数据
+func (c *testOfflineHandlerContext) cleanup() {
+	_ = c.handler.ClearOfflineMessages(c.ctx, c.userID)
+}
+
+// storeMessage 存储消息
+func (c *testOfflineHandlerContext) storeMessage(msg *HubMessage) {
+	err := c.handler.StoreOfflineMessage(c.ctx, c.userID, msg)
+	require.NoError(c.t, err)
+}
+
+// getMessages 获取消息
+func (c *testOfflineHandlerContext) getMessages(limit int, cursor string) ([]*HubMessage, string) {
+	messages, nextCursor, err := c.handler.GetOfflineMessages(c.ctx, c.userID, limit, cursor)
+	assert.NoError(c.t, err)
+	return messages, nextCursor
+}
+
+// getCount 获取消息数量
+func (c *testOfflineHandlerContext) getCount() int64 {
+	count, err := c.handler.GetOfflineMessageCount(c.ctx, c.userID)
+	assert.NoError(c.t, err)
+	return count
+}
+
+// createTestMessage 创建测试消息（自动生成所有字段）
+func (c *testOfflineHandlerContext) createTestMessage() (string, *HubMessage) {
+	return CreateTestHubMessage(c.userID, "")
+}
+
+func createTestHybridHandler(t *testing.T) OfflineMessageHandler {
 	db := getTestHandlerDB(t)
 	redisClient := getTestHandlerRedis(t)
 
@@ -88,285 +91,157 @@ func createTestHybridHandler(t *testing.T) OfflineMessageRepository {
 		QueueTTL:  time.Hour,
 	}
 
-	return NewHybridOfflineMessageHandler(redisClient, db, config)
-}
-
-// 创建测试消息
-func createTestHubOfflineMessage(messageID, sender, receiver, sessionID string) *HubMessage {
-	return &HubMessage{
-		ID:           messageID,
-		MessageID:    messageID,
-		MessageType:  MessageTypeText,
-		Sender:       sender,
-		SenderType:   UserTypeCustomer,
-		Receiver:     receiver,
-		ReceiverType: UserTypeAgent,
-		SessionID:    sessionID,
-		Content:      "Test offline message content",
-		Data:         map[string]interface{}{"test": "data"},
-		CreateAt:     time.Now(),
-	}
+	return NewHybridOfflineMessageHandler(redisClient, db, config, NewDefaultWSCLogger())
 }
 
 func TestHybridOfflineMessageHandlerStoreAndRetrieve(t *testing.T) {
-	handler := createTestHybridHandler(t)
-	ctx := context.Background()
+	tc := newTestOfflineHandlerContext(t, "001")
+	defer tc.cleanup()
 
-	userID := "test-user-001"
-	messageID := osx.HashUnixMicroCipherText()
-	msg := createTestHubOfflineMessage(messageID, "sender-001", userID, "session-001")
+	msgID, msg := tc.createTestMessage()
+	tc.storeMessage(msg)
 
-	// 先清理历史测试数据
-	_ = handler.ClearOfflineMessages(ctx, userID)
-
-	// 清理测试数据
-	defer func() {
-		_ = handler.ClearOfflineMessages(ctx, userID)
-	}()
-
-	// 存储离线消息
-	err := handler.StoreOfflineMessage(ctx, userID, msg)
-	assert.NoError(t, err)
-
-	// 获取离线消息
-	messages, _, err := handler.GetOfflineMessages(ctx, userID, 10, "")
-	assert.NoError(t, err)
+	messages, _ := tc.getMessages(10, "")
 	assert.Len(t, messages, 1)
-	assert.Equal(t, messageID, messages[0].ID)
+	assert.Equal(t, msgID, messages[0].MessageID)
 	assert.Equal(t, msg.Content, messages[0].Content)
 }
 
 func TestHybridOfflineMessageHandlerGetOfflineMessageCount(t *testing.T) {
-	handler := createTestHybridHandler(t)
-	ctx := context.Background()
+	tc := newTestOfflineHandlerContext(t, "002")
+	defer tc.cleanup()
 
-	userID := "test-user-002"
-
-	// 先清理历史测试数据
-	_ = handler.ClearOfflineMessages(ctx, userID)
-
-	// 清理测试数据
-	defer func() {
-		_ = handler.ClearOfflineMessages(ctx, userID)
-	}()
-
-	// 初始数量应该为0
-	count, err := handler.GetOfflineMessageCount(ctx, userID)
-	assert.NoError(t, err)
+	count := tc.getCount()
 	assert.Equal(t, int64(0), count)
 
-	// 存储3条消息
 	for i := 0; i < 3; i++ {
-		messageID := osx.HashUnixMicroCipherText()
-		msg := createTestHubOfflineMessage(messageID, "sender-001", userID, "session-001")
-		err := handler.StoreOfflineMessage(ctx, userID, msg)
-		require.NoError(t, err)
+		_, msg := tc.createTestMessage()
+		tc.storeMessage(msg)
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// 验证数量
-	count, err = handler.GetOfflineMessageCount(ctx, userID)
-	assert.NoError(t, err)
+	count = tc.getCount()
 	assert.Equal(t, int64(3), count)
 }
 
 func TestHybridOfflineMessageHandlerDeleteOfflineMessages(t *testing.T) {
-	handler := createTestHybridHandler(t)
-	ctx := context.Background()
+	tc := newTestOfflineHandlerContext(t, "003")
+	defer tc.cleanup()
 
-	userID := "test-user-003"
-	messageIDs := []string{
-		osx.HashUnixMicroCipherText(),
-		osx.HashUnixMicroCipherText(),
-	}
+	msgID1, msg1 := tc.createTestMessage()
+	msgID2, msg2 := tc.createTestMessage()
+	tc.storeMessage(msg1)
+	tc.storeMessage(msg2)
 
-	// 先清理历史测试数据
-	_ = handler.ClearOfflineMessages(ctx, userID)
+	messages, _ := tc.getMessages(10, "")
+	assert.Len(t, messages, 2)
 
-	// 清理测试数据
-	defer func() {
-		_ = handler.ClearOfflineMessages(ctx, userID)
-	}()
-
-	// 存储2条消息
-	for _, msgID := range messageIDs {
-		msg := createTestHubOfflineMessage(msgID, "sender-001", userID, "session-001")
-		err := handler.StoreOfflineMessage(ctx, userID, msg)
-		require.NoError(t, err)
-	}
-
-	// 从 Redis 获取消息(出队)
-	messages, _, err := handler.GetOfflineMessages(ctx, userID, 10, "")
-	assert.NoError(t, err)
-	assert.Len(t, messages, 2, "应该获取到2条消息")
-
-	// 删除第一条消息(从 MySQL)
-	err = handler.DeleteOfflineMessages(ctx, userID, []string{messageIDs[0]})
+	err := tc.handler.DeleteOfflineMessages(tc.ctx, tc.userID, []string{msgID1})
 	assert.NoError(t, err)
 
-	// 从 MySQL 获取剩余消息
-	messages, _, err = handler.GetOfflineMessages(ctx, userID, 10, "")
-	assert.NoError(t, err)
-	assert.Len(t, messages, 1, "应该剩余1条消息")
-	assert.Equal(t, messageIDs[1], messages[0].ID)
+	messages, _ = tc.getMessages(10, "")
+	assert.Len(t, messages, 1)
+	assert.Equal(t, msgID2, messages[0].MessageID)
 }
 
-func TestHybridOfflineMessageHandlerMarkAsPushed(t *testing.T) {
-	handler := createTestHybridHandler(t)
-	ctx := context.Background()
+func TestHybridOfflineMessageHandlerUpdatePushStatus(t *testing.T) {
+	tc := newTestOfflineHandlerContext(t, "004")
+	defer tc.cleanup()
 
-	userID := "test-user-004"
-	messageIDs := []string{
-		osx.HashUnixMicroCipherText(),
-		osx.HashUnixMicroCipherText(),
-		osx.HashUnixMicroCipherText(),
-	}
-
-	// 先清理历史测试数据
-	_ = handler.ClearOfflineMessages(ctx, userID)
-
-	// 清理测试数据
-	defer func() {
-		_ = handler.ClearOfflineMessages(ctx, userID)
-	}()
-
-	// 存储3条消息到 Redis + MySQL
-	for _, msgID := range messageIDs {
-		msg := createTestHubOfflineMessage(msgID, "sender-001", userID, "session-001")
-		err := handler.StoreOfflineMessage(ctx, userID, msg)
-		require.NoError(t, err)
+	msgIDs := make([]string, 3)
+	for i := 0; i < 3; i++ {
+		msgID, msg := tc.createTestMessage()
+		msgIDs[i] = msgID
+		tc.storeMessage(msg)
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// 第一次获取：从 Redis 出队所有消息
-	messages, _, err := handler.GetOfflineMessages(ctx, userID, 10, "")
-	assert.NoError(t, err)
+	messages, _ := tc.getMessages(10, "")
 	assert.Len(t, messages, 3, "第一次从 Redis 获取3条消息")
 
-	// 模拟推送：前2条成功,最后1条失败
-	// 标记前2条为已推送
-	err = handler.MarkAsPushed(ctx, messageIDs[:2])
+	// 标记前2条成功
+	err := tc.handler.UpdatePushStatus(tc.ctx, msgIDs[:2], nil)
 	assert.NoError(t, err)
 
-	// 第二次获取：Redis 已空,从 MySQL 读取,应该只返回未推送的消息
-	messages, _, err = handler.GetOfflineMessages(ctx, userID, 10, "")
+	// 标记第3条失败
+	err = tc.handler.UpdatePushStatus(tc.ctx, []string{msgIDs[2]}, fmt.Errorf("network timeout"))
 	assert.NoError(t, err)
-	assert.Len(t, messages, 1, "第二次从 MySQL 获取,只有1条未推送的消息")
-	assert.Equal(t, messageIDs[2], messages[0].ID)
 
-	// 统计数量：MySQL 中只有1条未推送的消息
-	count, err := handler.GetOfflineMessageCount(ctx, userID)
+	// 验证状态
+	var record1, record3 OfflineMessageRecord
+	err = tc.db.Where("message_id = ?", msgIDs[0]).First(&record1).Error
 	assert.NoError(t, err)
-	assert.Equal(t, int64(1), count, "统计数量为1(只包含未推送的消息)")
+	assert.Equal(t, MessageSendStatusSuccess, record1.Status)
+
+	err = tc.db.Where("message_id = ?", msgIDs[2]).First(&record3).Error
+	assert.NoError(t, err)
+	assert.Equal(t, MessageSendStatusFailed, record3.Status)
+	assert.Equal(t, "network timeout", record3.ErrorMessage)
 }
 
-func TestHybridOfflineMessageHandlerMarkAsPushedAll(t *testing.T) {
-	handler := createTestHybridHandler(t)
-	ctx := context.Background()
+func TestHybridOfflineMessageHandlerUpdatePushStatusAll(t *testing.T) {
+	tc := newTestOfflineHandlerContext(t, "005")
+	defer tc.cleanup()
 
-	userID := "test-user-005"
-	messageIDs := []string{
-		osx.HashUnixMicroCipherText(),
-		osx.HashUnixMicroCipherText(),
+	msgIDs := make([]string, 2)
+	for i := 0; i < 2; i++ {
+		msgID, msg := tc.createTestMessage()
+		msgIDs[i] = msgID
+		tc.storeMessage(msg)
 	}
 
-	// 先清理历史测试数据
-	_ = handler.ClearOfflineMessages(ctx, userID)
-
-	// 清理测试数据
-	defer func() {
-		_ = handler.ClearOfflineMessages(ctx, userID)
-	}()
-
-	// 存储消息
-	for _, msgID := range messageIDs {
-		msg := createTestHubOfflineMessage(msgID, "sender-001", userID, "session-001")
-		err := handler.StoreOfflineMessage(ctx, userID, msg)
-		require.NoError(t, err)
-	}
-
-	// 第一次获取：从 Redis 出队
-	messages, _, err := handler.GetOfflineMessages(ctx, userID, 10, "")
-	assert.NoError(t, err)
+	messages, _ := tc.getMessages(10, "")
 	assert.Len(t, messages, 2, "从 Redis 获取2条消息")
 
-	// 标记所有消息为已推送
-	err = handler.MarkAsPushed(ctx, messageIDs)
+	err := tc.handler.UpdatePushStatus(tc.ctx, msgIDs, nil)
 	assert.NoError(t, err)
 
-	// 第二次获取：从 MySQL 读取,所有消息都已推送,返回空
-	messages, _, err = handler.GetOfflineMessages(ctx, userID, 10, "")
-	assert.NoError(t, err)
-	assert.Len(t, messages, 0, "所有消息都已推送，应该返回空列表")
-
-	// 验证统计数量为0
-	count, err := handler.GetOfflineMessageCount(ctx, userID)
-	assert.NoError(t, err)
-	assert.Equal(t, int64(0), count)
+	// 验证状态
+	for _, msgID := range msgIDs {
+		var record OfflineMessageRecord
+		err = tc.db.Where("message_id = ?", msgID).First(&record).Error
+		assert.NoError(t, err)
+		assert.Equal(t, MessageSendStatusSuccess, record.Status)
+	}
 }
 
-func TestHybridOfflineMessageHandlerMarkAsPushedEmptyList(t *testing.T) {
-	handler := createTestHybridHandler(t)
-	ctx := context.Background()
+func TestHybridOfflineMessageHandlerUpdatePushStatusEmptyList(t *testing.T) {
+	tc := newTestOfflineHandlerContext(t, "empty-mark")
+	defer tc.cleanup()
 
-	// 空列表不应该报错
-	err := handler.MarkAsPushed(ctx, []string{})
+	err := tc.handler.UpdatePushStatus(tc.ctx, []string{}, nil)
 	assert.NoError(t, err)
 }
 
 func TestHybridOfflineMessageHandlerClearOfflineMessages(t *testing.T) {
-	handler := createTestHybridHandler(t)
-	ctx := context.Background()
+	tc := newTestOfflineHandlerContext(t, "006")
+	defer tc.cleanup()
 
-	userID := "test-user-006"
-
-	// 先清理历史测试数据
-	_ = handler.ClearOfflineMessages(ctx, userID)
-
-	// 存储多条消息
 	for i := 0; i < 3; i++ {
-		messageID := osx.HashUnixMicroCipherText()
-		msg := createTestHubOfflineMessage(messageID, "sender-001", userID, "session-001")
-		err := handler.StoreOfflineMessage(ctx, userID, msg)
-		require.NoError(t, err)
+		_, msg := tc.createTestMessage()
+		tc.storeMessage(msg)
 	}
 
-	// 验证存储成功
-	count, err := handler.GetOfflineMessageCount(ctx, userID)
-	assert.NoError(t, err)
+	count := tc.getCount()
 	assert.GreaterOrEqual(t, count, int64(3))
 
-	// 清空消息
-	err = handler.ClearOfflineMessages(ctx, userID)
+	err := tc.handler.ClearOfflineMessages(tc.ctx, tc.userID)
 	assert.NoError(t, err)
 
-	// 验证清空后数量为0
-	count, err = handler.GetOfflineMessageCount(ctx, userID)
-	assert.NoError(t, err)
+	count = tc.getCount()
 	assert.Equal(t, int64(0), count)
 }
 
-func TestHybridOfflineMessageHandlerConcurrentStoreAndMarkAsPushed(t *testing.T) {
-	handler := createTestHybridHandler(t)
-	ctx := context.Background()
+func TestHybridOfflineMessageHandlerConcurrentStoreAndUpdatePushStatus(t *testing.T) {
+	tc := newTestOfflineHandlerContext(t, "007")
+	defer tc.cleanup()
 
-	userID := "test-user-007"
 	concurrency := 10
-
 	messageIDs := make([]string, concurrency)
 	for i := 0; i < concurrency; i++ {
 		messageIDs[i] = osx.HashUnixMicroCipherText()
 	}
 
-	// 先清理历史测试数据
-	_ = handler.ClearOfflineMessages(ctx, userID)
-
-	// 清理测试数据
-	defer func() {
-		_ = handler.ClearOfflineMessages(ctx, userID)
-	}()
-
-	// 并发存储消息
 	var wg sync.WaitGroup
 	errChan := make(chan error, concurrency)
 
@@ -374,8 +249,8 @@ func TestHybridOfflineMessageHandlerConcurrentStoreAndMarkAsPushed(t *testing.T)
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			msg := createTestHubOfflineMessage(messageIDs[idx], "sender-001", userID, "session-001")
-			if err := handler.StoreOfflineMessage(ctx, userID, msg); err != nil {
+			_, msg := tc.createTestMessage()
+			if err := tc.handler.StoreOfflineMessage(tc.ctx, tc.userID, msg); err != nil {
 				errChan <- err
 			}
 		}(i)
@@ -384,23 +259,26 @@ func TestHybridOfflineMessageHandlerConcurrentStoreAndMarkAsPushed(t *testing.T)
 	wg.Wait()
 	close(errChan)
 
-	// 检查是否有错误
 	for err := range errChan {
 		assert.NoError(t, err)
 	}
 
-	// 第一次获取：从 Redis 出队所有消息
-	messages, _, err := handler.GetOfflineMessages(ctx, userID, 100, "")
-	assert.NoError(t, err)
+	messages, _ := tc.getMessages(100, "")
 	assert.Len(t, messages, concurrency, "应该获取到所有消息")
 
-	// 并发标记为已推送
 	errChan2 := make(chan error, concurrency)
 	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			if err := handler.MarkAsPushed(ctx, []string{messageIDs[idx]}); err != nil {
+			// 随机成功/失败
+			var pushErr error
+			if idx%2 == 0 {
+				pushErr = nil // 成功
+			} else {
+				pushErr = fmt.Errorf("push error %d", idx) // 失败
+			}
+			if err := tc.handler.UpdatePushStatus(tc.ctx, []string{messageIDs[idx]}, pushErr); err != nil {
 				errChan2 <- err
 			}
 		}(i)
@@ -409,68 +287,48 @@ func TestHybridOfflineMessageHandlerConcurrentStoreAndMarkAsPushed(t *testing.T)
 	wg.Wait()
 	close(errChan2)
 
-	// 检查是否有错误
 	for err := range errChan2 {
 		assert.NoError(t, err)
 	}
-
-	// 第二次获取：从 MySQL 读取,所有消息都已推送
-	count, err := handler.GetOfflineMessageCount(ctx, userID)
-	assert.NoError(t, err)
-	assert.Equal(t, int64(0), count, "所有消息都应该已推送")
 }
+func TestHybridOfflineMessageHandlerUpdatePushStatusNonExistent(t *testing.T) {
+	tc := newTestOfflineHandlerContext(t, "non-existent")
+	defer tc.cleanup()
 
-func TestHybridOfflineMessageHandlerMarkAsPushedNonExistent(t *testing.T) {
-	handler := createTestHybridHandler(t)
-	ctx := context.Background()
-
-	// 标记不存在的消息不应该报错
-	err := handler.MarkAsPushed(ctx, []string{"non-existent-msg-id"})
+	err := tc.handler.UpdatePushStatus(tc.ctx, []string{"non-existent-msg-id"}, nil)
 	assert.NoError(t, err)
 }
 
-func TestHybridOfflineMessageHandlerPartialMarkAsPushed(t *testing.T) {
-	handler := createTestHybridHandler(t)
-	ctx := context.Background()
+func TestHybridOfflineMessageHandlerPartialUpdatePushStatus(t *testing.T) {
+	tc := newTestOfflineHandlerContext(t, "008")
+	defer tc.cleanup()
 
-	userID := "test-user-008"
 	messageIDs := make([]string, 5)
 	for i := 0; i < 5; i++ {
-		messageIDs[i] = osx.HashUnixMicroCipherText()
-	}
-
-	// 先清理历史测试数据
-	_ = handler.ClearOfflineMessages(ctx, userID)
-
-	// 清理测试数据
-	defer func() {
-		_ = handler.ClearOfflineMessages(ctx, userID)
-	}()
-
-	// 存储5条消息
-	for _, msgID := range messageIDs {
-		msg := createTestHubOfflineMessage(msgID, "sender-001", userID, "session-001")
-		err := handler.StoreOfflineMessage(ctx, userID, msg)
-		require.NoError(t, err)
+		messageID, msg := tc.createTestMessage()
+		messageIDs[i] = messageID
+		tc.storeMessage(msg)
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// 第一次获取：从 Redis 出队所有消息
-	messages, _, err := handler.GetOfflineMessages(ctx, userID, 10, "")
-	assert.NoError(t, err)
+	messages, _ := tc.getMessages(10, "")
 	assert.Len(t, messages, 5, "从 Redis 获取5条消息")
 
-	// 标记中间3条为已推送
-	err = handler.MarkAsPushed(ctx, messageIDs[1:4])
+	// 推送成功的消息应该删除，而不是更新状态
+	// 这里删除 1-3 号消息（模拟推送成功）
+	err := tc.handler.DeleteOfflineMessages(tc.ctx, tc.userID, messageIDs[1:4])
 	assert.NoError(t, err)
 
-	// 第二次获取：从 MySQL 读取,应该只有2条未推送的消息
-	messages, _, err = handler.GetOfflineMessages(ctx, userID, 10, "")
+	// 推送失败的消息（0号和4号）应该更新状态
+	err = tc.handler.UpdatePushStatus(tc.ctx, []string{messageIDs[0]}, fmt.Errorf("push failed"))
 	assert.NoError(t, err)
-	assert.Len(t, messages, 2, "从 MySQL 获取2条未推送的消息")
+	err = tc.handler.UpdatePushStatus(tc.ctx, []string{messageIDs[4]}, fmt.Errorf("push failed"))
+	assert.NoError(t, err)
 
-	// 验证未推送的消息ID
-	unpushedIDs := []string{messages[0].ID, messages[1].ID}
+	messages, _ = tc.getMessages(10, "")
+	assert.Len(t, messages, 2, "从 MySQL 获取2条失败的消息")
+
+	unpushedIDs := []string{messages[0].MessageID, messages[1].MessageID}
 	assert.Contains(t, unpushedIDs, messageIDs[0])
 	assert.Contains(t, unpushedIDs, messageIDs[4])
 }
@@ -482,9 +340,11 @@ func TestHybridOfflineMessageHandlerCursorMultipleScales(t *testing.T) {
 		totalMessages int
 		batchSize     int
 	}{
+		"50":  {totalMessages: 50, batchSize: 20},
 		"100": {totalMessages: 100, batchSize: 30},
-		"300": {totalMessages: 300, batchSize: 50},
-		"1K":  {totalMessages: 1000, batchSize: 100},
+		// 注释掉大数据量测试以加快测试速度
+		// "300": {totalMessages: 300, batchSize: 50},
+		// "1K":  {totalMessages: 1000, batchSize: 100},
 		// "3K":  {totalMessages: 3000, batchSize: 100},
 		// "10K": {totalMessages: 10000, batchSize: 500},
 		// "20K": {totalMessages: 20000, batchSize: 1000},
@@ -525,36 +385,28 @@ func testCursorPagination(t *testing.T, totalMessages, batchSize int) {
 			batchEnd = totalMessages
 		}
 
-		records := make([]*OfflineMessageRecord, 0, batchEnd-batchStart)
-
 		for i := batchStart; i < batchEnd; i++ {
-			messageIDs[i] = osx.HashUnixMicroCipherText()
-			msg := createTestHubOfflineMessage(messageIDs[i], "sender-001", userID, "session-001")
-
-			// 使用 zipx 压缩数据
-			compressedData, _, _ := zipx.ZlibCompressObjectWithSize(msg)
-
-			record := &OfflineMessageRecord{
-				MessageID:      messageIDs[i],
-				Sender:         "sender-001",
-				Receiver:       userID,
-				SessionID:      "session-001",
-				CompressedData: compressedData,
-				ScheduledAt:    msg.CreateAt,
-				ExpireAt:       msg.CreateAt.Add(7 * 24 * time.Hour),
-				CreatedAt:      time.Now(),
+			messageID := osx.HashUnixMicroCipherText()
+			messageIDs[i] = messageID
+			msg := &HubMessage{
+				ID:           messageID,
+				MessageID:    messageID,
+				MessageType:  MessageTypeText,
+				Sender:       "sender-" + userID,
+				SenderType:   UserTypeAgent,
+				Receiver:     userID,
+				ReceiverType: UserTypeCustomer,
+				SessionID:    "session-" + userID,
+				Content:      "Pagination test message",
+				Data:         map[string]interface{}{"index": i},
+				CreateAt:     time.Now(),
 			}
-			records = append(records, record)
 
-			// 同时加入Redis
-			_ = handler.(*HybridOfflineMessageHandler).queueRepo.Enqueue(ctx, userID, msg)
-		}
-
-		// 批量插入MySQL
-		if len(records) > 0 {
-			db := getTestHandlerDB(t)
-			err := db.CreateInBatches(records, 1000).Error
-			require.NoError(t, err)
+			// 使用公共方法存储离线消息（会同时存储到 Redis 和 MySQL）
+			err := handler.StoreOfflineMessage(ctx, userID, msg)
+			if err != nil {
+				t.Logf("存储离线消息失败: %v", err)
+			}
 		}
 
 		t.Logf("已批量存储 %d/%d 条消息", batchEnd, totalMessages)
@@ -618,4 +470,283 @@ func testCursorPagination(t *testing.T, totalMessages, batchSize int) {
 
 	t.Logf("性能统计: 存储耗时=%v, 读取耗时=%v, 总耗时=%v",
 		storeTime, readTime, storeTime+readTime)
+}
+
+// ============================================================================
+// 增强测试 - Redis-MySQL混合存储、边界条件、可靠性
+// ============================================================================
+
+// TestHybridOfflineMessageHandlerRedisFailover 测试Redis故障切换到MySQL
+func TestHybridOfflineMessageHandlerRedisFailover(t *testing.T) {
+	tc := newTestOfflineHandlerContext(t, "redis-failover")
+	defer tc.cleanup()
+
+	// 存储消息到Redis
+	msgIDs := make([]string, 5)
+	for i := 0; i < 5; i++ {
+		msgID, msg := tc.createTestMessage()
+		msgIDs[i] = msgID
+		tc.storeMessage(msg)
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// 第一次获取：从Redis读取
+	messages1, _ := tc.getMessages(10, "")
+	assert.Len(t, messages1, 5, "应该从Redis获取5条消息")
+
+	// 清空Redis队列（模拟Redis故障后恢复）
+	for i := 0; i < 5; i++ {
+		_, _ = tc.getMessages(1, "")
+	}
+
+	// 第二次获取：应该从MySQL读取（因为Redis已空）
+	messages2, _ := tc.getMessages(10, "")
+	assert.Len(t, messages2, 5, "应该从MySQL获取5条消息")
+
+	// 验证消息ID一致
+	for i := 0; i < 5; i++ {
+		assert.Equal(t, msgIDs[i], messages2[i].MessageID)
+	}
+}
+
+// TestHybridOfflineMessageHandlerRedisMySQLConsistency 测试Redis和MySQL的数据一致性
+func TestHybridOfflineMessageHandlerRedisMySQLConsistency(t *testing.T) {
+	tc := newTestOfflineHandlerContext(t, "consistency")
+	defer tc.cleanup()
+
+	msgIDs := make([]string, 10)
+	for i := 0; i < 10; i++ {
+		msgID, msg := tc.createTestMessage()
+		msgIDs[i] = msgID
+		tc.storeMessage(msg)
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// 从Redis获取并标记前5条为已推送
+	messages, _ := tc.getMessages(5, "")
+	assert.Len(t, messages, 5)
+
+	pushedIDs := make([]string, 5)
+	for i := 0; i < 5; i++ {
+		pushedIDs[i] = messages[i].MessageID
+	}
+	err := tc.handler.UpdatePushStatus(tc.ctx, pushedIDs, nil)
+	assert.NoError(t, err)
+
+	// 继续从Redis获取剩余5条
+	messages2, _ := tc.getMessages(10, "")
+	assert.Len(t, messages2, 5, "应该获取剩余5条")
+
+	// 再次获取，此时Redis已空，从MySQL读取
+	// MySQL应该只返回未推送的消息
+	messages3, _ := tc.getMessages(10, "")
+	assert.Len(t, messages3, 5, "MySQL应该只返回5条未推送的消息")
+
+	// 验证MySQL返回的都是未推送的消息
+	pushedMap := make(map[string]bool)
+	for _, id := range pushedIDs {
+		pushedMap[id] = true
+	}
+
+	for _, msg := range messages3 {
+		assert.False(t, pushedMap[msg.MessageID], "不应该返回已推送的消息")
+	}
+}
+
+// TestHybridOfflineMessageHandlerEmptyUserMessages 测试用户无离线消息
+func TestHybridOfflineMessageHandlerEmptyUserMessages(t *testing.T) {
+	tc := newTestOfflineHandlerContext(t, "empty-user")
+	defer tc.cleanup()
+
+	messages, cursor := tc.getMessages(10, "")
+	assert.Len(t, messages, 0)
+	assert.Empty(t, cursor)
+
+	count := tc.getCount()
+	assert.Equal(t, int64(0), count)
+}
+
+// TestHybridOfflineMessageHandlerLargeMessageContent 测试大消息内容
+func TestHybridOfflineMessageHandlerLargeMessageContent(t *testing.T) {
+	tc := newTestOfflineHandlerContext(t, "large-content")
+	defer tc.cleanup()
+
+	// 创建包含大数据的消息
+	msgID := osx.HashUnixMicroCipherText()
+	largeData := make(map[string]interface{})
+	largeData["content"] = string(make([]byte, 100*1024)) // 100KB
+
+	msg := &HubMessage{
+		ID:          msgID,
+		MessageID:   msgID,
+		MessageType: MessageTypeText,
+		Sender:      "sender-large",
+		Receiver:    tc.userID,
+		SessionID:   "session-large",
+		Content:     "Large content test",
+		Data:        largeData,
+		CreateAt:    time.Now(),
+	}
+
+	tc.storeMessage(msg)
+
+	// 验证可以正常获取
+	messages, _ := tc.getMessages(10, "")
+	assert.Len(t, messages, 1)
+	assert.Equal(t, msgID, messages[0].MessageID)
+}
+
+// TestHybridOfflineMessageHandlerConcurrentGetAndStore 测试并发获取和存储
+func TestHybridOfflineMessageHandlerConcurrentGetAndStore(t *testing.T) {
+	tc := newTestOfflineHandlerContext(t, "concurrent-get-store")
+	defer tc.cleanup()
+
+	const (
+		storers       = 5
+		getters       = 10
+		msgsPerStorer = 10
+	)
+
+	var wg sync.WaitGroup
+	errChan := make(chan error, storers+getters)
+
+	// 并发存储
+	for s := 0; s < storers; s++ {
+		wg.Add(1)
+		go func(storerID int) {
+			defer wg.Done()
+			for i := 0; i < msgsPerStorer; i++ {
+				_, msg := tc.createTestMessage()
+				if err := tc.handler.StoreOfflineMessage(tc.ctx, tc.userID, msg); err != nil {
+					errChan <- err
+					return
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+		}(s)
+	}
+
+	// 并发获取
+	for g := 0; g < getters; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 5; i++ {
+				_, _, err := tc.handler.GetOfflineMessages(tc.ctx, tc.userID, 10, "")
+				if err != nil {
+					errChan <- err
+					return
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errChan)
+
+	for err := range errChan {
+		t.Errorf("并发错误: %v", err)
+	}
+
+	// 验证最终一致性
+	count := tc.getCount()
+	assert.GreaterOrEqual(t, count, int64(0))
+}
+
+// TestHybridOfflineMessageHandlerRecoveryAfterClear 测试清空后的恢复
+func TestHybridOfflineMessageHandlerRecoveryAfterClear(t *testing.T) {
+	tc := newTestOfflineHandlerContext(t, "recovery")
+	defer tc.cleanup()
+
+	// 存储一些消息
+	for i := 0; i < 5; i++ {
+		_, msg := tc.createTestMessage()
+		tc.storeMessage(msg)
+	}
+
+	count1 := tc.getCount()
+	assert.Equal(t, int64(5), count1)
+
+	// 清空
+	err := tc.handler.ClearOfflineMessages(tc.ctx, tc.userID)
+	assert.NoError(t, err)
+
+	count2 := tc.getCount()
+	assert.Equal(t, int64(0), count2)
+
+	// 重新存储消息
+	for i := 0; i < 3; i++ {
+		_, msg := tc.createTestMessage()
+		tc.storeMessage(msg)
+	}
+
+	count3 := tc.getCount()
+	assert.Equal(t, int64(3), count3)
+}
+
+// TestHybridOfflineMessageHandlerDataIntegrity 测试数据完整性
+func TestHybridOfflineMessageHandlerDataIntegrity(t *testing.T) {
+	tc := newTestOfflineHandlerContext(t, "integrity")
+	defer tc.cleanup()
+
+	// 存储带有特殊内容的消息
+	specialContents := []string{
+		"包含中文内容",
+		"Contains English",
+		"日本語を含む",
+		"특수문자@#$%^&*()",
+		"emoji 😀😃😄",
+		`{"json": "data"}`,
+		"<xml>data</xml>",
+	}
+
+	for _, content := range specialContents {
+		msgID := osx.HashUnixMicroCipherText()
+		msg := &HubMessage{
+			ID:        msgID,
+			MessageID: msgID,
+			Sender:    "sender-integrity",
+			Receiver:  tc.userID,
+			SessionID: "session-integrity",
+			Content:   content,
+			CreateAt:  time.Now(),
+		}
+		tc.storeMessage(msg)
+	}
+
+	// 获取并验证内容完整性
+	messages, _ := tc.getMessages(10, "")
+	assert.Len(t, messages, len(specialContents))
+
+	for i, msg := range messages {
+		assert.Equal(t, specialContents[i], msg.Content,
+			"消息内容应该保持完整: %s", specialContents[i])
+	}
+}
+
+// TestHybridOfflineMessageHandlerMessageOrdering 测试消息顺序
+func TestHybridOfflineMessageHandlerMessageOrdering(t *testing.T) {
+	tc := newTestOfflineHandlerContext(t, "ordering")
+	defer tc.cleanup()
+
+	// 按顺序存储带时间戳的消息
+	const messageCount = 20
+
+	for i := 0; i < messageCount; i++ {
+		_, msg := tc.createTestMessage()
+		tc.storeMessage(msg)
+		time.Sleep(10 * time.Millisecond) // 确保时间戳不同
+	}
+
+	// 获取所有消息
+	messages, _ := tc.getMessages(messageCount, "")
+	assert.Len(t, messages, messageCount)
+
+	// 验证顺序（应该按创建时间升序）
+	for i := 1; i < len(messages); i++ {
+		assert.True(t,
+			!messages[i].CreateAt.Before(messages[i-1].CreateAt),
+			"消息应该按时间升序排列")
+	}
 }

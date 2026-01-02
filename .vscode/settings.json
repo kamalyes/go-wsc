@@ -203,6 +203,7 @@
       "Retryable",
       "rsday",
       "sday",
+      "smax",
       "sqlbuilderx",
       "stretchr",
       "stringx",
@@ -220,7 +221,10 @@
       "varchar",
       "webp",
       "Wechat",
+      "WITHSCORES",
       "wscconfig",
-      "zipx"
+      "zipx",
+      "ZRANGE",
+      "zset"
     ]
 }

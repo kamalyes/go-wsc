@@ -273,7 +273,7 @@ func TestSendMessage_Concurrent(t *testing.T) {
 			}
 		}
 
-		time.Sleep(500 * time.Millisecond) // 等待接收
+		time.Sleep(100 * time.Millisecond) // 等待接收
 
 		t.Logf("Sent: %d, Received: %d", success, atomic.LoadInt32(&receivedCount))
 		assert.Greater(t, success, 0, "At least some messages should be sent")
@@ -289,7 +289,7 @@ func TestSendMessage_AfterSendChanClosed(t *testing.T) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		assert.NoError(t, err)
 		defer conn.Close()
-		time.Sleep(100 * time.Millisecond) // 减少等待时间
+		time.Sleep(100 * time.Millisecond)
 	}))
 	defer server.Close()
 
@@ -305,14 +305,18 @@ func TestSendMessage_AfterSendChanClosed(t *testing.T) {
 
 	select {
 	case <-connected:
-		// 手动设置sendChanClosed标志
-		atomic.StoreInt32(&client.WebSocket.sendChanClosed, 1)
+		// 真实地关闭连接
+		client.Close()
+
+		// 等待连接完全关闭
+		time.Sleep(100 * time.Millisecond)
 
 		// 尝试发送消息应该失败
 		err := client.SendTextMessage("test")
-		assert.Equal(t, ErrConnectionClosed, err, "SendTextMessage with closed sendChan should return ErrConnectionClosed")
+		assert.Equal(t, ErrConnectionClosed, err, "SendTextMessage after Close should return ErrConnectionClosed")
 
 		err = client.SendBinaryMessage([]byte("test"))
+		assert.Equal(t, ErrConnectionClosed, err, "SendBinaryMessage after Close should return ErrConnectionClosed")
 		assert.Equal(t, ErrConnectionClosed, err, "SendBinaryMessage with closed sendChan should return ErrConnectionClosed")
 
 		client.Close()

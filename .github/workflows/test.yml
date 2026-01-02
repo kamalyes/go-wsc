@@ -22,6 +22,26 @@ jobs:
       fail-fast: false  # 允许其他矩阵作业继续运行，即使有些失败
     runs-on: ${{ matrix.platform }}
     timeout-minutes: 30  # 设置作业超时
+
+    # 🔥 全局环境变量
+    env:
+      # Redis 配置
+      REDIS_HOST: ${{ vars.TEST_REDIS_HOST || 'localhost' }}
+      REDIS_PORT: ${{ vars.TEST_REDIS_PORT || '6379' }}
+      REDIS_PASSWORD: ${{ vars.TEST_REDIS_PASSWORD || '' }}
+      # MySQL 配置
+      MYSQL_HOST: ${{ vars.TEST_MYSQL_HOST || 'localhost' }}
+      MYSQL_PORT: ${{ vars.TEST_MYSQL_PORT || '3306' }}
+      MYSQL_USER: ${{ vars.TEST_MYSQL_USER || 'root' }}
+      MYSQL_PASSWORD: ${{ vars.MYSQL_ROOT_PASSWORD || '1235678' }}
+      MYSQL_DATABASE: ${{ vars.TEST_MYSQL_DATABASE || 'go_wsc_test' }}
+      # Windows 路径
+      WINDOWS_REDIS_PATH: ${{ vars.WINDOWS_REDIS_PATH || 'C:\Program Files\Redis' }}
+      WINDOWS_MYSQL_PATH: ${{ vars.WINDOWS_MYSQL_PATH || 'C:\tools\mysql\current\bin' }}
+      # macOS 路径 (Intel)
+      MACOS_REDIS_CONF_INTEL: ${{ vars.MACOS_REDIS_CONF_INTEL || '/usr/local/etc/redis.conf' }}
+      # macOS 路径 (Apple Silicon)
+      MACOS_REDIS_CONF_ARM: ${{ vars.MACOS_REDIS_CONF_ARM || '/opt/homebrew/etc/redis.conf' }}
     steps:
       - name: Fetch Repository
         uses: actions/checkout@v5
@@ -40,17 +60,17 @@ jobs:
         continue-on-error: true
 
       - name: Test (without coverage)
-        run: gotestsum -f testname -- ./... -race -count=1 -timeout=20s -shuffle=on
+        run: gotestsum -f testname -- ./... -race -count=1 -timeout=15m -shuffle=on
         timeout-minutes: 15
         continue-on-error: true  # 即使测试失败也继续
 
       - name: Test (with coverage)
-        run: gotestsum -f testname -- ./... -race -count=1 -timeout=20s -coverprofile=coverage.txt -covermode=atomic -shuffle=on
+        run: gotestsum -f testname -- ./... -race -count=1 -timeout=15m -coverprofile=coverage.txt -covermode=atomic -shuffle=on
         timeout-minutes: 15
         continue-on-error: true  # 即使测试失败也继续
 
       - name: Upload coverage reports to Codecov
-        if: ${{ matrix.platform == 'ubuntu-latest' && matrix.go-version == '1.22.x' }}
+        if: always() && matrix.platform == 'ubuntu-latest' && matrix.go-version == '1.22.x'
         uses: codecov/codecov-action@v4.5.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-11-15 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-12-12 13:54:11
+ * @LastEditTime: 2026-01-02 20:15:15
  * @FilePath: \go-wsc\hub_test.go
  * @Description: Hub 测试文件 - 测试WebSocket/SSE连接管理中心的各种功能
  *
@@ -15,13 +15,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // mockWelcomeProvider 模拟欢迎消息提供者
@@ -45,30 +48,36 @@ func newMockWelcomeProvider() *mockWelcomeProvider {
 }
 
 func (m *mockWelcomeProvider) GetWelcomeMessage(userID string, userRole UserRole, userType UserType, extraData map[string]interface{}) (*WelcomeMessage, bool, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if !m.enabled || !m.template.Enabled {
-		return nil, false, nil
+	type result struct {
+		msg *WelcomeMessage
+		ok  bool
 	}
+	res := syncx.WithRLockReturnFunc(&m.mu, func() result {
+		if !m.enabled || !m.template.Enabled {
+			return result{nil, false}
+		}
 
-	variables := map[string]interface{}{
-		"user_id": userID,
-	}
+		variables := map[string]interface{}{
+			"user_id": userID,
+		}
 
-	for key, value := range extraData {
-		variables[key] = value
-	}
+		for key, value := range extraData {
+			variables[key] = value
+		}
 
-	result := m.template.ReplaceVariables(variables)
+		temp := m.template.ReplaceVariables(variables)
 
-	return &WelcomeMessage{
-		Title:       result.Title,
-		Content:     result.Content,
-		MessageType: result.MessageType,
-		Priority:    PriorityNormal,
-		Data:        map[string]interface{}{"type": "welcome"},
-	}, true, nil
+		return result{
+			msg: &WelcomeMessage{
+				Title:    temp.Title,
+				Content:  temp.Content,
+				Priority: PriorityNormal,
+				Data:     map[string]interface{}{"type": "welcome"},
+			},
+			ok: true,
+		}
+	})
+	return res.msg, res.ok, nil
 }
 
 func (m *mockWelcomeProvider) RefreshConfig() error {
@@ -76,41 +85,42 @@ func (m *mockWelcomeProvider) RefreshConfig() error {
 }
 
 func (m *mockWelcomeProvider) setEnabled(enabled bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.enabled = enabled
+	syncx.WithLock(&m.mu, func() {
+		m.enabled = enabled
+	})
 }
 
 // TestNewHub 测试Hub创建
 func TestNewHub(t *testing.T) {
 	t.Run("使用默认配置创建Hub", func(t *testing.T) {
-		hub := NewHub(nil)
+		hub := NewHub(wscconfig.Default())
 		assert.NotNil(t, hub)
-		assert.NotEmpty(t, hub.nodeID)
-		assert.NotNil(t, hub.config)
-		assert.Equal(t, "0.0.0.0", hub.config.NodeIP)
-		assert.Equal(t, 8080, hub.config.NodePort)
-		assert.Equal(t, 30, hub.config.HeartbeatInterval)
+		assert.NotEmpty(t, hub.GetNodeID())
+		config := hub.GetConfig()
+		assert.NotNil(t, config)
+		assert.Equal(t, "0.0.0.0", config.NodeIP)
+		assert.Equal(t, 8080, config.NodePort)
+		assert.Equal(t, 30*time.Second, config.HeartbeatInterval)
 
 		hub.Shutdown()
 	})
 
 	t.Run("使用自定义配置创建Hub", func(t *testing.T) {
 		config := wscconfig.Default().
-			WithNodeIP("192.168.1.100").
-			WithNodePort(9000).
-			WithHeartbeatInterval(60)
-		config.ClientTimeout = 120
-		config.MessageBufferSize = 512
-		config.SSEHeartbeat = 45
-		config.SSETimeout = 180
-		config.SSEMessageBuffer = 200
+			WithNodeInfo("192.168.1.100", 9000).
+			WithHeartbeatInterval(60 * time.Second).
+			WithClientTimeout(120 * time.Second).
+			WithMessageBufferSize(512).
+			WithSSEHeartbeat(45 * time.Second).
+			WithSSETimeout(180 * time.Second).
+			WithSSEMessageBuffer(200)
 
 		hub := NewHub(config)
 		assert.NotNil(t, hub)
-		assert.Equal(t, config.NodeIP, hub.config.NodeIP)
-		assert.Equal(t, config.NodePort, hub.config.NodePort)
-		assert.Equal(t, config.HeartbeatInterval, hub.config.HeartbeatInterval)
+		hubConfig := hub.GetConfig()
+		assert.Equal(t, config.NodeIP, hubConfig.NodeIP)
+		assert.Equal(t, config.NodePort, hubConfig.NodePort)
+		assert.Equal(t, config.HeartbeatInterval, hubConfig.HeartbeatInterval)
 		// WelcomeProvider不再作为配置的一部分
 
 		hub.Shutdown()
@@ -119,7 +129,7 @@ func TestNewHub(t *testing.T) {
 
 // TestHubClientRegistration 测试客户端注册和注销
 func TestHubClientRegistration(t *testing.T) {
-	hub := NewHub(nil)
+	hub := NewHub(wscconfig.Default())
 	defer hub.Shutdown()
 
 	// 启动Hub
@@ -208,7 +218,7 @@ func TestHubClientRegistration(t *testing.T) {
 
 		// 验证第一个客户端已注册
 		assert.True(t, hub.HasUserClient(userID))
-		assert.Equal(t, client1, hub.GetUserClient(userID))
+		assert.Equal(t, client1, hub.GetMostRecentClient(userID))
 
 		// 创建第二个客户端（相同用户ID）
 		client2 := &Client{
@@ -225,91 +235,14 @@ func TestHubClientRegistration(t *testing.T) {
 		hub.Register(client2)
 		time.Sleep(100 * time.Millisecond)
 
-		// 验证第一个客户端已被替换
+		// 验证Hub支持同一用户的多个客户端连接
 		assert.True(t, hub.HasUserClient(userID))
-		assert.Equal(t, client2, hub.GetUserClient(userID))
-		assert.False(t, hub.HasClient(client1.ID))
-		assert.True(t, hub.HasClient(client2.ID))
+		assert.Equal(t, client2, hub.GetMostRecentClient(userID)) // 最近的是client2
+		assert.True(t, hub.HasClient(client1.ID))                 // client1仍然在线
+		assert.True(t, hub.HasClient(client2.ID))                 // client2也在线
 
+		hub.Unregister(client1)
 		hub.Unregister(client2)
-	})
-}
-
-// TestHubSSESupport 测试SSE连接支持
-func TestHubSSESupport(t *testing.T) {
-	hub := NewHub(nil)
-	defer hub.Shutdown()
-
-	t.Run("注册和注销SSE连接", func(t *testing.T) {
-		userID := "sse-user-001"
-		sseConn := &SSEConnection{
-			UserID:     userID,
-			MessageCh:  make(chan *HubMessage, 100),
-			CloseCh:    make(chan struct{}),
-			LastActive: time.Now(),
-			Context:    context.WithValue(context.Background(), ContextKeyUserID, userID),
-		}
-
-		// 注册SSE连接
-		hub.RegisterSSE(sseConn)
-		assert.Contains(t, hub.sseClients, userID)
-
-		stats := hub.GetStats()
-		assert.Equal(t, 1, stats.SSEClients)
-		assert.Equal(t, 1, stats.TotalClients)
-
-		// 注销SSE连接
-		hub.UnregisterSSE(userID)
-		assert.NotContains(t, hub.sseClients, userID)
-
-		stats = hub.GetStats()
-		assert.Equal(t, 0, stats.SSEClients)
-		assert.Equal(t, 0, stats.TotalClients)
-	})
-
-	t.Run("通过SSE发送消息", func(t *testing.T) {
-		userID := "sse-user-002"
-		sseConn := &SSEConnection{
-			UserID:     userID,
-			MessageCh:  make(chan *HubMessage, 100),
-			CloseCh:    make(chan struct{}),
-			LastActive: time.Now(),
-			Context:    context.WithValue(context.Background(), ContextKeyUserID, userID),
-		}
-
-		hub.RegisterSSE(sseConn)
-
-		message := &HubMessage{
-			MessageType: MessageTypeText,
-			Sender:      "system",
-			Receiver:    userID,
-			Content:     "SSE测试消息",
-			CreateAt:    time.Now(),
-		}
-
-		// 发送消息
-		success := hub.SendToUserViaSSE(userID, message)
-		assert.True(t, success)
-
-		// 验证消息已接收
-		select {
-		case receivedMsg := <-sseConn.MessageCh:
-			assert.Equal(t, message.Content, receivedMsg.Content)
-			assert.Equal(t, message.Sender, receivedMsg.Sender)
-			assert.Equal(t, message.Receiver, receivedMsg.Receiver)
-		case <-time.After(1 * time.Second):
-			t.Fatal("未收到SSE消息")
-		}
-
-		hub.UnregisterSSE(userID)
-	})
-
-	t.Run("向不存在的SSE用户发送消息", func(t *testing.T) {
-		success := hub.SendToUserViaSSE("nonexistent-user", &HubMessage{
-			MessageType: MessageTypeText,
-			Content:     "测试消息",
-		})
-		assert.False(t, success)
 	})
 }
 
@@ -319,10 +252,9 @@ func TestHubMessaging(t *testing.T) {
 	config = config.
 		WithNodeIP("127.0.0.1").
 		WithNodePort(8080).
-		WithHeartbeatInterval(30).
-		WithClientTimeout(90).
+		WithHeartbeatInterval(30 * time.Second).
+		WithClientTimeout(90 * time.Second).
 		WithMessageBufferSize(256)
-
 	hub := NewHub(config)
 	defer hub.Shutdown()
 
@@ -366,10 +298,8 @@ func TestHubMessaging(t *testing.T) {
 			Content:     "点对点测试消息",
 		}
 
-		err := hub.sendToUser(ctx, receiver.UserID, message)
-		assert.NoError(t, err)
-
-		// 验证接收者收到消息
+		result := hub.SendToUserWithRetry(ctx, receiver.UserID, message)
+		assert.NoError(t, result.FinalError) // 验证接收者收到消息
 		select {
 		case msgData := <-receiver.SendChan:
 			var receivedMsg HubMessage
@@ -443,8 +373,8 @@ func TestHubMessaging(t *testing.T) {
 		smallConfig := wscconfig.Default().
 			WithNodeIP("127.0.0.1").
 			WithNodePort(8080).
-			WithHeartbeatInterval(30).
-			WithClientTimeout(90).
+			WithHeartbeatInterval(30 * time.Second).
+			WithClientTimeout(90 * time.Second).
 			WithMessageBufferSize(1)
 
 		smallHub := NewHub(smallConfig)
@@ -477,8 +407,8 @@ func TestHubMessaging(t *testing.T) {
 				Content:     fmt.Sprintf("消息 %d", i),
 				CreateAt:    time.Now(),
 			}
-			err := smallHub.sendToUser(context.Background(), "queue-test-user", message)
-			if err != nil {
+			result := smallHub.SendToUserWithRetry(context.Background(), "queue-test-user", message)
+			if result.FinalError != nil {
 				errorCount++
 			} else {
 				successCount++
@@ -492,7 +422,7 @@ func TestHubMessaging(t *testing.T) {
 
 // TestHubOnlineUsers 测试在线用户管理
 func TestHubOnlineUsers(t *testing.T) {
-	hub := NewHub(nil)
+	hub := NewHub(wscconfig.Default())
 	defer hub.Shutdown()
 
 	go hub.Run()
@@ -517,14 +447,9 @@ func TestHubOnlineUsers(t *testing.T) {
 		hub.Register(wsClient)
 
 		// 添加SSE客户端
-		sseConn := &SSEConnection{
-			UserID:     "sse-user-001",
-			MessageCh:  make(chan *HubMessage, 100),
-			CloseCh:    make(chan struct{}),
-			LastActive: time.Now(),
-			Context:    context.WithValue(context.Background(), ContextKeyUserID, "sse-user-001"),
-		}
-		hub.RegisterSSE(sseConn)
+		w := httptest.NewRecorder()
+		sseClient, err := hub.RegisterSSE("sse-user-001", w, UserTypeCustomer)
+		require.NoError(t, err)
 
 		time.Sleep(100 * time.Millisecond)
 
@@ -535,7 +460,7 @@ func TestHubOnlineUsers(t *testing.T) {
 
 		// 移除客户端
 		hub.Unregister(wsClient)
-		hub.UnregisterSSE("sse-user-001")
+		hub.UnregisterSSE(sseClient.ID)
 
 		time.Sleep(100 * time.Millisecond)
 
@@ -560,14 +485,9 @@ func TestHubOnlineUsers(t *testing.T) {
 		hub.Register(wsClient)
 
 		// 添加SSE客户端
-		sseConn := &SSEConnection{
-			UserID:     userID,
-			MessageCh:  make(chan *HubMessage, 100),
-			CloseCh:    make(chan struct{}),
-			LastActive: time.Now(),
-			Context:    context.WithValue(context.Background(), ContextKeyUserID, userID),
-		}
-		hub.RegisterSSE(sseConn)
+		w := httptest.NewRecorder()
+		sseClient, err := hub.RegisterSSE(userID, w, UserTypeCustomer)
+		require.NoError(t, err)
 
 		time.Sleep(100 * time.Millisecond)
 
@@ -576,7 +496,7 @@ func TestHubOnlineUsers(t *testing.T) {
 		assert.Contains(t, onlineUsers, userID)
 
 		hub.Unregister(wsClient)
-		hub.UnregisterSSE(userID)
+		hub.UnregisterSSE(sseClient.ID)
 	})
 }
 
@@ -584,11 +504,10 @@ func TestHubOnlineUsers(t *testing.T) {
 func TestHubWelcomeMessage(t *testing.T) {
 	welcomeProvider := newMockWelcomeProvider()
 	config := wscconfig.Default().
-		WithNodeIP("127.0.0.1").
-		WithNodePort(8080).
-		WithHeartbeatInterval(30).
-		WithClientTimeout(90)
-	config.MessageBufferSize = 256
+		WithNodeInfo("127.0.0.1", 8080).
+		WithHeartbeatInterval(30 * time.Second).
+		WithClientTimeout(90 * time.Second).
+		WithMessageBufferSize(256)
 
 	hub := NewHub(config)
 	hub.SetWelcomeProvider(welcomeProvider)
@@ -618,7 +537,7 @@ func TestHubWelcomeMessage(t *testing.T) {
 			var welcomeMsg HubMessage
 			err := json.Unmarshal(msgData, &welcomeMsg)
 			assert.NoError(t, err)
-			assert.Equal(t, MessageTypeSystem, welcomeMsg.MessageType)
+			assert.Equal(t, MessageTypeWelcome, welcomeMsg.MessageType)
 			assert.Equal(t, "system", welcomeMsg.Sender)
 			assert.Equal(t, client.UserID, welcomeMsg.Receiver)
 			assert.Contains(t, welcomeMsg.Content, client.UserID)
@@ -667,18 +586,19 @@ func TestHubWelcomeMessage(t *testing.T) {
 
 // TestHubNodeID 测试节点ID
 func TestHubNodeID(t *testing.T) {
-	hub := NewHub(nil)
+	hub := NewHub(wscconfig.Default())
 	defer hub.Shutdown()
 
 	nodeID := hub.GetNodeID()
 	assert.NotEmpty(t, nodeID)
-	assert.Contains(t, nodeID, "node-")
+	assert.Contains(t, nodeID, wscconfig.Default().NodeIP)
 
 	// 微小延迟确保不同的纳秒时间戳
 	time.Sleep(time.Microsecond)
 
-	// 验证不同Hub实例有不同的NodeID
-	hub2 := NewHub(nil)
+	// 验证不同Hub实例有不同的NodeID（使用不同端口）
+	config2 := wscconfig.Default().WithNodePort(8081)
+	hub2 := NewHub(config2)
 	defer hub2.Shutdown()
 
 	nodeID2 := hub2.GetNodeID()
@@ -688,7 +608,7 @@ func TestHubNodeID(t *testing.T) {
 
 // TestHubShutdown 测试Hub关闭
 func TestHubShutdown(t *testing.T) {
-	hub := NewHub(nil)
+	hub := NewHub(wscconfig.Default())
 
 	// 添加一些客户端和SSE连接
 	client := &Client{
@@ -702,33 +622,29 @@ func TestHubShutdown(t *testing.T) {
 		Context:  context.WithValue(context.Background(), ContextKeyUserID, "shutdown-user-001"),
 	}
 
-	sseConn := &SSEConnection{
-		UserID:     "shutdown-sse-user-001",
-		MessageCh:  make(chan *HubMessage, 100),
-		CloseCh:    make(chan struct{}),
-		LastActive: time.Now(),
-		Context:    context.WithValue(context.Background(), ContextKeyUserID, "shutdown-sse-user-001"),
-	}
+	w := httptest.NewRecorder()
+	sseClient, err := hub.RegisterSSE("shutdown-sse-user-001", w, UserTypeCustomer)
+	require.NoError(t, err)
 
 	go hub.Run()
 	time.Sleep(100 * time.Millisecond)
 
 	hub.Register(client)
-	hub.RegisterSSE(sseConn)
+	// sseClient 已经注册了
 
 	// 等待注册完成
 	time.Sleep(200 * time.Millisecond)
 
 	// 验证客户端和SSE连接存在
 	assert.True(t, hub.HasClient(client.ID))
-	assert.True(t, hub.HasSSEClient(sseConn.UserID))
+	assert.True(t, hub.HasSSEClient("shutdown-sse-user-001"))
 
 	// 关闭Hub
 	hub.Shutdown()
 
 	// 验证上下文已被取消
 	select {
-	case <-hub.ctx.Done():
+	case <-hub.Context().Done():
 		// 正确情况
 	case <-time.After(1 * time.Second):
 		t.Fatal("Hub上下文未被取消")
@@ -736,7 +652,7 @@ func TestHubShutdown(t *testing.T) {
 
 	// 验证SSE连接的CloseCh已关闭
 	select {
-	case <-sseConn.CloseCh:
+	case <-sseClient.SSECloseCh:
 		// 正确情况
 	case <-time.After(1 * time.Second):
 		t.Fatal("SSE连接未正确关闭")
@@ -745,7 +661,7 @@ func TestHubShutdown(t *testing.T) {
 
 // TestHubMessageFallback 测试消息降级机制
 func TestHubMessageFallback(t *testing.T) {
-	hub := NewHub(nil)
+	hub := NewHub(wscconfig.Default())
 	defer hub.Shutdown()
 
 	go hub.Run()
@@ -755,14 +671,10 @@ func TestHubMessageFallback(t *testing.T) {
 		userID := "fallback-user-001"
 
 		// 只注册SSE连接
-		sseConn := &SSEConnection{
-			UserID:     userID,
-			MessageCh:  make(chan *HubMessage, 100),
-			CloseCh:    make(chan struct{}),
-			LastActive: time.Now(),
-			Context:    context.WithValue(context.Background(), ContextKeyUserID, userID),
-		}
-		hub.RegisterSSE(sseConn)
+		w := httptest.NewRecorder()
+		sseClient, err := hub.RegisterSSE(userID, w, UserTypeCustomer)
+		require.NoError(t, err)
+		time.Sleep(50 * time.Millisecond) // 等待注册完成
 
 		// 发送点对点消息
 		message := &HubMessage{
@@ -772,25 +684,23 @@ func TestHubMessageFallback(t *testing.T) {
 			CreateAt:    time.Now(),
 		}
 
-		err := hub.sendToUser(context.Background(), userID, message)
-		assert.NoError(t, err)
-
-		// 验证通过SSE收到消息
+		result := hub.SendToUserWithRetry(context.Background(), userID, message)
+		assert.NoError(t, result.FinalError) // 验证通过SSE收到消息
 		select {
-		case receivedMsg := <-sseConn.MessageCh:
+		case receivedMsg := <-sseClient.SSEMessageCh:
 			assert.Equal(t, message.Content, receivedMsg.Content)
 			assert.Equal(t, userID, receivedMsg.Receiver)
 		case <-time.After(1 * time.Second):
 			t.Fatal("未通过SSE收到消息")
 		}
 
-		hub.UnregisterSSE(userID)
+		hub.UnregisterSSE(sseClient.ID)
 	})
 }
 
 // TestHubConcurrentOperations 测试并发操作
 func TestHubConcurrentOperations(t *testing.T) {
-	hub := NewHub(nil)
+	hub := NewHub(wscconfig.Default())
 	defer hub.Shutdown()
 
 	go hub.Run()
@@ -884,7 +794,8 @@ func TestHubConcurrentOperations(t *testing.T) {
 					Content:     fmt.Sprintf("并发消息 %d", msgNum),
 					CreateAt:    time.Now(),
 				}
-				err := hub.sendToUser(context.Background(), receiver.UserID, message)
+				result := hub.SendToUserWithRetry(context.Background(), receiver.UserID, message)
+				err := result.FinalError
 				assert.NoError(t, err)
 			}(i)
 		}
@@ -925,7 +836,7 @@ func TestHubConcurrentOperations(t *testing.T) {
 
 // BenchmarkHubOperations Hub操作性能基准测试
 func BenchmarkHubOperations(b *testing.B) {
-	hub := NewHub(nil)
+	hub := NewHub(wscconfig.Default())
 	defer hub.Shutdown()
 
 	go hub.Run()
@@ -981,7 +892,7 @@ func BenchmarkHubOperations(b *testing.B) {
 
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			hub.sendToUser(context.Background(), receiver.UserID, message)
+			hub.SendToUserWithRetry(context.Background(), receiver.UserID, message)
 		}
 
 		hub.Unregister(receiver)
@@ -994,7 +905,7 @@ func BenchmarkHubOperations(b *testing.B) {
 
 // TestHubExtendedAPI 测试扩展API功能
 func TestHubExtendedAPI(t *testing.T) {
-	hub := NewHub(nil)
+	hub := NewHub(wscconfig.Default())
 	defer hub.Shutdown()
 
 	go hub.Run()
@@ -1026,7 +937,7 @@ func TestHubExtendedAPI(t *testing.T) {
 		hub.Unregister(client)
 	})
 
-	t.Run("GetClientByUserID", func(t *testing.T) {
+	t.Run("GetMostRecentClient", func(t *testing.T) {
 		userID := "test-user-getbyuserid"
 		client := &Client{
 			ID:       "test-client-getbyuserid",
@@ -1042,7 +953,7 @@ func TestHubExtendedAPI(t *testing.T) {
 		hub.Register(client)
 		time.Sleep(100 * time.Millisecond)
 
-		retrieved := hub.GetClientByUserID(userID)
+		retrieved := hub.GetMostRecentClient(userID)
 		assert.NotNil(t, retrieved)
 		assert.Equal(t, client.ID, retrieved.ID)
 
@@ -1278,11 +1189,11 @@ func TestHubExtendedAPI(t *testing.T) {
 	t.Run("GetHubHealth", func(t *testing.T) {
 		health := hub.GetHubHealth()
 		assert.NotNil(t, health)
-		assert.Equal(t, "healthy", health["status"])
-		assert.Contains(t, health, "is_running")
-		assert.Contains(t, health, "websocket_count")
-		assert.Contains(t, health, "sse_count")
-		assert.Contains(t, health, "total_connections")
+		assert.Equal(t, "healthy", health.Status)
+		assert.NotEmpty(t, health.NodeID)
+		assert.GreaterOrEqual(t, health.WebSocketCount, 0)
+		assert.GreaterOrEqual(t, health.SSECount, 0)
+		assert.GreaterOrEqual(t, health.TotalConnections, 0)
 	})
 
 	t.Run("GetOnlineUsersCount", func(t *testing.T) {
@@ -1295,7 +1206,7 @@ func TestHubExtendedAPI(t *testing.T) {
 		assert.NotNil(t, agents)
 		// 验证所有返回的都是agent类型
 		for _, userID := range agents {
-			client := hub.GetClientByUserID(userID)
+			client := hub.GetMostRecentClient(userID)
 			if client != nil {
 				assert.Equal(t, UserTypeAgent, client.UserType)
 			}
@@ -1325,62 +1236,6 @@ func TestHubExtendedAPI(t *testing.T) {
 
 		connections := hub.GetConnectionsByUserID(userID)
 		assert.GreaterOrEqual(t, len(connections), 1)
-	})
-
-	t.Run("KickOffUser", func(t *testing.T) {
-		userID := "kickoff-user"
-		client := &Client{
-			ID:       "kickoff-client",
-			UserID:   userID,
-			UserType: UserTypeCustomer,
-			Role:     UserRoleCustomer,
-			Status:   UserStatusOnline,
-			LastSeen: time.Now(),
-			SendChan: make(chan []byte, 256),
-			Context:  context.WithValue(context.Background(), ContextKeyUserID, userID),
-		}
-
-		hub.Register(client)
-		time.Sleep(100 * time.Millisecond)
-
-		kicked := hub.KickOffUser(userID, "test kick")
-		assert.Equal(t, 1, kicked)
-	})
-
-	t.Run("LimitUserConnections", func(t *testing.T) {
-		userID := "limit-user"
-
-		// 确保用户不存在任何连接
-		if existingConnections := hub.GetConnectionsByUserID(userID); len(existingConnections) > 0 {
-			for _, conn := range existingConnections {
-				hub.Unregister(conn)
-			}
-		}
-		time.Sleep(50 * time.Millisecond)
-
-		client := &Client{
-			ID:       "limit-client",
-			UserID:   userID,
-			UserType: UserTypeCustomer,
-			Role:     UserRoleCustomer,
-			Status:   UserStatusOnline,
-			LastSeen: time.Now(),
-			SendChan: make(chan []byte, 256),
-			Context:  context.WithValue(context.Background(), ContextKeyUserID, userID),
-		}
-
-		hub.Register(client)
-		time.Sleep(100 * time.Millisecond)
-
-		kicked := hub.LimitUserConnections(userID, 0)
-		// 可能由于并发问题或先前清理，只要不崩溃就算成功
-		t.Logf("踢出的连接数: %d", kicked)
-		assert.GreaterOrEqual(t, kicked, 0, "踢出连接数应该非负")
-
-		// 清理
-		if client := hub.GetClientByID("limit-client"); client != nil {
-			hub.Unregister(client)
-		}
 	})
 
 	t.Run("ResetClientStatus", func(t *testing.T) {
@@ -1436,6 +1291,12 @@ func TestHubExtendedAPI(t *testing.T) {
 		hub.Unregister(client)
 	})
 
+	t.Run("GetClientsCopy", func(t *testing.T) {
+		infos := hub.GetClientsCopy()
+		assert.NotNil(t, infos)
+		assert.IsType(t, []*Client{}, infos)
+	})
+
 	t.Run("FilterClients", func(t *testing.T) {
 		// 创建一些测试客户端
 		for i := 0; i < 5; i++ {
@@ -1474,7 +1335,7 @@ func TestHubExtendedAPI(t *testing.T) {
 
 // TestHubSendConditional 测试条件发送功能
 func TestHubSendConditional(t *testing.T) {
-	hub := NewHub(nil)
+	hub := NewHub(wscconfig.Default())
 	defer hub.Shutdown()
 
 	go hub.Run()
@@ -1558,7 +1419,7 @@ func TestHubSendConditional(t *testing.T) {
 
 // TestHubConcurrentSendConditional 并发条件发送压力测试
 func TestHubConcurrentSendConditional(t *testing.T) {
-	hub := NewHub(nil)
+	hub := NewHub(wscconfig.Default())
 	defer hub.Shutdown()
 
 	go hub.Run()
@@ -1630,7 +1491,7 @@ func TestHubConcurrentSendConditional(t *testing.T) {
 					MessageType: MessageTypeText,
 					Content:     fmt.Sprintf("batch message %d", idx),
 				}
-				errors := hub.BatchSendToUsers(context.Background(), userIDs, msg, 0)
+				errors := hub.SendToMultipleUsers(context.Background(), userIDs, msg)
 				successes := len(userIDs) - len(errors)
 				mu.Lock()
 				successCount += successes
@@ -1665,7 +1526,7 @@ func TestHubConcurrentSendConditional(t *testing.T) {
 
 // TestHubConcurrentRegistration 并发注册/注销压力测试
 func TestHubConcurrentRegistration(t *testing.T) {
-	hub := NewHub(nil)
+	hub := NewHub(wscconfig.Default())
 	defer hub.Shutdown()
 
 	go hub.Run()
@@ -1755,7 +1616,7 @@ func TestHubConcurrentRegistration(t *testing.T) {
 
 // TestHubHighThroughputMessaging 高吞吐量消息测试
 func TestHubHighThroughputMessaging(t *testing.T) {
-	hub := NewHub(nil)
+	hub := NewHub(wscconfig.Default())
 	defer hub.Shutdown()
 
 	go hub.Run()
@@ -1827,7 +1688,8 @@ func TestHubHighThroughputMessaging(t *testing.T) {
 				MessageType: MessageTypeText,
 				Content:     fmt.Sprintf("rapid message %d", i),
 			}
-			err := hub.sendToUser(context.Background(), userID, msg)
+			result := hub.SendToUserWithRetry(context.Background(), userID, msg)
+			err := result.FinalError
 			assert.NoError(t, err)
 		}
 
@@ -1851,7 +1713,7 @@ func TestHubHighThroughputMessaging(t *testing.T) {
 						MessageType: MessageTypeText,
 						Content:     fmt.Sprintf("multi user message %d", i),
 					}
-					hub.sendToUser(context.Background(), userID, msg)
+					hub.SendToUserWithRetry(context.Background(), userID, msg)
 				}
 			}(userIdx)
 		}
@@ -1865,7 +1727,7 @@ func TestHubHighThroughputMessaging(t *testing.T) {
 
 // TestHubMemoryEfficiency 内存效率测试
 func TestHubMemoryEfficiency(t *testing.T) {
-	hub := NewHub(nil)
+	hub := NewHub(wscconfig.Default())
 	defer hub.Shutdown()
 
 	go hub.Run()
@@ -1897,7 +1759,8 @@ func TestHubMemoryEfficiency(t *testing.T) {
 			Content:     string(largeContent),
 		}
 
-		err := hub.sendToUser(context.Background(), "large-msg-user", msg)
+		result := hub.SendToUserWithRetry(context.Background(), "large-msg-user", msg)
+		err := result.FinalError
 		assert.NoError(t, err)
 
 		hub.Unregister(client)
@@ -1924,7 +1787,8 @@ func TestHubMemoryEfficiency(t *testing.T) {
 				MessageType: MessageTypeText,
 				Content:     fmt.Sprintf("small message %d", i),
 			}
-			err := hub.sendToUser(context.Background(), "many-msg-user", msg)
+			result := hub.SendToUserWithRetry(context.Background(), "many-msg-user", msg)
+			err := result.FinalError
 			if err != nil && i%1000 == 0 {
 				// 可能队列满，继续
 				time.Sleep(10 * time.Millisecond)
@@ -1979,7 +1843,7 @@ func TestHubMemoryEfficiency(t *testing.T) {
 
 // TestHubEdgeCases 边界情况测试
 func TestHubEdgeCases(t *testing.T) {
-	hub := NewHub(nil)
+	hub := NewHub(wscconfig.Default())
 	defer hub.Shutdown()
 
 	go hub.Run()
@@ -1991,7 +1855,8 @@ func TestHubEdgeCases(t *testing.T) {
 			MessageType: MessageTypeText,
 			Content:     "test nonexistent",
 		}
-		err := hub.sendToUser(context.Background(), "nonexistent-user", msg)
+		result := hub.SendToUserWithRetry(context.Background(), "nonexistent-user", msg)
+		err := result.FinalError
 		// 实际实现可能不返回错误，只是不发送
 		_ = err // 允许nil或error
 	})
@@ -2044,7 +1909,7 @@ func TestHubEdgeCases(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 
 		// 最后只应该有一个连接
-		client := hub.GetClientByUserID(userID)
+		client := hub.GetMostRecentClient(userID)
 		assert.NotNil(t, client)
 	})
 
@@ -2054,12 +1919,19 @@ func TestHubEdgeCases(t *testing.T) {
 			MessageType: MessageTypeText,
 			Content:     "test empty",
 		}
-		err := hub.sendToUser(context.Background(), "", msg)
+		result := hub.SendToUserWithRetry(context.Background(), "", msg)
+		err := result.FinalError
 		// 实际实现可能允许空UserID
 		_ = err // 允许nil或error
 	})
 
 	t.Run("Very-Long-UserID", func(t *testing.T) {
+		// 使用独立的 Hub 避免与其他测试冲突
+		testHub := NewHub(wscconfig.Default())
+		defer testHub.Shutdown()
+		go testHub.Run()
+		time.Sleep(50 * time.Millisecond) // 等待 Hub 启动
+
 		longUserID := ""
 		for i := 0; i < 1000; i++ {
 			longUserID += "x"
@@ -2075,14 +1947,26 @@ func TestHubEdgeCases(t *testing.T) {
 			SendChan: make(chan []byte, 256),
 			Context:  context.WithValue(context.Background(), ContextKeyUserID, longUserID),
 		}
-		hub.Register(client)
-		time.Sleep(100 * time.Millisecond)
+		testHub.Register(client)
 
-		retrieved := hub.GetClientByUserID(longUserID)
-		assert.NotNil(t, retrieved)
-		assert.Equal(t, longUserID, retrieved.UserID)
+		// 等待客户端注册完成
+		registered := false
+		for i := 0; i < 20; i++ {
+			if testHub.HasClient("long-userid-client") {
+				registered = true
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		assert.True(t, registered, "客户端应该成功注册")
 
-		hub.Unregister(client)
+		retrieved := testHub.GetMostRecentClient(longUserID)
+		assert.NotNil(t, retrieved, "应该能获取到客户端")
+		if retrieved != nil {
+			assert.Equal(t, longUserID, retrieved.UserID)
+		}
+
+		testHub.Unregister(client)
 	})
 
 	t.Run("Filter-With-Nil-Predicate", func(t *testing.T) {
@@ -2096,13 +1980,13 @@ func TestHubEdgeCases(t *testing.T) {
 	})
 
 	t.Run("Multiple-Shutdown", func(t *testing.T) {
-		testHub := NewHub(nil)
+		testHub := NewHub(wscconfig.Default())
 		testHub.Shutdown()
 		testHub.Shutdown() // 第二次关闭不应该崩溃
 	})
 
 	t.Run("Operations-After-Shutdown", func(t *testing.T) {
-		testHub := NewHub(nil)
+		testHub := NewHub(wscconfig.Default())
 		go testHub.Run()
 		time.Sleep(100 * time.Millisecond)
 		testHub.Shutdown()
@@ -2115,7 +1999,7 @@ func TestHubEdgeCases(t *testing.T) {
 			Content:     "after shutdown",
 		}
 		// 关闭后的操作可能会失败或无效
-		err := testHub.sendToUser(context.Background(), "any-user", msg)
+		err := testHub.SendToUserWithRetry(context.Background(), "any-user", msg)
 		// 可能返回错误或成功（取决于实现）
 		_ = err
 	})
@@ -2123,7 +2007,7 @@ func TestHubEdgeCases(t *testing.T) {
 
 // TestHubStatusTransitions 状态转换测试
 func TestHubStatusTransitions(t *testing.T) {
-	hub := NewHub(nil)
+	hub := NewHub(wscconfig.Default())
 	defer hub.Shutdown()
 
 	go hub.Run()
@@ -2196,104 +2080,9 @@ func TestHubStatusTransitions(t *testing.T) {
 	})
 }
 
-// TestHubBatchSendToUsers 测试批量发送功能
-func TestHubBatchSendToUsers(t *testing.T) {
-	hub := NewHub(nil)
-	defer hub.Shutdown()
-
-	go hub.Run()
-	time.Sleep(100 * time.Millisecond)
-
-	// 创建多个用户
-	userIDs := make([]string, 0)
-	for i := 0; i < 10; i++ {
-		userID := fmt.Sprintf("batch-user-%d", i)
-		userIDs = append(userIDs, userID)
-		client := &Client{
-			ID:       fmt.Sprintf("batch-client-%d", i),
-			UserID:   userID,
-			UserType: UserTypeCustomer,
-			Role:     UserRoleCustomer,
-			Status:   UserStatusOnline,
-			LastSeen: time.Now(),
-			SendChan: make(chan []byte, 256),
-			Context:  context.WithValue(context.Background(), ContextKeyUserID, userID),
-		}
-		hub.Register(client)
-	}
-	time.Sleep(200 * time.Millisecond)
-
-	t.Run("BatchSendToUsers-NoLimit", func(t *testing.T) {
-		msg := &HubMessage{
-			ID:          "batch-msg-1",
-			MessageType: MessageTypeText,
-			Content:     "batch message",
-		}
-		errors := hub.BatchSendToUsers(context.Background(), userIDs, msg, 0)
-		successes := len(userIDs) - len(errors)
-		failures := len(errors)
-		assert.Greater(t, successes, 0)
-		assert.LessOrEqual(t, failures, len(userIDs))
-	})
-
-	t.Run("BatchSendToUsers-WithLimit", func(t *testing.T) {
-		msg := &HubMessage{
-			ID:          "batch-msg-2",
-			MessageType: MessageTypeText,
-			Content:     "batch message with limit",
-		}
-		errors := hub.BatchSendToUsers(context.Background(), userIDs, msg, 100)
-		successes := len(userIDs) - len(errors)
-		failures := len(errors)
-		assert.Greater(t, successes, 0)
-		assert.LessOrEqual(t, failures, len(userIDs))
-	})
-
-	t.Run("BatchSendToUsers-PartialUsers", func(t *testing.T) {
-		partialUsers := userIDs[:5]
-		msg := &HubMessage{
-			ID:          "batch-msg-3",
-			MessageType: MessageTypeText,
-			Content:     "partial batch message",
-		}
-		errors := hub.BatchSendToUsers(context.Background(), partialUsers, msg, 0)
-		successes := len(partialUsers) - len(errors)
-		_ = successes
-		assert.Greater(t, successes, 0)
-	})
-
-	t.Run("BatchSendToUsers-EmptyList", func(t *testing.T) {
-		msg := &HubMessage{
-			ID:          "batch-msg-4",
-			MessageType: MessageTypeText,
-			Content:     "empty batch",
-		}
-		errors := hub.BatchSendToUsers(context.Background(), []string{}, msg, 0)
-		successes := 0 - len(errors)
-		failures := len(errors)
-		assert.Equal(t, 0, successes)
-		assert.Equal(t, 0, failures)
-	})
-
-	t.Run("BatchSendToUsers-NonExistentUsers", func(t *testing.T) {
-		nonExistent := []string{"nonexistent-1", "nonexistent-2"}
-		msg := &HubMessage{
-			ID:          "batch-msg-5",
-			MessageType: MessageTypeText,
-			Content:     "nonexistent batch",
-		}
-		errors := hub.BatchSendToUsers(context.Background(), nonExistent, msg, 0)
-
-		// 向不存在的用户发送消息应该全部成功（放入队列）
-		t.Logf("发送到%d个不存在用户，错误数: %d", len(nonExistent), len(errors))
-		// Hub只要能放入队列就不返回错误，即使用户不存在
-		assert.Equal(t, 0, len(errors), "不存在的用户发送时，只要队列不满就不会错误")
-	})
-}
-
 // TestHubBroadcastToGroup 测试分组广播功能
 func TestHubBroadcastToGroup(t *testing.T) {
-	hub := NewHub(nil)
+	hub := NewHub(wscconfig.Default())
 	defer hub.Shutdown()
 
 	go hub.Run()
@@ -2393,7 +2182,7 @@ func TestHubBroadcastToGroup(t *testing.T) {
 
 // TestHubBroadcastToRole 测试角色广播功能
 func TestHubBroadcastToRole(t *testing.T) {
-	hub := NewHub(nil)
+	hub := NewHub(wscconfig.Default())
 	defer hub.Shutdown()
 
 	go hub.Run()
@@ -2463,7 +2252,7 @@ func TestHubBroadcastToRole(t *testing.T) {
 
 // TestHubSendWithCallback 测试带回调的发送
 func TestHubSendWithCallback(t *testing.T) {
-	hub := NewHub(nil)
+	hub := NewHub(wscconfig.Default())
 	defer hub.Shutdown()
 
 	go hub.Run()
@@ -2493,8 +2282,8 @@ func TestHubSendWithCallback(t *testing.T) {
 
 		done := make(chan bool, 1)
 
-		hub.SendWithCallback(context.Background(), userID, msg, time.Second,
-			func() {
+		hub.SendWithCallback(context.Background(), userID, msg,
+			func(result *SendResult) {
 				done <- true
 			},
 			func(err error) {
@@ -2520,8 +2309,8 @@ func TestHubSendWithCallback(t *testing.T) {
 
 		done := make(chan bool, 1)
 
-		hub.SendWithCallback(context.Background(), "nonexistent-user", msg, time.Second,
-			func() {
+		hub.SendWithCallback(context.Background(), "nonexistent-user", msg,
+			func(result *SendResult) {
 				done <- true
 			},
 			func(error) {
@@ -2543,69 +2332,9 @@ func TestHubSendWithCallback(t *testing.T) {
 	time.Sleep(1 * time.Second)
 }
 
-// TestHubScheduleMessage 测试定时发送消息
-func TestHubScheduleMessage(t *testing.T) {
-	hub := NewHub(nil)
-	defer hub.Shutdown()
-
-	go hub.Run()
-	time.Sleep(100 * time.Millisecond)
-
-	userID := "schedule-user"
-	client := &Client{
-		ID:       "schedule-client",
-		UserID:   userID,
-		UserType: UserTypeCustomer,
-		Role:     UserRoleCustomer,
-		Status:   UserStatusOnline,
-		LastSeen: time.Now(),
-		SendChan: make(chan []byte, 256),
-		Context:  context.WithValue(context.Background(), ContextKeyUserID, userID),
-	}
-
-	hub.Register(client)
-	time.Sleep(100 * time.Millisecond)
-
-	t.Run("ScheduleMessage-Immediate", func(t *testing.T) {
-		msg := &HubMessage{
-			ID:          "schedule-msg-1",
-			MessageType: MessageTypeText,
-			Content:     "scheduled message",
-		}
-		hub.ScheduleMessage(context.Background(), userID, msg, 100*time.Millisecond)
-		// Scheduled message will be sent after delay
-
-		time.Sleep(300 * time.Millisecond)
-	})
-
-	t.Run("ScheduleMessage-Future", func(t *testing.T) {
-		msg := &HubMessage{
-			ID:          "schedule-msg-2",
-			MessageType: MessageTypeText,
-			Content:     "future scheduled message",
-		}
-		hub.ScheduleMessage(context.Background(), userID, msg, 500*time.Millisecond)
-
-		time.Sleep(600 * time.Millisecond)
-	})
-
-	t.Run("ScheduleMessage-ZeroDuration", func(t *testing.T) {
-		msg := &HubMessage{
-			ID:          "schedule-msg-3",
-			MessageType: MessageTypeText,
-			Content:     "zero duration scheduled",
-		}
-		hub.ScheduleMessage(context.Background(), userID, msg, 0)
-
-		time.Sleep(200 * time.Millisecond)
-	})
-
-	hub.Unregister(client)
-}
-
 // TestHubBroadcastAfterDelay 测试延迟广播
 func TestHubBroadcastAfterDelay(t *testing.T) {
-	hub := NewHub(nil)
+	hub := NewHub(wscconfig.Default())
 	defer hub.Shutdown()
 
 	go hub.Run()
@@ -2663,7 +2392,7 @@ func TestHubBroadcastAfterDelay(t *testing.T) {
 
 // TestHubSendToMultipleUsers 测试多用户发送
 func TestHubSendToMultipleUsers(t *testing.T) {
-	hub := NewHub(nil)
+	hub := NewHub(wscconfig.Default())
 	defer hub.Shutdown()
 
 	go hub.Run()
@@ -2727,13 +2456,16 @@ func TestHubSendToMultipleUsers(t *testing.T) {
 			Content:     "all invalid",
 		}
 		errs := hub.SendToMultipleUsers(context.Background(), invalidIDs, msg)
-		assert.Equal(t, 0, len(errs)) // 无有效用户，应该没有错误
+		assert.Equal(t, 3, len(errs)) // 3个无效用户，应该返回3个错误
+		for _, userID := range invalidIDs {
+			assert.Contains(t, errs, userID)
+		}
 	})
 }
 
 // TestHubGetConnectionInfo 测试连接信息获取
 func TestHubGetConnectionInfo(t *testing.T) {
-	hub := NewHub(nil)
+	hub := NewHub(wscconfig.Default())
 	defer hub.Shutdown()
 
 	go hub.Run()
@@ -2754,138 +2486,30 @@ func TestHubGetConnectionInfo(t *testing.T) {
 	hub.Register(client)
 	time.Sleep(100 * time.Millisecond)
 
-	t.Run("GetConnectionInfo-ValidClient", func(t *testing.T) {
-		info := hub.GetConnectionInfo(clientID)
+	t.Run("GetClientByID-ValidClient", func(t *testing.T) {
+		info := hub.GetClientByID(clientID)
 		assert.NotNil(t, info)
-		assert.Contains(t, info, "client_id")
-		assert.Contains(t, info, "user_id")
-		assert.Contains(t, info, "status")
 		assert.Equal(t, clientID, info.ID)
+		assert.Equal(t, "conn-info-user", info.UserID)
+		assert.Equal(t, UserStatusOnline, info.Status)
 	})
 
-	t.Run("GetConnectionInfo-InvalidClient", func(t *testing.T) {
-		info := hub.GetConnectionInfo("nonexistent")
+	t.Run("GetClientByID-InvalidClient", func(t *testing.T) {
+		info := hub.GetClientByID("nonexistent")
 		assert.Nil(t, info)
 	})
 
 	hub.Unregister(client)
 }
 
-// TestHubMessageStatistics 测试消息统计
-func TestHubMessageStatistics(t *testing.T) {
-	hub := NewHub(nil)
-	defer hub.Shutdown()
-
-	go hub.Run()
-	time.Sleep(100 * time.Millisecond)
-
-	t.Run("GetMessageStatisticsDetailed", func(t *testing.T) {
-		stats := hub.GetMessageStatisticsDetailed()
-		assert.NotNil(t, stats)
-		assert.Contains(t, stats, "message_stats")
-		assert.Contains(t, stats, "hub_health")
-		assert.Contains(t, stats, "agent_stats")
-
-		// 检查message_stats的内容
-		msgStats, ok := stats["message_stats"]
-		assert.True(t, ok)
-		assert.NotNil(t, msgStats)
-	})
-
-	t.Run("GetMessageQueue", func(t *testing.T) {
-		queueLen := hub.GetMessageQueue()
-		assert.GreaterOrEqual(t, queueLen, 0)
-	})
-}
-
-// TestHubClearExpiredConnections 测试清理过期连接
-func TestHubClearExpiredConnections(t *testing.T) {
-	hub := NewHub(nil)
-	defer hub.Shutdown()
-
-	go hub.Run()
-	time.Sleep(100 * time.Millisecond)
-
-	t.Run("ClearExpiredConnections", func(t *testing.T) {
-		cleared := hub.ClearExpiredConnections(10 * time.Minute)
-		assert.GreaterOrEqual(t, cleared, 0)
-	})
-
-	t.Run("ClearExpiredConnections-ZeroDuration", func(t *testing.T) {
-		cleared := hub.ClearExpiredConnections(0)
-		assert.GreaterOrEqual(t, cleared, 0)
-	})
-}
-
-// TestHubWaitForCondition 测试条件等待
-func TestHubWaitForCondition(t *testing.T) {
-	hub := NewHub(nil)
-	defer hub.Shutdown()
-
-	go hub.Run()
-	time.Sleep(100 * time.Millisecond)
-
-	userID := "wait-condition-user"
-	client := &Client{
-		ID:       "wait-condition-client",
-		UserID:   userID,
-		UserType: UserTypeCustomer,
-		Role:     UserRoleCustomer,
-		Status:   UserStatusOnline,
-		LastSeen: time.Now(),
-		SendChan: make(chan []byte, 256),
-		Context:  context.WithValue(context.Background(), ContextKeyUserID, userID),
-	}
-
-	hub.Register(client)
-	time.Sleep(100 * time.Millisecond)
-
-	t.Run("WaitForCondition-AlreadyMet", func(t *testing.T) {
-		result := hub.WaitForCondition(func() bool {
-			isOnline, _ := hub.IsUserOnline(userID)
-			return isOnline
-		}, 2*time.Second)
-		assert.True(t, result)
-	})
-
-	t.Run("WaitForCondition-Timeout", func(t *testing.T) {
-		result := hub.WaitForCondition(func() bool {
-			isOnline, _ := hub.IsUserOnline("nonexistent")
-			return isOnline
-		}, 100*time.Millisecond)
-		assert.False(t, result)
-	})
-
-	t.Run("WaitForCondition-EventuallyMet", func(t *testing.T) {
-		// 在后台创建客户端
-		go func() {
-			time.Sleep(300 * time.Millisecond)
-			newClient := &Client{
-				ID:       "wait-eventually-client",
-				UserID:   "wait-eventually-user",
-				UserType: UserTypeCustomer,
-				Role:     UserRoleCustomer,
-				Status:   UserStatusOnline,
-				LastSeen: time.Now(),
-				SendChan: make(chan []byte, 256),
-				Context:  context.WithValue(context.Background(), ContextKeyUserID, "wait-eventually-user"),
-			}
-			hub.Register(newClient)
-		}()
-
-		result := hub.WaitForCondition(func() bool {
-			isOnline, _ := hub.IsUserOnline("wait-eventually-user")
-			return isOnline
-		}, 2*time.Second)
-		assert.True(t, result)
-	})
-	hub.Unregister(client)
-}
-
 // TestHubComplexScenarios 复杂场景测试
 func TestHubComplexScenarios(t *testing.T) {
-	hub := NewHub(nil)
+	hub := NewHub(wscconfig.Default())
+	go hub.Run() // 启动Hub事件循环
 	defer hub.Shutdown()
+
+	// 等待Hub启动完成
+	time.Sleep(50 * time.Millisecond)
 
 	t.Run("多用户实时聊天模拟", func(t *testing.T) {
 		// 创建聊天室用户
@@ -2907,8 +2531,15 @@ func TestHubComplexScenarios(t *testing.T) {
 					"nickname": fmt.Sprintf("User%d", i),
 				},
 			}
+			// 启动消息消费goroutine
+			go func(c *Client) {
+				for range c.SendChan {
+				}
+			}(users[i])
 			hub.Register(users[i])
 		}
+		// 等待客户端注册完成
+		time.Sleep(100 * time.Millisecond)
 
 		// 模拟聊天消息
 		var wg sync.WaitGroup
@@ -2937,7 +2568,7 @@ func TestHubComplexScenarios(t *testing.T) {
 							MessageType: MessageTypeText,
 							Content:     fmt.Sprintf("Private message from %s", users[userIndex].Metadata["nickname"]),
 						}
-						hub.sendToUser(context.Background(), users[userIndex-1].UserID, privateMsg)
+						hub.SendToUserWithRetry(context.Background(), users[userIndex-1].UserID, privateMsg)
 					}
 
 					time.Sleep(10 * time.Millisecond)
@@ -2972,6 +2603,11 @@ func TestHubComplexScenarios(t *testing.T) {
 				SendChan: make(chan []byte, 256),
 				Context:  context.Background(),
 			}
+			// 启动消息消费goroutine
+			go func(c *Client) {
+				for range c.SendChan {
+				}
+			}(customers[i])
 			hub.Register(customers[i])
 		}
 
@@ -2986,8 +2622,15 @@ func TestHubComplexScenarios(t *testing.T) {
 				SendChan: make(chan []byte, 256),
 				Context:  context.Background(),
 			}
+			// 启动消息消费goroutine
+			go func(c *Client) {
+				for range c.SendChan {
+				}
+			}(agents[i])
 			hub.Register(agents[i])
 		}
+		// 等待客户端注册完成
+		time.Sleep(100 * time.Millisecond)
 
 		// 模拟客服系统场景（不使用工单）
 		for i := 0; i < 3; i++ {
@@ -3003,7 +2646,8 @@ func TestHubComplexScenarios(t *testing.T) {
 				Receiver:    agent.UserID, // 直接发送给客服
 				Sender:      customer.UserID,
 			}
-			err := hub.sendToUser(context.Background(), agent.UserID, msg)
+			result := hub.SendToUserWithRetry(context.Background(), agent.UserID, msg)
+			err := result.FinalError
 			assert.NoError(t, err)
 
 			// 客服回复（直接回复给客户）
@@ -3014,8 +2658,8 @@ func TestHubComplexScenarios(t *testing.T) {
 				Receiver:    customer.UserID, // 直接发送给客户
 				Sender:      agent.UserID,
 			}
-			err = hub.sendToUser(context.Background(), customer.UserID, replyMsg)
-			assert.NoError(t, err)
+			result = hub.SendToUserWithRetry(context.Background(), customer.UserID, replyMsg)
+			assert.NoError(t, result.FinalError)
 		}
 
 		// 广播系统通知给所有客服
@@ -3091,10 +2735,8 @@ func TestHubComplexScenarios(t *testing.T) {
 			Content:     "Regular announcement for all users",
 		}
 
-		errors := hub.BatchSendToUsers(context.Background(), userIDs, normalMsg, 2)
-		assert.LessOrEqual(t, len(errors), 1)
-
-		// 测试优先级广播
+		errors := hub.SendToMultipleUsers(context.Background(), userIDs, normalMsg)
+		assert.LessOrEqual(t, len(errors), 1) // 测试优先级广播
 		urgentMsg := &HubMessage{
 			ID:          "urgent-broadcast",
 			MessageType: MessageTypeText, // 使用已存在的类型
@@ -3112,14 +2754,14 @@ func TestHubComplexScenarios(t *testing.T) {
 
 // TestHubStressAndPerformance 压力和性能测试
 func TestHubStressAndPerformance(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping stress tests in short mode")
-	}
-
 	// 使用更大的缓冲区配置，支持高性能测试
 	config := wscconfig.Default().WithMessageBufferSize(5000)
 	hub := NewHub(config)
+	go hub.Run() // 启动Hub事件循环
 	defer hub.Shutdown()
+
+	// 等待Hub启动完成
+	time.Sleep(50 * time.Millisecond)
 
 	t.Run("大规模并发连接", func(t *testing.T) {
 		const numClients = 500
@@ -3154,7 +2796,7 @@ func TestHubStressAndPerformance(t *testing.T) {
 					Content:     fmt.Sprintf("Stress test message from client %d", id),
 				}
 
-				hub.sendToUser(context.Background(), client.UserID, msg)
+				hub.SendToUserWithRetry(context.Background(), client.UserID, msg)
 
 				// 短暂停留
 				time.Sleep(time.Millisecond * 10)
@@ -3186,8 +2828,19 @@ func TestHubStressAndPerformance(t *testing.T) {
 				SendChan: make(chan []byte, 2048), // 高性能缓冲
 				Context:  context.Background(),
 			}
+
+			// 启动消息消费goroutine，防止SendChan阻塞
+			go func(c *Client) {
+				for range c.SendChan {
+					// 消费消息，防止阻塞
+				}
+			}(users[i])
+
 			hub.Register(users[i])
 		}
+
+		// 等待所有用户注册完成
+		time.Sleep(100 * time.Millisecond)
 
 		const totalMessages = 10000
 		const batchSize = 100 // 批量发送，减少goroutine数量
@@ -3214,7 +2867,8 @@ func TestHubStressAndPerformance(t *testing.T) {
 						Content:     fmt.Sprintf("Performance test message #%d", msgID),
 					}
 
-					err := hub.sendToUser(context.Background(), targetUser.UserID, msg)
+					result := hub.SendToUserWithRetry(context.Background(), targetUser.UserID, msg)
+					err := result.FinalError
 					if err == nil {
 						atomic.AddInt64(&sentCount, 1)
 					}
@@ -3248,7 +2902,11 @@ func TestHubStressAndPerformance(t *testing.T) {
 // TestHubWithNewMessageTypes 测试新的消息类型
 func TestHubWithNewMessageTypes(t *testing.T) {
 	hub := NewHub(wscconfig.Default())
+	go hub.Run() // 启动Hub事件循环
 	defer hub.Shutdown()
+
+	// 等待Hub启动完成
+	time.Sleep(50 * time.Millisecond)
 
 	// 创建测试客户端
 	sendChan := make(chan []byte, 256)
@@ -3270,6 +2928,9 @@ func TestHubWithNewMessageTypes(t *testing.T) {
 
 	hub.Register(client)
 	defer hub.Unregister(client)
+
+	// 等待客户端注册完成
+	time.Sleep(50 * time.Millisecond)
 
 	t.Run("发送各种新消息类型", func(t *testing.T) {
 		testCases := []struct {
@@ -3330,7 +2991,8 @@ func TestHubWithNewMessageTypes(t *testing.T) {
 				assert.True(t, tc.msgType.IsValid(), "消息类型应该有效: %s", tc.msgType)
 
 				// 发送消息
-				err := hub.sendToUser(context.Background(), "test-user", msg)
+				result := hub.SendToUserWithRetry(context.Background(), "test-user", msg)
+				err := result.FinalError
 				assert.NoError(t, err, "发送%s失败", tc.name)
 
 				// 验证分类
@@ -3385,7 +3047,8 @@ func TestHubWithNewMessageTypes(t *testing.T) {
 
 		successCount := 0
 		for i, msg := range messages {
-			err := hub.sendToUser(context.Background(), "test-user", msg)
+			result := hub.SendToUserWithRetry(context.Background(), "test-user", msg)
+			err := result.FinalError
 			if err == nil {
 				successCount++
 			}
@@ -3416,4 +3079,244 @@ func TestHubWithNewMessageTypes(t *testing.T) {
 		assert.Greater(t, categoryStats["interactive"], 0, "应该有交互类型")
 		assert.Greater(t, categoryStats["status"], 0, "应该有状态类型")
 	})
+}
+
+// TestGetClientsCopyForUser_AllClients 测试获取用户所有客户端
+func TestGetClientsCopyForUser_AllClients(t *testing.T) {
+	config := wscconfig.Default().Enable()
+	hub := NewHub(config)
+	go hub.Run()
+	defer hub.Shutdown()
+
+	// 注册多个客户端给同一个用户
+	userID := "test-user-1"
+	client1 := &Client{
+		ID:            "client-1",
+		UserID:        userID,
+		SendChan:      make(chan []byte, 10),
+		Context:       context.Background(),
+		LastSeen:      time.Now(),
+		LastHeartbeat: time.Now(),
+	}
+	client2 := &Client{
+		ID:            "client-2",
+		UserID:        userID,
+		SendChan:      make(chan []byte, 10),
+		Context:       context.Background(),
+		LastSeen:      time.Now(),
+		LastHeartbeat: time.Now(),
+	}
+	client3 := &Client{
+		ID:            "client-3",
+		UserID:        userID,
+		SendChan:      make(chan []byte, 10),
+		Context:       context.Background(),
+		LastSeen:      time.Now(),
+		LastHeartbeat: time.Now(),
+	}
+
+	hub.Register(client1)
+	hub.Register(client2)
+	hub.Register(client3)
+
+	// 等待注册完成
+	time.Sleep(100 * time.Millisecond)
+
+	// 测试：获取所有客户端（不指定clientID）
+	clients := hub.GetClientsCopyForUser(userID, "")
+
+	assert.NotNil(t, clients, "应该返回客户端列表")
+	assert.Equal(t, 3, len(clients), "应该返回3个客户端")
+
+	// 验证返回的是副本，修改副本不影响原始数据
+	originalLen := len(clients)
+	clients = append(clients, &Client{ID: "fake-client"})
+
+	clientsAgain := hub.GetClientsCopyForUser(userID, "")
+	assert.Equal(t, originalLen, len(clientsAgain), "修改副本不应影响原始数据")
+}
+
+// TestGetClientsCopyForUser_SpecificClient 测试获取指定客户端
+func TestGetClientsCopyForUser_SpecificClient(t *testing.T) {
+	config := wscconfig.Default().Enable()
+	hub := NewHub(config)
+	go hub.Run()
+	defer hub.Shutdown()
+
+	// 注册多个客户端给同一个用户
+	userID := "test-user-2"
+	client1 := &Client{
+		ID:            "client-1",
+		UserID:        userID,
+		SendChan:      make(chan []byte, 10),
+		Context:       context.Background(),
+		LastSeen:      time.Now(),
+		LastHeartbeat: time.Now(),
+	}
+	client2 := &Client{
+		ID:            "client-2",
+		UserID:        userID,
+		SendChan:      make(chan []byte, 10),
+		Context:       context.Background(),
+		LastSeen:      time.Now(),
+		LastHeartbeat: time.Now(),
+	}
+
+	hub.Register(client1)
+	hub.Register(client2)
+	time.Sleep(100 * time.Millisecond)
+
+	// 测试：获取指定客户端
+	clients := hub.GetClientsCopyForUser(userID, "client-1")
+
+	assert.NotNil(t, clients, "应该返回客户端列表")
+	assert.Equal(t, 1, len(clients), "应该只返回1个客户端")
+	assert.Equal(t, "client-1", clients[0].ID, "应该返回指定的客户端")
+}
+
+// TestGetClientsCopyForUser_NonExistentClient 测试获取不存在的客户端
+func TestGetClientsCopyForUser_NonExistentClient(t *testing.T) {
+	config := wscconfig.Default().Enable()
+	hub := NewHub(config)
+	go hub.Run()
+	defer hub.Shutdown()
+
+	userID := "test-user-3"
+	client := &Client{
+		ID:            "client-1",
+		UserID:        userID,
+		SendChan:      make(chan []byte, 10),
+		Context:       context.Background(),
+		LastSeen:      time.Now(),
+		LastHeartbeat: time.Now(),
+	}
+
+	hub.Register(client)
+	time.Sleep(100 * time.Millisecond)
+
+	// 测试：获取不存在的客户端
+	clients := hub.GetClientsCopyForUser(userID, "non-existent-client")
+
+	assert.Nil(t, clients, "不存在的客户端应该返回nil")
+}
+
+// TestGetClientsCopyForUser_NonExistentUser 测试获取不存在的用户
+func TestGetClientsCopyForUser_NonExistentUser(t *testing.T) {
+	config := wscconfig.Default().Enable()
+	hub := NewHub(config)
+	go hub.Run()
+	defer hub.Shutdown()
+
+	// 测试：获取不存在的用户
+	clients := hub.GetClientsCopyForUser("non-existent-user", "")
+
+	assert.Nil(t, clients, "不存在的用户应该返回nil")
+}
+
+// TestGetClientsCopyForUser_ThreadSafety 测试线程安全性
+func TestGetClientsCopyForUser_ThreadSafety(t *testing.T) {
+	config := wscconfig.Default().Enable()
+	hub := NewHub(config)
+	go hub.Run()
+	defer hub.Shutdown()
+
+	userID := "test-user-4"
+
+	// 并发注册和获取客户端
+	done := make(chan bool)
+
+	// Goroutine 1: 持续注册客户端
+	go func() {
+		for i := 0; i < 10; i++ {
+			client := &Client{
+				ID:            "client-" + string(rune('a'+i)),
+				UserID:        userID,
+				SendChan:      make(chan []byte, 10),
+				Context:       context.Background(),
+				LastSeen:      time.Now(),
+				LastHeartbeat: time.Now(),
+			}
+			hub.Register(client)
+			time.Sleep(10 * time.Millisecond)
+		}
+		done <- true
+	}()
+
+	// Goroutine 2: 持续获取客户端副本
+	go func() {
+		for i := 0; i < 20; i++ {
+			clients := hub.GetClientsCopyForUser(userID, "")
+			_ = clients // 使用返回值
+			time.Sleep(5 * time.Millisecond)
+		}
+		done <- true
+	}()
+
+	// Goroutine 3: 持续注销客户端
+	go func() {
+		time.Sleep(50 * time.Millisecond) // 等待一些客户端注册
+		for i := 0; i < 5; i++ {
+			clientID := "client-" + string(rune('a'+i))
+			if client, exists := hub.GetClientByIDWithLock(clientID); exists {
+				hub.Unregister(client)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		done <- true
+	}()
+
+	// 等待所有goroutine完成
+	<-done
+	<-done
+	<-done
+
+	// 如果没有panic或死锁，测试通过
+	assert.True(t, true, "并发操作应该是线程安全的")
+}
+
+// TestCopyClientsFromMap 测试复制客户端映射（通过Hub测试内部函数）
+func TestCopyClientsFromMap(t *testing.T) {
+	config := wscconfig.Default().Enable()
+	hub := NewHub(config)
+	go hub.Run()
+	defer hub.Shutdown()
+
+	// 注册测试客户端
+	userID := "test-user-copy"
+	clientMap := map[string]*Client{
+		"client-1": {ID: "client-1", UserID: userID, SendChan: make(chan []byte, 10), Context: context.Background(), LastSeen: time.Now(), LastHeartbeat: time.Now()},
+		"client-2": {ID: "client-2", UserID: userID, SendChan: make(chan []byte, 10), Context: context.Background(), LastSeen: time.Now(), LastHeartbeat: time.Now()},
+		"client-3": {ID: "client-3", UserID: userID, SendChan: make(chan []byte, 10), Context: context.Background(), LastSeen: time.Now(), LastHeartbeat: time.Now()},
+	}
+
+	for _, client := range clientMap {
+		hub.Register(client)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	// 通过GetClientsCopyForUser测试复制功能
+	clients := hub.GetClientsCopyForUser(userID, "")
+
+	assert.NotNil(t, clients, "应该返回客户端列表")
+	assert.Equal(t, 3, len(clients), "应该复制所有客户端")
+
+	// 验证是副本 - 修改副本不应影响下次查询
+	originalLen := len(clients)
+	clients = append(clients, &Client{ID: "fake-client"})
+
+	clientsAgain := hub.GetClientsCopyForUser(userID, "")
+	assert.Equal(t, originalLen, len(clientsAgain), "修改副本不应影响原始数据")
+}
+
+// TestCopyClientsFromMap_EmptyMap 测试复制空映射
+func TestCopyClientsFromMap_EmptyMap(t *testing.T) {
+	config := wscconfig.Default().Enable()
+	hub := NewHub(config)
+	go hub.Run()
+	defer hub.Shutdown()
+
+	// 测试不存在的用户（空map情况）
+	clients := hub.GetClientsCopyForUser("non-existent-user", "")
+
+	assert.Nil(t, clients, "不存在的用户应该返回nil")
 }

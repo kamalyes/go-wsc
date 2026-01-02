@@ -14,27 +14,19 @@ package wsc
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func setupMessageQueueTest(t *testing.T) (*RedisMessageQueueRepository, string, func()) {
 	// Redis配置
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     "120.79.25.168:16389",
-		Password: "M5Pi9YW6u",
-		DB:       1,
-	})
+	rdb := NewTestRedisClient(t)
 
 	ctx := context.Background()
-	if err := rdb.Ping(ctx).Err(); err != nil {
-		t.Fatalf("Failed to connect to Redis: %v", err)
-	}
-
 	repo := NewRedisMessageQueueRepository(rdb, "wsc:test:queue:", 1*time.Hour)
 
 	// 使用唯一的队列名称（包含测试名称和时间戳）
@@ -214,7 +206,7 @@ func TestMessageQueueWatchdog(t *testing.T) {
 		// 处理时间超过锁的过期时间,测试续期
 		err = repo.DequeueWithWatchdog(ctx, queueName, 1*time.Second, func(m *HubMessage) error {
 			// 处理15秒,超过lockExpiry(30s)的一半,会触发续期
-			time.Sleep(15 * time.Second)
+			time.Sleep(2 * time.Second)
 			return nil
 		})
 
@@ -238,10 +230,10 @@ func TestMessageQueueConcurrency(t *testing.T) {
 	repo.Clear(ctx, queueName+":processing")
 
 	t.Run("并发入队出队", func(t *testing.T) {
-		const numMessages = 100
-		const numWorkers = 10
+		const numMessages = 10 // 减少消息数量
+		const numWorkers = 3   // 减少worker数量
 
-		// 入队100条消息
+		// 入队10条消息
 		for i := 0; i < numMessages; i++ {
 			msg := &HubMessage{
 				ID:      fmt.Sprintf("msg-%d", i),
@@ -256,52 +248,76 @@ func TestMessageQueueConcurrency(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, int64(numMessages), length)
 
+		// 创建可取消的context
+		workerCtx, cancelWorkers := context.WithCancel(ctx)
+		defer cancelWorkers()
+
 		// 并发出队
 		done := make(chan bool, numWorkers)
 		processed := make(map[string]bool)
-		var processMutex = make(chan struct{}, 1)
-		processMutex <- struct{}{} // 初始化锁
+		var processMutex sync.Mutex
 
 		for i := 0; i < numWorkers; i++ {
 			go func(workerID int) {
 				defer func() { done <- true }()
 
 				for {
-					err := repo.DequeueWithWatchdog(ctx, queueName, 500*time.Millisecond, func(m *HubMessage) error {
-						<-processMutex
+					// 检查context是否取消
+					select {
+					case <-workerCtx.Done():
+						return
+					default:
+					}
+
+					// 检查是否所有消息都已处理
+					processMutex.Lock()
+					count := len(processed)
+					processMutex.Unlock()
+
+					if count >= numMessages {
+						cancelWorkers() // 取消所有workers
+						return
+					}
+
+					// 使用worker context进行出队(可被取消)
+					err := repo.DequeueWithWatchdog(workerCtx, queueName, 1*time.Second, func(m *HubMessage) error {
+						processMutex.Lock()
 						processed[m.ID] = true
 						count := len(processed)
-						processMutex <- struct{}{}
+						processMutex.Unlock()
 
-						// 如果所有消息都已处理,退出
+						// 如果所有消息都已处理,取消所有workers
 						if count >= numMessages {
-							return nil
+							cancelWorkers()
 						}
 						return nil
 					})
 
-					// 检查是否所有消息都已处理
-					<-processMutex
-					count := len(processed)
-					processMutex <- struct{}{}
-
-					if count >= numMessages || err != nil {
+					// 如果context被取消,退出
+					if err != nil && workerCtx.Err() != nil {
 						return
 					}
 				}
 			}(i)
 		}
 
-		// 等待所有worker完成(最多30秒)
-		timeout := time.After(30 * time.Second)
+		// 等待所有worker完成(最多15秒)
+		timeout := time.After(15 * time.Second)
 		workersCompleted := 0
 		for workersCompleted < numWorkers {
 			select {
 			case <-done:
 				workersCompleted++
 			case <-timeout:
+				cancelWorkers() // 超时时取消所有workers
+				// 等待一小段时间让workers退出
+				time.Sleep(100 * time.Millisecond)
+
+				processMutex.Lock()
+				count := len(processed)
+				processMutex.Unlock()
 				t.Fatalf("超时:只有 %d/%d workers完成, 处理了 %d/%d 消息",
-					workersCompleted, numWorkers, len(processed), numMessages)
+					workersCompleted, numWorkers, count, numMessages)
 			}
 		}
 

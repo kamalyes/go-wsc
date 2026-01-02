@@ -11,6 +11,7 @@
 package wsc
 
 import (
+	"context"
 	"testing"
 
 	"github.com/kamalyes/go-toolbox/pkg/osx"
@@ -20,24 +21,25 @@ import (
 
 // TestHubMessageIDVsHubIDDistinction 验证 Hub ID 和 MessageID 不会混淆
 func TestHubMessageIDVsHubIDDistinction(t *testing.T) {
+	ctx := context.Background()
 	db := getTestDB(t)
 	repo := NewMessageRecordRepository(db)
 
 	businessMsgID := osx.HashUnixMicroCipherText()
 	defer func() {
-		_ = repo.DeleteByMessageID(businessMsgID)
+		_ = repo.DeleteByMessageID(ctx, businessMsgID)
 	}()
 
 	// 创建消息，Hub ID 和 MessageID 应该不同
 	msg := createTestHubMessage(businessMsgID, "sender-id-test", "receiver-id-test", MessageTypeText)
-	
+
 	// 🔥 断言：Hub ID 和 MessageID 必须不同
 	assert.NotEqual(t, msg.ID, msg.MessageID, "Hub ID 和 MessageID 不应该相同")
 	assert.Contains(t, msg.ID, "msg_test_node_", "Hub ID 应该包含节点前缀")
 	assert.NotContains(t, msg.MessageID, "msg_test_node_", "MessageID 不应该包含节点前缀")
 
 	// 创建记录
-	created, err := repo.CreateFromMessage(msg, 3, nil)
+	created, err := repo.CreateFromMessage(ctx, msg, 3, nil)
 	require.NoError(t, err)
 
 	// 🔥 验证数据库记录保存了两个不同的ID
@@ -46,29 +48,29 @@ func TestHubMessageIDVsHubIDDistinction(t *testing.T) {
 	assert.NotEqual(t, created.MessageID, created.HubID, "数据库的两个ID字段值应该不同")
 
 	// 🔥 验证只能通过 MessageID 查询（而不是 HubID）
-	found, err := repo.FindByMessageID(businessMsgID)
+	found, err := repo.FindByMessageID(ctx, businessMsgID)
 	require.NoError(t, err)
 	assert.Equal(t, created.ID, found.ID, "应该能通过 MessageID 查询到记录")
 
 	// 🔥 尝试用 Hub ID 查询应该找不到（因为查询用的是 message_id 字段）
-	notFound, err := repo.FindByMessageID(msg.ID) // 这里传入的是 Hub ID
+	notFound, err := repo.FindByMessageID(ctx, msg.ID) // 这里传入的是 Hub ID
 	assert.Error(t, err, "用 Hub ID 查询应该报错")
 	assert.Nil(t, notFound, "用 Hub ID 不应该查到记录")
 
 	// 🔥 验证更新操作使用的是 MessageID
-	err = repo.UpdateStatus(businessMsgID, MessageSendStatusSuccess, "", "")
+	err = repo.UpdateStatus(ctx, businessMsgID, MessageSendStatusSuccess, "", "")
 	assert.NoError(t, err, "用 MessageID 更新应该成功")
 
-	updated, err := repo.FindByMessageID(businessMsgID)
+	updated, err := repo.FindByMessageID(ctx, businessMsgID)
 	require.NoError(t, err)
 	assert.Equal(t, MessageSendStatusSuccess, updated.Status, "状态应该已更新")
 
 	// 🔥 尝试用 Hub ID 更新应该静默失败（UpdateStatus 会忽略不存在的记录）
-	err = repo.UpdateStatus(msg.ID, MessageSendStatusFailed, FailureReasonNetworkError, "test")
+	err = repo.UpdateStatus(ctx, msg.ID, MessageSendStatusFailed, FailureReasonNetworkError, "test")
 	assert.NoError(t, err, "UpdateStatus 对不存在的记录应该静默返回")
 
 	// 验证状态没有被错误更新
-	final, err := repo.FindByMessageID(businessMsgID)
+	final, err := repo.FindByMessageID(ctx, businessMsgID)
 	require.NoError(t, err)
 	assert.Equal(t, MessageSendStatusSuccess, final.Status, "状态不应该被 Hub ID 更新影响")
 }
@@ -79,8 +81,8 @@ func TestMessageRecordIDFields(t *testing.T) {
 	hubInternalID := "msg_node01_67890"
 
 	msg := &HubMessage{
-		ID:          hubInternalID,  // Hub 内部ID
-		MessageID:   businessMsgID,  // 业务消息ID
+		ID:          hubInternalID, // Hub 内部ID
+		MessageID:   businessMsgID, // 业务消息ID
 		Sender:      "user-a",
 		Receiver:    "user-b",
 		MessageType: MessageTypeText,
@@ -109,12 +111,13 @@ func TestRetryWithCorrectMessageID(t *testing.T) {
 	repo := NewMessageRecordRepository(db)
 
 	businessMsgID := osx.HashUnixMicroCipherText()
+	ctx := context.Background()
 	defer func() {
-		_ = repo.DeleteByMessageID(businessMsgID)
+		_ = repo.DeleteByMessageID(ctx, businessMsgID)
 	}()
 
 	msg := createTestHubMessage(businessMsgID, "sender-retry", "receiver-retry", MessageTypeText)
-	_, err := repo.CreateFromMessage(msg, 3, nil)
+	_, err := repo.CreateFromMessage(ctx, msg, 3, nil)
 	require.NoError(t, err)
 
 	// 🔥 重试应该使用 MessageID 而不是 Hub ID
@@ -123,23 +126,23 @@ func TestRetryWithCorrectMessageID(t *testing.T) {
 		Success:       false,
 		Error:         "timeout",
 	}
-	
+
 	// 使用业务消息ID进行重试记录
-	err = repo.IncrementRetry(businessMsgID, attempt)
+	err = repo.IncrementRetry(ctx, businessMsgID, attempt)
 	assert.NoError(t, err, "使用 MessageID 记录重试应该成功")
 
 	// 验证重试记录已保存
-	record, err := repo.FindByMessageID(businessMsgID)
+	record, err := repo.FindByMessageID(ctx, businessMsgID)
 	require.NoError(t, err)
 	assert.Equal(t, 1, record.RetryCount, "重试次数应该增加")
 	assert.Len(t, record.RetryHistory, 1, "重试历史应该有一条记录")
 
 	// 🔥 尝试用 Hub ID 记录重试应该找不到记录（静默失败）
-	err = repo.IncrementRetry(msg.ID, attempt) // 使用 Hub ID
+	err = repo.IncrementRetry(ctx, msg.ID, attempt) // 使用 Hub ID
 	assert.Error(t, err, "使用 Hub ID 应该报错（找不到记录）")
 
 	// 验证重试次数没有被错误增加
-	final, err := repo.FindByMessageID(businessMsgID)
+	final, err := repo.FindByMessageID(ctx, businessMsgID)
 	require.NoError(t, err)
 	assert.Equal(t, 1, final.RetryCount, "重试次数不应该被 Hub ID 操作影响")
 }

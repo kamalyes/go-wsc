@@ -2,8 +2,8 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-09-06 09:50:55
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-09-06 09:50:55
- * @FilePath: \go-wsc\websocket_test.go
+ * @LastEditTime: 2025-12-29 23:59:05
+ * @FilePath: \go-wsc\wsc_test.go
  * @Description: WebSocket结构体及其配置选项测试
  *
  * Copyright (c) 2025 by kamalyes, All Rights Reserved.
@@ -123,12 +123,12 @@ func TestWsc_SetConfig(t *testing.T) {
 	defer client.Close()
 
 	config := wscconfig.Default().
-		WithClientTimeout(90).
+		WithClientTimeout(90 * time.Second).
 		WithMessageBufferSize(128)
 
 	client.SetConfig(config)
 
-	assert.Equal(t, 90, client.Config.ClientTimeout)
+	assert.Equal(t, 90*time.Second, client.Config.ClientTimeout)
 	assert.Equal(t, 128, client.Config.MessageBufferSize)
 }
 
@@ -139,47 +139,47 @@ func TestWsc_AllCallbacks(t *testing.T) {
 
 	// 测试 OnConnected
 	client.OnConnected(func() {})
-	assert.NotNil(t, client.onConnected.Load())
+	assert.True(t, client.HasOnConnectedCallback())
 
 	// 测试 OnConnectError
 	client.OnConnectError(func(err error) {})
-	assert.NotNil(t, client.onConnectError.Load())
+	assert.True(t, client.HasOnConnectErrorCallback())
 
 	// 测试 OnDisconnected
 	client.OnDisconnected(func(err error) {})
-	assert.NotNil(t, client.onDisconnected.Load())
+	assert.True(t, client.HasOnDisconnectedCallback())
 
 	// 测试 OnClose
 	client.OnClose(func(code int, text string) {})
-	assert.NotNil(t, client.onClose.Load())
+	assert.True(t, client.HasOnCloseCallback())
 
 	// 测试 OnTextMessageSent
 	client.OnTextMessageSent(func(message string) {})
-	assert.NotNil(t, client.onTextMessageSent.Load())
+	assert.True(t, client.HasOnTextMessageSentCallback())
 
 	// 测试 OnBinaryMessageSent
 	client.OnBinaryMessageSent(func(data []byte) {})
-	assert.NotNil(t, client.onBinaryMessageSent.Load())
+	assert.True(t, client.HasOnBinaryMessageSentCallback())
 
 	// 测试 OnSentError
 	client.OnSentError(func(err error) {})
-	assert.NotNil(t, client.onSentError.Load())
+	assert.True(t, client.HasOnSentErrorCallback())
 
 	// 测试 OnPingReceived
 	client.OnPingReceived(func(appData string) {})
-	assert.NotNil(t, client.onPingReceived.Load())
+	assert.True(t, client.HasOnPingReceivedCallback())
 
 	// 测试 OnPongReceived
 	client.OnPongReceived(func(appData string) {})
-	assert.NotNil(t, client.onPongReceived.Load())
+	assert.True(t, client.HasOnPongReceivedCallback())
 
 	// 测试 OnTextMessageReceived
 	client.OnTextMessageReceived(func(message string) {})
-	assert.NotNil(t, client.onTextMessageReceived.Load())
+	assert.True(t, client.HasOnTextMessageReceivedCallback())
 
 	// 测试 OnBinaryMessageReceived
 	client.OnBinaryMessageReceived(func(data []byte) {})
-	assert.NotNil(t, client.onBinaryMessageReceived.Load())
+	assert.True(t, client.HasOnBinaryMessageReceivedCallback())
 }
 
 // TestWsc_New 测试创建新客户端

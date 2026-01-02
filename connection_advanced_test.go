@@ -68,12 +68,13 @@ func TestConnection_ReadMessages_TextMessage(t *testing.T) {
 		timeout := time.After(2 * time.Second)
 		received := []string{}
 
+	collectLoop:
 		for i := 0; i < 3; i++ {
 			select {
 			case msg := <-receivedMessages:
 				received = append(received, msg)
 			case <-timeout:
-				break
+				break collectLoop
 			}
 		}
 
@@ -123,12 +124,13 @@ func TestConnection_ReadMessages_BinaryMessage(t *testing.T) {
 		timeout := time.After(2 * time.Second)
 		received := [][]byte{}
 
+	collectLoop:
 		for i := 0; i < 2; i++ {
 			select {
 			case msg := <-receivedMessages:
 				received = append(received, msg)
 			case <-timeout:
-				break
+				break collectLoop
 			}
 		}
 

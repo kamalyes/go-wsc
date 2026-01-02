@@ -11,6 +11,71 @@
 
 **go-wsc** 是一个企业级 Go WebSocket 框架，专注于高性能实时通信。提供智能重连、消息确认(ACK)、连接池管理等关键特性，支持百万级并发连接。
 
+## 📦 项目结构
+
+```
+go-wsc/
+├── client/          # WebSocket客户端封装
+│   ├── websocket.go # 核心WebSocket连接(Getter方法、线程安全)
+│   ├── wsc.go       # 客户端逻辑(回调检测、重连机制)
+│   ├── connection.go# 连接管理
+│   └── aliases.go   # 类型别名
+├── hub/            # 服务端核心(模块化拆分)
+│   ├── hub.go      # Hub核心结构
+│   ├── send.go     # 消息发送与重试
+│   ├── ack.go      # ACK确认机制
+│   ├── batch_sender.go # 批量发送器
+│   ├── broadcast.go    # 广播逻辑
+│   ├── query.go        # 查询接口
+│   ├── registry.go     # 注册管理
+│   ├── lifecycle.go    # 生命周期
+│   ├── handlers.go     # 消息处理
+│   ├── callbacks.go    # 回调管理
+│   ├── sse.go          # SSE支持
+│   ├── vip.go          # VIP管理
+│   ├── utils.go        # 工具函数
+│   ├── context.go      # 上下文
+│   └── repository.go   # 仓库集成
+├── models/         # 数据模型层
+│   ├── message.go      # 消息模型
+│   ├── message_record.go  # 消息记录
+│   ├── offline_message.go # 离线消息
+│   ├── connection.go   # 连接模型
+│   ├── enums.go        # 枚举定义
+│   ├── message_type.go # 消息类型
+│   ├── types.go        # 核心类型
+│   ├── templates.go    # 模板
+│   ├── errors.go       # 错误定义
+│   └── validator.go    # 验证器
+├── repository/     # 数据访问层
+│   ├── message_record_repository.go
+│   ├── offline_message_repository.go
+│   ├── online_status_repository.go
+│   ├── connection_repository.go
+│   ├── message_queue_repository.go
+│   ├── hub_stats_repository.go
+│   ├── workload_repository.go
+│   └── aliases.go
+├── handler/        # 业务逻辑层
+│   ├── offline_message.go  # 离线消息处理
+│   └── aliases.go
+├── middleware/     # 中间件层
+│   ├── logger.go
+│   ├── rate_limiter.go
+│   └── rate_limit_alert.go
+├── protocol/       # 协议层
+│   └── ack.go
+└── exports_*.go    # 向后兼容导出(7个文件)
+```
+
+### 架构特点
+
+- **模块化设计**: 从单体4885行重构为6大核心模块
+- **职责清晰**: handler(业务逻辑) vs repository(数据访问) 明确分离
+- **完整封装**: 30+公共方法，测试代码零私有字段访问
+- **向后兼容**: exports文件保证老代码平滑迁移
+- **线程安全**: Getter方法使用mutex保护并发访问
+
 ## 🏗️ 系统架构
 
 ```mermaid
@@ -222,119 +287,218 @@ package main
 
 import (
     "fmt"
+    "log"
     "github.com/kamalyes/go-wsc"
 )
 
 func main() {
     // 1. 创建客户端
-    client := wsc.New("ws://localhost:8080/ws")
+    client := wsc.NewWsc("ws://localhost:8080/ws")
     
-    // 2. 设置消息处理
-    client.OnTextMessageReceived(func(message string) {
-        fmt.Printf("📨 收到: %s\n", message)
+    // 2. 设置回调处理
+    client.OnConnected(func() {
+        fmt.Println("✅ 连接成功")
+    })
+    
+    client.OnTextMessage(func(message string) {
+        fmt.Printf("📨 收到消息: %s\n", message)
+    })
+    
+    client.OnDisconnected(func(err error) {
+        log.Printf("❌ 连接断开: %v\n", err)
     })
     
     // 3. 连接并发送消息
-    client.Connect()
+    if err := client.Connect(); err != nil {
+        log.Fatal(err)
+    }
+    
     client.SendText("Hello WebSocket!")
     
     select {} // 保持运行
 }
 ```
 
-### 基础服务端（含失败处理）
+### 基础服务端
 
 ```go
 package main
 
 import (
-    "context"
     "log"
     "net/http"
-    "time"
     
     "github.com/kamalyes/go-wsc"
+    "github.com/kamalyes/go-wsc/middleware"
 )
 
 func main() {
-    hub := wsc.NewHub()
+    // 1. 创建Hub并配置中间件
+    logger := middleware.NewDefaultWSCLogger()
+    hub := wsc.NewHub(
+        wsc.WithLogger(logger),
+        wsc.WithMessageBufferSize(256),
+    )
     
-    // 配置失败处理器
-    setupFailureHandlers(hub)
-    
-    go hub.Run()
-    
-    http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-        wsc.HandleWebSocket(hub, w, r)
+    // 2. 设置回调处理
+    hub.OnClientConnected(func(conn *wsc.Connection) {
+        log.Printf("👤 客户端连接: %s\n", conn.GetUserID())
     })
     
-    http.ListenAndServe(":8080", nil)
-}
-
-// 配置失败处理器
-func setupFailureHandlers(hub *wsc.Hub) {
-    // 通用失败处理器
-    hub.AddSendFailureHandler(&MyFailureHandler{})
+    hub.OnClientDisconnected(func(conn *wsc.Connection) {
+        log.Printf("👋 客户端断开: %s\n", conn.GetUserID())
+    })
     
-    // 用户离线处理器
-    hub.AddUserOfflineHandler(&MyOfflineHandler{})
+    hub.OnMessageReceived(func(conn *wsc.Connection, msg *wsc.HubMessage) {
+        log.Printf("📨 收到消息: %s -> %s\n", conn.GetUserID(), msg.Content)
+    })
     
-    // 队列满处理器  
-    hub.AddQueueFullHandler(&MyQueueHandler{})
-}
-
-// 自定义失败处理器
-type MyFailureHandler struct{}
-
-func (h *MyFailureHandler) HandleSendFailure(msg *wsc.HubMessage, recipient string, reason string, err error) {
-    log.Printf("🚨 消息发送失败: 用户=%s, 原因=%s, 消息=%s", recipient, reason, msg.ID)
-}
-
-type MyOfflineHandler struct{}
-
-func (h *MyOfflineHandler) HandleUserOffline(msg *wsc.HubMessage, userID string, err error) {
-    log.Printf("👤 用户离线，存储消息: 用户=%s, 消息=%s", userID, msg.ID)
-    // 存储离线消息到数据库
-}
-
-type MyQueueHandler struct{}
-
-func (h *MyQueueHandler) HandleQueueFull(msg *wsc.HubMessage, recipient string, queueType string, err error) {
-    log.Printf("📦 队列满，备用存储: 队列=%s, 用户=%s", queueType, recipient)
-    // 存储到Redis等外部存储
+    // 3. 启动Hub
+    go hub.Run()
+    defer hub.Shutdown()
+    
+    // 4. 配置HTTP路由
+    http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+        userID := r.URL.Query().Get("user_id")
+        if userID == "" {
+            http.Error(w, "缺少user_id参数", http.StatusBadRequest)
+            return
+        }
+        wsc.ServeWs(hub, w, r, userID)
+    })
+    
+    log.Println("🚀 服务器启动: http://localhost:8080")
+    if err := http.ListenAndServe(":8080", nil); err != nil {
+        log.Fatal(err)
+    }
 }
 ```
 
-### 带重试机制的消息发送
+### 消息发送与广播
 
 ```go
-// 使用重试机制发送重要消息
-func sendImportantMessage(hub *wsc.Hub, userID string, content string) {
+// 发送给单个用户
+func sendToUser(hub *wsc.Hub, userID string, content string) {
     msg := &wsc.HubMessage{
-        ID:       generateMessageID(),
-        Type:     wsc.TextMessage,
-        Content:  content,
-        CreateAt: time.Now(),
-        Priority: wsc.HighPriority,
+        Type:    wsc.TextMessage,
+        Content: content,
     }
+    hub.SendToUser(userID, msg)
+}
+
+// 批量发送
+func batchSend(hub *wsc.Hub) {
+    sender := hub.NewBatchSender().
+        SetBeforeSendCallback(func(userID string, msg *wsc.HubMessage) {
+            log.Printf("准备发送: %s -> %s\n", userID, msg.ID)
+        }).
+        SetAfterSendCallback(func(userID string, msg *wsc.HubMessage, err error) {
+            if err != nil {
+                log.Printf("发送失败: %s -> %s: %v\n", userID, msg.ID, err)
+            }
+        })
     
-    // 带详细重试信息的发送
-    result := hub.SendToUserWithRetry(context.Background(), userID, msg)
+    // 添加消息
+    sender.AddMessage("user1", &wsc.HubMessage{Type: wsc.TextMessage, Content: "Hello User1"})
+    sender.AddMessage("user2", &wsc.HubMessage{Type: wsc.TextMessage, Content: "Hello User2"})
     
-    if result.Success {
-        log.Printf("✅ 消息发送成功，重试 %d 次，总耗时 %v", result.TotalRetries, result.TotalTime)
-    } else {
-        log.Printf("❌ 消息发送失败，重试 %d 次后放弃: %v", result.TotalRetries, result.FinalError)
+    // 执行发送
+    sender.Send()
+}
+
+// 广播消息
+func broadcast(hub *wsc.Hub, content string) {
+    msg := &wsc.HubMessage{
+        Type:    wsc.TextMessage,
+        Content: content,
     }
-    
-    // 查看详细的重试历史
-    for i, attempt := range result.Attempts {
-        log.Printf("   尝试 %d: %v (%v)", i+1, attempt.Success, attempt.Duration)
+    hub.Broadcast(msg)
+}
+
+// 发送给用户组
+func sendToGroup(hub *wsc.Hub, userIDs []string, content string) {
+    msg := &wsc.HubMessage{
+        Type:    wsc.TextMessage,
+        Content: content,
     }
+    hub.SendToMultipleUsers(userIDs, msg)
 }
 ```
 
-> 💡 **深入学习**: 查看 [TypeScript 集成文档](./docs/TypeScript_Integration.md) 了解前端集成示例
+### 带ACK确认的可靠消息
+
+```go
+// 发送需要ACK确认的消息
+func sendWithAck(hub *wsc.Hub, userID string, content string) {
+    msg := &wsc.HubMessage{
+        Type:    wsc.TextMessage,
+        Content: content,
+    }
+    
+    // 发送并等待ACK
+    err := hub.SendToUserWithAck(userID, msg, 5*time.Second)
+    if err != nil {
+        log.Printf("❌ 消息未确认: %v\n", err)
+        // 自动存储到离线消息
+    } else {
+        log.Printf("✅ 消息已确认\n")
+    }
+}
+
+// 客户端确认消息
+func clientAckHandler(client *wsc.Wsc) {
+    client.OnTextMessage(func(message string) {
+        // 解析消息
+        var msg wsc.HubMessage
+        if err := json.Unmarshal([]byte(message), &msg); err != nil {
+            return
+        }
+        
+        // 如果需要ACK，发送确认
+        if msg.RequireAck {
+            ackMsg := wsc.CreateAckResponse(msg.ID)
+            client.SendMessage(ackMsg)
+        }
+        
+        // 处理业务逻辑
+        handleBusinessLogic(&msg)
+    })
+}
+```
+
+### 离线消息处理
+
+```go
+// 配置离线消息处理器
+func setupOfflineHandler(hub *wsc.Hub) {
+    // 使用Redis+MySQL混合存储
+    offlineHandler := wsc.NewHybridOfflineMessageHandler(
+        redisClient,
+        database,
+        middleware.NewDefaultWSCLogger(),
+    )
+    
+    hub.SetOfflineMessageHandler(offlineHandler)
+}
+
+// 用户上线后推送离线消息
+func pushOfflineMessages(hub *wsc.Hub, userID string) {
+    messages, err := hub.GetOfflineMessages(userID, 100)
+    if err != nil {
+        log.Printf("获取离线消息失败: %v\n", err)
+        return
+    }
+    
+    for _, msg := range messages {
+        hub.SendToUser(userID, msg)
+    }
+    
+    // 标记为已推送
+    hub.MarkOfflineMessagesAsPushed(userID, getMessageIDs(messages))
+}
+```
+
+> 💡 **深入学习**: 查看 [客户端API文档](./docs/Client_API.md) 和 [Hub API文档](./docs/Hub_API.md)
 
 ## ⚡ 性能表现
 
@@ -356,105 +520,238 @@ func sendImportantMessage(hub *wsc.Hub, userID string, content string) {
 
 ## 🔧 高级配置
 
-### 客户端配置示例
+### 客户端配置
 
 ```go
-config := wsc.Config{
-    WriteWait:          15 * time.Second,
-    PongWait:           60 * time.Second, 
-    PingPeriod:         54 * time.Second,
-    MaxMessageSize:     1024,
-    MessageBufferSize:  512,
-    AutoReconnect:      true,
-    MinRecTime:         1 * time.Second,
-    MaxRecTime:         30 * time.Second,
-    RecFactor:          2.0,
-}
-
-client := wsc.New("ws://localhost:8080/ws")
-client.SetConfig(config)
-```
-
-### 重试机制配置
-
-```go
-// go-config/wsc 配置文件示例
 import (
-    wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+    "time"
+    "github.com/kamalyes/go-wsc/client"
 )
 
-// YAML 配置文件 config.yaml
-/*
-wsc:
-  max_retries: 5
-  base_delay: 200ms
-  backoff_factor: 1.5
-  retryable_errors:
-    - "queue_full"
-    - "timeout"
-    - "conn_error"
-    - "channel_closed"
-    - "network_unreachable"
-  non_retryable_errors:
-    - "user_offline"
-    - "permission"
-    - "validation"
-    - "authentication_failed"
-*/
+// 创建自定义配置的客户端
+ws := client.NewWebSocket(
+    "ws://localhost:8080/ws",
+    client.WithWriteWait(10*time.Second),
+    client.WithPongWait(60*time.Second),
+    client.WithPingPeriod(54*time.Second),
+    client.WithMaxMessageSize(1024*1024), // 1MB
+    client.WithSendChanSize(512),
+)
 
-// 代码中使用配置
-hub := wsc.NewHub()
-// 配置会自动从 go-config/wsc 加载
-```
+// 使用Wsc包装器
+wscClient := client.NewWsc(ws)
 
-### 失败处理器配置
+// 配置自动重连
+wscClient.SetAutoReconnect(true)
+wscClient.SetReconnectConfig(
+    1*time.Second,  // 最小重连间隔
+    30*time.Second, // 最大重连间隔
+    2.0,           // 退避因子
+)
 
-```go
-// 配置多个失败处理器
-hub := wsc.NewHub()
-
-// 添加日志记录处理器
-hub.AddSendFailureHandler(&LoggingFailureHandler{
-    logLevel: "ERROR",
+// 设置完整回调
+wscClient.OnConnected(func() {
+    log.Println("✅ 已连接")
 })
 
-// 添加指标收集处理器
-hub.AddSendFailureHandler(&MetricsFailureHandler{
-    prometheusRegistry: registry,
+wscClient.OnConnectError(func(err error) {
+    log.Printf("❌ 连接错误: %v\n", err)
 })
 
-// 添加告警处理器
-hub.AddSendFailureHandler(&AlertFailureHandler{
-    alertThreshold: 10,
-    alertChannel:   "#operations",
+wscClient.OnDisconnected(func(err error) {
+    log.Printf("👋 断开连接: %v\n", err)
 })
 
-// 专门的队列满处理器，使用Redis作为备用存储
-hub.AddQueueFullHandler(&RedisQueueHandler{
-    redisClient: redisClient,
-    keyPrefix:   "wsc:queue:",
-    ttl:         24 * time.Hour,
+wscClient.OnReconnecting(func(attempt int, delay time.Duration) {
+    log.Printf("🔄 重连中 (第%d次, 延迟%v)\n", attempt, delay)
 })
 
-// 专门的离线用户处理器，使用数据库存储
-hub.AddUserOfflineHandler(&DatabaseOfflineHandler{
-    db:             database,
-    tableName:      "offline_messages",
-    maxOfflineMsg:  1000,
+wscClient.OnClose(func(code int, text string) {
+    log.Printf("🚪 连接关闭: %d - %s\n", code, text)
+})
+
+// 消息处理
+wscClient.OnTextMessage(func(msg string) {
+    log.Printf("📨 文本消息: %s\n", msg)
+})
+
+wscClient.OnBinaryMessage(func(data []byte) {
+    log.Printf("📦 二进制消息: %d bytes\n", len(data))
 })
 ```
 
-### ACK 消息确认
+### 服务端配置
 
 ```go
-// 发送需要确认的消息
-ackMessage := wsc.CreateAckMessage("message-123", "Hello World")
-client.SendAckMessage(ackMessage)
+import (
+    "github.com/kamalyes/go-wsc/hub"
+    "github.com/kamalyes/go-wsc/middleware"
+    "github.com/kamalyes/go-wsc/repository"
+    "github.com/kamalyes/go-wsc/handler"
+)
 
-// 处理 ACK 确认
-client.OnAckReceived(func(messageID string) {
-    fmt.Printf("✅ 消息 %s 已确认\n", messageID)
+func setupHub() *hub.Hub {
+    // 1. 创建日志器
+    logger := middleware.NewDefaultWSCLogger()
+    
+    // 2. 创建仓库
+    redisClient := createRedisClient()
+    db := createDatabaseConnection()
+    
+    onlineStatusRepo := repository.NewRedisOnlineStatusRepository(redisClient, logger)
+    messageRecordRepo := repository.NewRedisMessageRecordRepository(redisClient, logger)
+    workloadRepo := repository.NewRedisWorkloadRepository(redisClient, logger)
+    messageQueueRepo := repository.NewRedisMessageQueueRepository(redisClient, logger)
+    offlineMessageRepo := repository.NewMySQLOfflineMessageRepository(db, logger)
+    
+    // 3. 创建离线消息处理器
+    offlineHandler := handler.NewHybridOfflineMessageHandler(
+        redisClient,
+        db,
+        logger,
+        handler.WithMaxOfflineMessages(1000),
+        handler.WithTTL(7*24*time.Hour),
+    )
+    
+    // 4. 创建Hub
+    h := hub.New(
+        logger,
+        onlineStatusRepo,
+        messageRecordRepo,
+        workloadRepo,
+        messageQueueRepo,
+        offlineMessageRepo,
+        hub.WithMessageBufferSize(512),
+        hub.WithWriteWait(10*time.Second),
+        hub.WithPongWait(60*time.Second),
+        hub.WithPingPeriod(54*time.Second),
+        hub.WithMaxMessageSize(1024*1024),
+    )
+    
+    // 5. 设置离线消息处理器
+    h.SetOfflineMessageHandler(offlineHandler)
+    
+    // 6. 配置回调
+    setupHubCallbacks(h)
+    
+    return h
+}
+
+func setupHubCallbacks(h *hub.Hub) {
+    // 客户端连接回调
+    h.OnClientConnected(func(conn *hub.Connection) {
+        userID := conn.GetUserID()
+        log.Printf("👤 用户上线: %s\n", userID)
+        
+        // 推送离线消息
+        go pushOfflineMessages(h, userID)
+    })
+    
+    // 客户端断开回调
+    h.OnClientDisconnected(func(conn *hub.Connection) {
+        userID := conn.GetUserID()
+        log.Printf("👋 用户离线: %s\n", userID)
+    })
+    
+    // 消息接收回调
+    h.OnMessageReceived(func(conn *hub.Connection, msg *hub.HubMessage) {
+        log.Printf("📨 收到消息: %s -> %s\n", conn.GetUserID(), msg.ID)
+    })
+    
+    // 消息发送成功回调
+    h.OnMessageSent(func(userID string, msg *hub.HubMessage) {
+        log.Printf("✅ 消息已送达: %s -> %s\n", userID, msg.ID)
+    })
+    
+    // 消息发送失败回调
+    h.OnMessageSendFailed(func(userID string, msg *hub.HubMessage, err error) {
+        log.Printf("❌ 消息发送失败: %s -> %s: %v\n", userID, msg.ID, err)
+    })
+}
+```
+
+### ACK消息确认配置
+
+```go
+// 服务端发送需要ACK的消息
+func sendWithAck(h *hub.Hub, userID string, content string) {
+    msg := &hub.HubMessage{
+        Type:       hub.TextMessage,
+        Content:    content,
+        RequireAck: true,
+    }
+    
+    // 带超时的ACK发送
+    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+    defer cancel()
+    
+    err := h.SendToUserWithAck(ctx, userID, msg)
+    if err != nil {
+        log.Printf("❌ ACK超时或失败: %v\n", err)
+        // 自动存储到离线消息
+    } else {
+        log.Printf("✅ 消息已确认\n")
+    }
+}
+
+// 客户端自动ACK
+wscClient.OnTextMessage(func(message string) {
+    var msg hub.HubMessage
+    if err := json.Unmarshal([]byte(message), &msg); err != nil {
+        return
+    }
+    
+    // 自动发送ACK
+    if msg.RequireAck {
+        ackMsg := protocol.CreateAckMessage(msg.ID)
+        wscClient.SendMessage(ackMsg)
+    }
+    
+    // 处理消息
+    handleMessage(&msg)
 })
+```
+
+### 批量发送配置
+
+```go
+// 创建批量发送器
+sender := h.NewBatchSender()
+
+// 配置回调
+sender.SetBeforeSendCallback(func(userID string, msg *hub.HubMessage) {
+    log.Printf("⏩ 准备发送: %s\n", msg.ID)
+})
+
+sender.SetAfterSendCallback(func(userID string, msg *hub.HubMessage, err error) {
+    if err != nil {
+        log.Printf("❌ 发送失败: %s: %v\n", msg.ID, err)
+        // 记录失败信息
+    } else {
+        log.Printf("✅ 发送成功: %s\n", msg.ID)
+    }
+})
+
+// 添加消息
+for _, user := range userList {
+    msg := &hub.HubMessage{
+        Type:    hub.TextMessage,
+        Content: fmt.Sprintf("通知给 %s", user),
+    }
+    sender.AddMessage(user, msg)
+}
+
+// 批量添加
+messages := map[string]*hub.HubMessage{
+    "user1": {Type: hub.TextMessage, Content: "Hello User1"},
+    "user2": {Type: hub.TextMessage, Content: "Hello User2"},
+    "user3": {Type: hub.TextMessage, Content: "Hello User3"},
+}
+sender.AddMessages(messages)
+
+// 配置超时并发送
+sender.SetTimeout(5 * time.Second)
+sender.Send()
 ```
 
 > 🔗 **深入了解**: 查看 [ACK 消息确认机制](./docs/ACK_Mechanism.md) 了解可靠消息传输
@@ -483,6 +780,7 @@ go test -race ./...
 # 生成覆盖报告
 go test -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out
+go test -v ./... -timeout 5m 2>&1 | Select-String -Pattern "(FAIL|ERROR|panic)" -Context 1,0
 ```
 
 > 📋 **测试报告**: 查看 [测试覆盖报告](./docs/Test_Coverage.md) 了解详细测试情况
@@ -521,6 +819,31 @@ go tool cover -html=coverage.out
 ## 📄 许可证
 
 本项目采用 [MIT 许可证](LICENSE) 开源。
+
+## 📌 Commit Emoji 图例
+
+在本项目的提交记录中，我们使用以下 emoji 标记不同类型的变更：
+
+| Emoji | 类型 | 说明 |
+|-------|------|------|
+| 🔥 | feat | 新增功能或重大重构 |
+| 🐛 | fix | Bug 修复 |
+| ➕ | add | 添加新模块/文件 |
+| 📊 | data | 连接记录、数据持久化 |
+| 📈 | stats | 统计信息、监控指标 |
+| 📮 | queue | 消息队列相关 |
+| 💾 | database | 数据库、GORM 相关 |
+| 📦 | storage | 离线消息、存储层 |
+| 🟢 | status | 在线状态管理 |
+| ⚖️ | balance | 负载管理、负载均衡 |
+| 🗑️ | remove | 移除文件、清理代码 |
+| ✅ | test | 修复测试、测试相关 |
+| ⚡ | perf | 性能优化 |
+| 📝 | docs | 文档更新 |
+| 🎨 | style | 代码格式、样式调整 |
+| ♻️ | refactor | 代码重构 |
+| 🔒 | security | 安全相关 |
+| 🚀 | deploy | 部署、发布相关 |
 
 ---
 

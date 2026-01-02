@@ -98,18 +98,11 @@ func TestConnectionOnSentErrorTriggered(t *testing.T) {
 	client.Connect()
 
 	// 人为标记断开（不调用 clean 以保持 sendChan 可用）并强制制造发送错误
-	client.WebSocket.connMu.Lock()
-	client.WebSocket.isConnected = false
-	client.WebSocket.connMu.Unlock()
+	client.WebSocket.SetConnectedForTest(false)
 
 	// 直接向内部发送通道注入消息，绕过 SendTextMessage 对关闭状态的短路
 	for i := 0; i < 3; i++ {
-		client.WebSocket.sendChanMu.RLock()
-		select {
-		case client.WebSocket.sendChan <- &wsMsg{t: websocket.TextMessage, msg: []byte("m")}:
-		default: // 若缓冲已满则忽略
-		}
-		client.WebSocket.sendChanMu.RUnlock()
+		_ = client.WebSocket.SendMessageForTest(websocket.TextMessage, []byte("m"))
 	}
 
 	// 等待错误回调执行

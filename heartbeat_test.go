@@ -1,11 +1,23 @@
+/*
+ * @Author: kamalyes 501893067@qq.com
+ * @Date: 2025-12-27 22:53:02
+ * @LastEditors: kamalyes 501893067@qq.com
+ * @LastEditTime: 2025-12-30 00:23:53
+ * @FilePath: \go-wsc\heartbeat_test.go
+ * @Description:
+ *
+ * Copyright (c) 2025 by kamalyes, All Rights Reserved.
+ */
 package wsc
 
 import (
-	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
-	"github.com/stretchr/testify/assert"
 	"sync"
 	"testing"
 	"time"
+
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-toolbox/pkg/syncx"
+	"github.com/stretchr/testify/assert"
 )
 
 // MockHeartbeatTimeoutRecorder 记录心跳超时回调
@@ -48,9 +60,9 @@ func (m *MockHeartbeatTimeoutRecorder) Record(clientID string, userID string, la
 }
 
 func (m *MockHeartbeatTimeoutRecorder) GetTimeoutCalls() []HeartbeatTimeoutCall {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]HeartbeatTimeoutCall{}, m.timeoutCalls...)
+	return syncx.WithLockReturnValue(&m.mu, func() []HeartbeatTimeoutCall {
+		return append([]HeartbeatTimeoutCall{}, m.timeoutCalls...)
+	})
 }
 
 func (m *MockHeartbeatTimeoutRecorder) WaitForTimeout(timeout time.Duration) *HeartbeatTimeoutCall {
@@ -63,20 +75,18 @@ func (m *MockHeartbeatTimeoutRecorder) WaitForTimeout(timeout time.Duration) *He
 }
 
 func (m *MockHeartbeatTimeoutRecorder) Reset() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.timeoutCalls = make([]HeartbeatTimeoutCall, 0)
+	syncx.WithLock(&m.mu, func() {
+		m.timeoutCalls = make([]HeartbeatTimeoutCall, 0)
+	})
 }
 
 // TestHeartbeatBasic 测试基本心跳功能
 func TestHeartbeatBasic(t *testing.T) {
 	// 创建配置
-	config := &wscconfig.WSC{
-		NodeIP:            "127.0.0.1",
-		NodePort:          8080,
-		HeartbeatInterval: 1, // 1秒检查一次
-		MessageBufferSize: 100,
-	}
+	config := wscconfig.Default().
+		WithNodeInfo("127.0.0.1", 8080).
+		WithHeartbeatInterval(1 * time.Second).
+		WithMessageBufferSize(100)
 
 	// 创建Hub
 	hub := NewHub(config)
@@ -111,11 +121,8 @@ func TestHeartbeatBasic(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// 验证客户端已注册
-	hub.mutex.RLock()
-	registeredClient, exists := hub.clients[client.ID]
-	hub.mutex.RUnlock()
-	assert.True(t, exists, "Client should be registered")
-	assert.NotNil(t, registeredClient, "Registered client should not be nil")
+	registeredClient := hub.GetClientByID(client.ID)
+	assert.NotNil(t, registeredClient, "Client should be registered")
 	assert.False(t, registeredClient.LastHeartbeat.IsZero(), "LastHeartbeat should be initialized")
 
 	// 验证初始化的心跳时间是最近的
@@ -125,16 +132,16 @@ func TestHeartbeatBasic(t *testing.T) {
 
 // TestHeartbeatUpdate 测试心跳更新功能
 func TestHeartbeatUpdate(t *testing.T) {
-	config := &wscconfig.WSC{
-		NodeIP:            "127.0.0.1",
-		NodePort:          8081,
-		HeartbeatInterval: 1,
-		MessageBufferSize: 100,
-	}
+	config := wscconfig.Default().
+		WithNodeInfo("127.0.0.1", 8081).
+		WithHeartbeatInterval(1 * time.Second).
+		WithMessageBufferSize(100)
 
 	hub := NewHub(config)
 	recorder := NewMockHeartbeatTimeoutRecorder()
-	hub.OnHeartbeatTimeout(func(clientID, userID string, lastHeartbeat time.Time) { recorder.Record(clientID, userID, lastHeartbeat) })
+	hub.OnHeartbeatTimeout(func(clientID, userID string, lastHeartbeat time.Time) {
+		recorder.Record(clientID, userID, lastHeartbeat)
+	})
 	hub.SetHeartbeatConfig(1*time.Second, 2*time.Second)
 
 	go hub.Run()
@@ -152,9 +159,8 @@ func TestHeartbeatUpdate(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// 获取初始心跳时间
-	hub.mutex.RLock()
-	initialHeartbeat := hub.clients[client.ID].LastHeartbeat
-	hub.mutex.RUnlock()
+	initialClient := hub.GetClientByID(client.ID)
+	initialHeartbeat := initialClient.LastHeartbeat
 
 	// 等待一段时间
 	time.Sleep(500 * time.Millisecond)
@@ -163,9 +169,8 @@ func TestHeartbeatUpdate(t *testing.T) {
 	hub.UpdateHeartbeat(client.ID)
 
 	// 验证心跳时间已更新
-	hub.mutex.RLock()
-	updatedHeartbeat := hub.clients[client.ID].LastHeartbeat
-	hub.mutex.RUnlock()
+	updatedClient := hub.GetClientByID(client.ID)
+	updatedHeartbeat := updatedClient.LastHeartbeat
 
 	assert.True(t, updatedHeartbeat.After(initialHeartbeat),
 		"Updated heartbeat should be after initial heartbeat")
@@ -178,16 +183,16 @@ func TestHeartbeatUpdate(t *testing.T) {
 
 // TestHeartbeatTimeout 测试心跳超时检测
 func TestHeartbeatTimeout(t *testing.T) {
-	config := &wscconfig.WSC{
-		NodeIP:            "127.0.0.1",
-		NodePort:          8082,
-		HeartbeatInterval: 1,
-		MessageBufferSize: 100,
-	}
+	config := wscconfig.Default().
+		WithNodeInfo("127.0.0.1", 8082).
+		WithHeartbeatInterval(1 * time.Second).
+		WithMessageBufferSize(100)
 
 	hub := NewHub(config)
 	recorder := NewMockHeartbeatTimeoutRecorder()
-	hub.OnHeartbeatTimeout(func(clientID, userID string, lastHeartbeat time.Time) { recorder.Record(clientID, userID, lastHeartbeat) })
+	hub.OnHeartbeatTimeout(func(clientID, userID string, lastHeartbeat time.Time) {
+		recorder.Record(clientID, userID, lastHeartbeat)
+	})
 
 	// 设置较短的超时时间便于测试：检查间隔1秒，超时1.5秒
 	hub.SetHeartbeatConfig(1*time.Second, 1500*time.Millisecond)
@@ -207,9 +212,7 @@ func TestHeartbeatTimeout(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// 手动设置一个过期的心跳时间（3秒前）
-	hub.mutex.Lock()
-	hub.clients[client.ID].LastHeartbeat = time.Now().Add(-3 * time.Second)
-	hub.mutex.Unlock()
+	hub.SetClientLastHeartbeatForTest(client.ID, time.Now().Add(-3*time.Second))
 
 	// 等待心跳检查触发（最多2秒）
 	timeoutCall := recorder.WaitForTimeout(2 * time.Second)
@@ -221,26 +224,24 @@ func TestHeartbeatTimeout(t *testing.T) {
 		assert.Equal(t, client.UserID, timeoutCall.UserID, "User ID should match")
 	}
 
-	// 验证客户端已被移除
+	// 验证客户端已被移除（使用公共 API 避免数据竞争）
 	time.Sleep(200 * time.Millisecond)
-	hub.mutex.RLock()
-	_, exists := hub.clients[client.ID]
-	hub.mutex.RUnlock()
+	exists := hub.HasClient(client.ID)
 	assert.False(t, exists, "Client should be removed after timeout")
 }
 
 // TestHeartbeatNoTimeout 测试正常心跳不会超时
 func TestHeartbeatNoTimeout(t *testing.T) {
-	config := &wscconfig.WSC{
-		NodeIP:            "127.0.0.1",
-		NodePort:          8083,
-		HeartbeatInterval: 1,
-		MessageBufferSize: 100,
-	}
+	config := wscconfig.Default().
+		WithNodeInfo("127.0.0.1", 8083).
+		WithHeartbeatInterval(1 * time.Second).
+		WithMessageBufferSize(100)
 
 	hub := NewHub(config)
 	recorder := NewMockHeartbeatTimeoutRecorder()
-	hub.OnHeartbeatTimeout(func(clientID, userID string, lastHeartbeat time.Time) { recorder.Record(clientID, userID, lastHeartbeat) })
+	hub.OnHeartbeatTimeout(func(clientID, userID string, lastHeartbeat time.Time) {
+		recorder.Record(clientID, userID, lastHeartbeat)
+	})
 
 	// 设置超时时间：2秒
 	hub.SetHeartbeatConfig(1*time.Second, 2*time.Second)
@@ -256,6 +257,7 @@ func TestHeartbeatNoTimeout(t *testing.T) {
 		UserType: UserTypeAgent,
 		SendChan: make(chan []byte, 10),
 	}
+	clientID := client.ID // 保存clientID避免竞争
 	hub.Register(client)
 	time.Sleep(100 * time.Millisecond)
 
@@ -267,7 +269,7 @@ func TestHeartbeatNoTimeout(t *testing.T) {
 		for {
 			select {
 			case <-ticker.C:
-				hub.UpdateHeartbeat(client.ID)
+				hub.UpdateHeartbeat(clientID)
 			case <-done:
 				return
 			}
@@ -283,24 +285,22 @@ func TestHeartbeatNoTimeout(t *testing.T) {
 	assert.Equal(t, 0, len(calls), "Should not trigger timeout with regular heartbeats")
 
 	// 验证客户端仍然存在
-	hub.mutex.RLock()
-	_, exists := hub.clients[client.ID]
-	hub.mutex.RUnlock()
-	assert.True(t, exists, "Client should still exist with regular heartbeats")
+	client = hub.GetClientByID(clientID)
+	assert.NotNil(t, client, "Client should still exist with regular heartbeats")
 }
 
 // TestMultipleClientsHeartbeat 测试多个客户端的心跳管理
 func TestMultipleClientsHeartbeat(t *testing.T) {
-	config := &wscconfig.WSC{
-		NodeIP:            "127.0.0.1",
-		NodePort:          8084,
-		HeartbeatInterval: 1,
-		MessageBufferSize: 100,
-	}
+	config := wscconfig.Default().
+		WithNodeInfo("127.0.0.1", 8084).
+		WithHeartbeatInterval(1 * time.Second).
+		WithMessageBufferSize(100)
 
 	hub := NewHub(config)
 	recorder := NewMockHeartbeatTimeoutRecorder()
-	hub.OnHeartbeatTimeout(func(clientID, userID string, lastHeartbeat time.Time) { recorder.Record(clientID, userID, lastHeartbeat) })
+	hub.OnHeartbeatTimeout(func(clientID, userID string, lastHeartbeat time.Time) {
+		recorder.Record(clientID, userID, lastHeartbeat)
+	})
 	hub.SetHeartbeatConfig(1*time.Second, 1500*time.Millisecond)
 
 	go hub.Run()
@@ -346,9 +346,7 @@ func TestMultipleClientsHeartbeat(t *testing.T) {
 	}()
 
 	// 让第二个客户端的心跳过期
-	hub.mutex.Lock()
-	hub.clients[clients[1].ID].LastHeartbeat = time.Now().Add(-3 * time.Second)
-	hub.mutex.Unlock()
+	hub.SetClientLastHeartbeatForTest(clients[1].ID, time.Now().Add(-3*time.Second))
 
 	// 等待超时检测
 	time.Sleep(2 * time.Second)
@@ -361,25 +359,21 @@ func TestMultipleClientsHeartbeat(t *testing.T) {
 	}
 
 	// 验证客户端状态
-	hub.mutex.RLock()
-	_, exists1 := hub.clients[clients[0].ID]
-	_, exists2 := hub.clients[clients[1].ID]
-	_, exists3 := hub.clients[clients[2].ID]
-	hub.mutex.RUnlock()
+	client1 := hub.GetClientByID(clients[0].ID)
+	client2 := hub.GetClientByID(clients[1].ID)
+	client3 := hub.GetClientByID(clients[2].ID)
 
-	assert.True(t, exists1, "Client 005 should still exist")
-	assert.False(t, exists2, "Client 006 should be removed")
-	assert.True(t, exists3, "Client 007 should still exist")
+	assert.NotNil(t, client1, "Client 005 should still exist")
+	assert.Nil(t, client2, "Client 006 should be removed")
+	assert.NotNil(t, client3, "Client 007 should still exist")
 }
 
 // TestHeartbeatWithoutHandler 测试没有设置处理器的情况
 func TestHeartbeatWithoutHandler(t *testing.T) {
-	config := &wscconfig.WSC{
-		NodeIP:            "127.0.0.1",
-		NodePort:          8085,
-		HeartbeatInterval: 1,
-		MessageBufferSize: 100,
-	}
+	config := wscconfig.Default().
+		WithNodeInfo("127.0.0.1", 8085).
+		WithHeartbeatInterval(1 * time.Second).
+		WithMessageBufferSize(100)
 
 	hub := NewHub(config)
 	// 不设置心跳处理器
@@ -400,33 +394,29 @@ func TestHeartbeatWithoutHandler(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// 设置过期心跳
-	hub.mutex.Lock()
-	hub.clients[client.ID].LastHeartbeat = time.Now().Add(-2 * time.Second)
-	hub.mutex.Unlock()
+	hub.SetClientLastHeartbeatForTest(client.ID, time.Now().Add(-2*time.Second))
 
 	// 等待检查
 	time.Sleep(1500 * time.Millisecond)
 
 	// 即使没有处理器，客户端也应该被移除
-	hub.mutex.RLock()
-	_, exists := hub.clients[client.ID]
-	hub.mutex.RUnlock()
-	assert.False(t, exists, "Client should be removed even without handler")
+	client = hub.GetClientByID(client.ID)
+	assert.Nil(t, client, "Client should be removed even without timeout handler")
 }
 
 // TestHeartbeatConfigDefaults 测试默认配置
 func TestHeartbeatConfigDefaults(t *testing.T) {
-	config := &wscconfig.WSC{
-		NodeIP:            "127.0.0.1",
-		NodePort:          8086,
-		HeartbeatInterval: 30,
-		ClientTimeout:     90, // 默认90秒
-		MessageBufferSize: 100,
-	}
+	config := wscconfig.Default().
+		WithNodeInfo("127.0.0.1", 8086).
+		WithHeartbeatInterval(1 * time.Second). // 使用1秒的检查间隔方便测试
+		WithClientTimeout(3 * time.Second).     // 使用3秒的超时时间
+		WithMessageBufferSize(100)
 
 	hub := NewHub(config)
 	recorder := NewMockHeartbeatTimeoutRecorder()
-	hub.OnHeartbeatTimeout(func(clientID, userID string, lastHeartbeat time.Time) { recorder.Record(clientID, userID, lastHeartbeat) })
+	hub.OnHeartbeatTimeout(func(clientID, userID string, lastHeartbeat time.Time) {
+		recorder.Record(clientID, userID, lastHeartbeat)
+	})
 	// 不调用 SetHeartbeatConfig，使用默认值
 
 	go hub.Run()
@@ -434,8 +424,8 @@ func TestHeartbeatConfigDefaults(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// 验证使用配置中的默认超时时间
-	assert.Equal(t, time.Duration(0), hub.heartbeatTimeout,
-		"Should use zero when not configured, falling back to config")
+	assert.Equal(t, 1*time.Second, hub.GetConfig().HeartbeatInterval,
+		"Should use config value when not explicitly set")
 
 	client := &Client{
 		ID:       "client-009",
@@ -444,46 +434,31 @@ func TestHeartbeatConfigDefaults(t *testing.T) {
 		SendChan: make(chan []byte, 10),
 	}
 	hub.Register(client)
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond) // 等待注册完成
 
-	// 设置一个刚好不超时的心跳（89秒前）
-	hub.mutex.Lock()
-	hub.clients[client.ID].LastHeartbeat = time.Now().Add(-89 * time.Second)
-	hub.mutex.Unlock()
+	// 测试1: 设置心跳为1.5秒前（小于3秒超时），等待1秒检查，总共2.5秒，应该不超时
+	hub.SetClientLastHeartbeatForTest(client.ID, time.Now().Add(-1500*time.Millisecond))
+	time.Sleep(1100 * time.Millisecond) // 等待心跳检查触发（心跳间隔1秒）
 
-	// 手动触发一次心跳检查
-	hub.checkHeartbeat()
+	clientCheck := hub.GetClientByID(client.ID)
+	assert.NotNil(t, clientCheck, "Client should not timeout (1.5s + 1.1s = 2.6s < 3s)")
 
-	// 应该还存在
-	hub.mutex.RLock()
-	_, exists := hub.clients[client.ID]
-	hub.mutex.RUnlock()
-	assert.True(t, exists, "Client should not timeout at 89 seconds")
+	// 测试2: 设置心跳为2.5秒前，等待1秒检查，总共3.5秒，应该超时
+	hub.SetClientLastHeartbeatForTest(client.ID, time.Now().Add(-2500*time.Millisecond))
+	time.Sleep(1100 * time.Millisecond) // 等待心跳检查触发
 
-	// 设置超时的心跳（91秒前）
-	hub.mutex.Lock()
-	hub.clients[client.ID].LastHeartbeat = time.Now().Add(-91 * time.Second)
-	hub.mutex.Unlock()
+	clientCheck = hub.GetClientByID(client.ID)
+	assert.Nil(t, clientCheck, "Client should timeout (2.5s + 1.1s = 3.6s > 3s)")
 
-	// 再次检查
-	hub.checkHeartbeat()
-
-	// 应该被移除
-	time.Sleep(100 * time.Millisecond)
-	hub.mutex.RLock()
-	_, exists = hub.clients[client.ID]
-	hub.mutex.RUnlock()
-	assert.False(t, exists, "Client should timeout at 91 seconds")
 }
 
 // BenchmarkHeartbeatUpdate 性能测试：心跳更新
 func BenchmarkHeartbeatUpdate(b *testing.B) {
-	config := &wscconfig.WSC{
-		NodeIP:            "127.0.0.1",
-		NodePort:          8087,
-		HeartbeatInterval: 30,
-		MessageBufferSize: 100,
-	}
+	config := wscconfig.Default()
+	config.NodeIP = "127.0.0.1"
+	config.NodePort = 8087
+	config.HeartbeatInterval = 30 * time.Second
+	config.MessageBufferSize = 100
 
 	hub := NewHub(config)
 	hub.SetHeartbeatConfig(30*time.Second, 90*time.Second)
@@ -510,12 +485,11 @@ func BenchmarkHeartbeatUpdate(b *testing.B) {
 
 // BenchmarkHeartbeatCheck 性能测试：心跳检查
 func BenchmarkHeartbeatCheck(b *testing.B) {
-	config := &wscconfig.WSC{
-		NodeIP:            "127.0.0.1",
-		NodePort:          8088,
-		HeartbeatInterval: 30,
-		MessageBufferSize: 100,
-	}
+	config := wscconfig.Default()
+	config.NodeIP = "127.0.0.1"
+	config.NodePort = 8088
+	config.HeartbeatInterval = 30 * time.Second
+	config.MessageBufferSize = 100
 
 	hub := NewHub(config)
 	hub.SetHeartbeatConfig(30*time.Second, 90*time.Second)
@@ -538,6 +512,9 @@ func BenchmarkHeartbeatCheck(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		hub.checkHeartbeat()
+		// 基准测试：更新所有客户端的心跳
+		for j := 0; j < 100; j++ {
+			hub.UpdateHeartbeat("bench-client-" + string(rune(j)))
+		}
 	}
 }

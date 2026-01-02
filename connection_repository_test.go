@@ -23,9 +23,7 @@ import (
 	"github.com/kamalyes/go-toolbox/pkg/osx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
 )
 
 var (
@@ -46,32 +44,20 @@ func cleanTestData(t *testing.T, db *gorm.DB) {
 	}
 }
 
-// 测试用 MySQL 配置（使用 local 配置文件中的数据库）- 单例模式
+// 测试用 MySQL 配置 - 使用统一的测试数据库连接
 func getConnectTestDB(t *testing.T) *gorm.DB {
 	testConnectDBOnce.Do(func() {
-		dsn := "root:idev88888@tcp(120.77.38.35:13306)/im_agent?charset=utf8mb4&parseTime=True&loc=Local&timeout=10s"
-		db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{
-			Logger:                 logger.Default.LogMode(logger.Silent), // 测试时使用静默模式
-			SkipDefaultTransaction: true,                                  // 跳过默认事务，提升性能
-			PrepareStmt:            true,                                  // 预编译语句，提升性能
-		})
-		require.NoError(t, err, "数据库连接失败")
+		// 使用统一的测试数据库连接
+		db := GetTestDB(t)
 
 		// 只执行一次自动迁移
-		err = db.AutoMigrate(&ConnectionRecord{})
+		err := db.AutoMigrate(&ConnectionRecord{})
 		require.NoError(t, err, "数据库迁移失败")
-
-		// 配置连接池
-		sqlDB, err := db.DB()
-		require.NoError(t, err, "获取底层DB失败")
-		sqlDB.SetMaxIdleConns(10)
-		sqlDB.SetMaxOpenConns(20)
-		sqlDB.SetConnMaxLifetime(time.Hour)
 
 		testConnectDBInstance = db
 	})
 
-	// 每次获取测试DB时清理数据（确保在 Once.Do 之后执行）
+	// 每次获取测试DB时清理数据
 	if testConnectDBInstance != nil {
 		cleanTestData(t, testConnectDBInstance)
 	}
@@ -116,7 +102,8 @@ func TestCreate(t *testing.T) {
 
 	// 验证记录已创建
 	found, err := repo.GetByConnectionID(ctx, record.ConnectionID)
-	assert.NoError(t, err)
+	require.NoError(t, err)
+	require.NotNil(t, found, "查询结果不应为空")
 	assert.Equal(t, record.UserID, found.UserID)
 	assert.Equal(t, record.NodeID, found.NodeID)
 }
@@ -446,6 +433,9 @@ func TestGetByNodeID(t *testing.T) {
 	db := getConnectTestDB(t)
 	repo := NewConnectionRecordRepository(db)
 	ctx := context.Background()
+
+	// 清理之前的测试数据
+	db.Exec("DELETE FROM connection_records WHERE node_id IN ('node1', 'node2')")
 
 	// 创建5个连接
 	for i := 0; i < 5; i++ {

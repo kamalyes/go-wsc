@@ -12,7 +12,6 @@ package wsc
 
 import (
 	"context"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -40,8 +39,8 @@ const (
 func TestAckManagerCreate(t *testing.T) {
 	am := NewAckManager(5*time.Second, 3)
 	assert.NotNil(t, am)
-	assert.Equal(t, 5*time.Second, am.timeout)
-	assert.Equal(t, 3, am.maxRetry)
+	assert.Equal(t, 5*time.Second, am.GetTimeout())
+	assert.Equal(t, 3, am.GetMaxRetry())
 	assert.Equal(t, 0, am.GetPendingCount())
 }
 
@@ -71,9 +70,10 @@ func TestAckManagerConfirmSuccess(t *testing.T) {
 		Content:     testMessage,
 	}
 
-	pm := am.AddPendingMessageWithExpire(msg, 5*time.Second, 2)
+	// 使用较短的超时避免测试等待太久
+	pm := am.AddPendingMessageWithExpire(msg, 200*time.Millisecond, 2)
 
-	// 模拟ACK确认
+	// 模拟ACK确认 - 在超时前发送
 	go func() {
 		time.Sleep(50 * time.Millisecond)
 		ack := &AckMessage{
@@ -116,24 +116,28 @@ func TestAckManagerCleanupExpired(t *testing.T) {
 	am := NewAckManager(5*time.Second, 3)
 
 	// 添加多个消息,使用较短的超时
+	// timeout=50ms, maxRetry=0, contextTimeout = 50ms * (0+1) + 1s = 1.05s
 	for i := 0; i < 5; i++ {
 		msg := &HubMessage{
 			ID:          string(rune('a' + i)),
 			MessageType: MessageTypeText,
 			Content:     testMessage,
 		}
-		am.AddPendingMessageWithExpire(msg, 100*time.Millisecond, 0)
+		// 设置 maxRetry=0 以缩短 context 超时时间
+		am.AddPendingMessageWithExpire(msg, 50*time.Millisecond, 0)
 	}
 
 	assert.Equal(t, 5, am.GetPendingCount())
 
-	// 等待消息过期（contextTimeout = 100ms * (0+1) + 1s = 1.1s）
+	// 等待所有消息的 context 过期
+	// contextTimeout = 50ms * (0+1) + 1s = 1.05s
+	// 等待 1.2s 确保所有消息都过期
 	time.Sleep(1200 * time.Millisecond)
 
 	// 清理过期消息
 	cleaned := am.CleanupExpired()
-	assert.Equal(t, 5, cleaned)
-	assert.Equal(t, 0, am.GetPendingCount())
+	assert.Equal(t, 5, cleaned, "应该清理所有5个过期消息")
+	assert.Equal(t, 0, am.GetPendingCount(), "清理后应该没有待确认消息")
 }
 
 // TestHubSendWithAckEnabled 测试启用ACK的消息发送
@@ -149,12 +153,14 @@ func TestHubSendWithAckEnabled(t *testing.T) {
 	defer hub.Shutdown()
 
 	// 注册测试客户端
+	now := time.Now()
 	client := &Client{
-		ID:       testClient1,
-		UserID:   testUser1,
-		SendChan: make(chan []byte, 10),
-		Context:  context.Background(),
-		LastSeen: time.Now(), // 设置最后活跃时间防止被清理
+		ID:            testClient1,
+		UserID:        testUser1,
+		SendChan:      make(chan []byte, 10),
+		Context:       context.Background(),
+		LastSeen:      now,
+		LastHeartbeat: now,
 	}
 	hub.Register(client)
 
@@ -205,7 +211,7 @@ func TestHubSendWithAckEnabled(t *testing.T) {
 	}
 
 	ackMsg, err := hub.SendToUserWithAck(ctx, testUser1, msg, 0, 0)
-	t.Logf("EnableAck配置: %v, AckTimeout: %v", hub.config.EnableAck, hub.config.AckTimeout)
+	t.Logf("EnableAck配置: %v, AckTimeout: %v", hub.GetConfig().EnableAck, hub.GetConfig().AckTimeout)
 	assert.NoError(t, err)
 	assert.NotNil(t, ackMsg)
 	assert.Equal(t, AckStatusConfirmed, ackMsg.Status)
@@ -220,23 +226,26 @@ func TestHubSendWithAckDisabled(t *testing.T) {
 	// 不调用WithAck，保持EnableAck=false
 
 	hub := NewHub(config)
+
+	// 启动hub
 	go hub.Run()
 	defer hub.Shutdown()
-
-	// 注册测试客户端
+	// 注册测试客户端 - 在hub.Run()之前注册避免竞争
+	now := time.Now()
 	client := &Client{
-		ID:       testClient2,
-		UserID:   testUser2,
-		SendChan: make(chan []byte, 10),
-		Context:  context.Background(),
-		LastSeen: time.Now(), // 设置最后活跃时间防止被清理
+		ID:            testClient1,
+		UserID:        testUser1,
+		SendChan:      make(chan []byte, 10),
+		Context:       context.Background(),
+		LastSeen:      now,
+		LastHeartbeat: now,
 	}
 	hub.Register(client)
 
 	// 可靠地等待注册完成
 	registered := false
 	for i := 0; i < 50; i++ {
-		if isOnline, _ := hub.IsUserOnline(testUser2); isOnline {
+		if isOnline, _ := hub.IsUserOnline(testUser1); isOnline {
 			registered = true
 			break
 		}
@@ -253,7 +262,7 @@ func TestHubSendWithAckDisabled(t *testing.T) {
 		Content:     "Test message without ACK",
 	}
 
-	ackMsg, err := hub.SendToUserWithAck(ctx, testUser2, msg, 0, 0)
+	ackMsg, err := hub.SendToUserWithAck(ctx, testUser1, msg, 0, 0)
 	assert.NoError(t, err)
 	assert.Nil(t, ackMsg) // 未启用ACK时返回nil
 }
@@ -360,37 +369,28 @@ func TestAckRetrySuccess(t *testing.T) {
 		Content:     "Test retry message",
 	}
 
-	pm := am.AddPendingMessageWithExpire(msg, 200*time.Millisecond, 2)
+	pm := am.AddPendingMessageWithExpire(msg, 150*time.Millisecond, 2)
 
-	// 使用channel来同步goroutine之间的通信，避免数据竞态
+	// 记录重试次数
 	var retryCount int32
-	retryCountMu := &sync.Mutex{}
 
-	go func() {
-		for {
-			time.Sleep(250 * time.Millisecond)
-			retryCountMu.Lock()
-			current := atomic.AddInt32(&retryCount, 1)
-			retryCountMu.Unlock()
+	// 重试函数
+	retryFunc := func() error {
+		current := atomic.AddInt32(&retryCount, 1)
+		t.Logf("重试发送消息，第 %d 次", current-1)
 
-			if current >= 2 {
+		// 在第2次重试时发送ACK
+		if current == 2 {
+			go func() {
+				time.Sleep(10 * time.Millisecond)
 				ack := &AckMessage{
 					MessageID: msg.ID,
 					Status:    AckStatusConfirmed,
 					Timestamp: time.Now(),
 				}
 				am.ConfirmMessage(msg.ID, ack)
-				return
-			}
+			}()
 		}
-	}()
-
-	// 重试函数
-	retryFunc := func() error {
-		retryCountMu.Lock()
-		current := atomic.LoadInt32(&retryCount)
-		retryCountMu.Unlock()
-		t.Logf("重试发送消息，第 %d 次", current)
 		return nil
 	}
 

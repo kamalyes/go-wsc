@@ -44,7 +44,7 @@ jobs:
       MACOS_REDIS_CONF_ARM: ${{ vars.MACOS_REDIS_CONF_ARM || '/opt/homebrew/etc/redis.conf' }}
     steps:
       - name: Fetch Repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Install Go
         uses: actions/setup-go@v5

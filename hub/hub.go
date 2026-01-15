@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/kamalyes/go-cachex"
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"github.com/kamalyes/go-toolbox/pkg/idgen"
@@ -159,6 +160,8 @@ var (
 	ErrOnlineStatusRepositoryNotSet = models.ErrOnlineStatusRepositoryNotSet
 	ErrMessageDeliveryTimeout       = models.ErrMessageDeliveryTimeout
 	ErrQueueAndPendingFull          = models.ErrQueueAndPendingFull
+	ErrPubSubNotSet                 = models.ErrPubSubNotSet
+	ErrPubSubPublishFailed          = models.ErrPubSubPublishFailed
 
 	// ErrorType 常量
 	ErrTypeUserNotFound   = models.ErrTypeUserNotFound
@@ -263,6 +266,9 @@ type Hub struct {
 	idGenerator           IDGenerator
 	workerID              int64
 
+	// 📡 事件发布订阅
+	pubsub *cachex.PubSub
+
 	offlineMessagePushCallback OfflineMessagePushCallback
 	messageSendCallback        MessageSendCallback
 	queueFullCallback          QueueFullCallback
@@ -343,6 +349,7 @@ func (h *Hub) GetNodeID() string           { return h.nodeID }
 func (h *Hub) GetWorkerID() int64          { return h.workerID }
 func (h *Hub) GetIDGenerator() IDGenerator { return h.idGenerator }
 func (h *Hub) GetLogger() WSCLogger        { return h.logger }
+func (h *Hub) GetContext() context.Context { return h.ctx }
 func (h *Hub) IsStarted() bool             { return h.started.Load() }
 func (h *Hub) IsShutdown() bool            { return h.shutdown.Load() }
 func (h *Hub) GetConfig() *wscconfig.WSC   { return h.config }
@@ -363,4 +370,13 @@ func (h *Hub) SetRateLimiter(limiter *RateLimiter) {
 
 func (h *Hub) SetPoolManager(manager PoolManager) {
 	h.poolManager = manager
+}
+
+func (h *Hub) SetPubSub(pubsub *cachex.PubSub) {
+	h.pubsub = pubsub
+	h.logger.InfoKV("PubSub已设置", "enabled", true)
+}
+
+func (h *Hub) GetPubSub() *cachex.PubSub {
+	return h.pubsub
 }

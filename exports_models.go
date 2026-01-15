@@ -527,6 +527,12 @@ const (
 	ErrTypeThreatDetected     = models.ErrTypeThreatDetected
 	ErrTypeAccessDeniedByRule = models.ErrTypeAccessDeniedByRule
 
+	// PubSub相关错误
+	ErrTypePubSubNotSet           = models.ErrTypePubSubNotSet
+	ErrTypePubSubPublishFailed    = models.ErrTypePubSubPublishFailed
+	ErrTypeEventSerializeFailed   = models.ErrTypeEventSerializeFailed
+	ErrTypeEventDeserializeFailed = models.ErrTypeEventDeserializeFailed
+
 	// 错误消息格式常量
 	ErrMsgClientIDFormat   = models.ErrMsgClientIDFormat
 	ErrMsgDecompressFailed = models.ErrMsgDecompressFailed
@@ -565,6 +571,12 @@ var (
 	ErrOnlineStatusRepositoryNotSet = models.ErrOnlineStatusRepositoryNotSet
 	ErrStatsRepositoryNotSet        = models.ErrStatsRepositoryNotSet
 
+	// PubSub相关错误
+	ErrPubSubNotSet           = models.ErrPubSubNotSet
+	ErrPubSubPublishFailed    = models.ErrPubSubPublishFailed
+	ErrEventSerializeFailed   = models.ErrEventSerializeFailed
+	ErrEventDeserializeFailed = models.ErrEventDeserializeFailed
+
 	// 错误判断辅助函数
 	IsRetryableError     = models.IsRetryableError
 	IsRetryableErrorType = models.IsRetryableErrorType
@@ -595,6 +607,33 @@ var (
 	VIPLevelValidator         = models.VIPLevelValidator
 	UrgencyLevelValidator     = models.UrgencyLevelValidator
 	BusinessCategoryValidator = models.BusinessCategoryValidator
+)
+
+// ==================== 事件相关类型 ====================
+type (
+	EventStatus                        = models.EventStatus
+	UserStatusEvent                    = models.UserStatusEvent
+	TicketQueueEvent                   = models.TicketQueueEvent
+	TicketAssignedEvent                = models.TicketAssignedEvent
+	TicketAssignmentFailedEvent        = models.TicketAssignmentFailedEvent
+	UserStatusEventHandler             = models.UserStatusEventHandler
+	TicketQueueEventHandler            = models.TicketQueueEventHandler
+	TicketAssignedEventHandler         = models.TicketAssignedEventHandler
+	TicketAssignmentFailedEventHandler = models.TicketAssignmentFailedEventHandler
+)
+
+// ==================== 事件类型常量 ====================
+const (
+	// 事件类型
+	EventUserOnline             = models.EventUserOnline
+	EventUserOffline            = models.EventUserOffline
+	EventTicketQueuePushed      = models.EventTicketQueuePushed
+	EventTicketAssigned         = models.EventTicketAssigned
+	EventTicketAssignmentFailed = models.EventTicketAssignmentFailed
+
+	// 事件状态
+	EventTypeOnline  = models.EventTypeOnline
+	EventTypeOffline = models.EventTypeOffline
 )
 
 // ============================================================================

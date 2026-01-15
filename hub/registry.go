@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-12-28 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-01-02 13:50:21
+ * @LastEditTime: 2026-01-13 10:17:07
  * @FilePath: \go-wsc\hub\registry.go
  * @Description: Hub 客户端注册/注销管理
  *
@@ -19,6 +19,7 @@ import (
 	"github.com/kamalyes/go-toolbox/pkg/contextx"
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
+	"github.com/kamalyes/go-wsc/events"
 )
 
 // ============================================================================
@@ -94,6 +95,9 @@ func (h *Hub) handleRegister(client *Client) {
 	go h.syncOnlineStatus(client)
 	go h.pushOfflineMessagesOnConnect(client)
 
+	// 📡 发布用户上线事件（所有用户类型）
+	go events.PublishUserOnline(h, client.UserID, client.UserType, client.ID)
+
 	h.sendWelcomeMessage(client)
 
 	if client.Conn != nil {
@@ -104,6 +108,9 @@ func (h *Hub) handleRegister(client *Client) {
 
 // handleUnregister 处理客户端注销（内部方法）
 func (h *Hub) handleUnregister(client *Client) {
+	// 📡 发布用户下线事件（所有用户类型，在锁外发布）
+	go events.PublishUserOffline(h, client.UserID, client.UserType, client.ID)
+
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
 	h.removeClientUnsafe(client)

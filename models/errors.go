@@ -105,6 +105,11 @@ const (
 	ErrTypeThreatDetected     ErrorType = 81203 // 检测到威胁内容
 	ErrTypeAccessDeniedByRule ErrorType = 81204 // 被访问规则拒绝
 
+	// PubSub相关错误 (81300-81399) - 不可重试
+	ErrTypePubSubNotSet           ErrorType = 81301 // PubSub未设置
+	ErrTypePubSubPublishFailed    ErrorType = 81302 // 事件发布失败
+	ErrTypeEventSerializeFailed   ErrorType = 81303 // 事件序列化失败
+	ErrTypeEventDeserializeFailed ErrorType = 81304 // 事件反序列化失败
 )
 
 // init 初始化所有错误类型注册
@@ -193,6 +198,12 @@ func init() {
 	errorx.RegisterError(ErrTypeThreatDetected, "threat detected: %s")
 	errorx.RegisterError(ErrTypeAccessDeniedByRule, "access denied by security rule: %s")
 
+	// 注册PubSub相关错误
+	errorx.RegisterError(ErrTypePubSubNotSet, "pubsub is not set")
+	errorx.RegisterError(ErrTypePubSubPublishFailed, "failed to publish event: %s")
+	errorx.RegisterError(ErrTypeEventSerializeFailed, "failed to serialize event: %s")
+	errorx.RegisterError(ErrTypeEventDeserializeFailed, "failed to deserialize event: %s")
+
 	// 注册消息记录仓库相关错误
 	errorx.RegisterError(ErrTypeRecordRepositoryNotSet, "message record repository is not set")
 }
@@ -253,6 +264,14 @@ var (
 	ErrOnlineStatusRepositoryNotSet = errorx.NewError(ErrTypeOnlineStatusRepositoryNotSet)
 	ErrStatsRepositoryNotSet        = errorx.NewError(ErrTypeStatsRepositoryNotSet)
 	ErrSendChannelFull              = errorx.NewError(ErrTypeSendChannelFull)
+)
+
+// PubSub相关错误变量
+var (
+	ErrPubSubNotSet           = errorx.NewError(ErrTypePubSubNotSet)
+	ErrPubSubPublishFailed    = errorx.NewError(ErrTypePubSubPublishFailed)
+	ErrEventSerializeFailed   = errorx.NewError(ErrTypeEventSerializeFailed)
+	ErrEventDeserializeFailed = errorx.NewError(ErrTypeEventDeserializeFailed)
 )
 
 // IsRetryableError 判断错误是否可以重试

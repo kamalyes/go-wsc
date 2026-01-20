@@ -71,8 +71,10 @@ const (
 	MessageTypeMention              MessageType = "mention"                // @提及消息
 	MessageTypeCustom               MessageType = "custom"                 // 自定义类型消息
 	MessageTypeUnknown              MessageType = "unknown"                // 未知类型消息
+	MessageTypeTicketCreated        MessageType = "ticket_created"         // 工单创建消息
 	MessageTypeTicketAssigned       MessageType = "ticket_assigned"        // 分配工单消息
-	MessageTypeTicketClosed         MessageType = "ticket_closed"          // 关闭工单消息
+	MessageTypeTicketClosed         MessageType = "ticket_closed"          // 手动关闭工单消息
+	MessageTypeTicketTimeoutClosed  MessageType = "ticket_timeout_closed"  // 超时关闭工单消息
 	MessageTypeTicketTransfer       MessageType = "ticket_transfer"        // 转移工单消息
 	MessageTypeTicketActive         MessageType = "ticket_active"          // 活跃工单列表
 	MessageTypeTest                 MessageType = "test"                   // 测试消息
@@ -113,6 +115,8 @@ const (
 	MessageTypeConnectionTimeout    MessageType = "connection_timeout"     // 连接超时消息（发给超时的客户端）
 	MessageTypeKickOut              MessageType = "kick_out"               // 被踢出消息（发给被踢的客户端，之后断开）
 	MessageTypeForceOffline         MessageType = "force_offline"          // 强制下线通知（异地登录等，发给被下线的客户端）
+	MessageTypeOpenWindow           MessageType = "open_window"            // 打开窗口消息
+	MessageTypeCloseWindow          MessageType = "close_window"           // 关闭窗口消息
 )
 
 // String 实现Stringer接口
@@ -134,7 +138,7 @@ func (t MessageType) IsValid() bool {
 		MessageTypeError, MessageTypeInfo, MessageTypeSuccess, MessageTypeWarning, MessageTypeHeartbeat,
 		MessageTypePing, MessageTypePong, MessageTypeTyping, MessageTypeRead, MessageTypeDelivered,
 		MessageTypeRecall, MessageTypeEdit, MessageTypeReaction, MessageTypeThread, MessageTypeReply,
-		MessageTypeMention, MessageTypeCustom, MessageTypeTicketAssigned, MessageTypeTicketClosed,
+		MessageTypeMention, MessageTypeCustom, MessageTypeTicketCreated, MessageTypeTicketAssigned, MessageTypeTicketClosed, MessageTypeTicketTimeoutClosed,
 		MessageTypeTicketTransfer, MessageTypeTicketActive, MessageTypeTest, MessageTypeWelcome, MessageTypeTerminate, MessageTypeTransferred,
 		MessageTypeSessionCreated, MessageTypeSessionClosed, MessageTypeSessionQueued, MessageTypeSessionTimeout,
 		MessageTypeSessionPaused, MessageTypeSessionResumed, MessageTypeSessionTransferred, MessageTypeSessionMemberJoined,
@@ -144,7 +148,8 @@ func (t MessageType) IsValid() bool {
 		MessageTypeUserJoined, MessageTypeUserLeft, MessageTypeUserStatusChanged, MessageTypeServerStatus,
 		MessageTypeServerStats, MessageTypeClientConfig, MessageTypeConfigUpdate, MessageTypeHealthCheck,
 		MessageTypeHealthResponse, MessageTypeConnected, MessageTypeDisconnected, MessageTypeReconnected,
-		MessageTypeConnectionError, MessageTypeConnectionTimeout, MessageTypeKickOut, MessageTypeForceOffline:
+		MessageTypeConnectionError, MessageTypeConnectionTimeout, MessageTypeKickOut, MessageTypeForceOffline,
+		MessageTypeCloseWindow, MessageTypeOpenWindow:
 		return true
 	default:
 		return false
@@ -199,7 +204,13 @@ func (t MessageType) IsInteractiveType() bool {
 // IsStatusType 检查是否为状态类型消息
 func (t MessageType) IsStatusType() bool {
 	switch t {
-	case MessageTypeTyping, MessageTypeRead, MessageTypeDelivered, MessageTypeAck:
+	case MessageTypeTyping, // 正在输入状态
+		MessageTypeRead,      // 已读状态
+		MessageTypeDelivered, // 送达状态
+		MessageTypeAck,       // 确认状态
+		MessageTypeReaction,  // 消息反应/表态
+		MessageTypeEdit,      // 消息编辑
+		MessageTypeRecall:    // 消息撤回
 		return true
 	default:
 		return false
@@ -248,7 +259,140 @@ func (t MessageType) ShouldSkipDatabaseRecord() bool {
 	return t.IsStatusType() || t.IsConnectionType() || t.IsSystemType()
 }
 
-// GetCategory 获取消息类型分类
+// IsBusinessType 检查是否为业务相关类型消息
+func (t MessageType) IsBusinessType() bool {
+	switch t {
+	case MessageTypePayment, MessageTypeOrder, MessageTypeProduct, MessageTypeTicketCreated, MessageTypeTicketAssigned,
+		MessageTypeTicketClosed, MessageTypeTicketTimeoutClosed, MessageTypeTicketTransfer, MessageTypeTicketActive:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsWindowType 检查是否为窗口相关类型消息
+func (t MessageType) IsWindowType() bool {
+	switch t {
+	case MessageTypeOpenWindow, MessageTypeCloseWindow:
+		return true
+	default:
+		return false
+	}
+}
+
+// MessageTypeEmojiMap 消息类型对应的日志 emoji 映射表
+var MessageTypeEmojiMap = map[MessageType]string{
+	// 窗口消息
+	MessageTypeOpenWindow:  "🟢",
+	MessageTypeCloseWindow: "🔴",
+	// 状态消息
+	MessageTypeTyping:    "⌨️",
+	MessageTypeRead:      "👁️",
+	MessageTypeDelivered: "✅",
+	MessageTypeAck:       "✔️",
+	MessageTypeReaction:  "❤️",
+	MessageTypeEdit:      "✏️",
+	MessageTypeRecall:    "↩️",
+}
+
+// GetEmoji 获取消息类型对应的 emoji，未找到返回默认值
+func (t MessageType) GetEmoji() string {
+	if emoji, ok := MessageTypeEmojiMap[t]; ok {
+		return emoji
+	}
+	return "🔄"
+}
+
+// IsForwardableType 检查是否为需要转发的消息类型
+// 可转发消息：客户端发送的消息需要直接转发给接收者，不需要经过业务处理
+// 包括：窗口消息（打开/关闭）、状态消息（输入状态、已读、送达、确认、反应、编辑、撤回）等需要实时转发的消息
+func (t MessageType) IsForwardableType() bool {
+	// 窗口消息需要转发
+	if t.IsWindowType() {
+		return true
+	}
+
+	// 状态消息需要实时转发
+	if t.IsStatusType() {
+		return true
+	}
+
+	return false
+}
+
+// IsUserType 检查是否为用户相关类型消息
+func (t MessageType) IsUserType() bool {
+	switch t {
+	case MessageTypeUserJoined, MessageTypeUserLeft, MessageTypeUserStatusChanged, MessageTypeCheckUserStatus,
+		MessageTypeUserStatusResponse, MessageTypeGetOnlineUsers, MessageTypeOnlineUsersList, MessageTypeGetUserInfo,
+		MessageTypeUserInfoResponse:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsConfigType 检查是否为配置相关类型消息
+func (t MessageType) IsConfigType() bool {
+	switch t {
+	case MessageTypeClientConfig, MessageTypeConfigUpdate:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsHealthType 检查是否为健康检查相关类型消息
+func (t MessageType) IsHealthType() bool {
+	switch t {
+	case MessageTypeHealthCheck, MessageTypeHealthResponse:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsServerType 检查是否为服务器相关类型消息
+func (t MessageType) IsServerType() bool {
+	switch t {
+	case MessageTypeServerStatus, MessageTypeServerStats:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsRecallType 检查是否为消息撤回/编辑/反应等类型
+func (t MessageType) IsRecallType() bool {
+	switch t {
+	case MessageTypeRecall, MessageTypeEdit, MessageTypeReaction:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsThreadType 检查是否为线程/回复相关类型
+func (t MessageType) IsThreadType() bool {
+	switch t {
+	case MessageTypeThread, MessageTypeReply:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsCustomType 检查是否为自定义/未知类型
+func (t MessageType) IsCustomType() bool {
+	switch t {
+	case MessageTypeCustom, MessageTypeUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// GetCategory 获取消息类型分类（扩展）
 func (t MessageType) GetCategory() string {
 	if t.IsMediaType() {
 		return "media"
@@ -264,6 +408,36 @@ func (t MessageType) GetCategory() string {
 	}
 	if t.IsStatusType() {
 		return "status"
+	}
+	if t.IsBusinessType() {
+		return "business"
+	}
+	if t.IsSessionType() {
+		return "session"
+	}
+	if t.IsWindowType() {
+		return "window"
+	}
+	if t.IsUserType() {
+		return "user"
+	}
+	if t.IsConfigType() {
+		return "config"
+	}
+	if t.IsHealthType() {
+		return "health"
+	}
+	if t.IsServerType() {
+		return "server"
+	}
+	if t.IsRecallType() {
+		return "recall"
+	}
+	if t.IsThreadType() {
+		return "thread"
+	}
+	if t.IsCustomType() {
+		return "custom"
 	}
 	return "other"
 }
@@ -283,6 +457,7 @@ func (t MessageType) GetDefaultPriority() MessagePriority {
 	case t == MessageTypeNotice || t == MessageTypeEvent || t == MessageTypeSuccess ||
 		t == MessageTypePayment || t == MessageTypeOrder || t == MessageTypeInvite ||
 		t == MessageTypeTask || t == MessageTypeRecall || t == MessageTypeTicketAssigned ||
+		t == MessageTypeTicketCreated || t == MessageTypeTicketTimeoutClosed ||
 		t == MessageTypeTicketClosed || t == MessageTypeTicketTransfer || t == MessageTypeTicketActive || t == MessageTypeTest ||
 		t == MessageTypeWelcome || t == MessageTypeTerminate || t == MessageTypeTransferred || t == MessageTypeSessionCreated ||
 		t == MessageTypeSessionClosed || t == MessageTypeSessionQueued || t == MessageTypeSessionTimeout ||
@@ -299,7 +474,8 @@ func (t MessageType) GetDefaultPriority() MessagePriority {
 		t == MessageTypeDocument || t == MessageTypeCalendar || t == MessageTypePoll ||
 		t == MessageTypeForm || t == MessageTypeProduct || t == MessageTypeEmoji ||
 		t == MessageTypeSticker || t == MessageTypeGIF || t == MessageTypeReply ||
-		t == MessageTypeThread || t == MessageTypeMention:
+		t == MessageTypeThread || t == MessageTypeMention || t == MessageTypeOpenWindow ||
+		t == MessageTypeCloseWindow:
 		return MessagePriorityNormal
 
 	// 低优先级 - 状态、统计、心跳等
@@ -338,7 +514,8 @@ func GetAllMessageTypes() []MessageType {
 		MessageTypeGetUserInfo, MessageTypeUserInfoResponse, MessageTypeSystemQuery, MessageTypeSystemResponse,
 		MessageTypeUserJoined, MessageTypeUserLeft, MessageTypeUserStatusChanged, MessageTypeServerStatus,
 		MessageTypeServerStats, MessageTypeClientConfig, MessageTypeConfigUpdate, MessageTypeHealthCheck,
-		MessageTypeHealthResponse,
+		MessageTypeHealthResponse, MessageTypeConnected, MessageTypeDisconnected, MessageTypeReconnected, MessageTypeConnectionError,
+		MessageTypeConnectionTimeout, MessageTypeKickOut, MessageTypeForceOffline, MessageTypeCloseWindow, MessageTypeOpenWindow,
 	}
 }
 

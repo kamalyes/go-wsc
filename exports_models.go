@@ -309,8 +309,10 @@ const (
 	MessageTypeMention              = models.MessageTypeMention
 	MessageTypeCustom               = models.MessageTypeCustom
 	MessageTypeUnknown              = models.MessageTypeUnknown
+	MessageTypeTicketCreated        = models.MessageTypeTicketCreated
 	MessageTypeTicketAssigned       = models.MessageTypeTicketAssigned
 	MessageTypeTicketClosed         = models.MessageTypeTicketClosed
+	MessageTypeTicketTimeoutClosed  = models.MessageTypeTicketTimeoutClosed
 	MessageTypeTicketTransfer       = models.MessageTypeTicketTransfer
 	MessageTypeTicketActive         = models.MessageTypeTicketActive
 	MessageTypeTest                 = models.MessageTypeTest
@@ -351,6 +353,8 @@ const (
 	MessageTypeConnectionTimeout    = models.MessageTypeConnectionTimeout
 	MessageTypeKickOut              = models.MessageTypeKickOut
 	MessageTypeForceOffline         = models.MessageTypeForceOffline
+	MessageTypeOpenWindow           = models.MessageTypeOpenWindow
+	MessageTypeCloseWindow          = models.MessageTypeCloseWindow
 )
 
 // ==================== 消息优先级常量 ====================

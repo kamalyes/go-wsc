@@ -451,7 +451,20 @@ func (h *Hub) handleTextMessage(client *Client, data []byte) {
 		return
 	}
 
-	// 调用消息接收回调
+	// 🔄 自动转发可转发类型的消息（异步执行，避免阻塞）
+	if models.MessageType(msg.MessageType).IsForwardableType() {
+		syncx.Go(h.ctx).
+			WithTimeout(5 * time.Second).
+			OnPanic(func(r interface{}) {
+				h.logger.ErrorKV("转发消息panic", "panic", r, "message_id", msg.ID)
+			}).
+			ExecWithContext(func(ctx context.Context) error {
+				return h.handleForwardableMessage(ctx, msg)
+			})
+		return
+	}
+
+	// 调用消息接收回调（其他类型消息交给业务层处理）
 	ctx := context.Background()
 	if err := h.InvokeMessageReceivedCallback(ctx, client, msg); err != nil {
 		h.logger.WarnKV("消息接收回调执行失败",
@@ -459,6 +472,38 @@ func (h *Hub) handleTextMessage(client *Client, data []byte) {
 			"error", err,
 		)
 	}
+}
+
+// handleForwardableMessage 处理可转发类型的消息（窗口消息、状态消息等）
+// 这些消息无需业务层处理，框架自动转发
+func (h *Hub) handleForwardableMessage(ctx context.Context, msg *HubMessage) error {
+	emoji := msg.MessageType.GetEmoji()
+
+	h.logger.DebugKV(fmt.Sprintf("%s 自动转发消息", emoji),
+		"message_type", msg.MessageType,
+		"from", msg.Sender,
+		"to", msg.Receiver,
+		"message_id", msg.ID,
+	)
+
+	// 检查接收者是否指定
+	if msg.Receiver == "" {
+		h.logger.WarnKV("可转发消息缺少接收者",
+			"message_type", msg.MessageType,
+			"sender", msg.Sender,
+		)
+		return nil
+	}
+
+	// 使用 SendToUserWithRetry 自动转发消息
+	ctx = context.WithValue(ctx, ContextKeySenderID, msg.Sender)
+	result := h.SendToUserWithRetry(ctx, msg.Receiver, msg)
+
+	if !result.Success {
+		h.logger.ErrorKV(fmt.Sprintf("%s 转发失败", emoji), "from", msg.Sender, "to", msg.Receiver, "error", result.FinalError)
+		return result.FinalError
+	}
+	return nil
 }
 
 // handleBinaryMessage 处理二进制消息

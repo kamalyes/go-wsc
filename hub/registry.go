@@ -57,6 +57,9 @@ func (h *Hub) handleRegister(client *Client) {
 
 	// 初始化客户端时间戳（如果未设置）
 	now := time.Now()
+	if client.ConnectedAt.IsZero() {
+		client.ConnectedAt = now
+	}
 	if client.LastHeartbeat.IsZero() {
 		client.LastHeartbeat = now
 	}

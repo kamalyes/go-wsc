@@ -31,6 +31,7 @@ type Client struct {
 	Role           UserRole               `json:"role"`            // 用户角色
 	ClientIP       string                 `json:"client_ip"`       // 客户端IP
 	Conn           *websocket.Conn        `json:"-"`               // WebSocket连接（不序列化，仅WS使用）
+	ConnectedAt    time.Time              `json:"connected_at"`    // 连接时间
 	LastSeen       time.Time              `json:"last_seen"`       // 最后活跃时间
 	LastHeartbeat  time.Time              `json:"last_heartbeat"`  // 最后心跳时间
 	Status         UserStatus             `json:"status"`          // 用户状态

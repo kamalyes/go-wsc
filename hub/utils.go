@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/kamalyes/go-logger"
 	"github.com/kamalyes/go-sqlbuilder"
 	"github.com/kamalyes/go-toolbox/pkg/contextx"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
@@ -26,6 +27,42 @@ import (
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/protocol"
 )
+
+// ClassifyCloseError 分类关闭错误
+func ClassifyCloseError(err error) (closeCode int, isNormal bool) {
+	closeCode = websocket.CloseAbnormalClosure // 默认异常关闭
+
+	// 遍历检查各种关闭错误
+	for code, info := range WsCloseCodeMap {
+		if websocket.IsCloseError(err, code) {
+			return code, info.IsNormal
+		}
+	}
+
+	return closeCode, false
+}
+
+// logWithClient 带客户端信息的日志记录辅助方法
+func (h *Hub) logWithClient(level logger.LogLevel, msg string, client *Client, extraFields ...interface{}) {
+	fields := []interface{}{
+		"client_id", client.ID,
+		"user_id", client.UserID,
+		"user_type", client.UserType,
+		"client_ip", client.ClientIP,
+	}
+	fields = append(fields, extraFields...)
+
+	switch level {
+	case logger.INFO:
+		h.logger.InfoKV(msg, fields...)
+	case logger.WARN:
+		h.logger.WarnKV(msg, fields...)
+	case logger.ERROR:
+		h.logger.ErrorKV(msg, fields...)
+	case logger.DEBUG:
+		h.logger.DebugKV(msg, fields...)
+	}
+}
 
 // ============================================================================
 // 客户端管理辅助方法
@@ -346,37 +383,28 @@ func (h *Hub) handleClientWrite(client *Client) {
 	h.wg.Add(1)
 	defer h.wg.Done()
 	defer func() {
-		h.logger.InfoKV("客户端写入协程结束",
-			"client_id", client.ID,
-			"user_id", client.UserID,
-		)
+		h.logWithClient(logger.INFO, "客户端写入协程结束", client)
 	}()
 
-	h.logger.InfoKV("客户端写入协程启动",
-		"client_id", client.ID,
-		"user_id", client.UserID,
-	)
+	h.logWithClient(logger.INFO, "客户端写入协程启动", client)
 
 	for {
 		select {
 		case message, ok := <-client.SendChan:
 			if !ok {
-				h.logger.InfoKV("客户端发送通道关闭", "client_id", client.ID)
+				h.logWithClient(logger.INFO, "客户端发送通道关闭", client)
 				return
 			}
 
 			if client.Conn != nil {
 				client.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 				if err := client.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
-					h.logger.ErrorKV("客户端消息写入失败",
-						"client_id", client.ID,
-						"error", err,
-					)
+					h.logWithClient(logger.ERROR, "客户端消息写入失败", client, "error", err)
 					return
 				}
 			}
 		case <-h.ctx.Done():
-			h.logger.InfoKV("客户端写入协程因Hub关闭而结束", "client_id", client.ID)
+			h.logWithClient(logger.INFO, "客户端写入协程因Hub关闭而结束", client)
 			return
 		}
 	}
@@ -388,18 +416,31 @@ func (h *Hub) handleClientRead(client *Client) {
 	defer h.wg.Done()
 	defer h.Unregister(client)
 	defer func() {
-		h.logger.InfoKV("客户端读取协程结束", "client_id", client.ID)
+		h.logWithClient(logger.INFO, "客户端读取协程结束", client)
 	}()
 
-	h.logger.InfoKV("客户端读取协程启动", "client_id", client.ID)
+	h.logWithClient(logger.INFO, "客户端读取协程启动", client)
 
 	for {
 		messageType, data, err := client.Conn.ReadMessage()
 		if err != nil {
-			h.logger.InfoKV("客户端连接读取错误",
-				"client_id", client.ID,
-				"error", err,
-			)
+			// 🔍 识别断开类型和原因
+			errStr := err.Error()
+			closeCode, isNormal := ClassifyCloseError(err)
+
+			// 获取关闭码描述
+			codeDesc := "未知错误"
+			if info, exists := WsCloseCodeMap[closeCode]; exists {
+				codeDesc = info.Desc
+			}
+
+			// 根据错误类型记录不同级别的日志
+			if isNormal {
+				h.logWithClient(logger.INFO, "客户端正常断开", client, "close_code", closeCode, "code_desc", codeDesc)
+			} else {
+				// 异常断开 - 记录详细信息用于排查
+				h.logWithClient(logger.WARN, "客户端异常断开", client, "close_code", closeCode, "code_desc", codeDesc, "error", errStr)
+			}
 			return
 		}
 

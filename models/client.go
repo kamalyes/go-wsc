@@ -169,3 +169,37 @@ func (c *Client) TrySendSSE(msg *HubMessage) bool {
 		return false
 	}
 }
+
+// ============================================================================
+// WebSocket Close Code 配置
+// ============================================================================
+
+// WsCloseCodeMap WebSocket 关闭码映射表 (RFC 6455, section 11.7)
+var WsCloseCodeMap = map[int]struct {
+	IsNormal bool   // 是否正常关闭
+	Desc     string // 描述
+}{
+	// 正常关闭
+	websocket.CloseNormalClosure: {IsNormal: true, Desc: "正常关闭"},
+	websocket.CloseGoingAway:     {IsNormal: true, Desc: "客户端离开（关闭标签页/浏览器）"},
+
+	// 协议/数据错误
+	websocket.CloseProtocolError:           {IsNormal: false, Desc: "协议错误"},
+	websocket.CloseUnsupportedData:         {IsNormal: false, Desc: "不支持的数据类型"},
+	websocket.CloseNoStatusReceived:        {IsNormal: false, Desc: "未收到状态码"},
+	websocket.CloseInvalidFramePayloadData: {IsNormal: false, Desc: "无效的帧数据"},
+
+	// 策略/配置错误
+	websocket.ClosePolicyViolation:    {IsNormal: false, Desc: "策略违规"},
+	websocket.CloseMessageTooBig:      {IsNormal: false, Desc: "消息过大"},
+	websocket.CloseMandatoryExtension: {IsNormal: false, Desc: "强制扩展未协商"},
+
+	// 服务器错误
+	websocket.CloseInternalServerErr: {IsNormal: false, Desc: "服务器内部错误"},
+	websocket.CloseServiceRestart:    {IsNormal: false, Desc: "服务重启"},
+	websocket.CloseTryAgainLater:     {IsNormal: false, Desc: "稍后重试"},
+
+	// 连接/网络错误
+	websocket.CloseAbnormalClosure: {IsNormal: false, Desc: "异常关闭（网络中断/连接丢失）"},
+	websocket.CloseTLSHandshake:    {IsNormal: false, Desc: "TLS握手失败"},
+}

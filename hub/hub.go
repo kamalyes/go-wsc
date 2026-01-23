@@ -148,8 +148,14 @@ const (
 	BroadcastTypeGlobal = models.BroadcastTypeGlobal
 )
 
+// NewHubMessage 创建新的 HubMessage
 var (
 	NewHubMessage = models.NewHubMessage
+)
+
+// WsCloseCodeMap WebSocket 关闭代码映射
+var (
+	WsCloseCodeMap = models.WsCloseCodeMap
 )
 
 // 错误常量

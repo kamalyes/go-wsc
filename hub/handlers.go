@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/kamalyes/go-logger"
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
 )
 
@@ -74,6 +75,9 @@ func (h *Hub) SendPongResponse(clientID string) error {
 func (h *Hub) handleHeartbeatMessage(client *Client) {
 	// 更新心跳时间（内存）
 	h.UpdateHeartbeat(client.ID)
+
+	// 💓 记录心跳日志
+	h.logWithClient(logger.DEBUG, "💓 收到心跳消息", client)
 
 	// 同步更新 Redis 中的在线状态和心跳时间
 	if err := h.UpdateUserHeartbeat(client.UserID); err != nil {

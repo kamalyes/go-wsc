@@ -15,7 +15,10 @@ import (
 	"context"
 	"time"
 
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-logger"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
+	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"gorm.io/gorm"
 )
 
@@ -59,16 +62,41 @@ type OfflineMessageDBRepository interface {
 	// status: 消息状态(pending/success/failed)
 	// errorMsg: 错误信息(失败时)
 	UpdatePushStatus(ctx context.Context, messageIDs []string, status MessageSendStatus, errorMsg string) error
+
+	// CleanupOld 清理旧记录
+	CleanupOld(ctx context.Context, before time.Time) (int64, error)
+
+	// Close 关闭仓库，停止后台任务
+	Close() error
 }
 
 // GormOfflineMessageRepository GORM实现
 type GormOfflineMessageRepository struct {
-	db *gorm.DB
+	db         *gorm.DB
+	logger     logger.ILogger
+	cancelFunc context.CancelFunc
 }
 
 // NewGormOfflineMessageRepository 创建GORM离线消息仓库
-func NewGormOfflineMessageRepository(db *gorm.DB) OfflineMessageDBRepository {
-	return &GormOfflineMessageRepository{db: db}
+// 参数:
+//   - db: GORM 数据库实例
+//   - config: 离线消息配置对象（可选，传 nil 则不启用自动清理）
+//   - log: 日志记录器
+func NewGormOfflineMessageRepository(db *gorm.DB, config *wscconfig.OfflineMessage, log logger.ILogger) OfflineMessageDBRepository {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	repo := &GormOfflineMessageRepository{
+		db:         db,
+		logger:     log,
+		cancelFunc: cancel,
+	}
+
+	// 启动定时清理任务
+	if config != nil && config.EnableAutoCleanup && config.CleanupDaysAgo > 0 {
+		go repo.startCleanupScheduler(ctx, config.CleanupDaysAgo)
+	}
+
+	return repo
 }
 
 // Save 保存离线消息到数据库
@@ -201,4 +229,68 @@ func (r *GormOfflineMessageRepository) UpdatePushStatus(ctx context.Context, mes
 		Model(&OfflineMessageRecord{}).
 		Where("message_id IN ?", messageIDs).
 		Updates(updates).Error
+}
+
+// CleanupOld 清理旧记录（已成功推送或已过期的消息）
+func (r *GormOfflineMessageRepository) CleanupOld(ctx context.Context, before time.Time) (int64, error) {
+	result := r.db.WithContext(ctx).
+		Where("created_at < ? AND (status = ? OR expire_at < ?)", before, MessageSendStatusSuccess, time.Now()).
+		Delete(&OfflineMessageRecord{})
+	return result.RowsAffected, result.Error
+}
+
+// startCleanupScheduler 启动定时清理任务
+func (r *GormOfflineMessageRepository) startCleanupScheduler(ctx context.Context, daysAgo int) {
+	// 立即执行一次清理
+	r.cleanupOldData(ctx, daysAgo)
+
+	// 使用 EventLoop 管理定时任务
+	syncx.NewEventLoop(ctx).
+		// 每天执行一次清理
+		OnTicker(24*time.Hour, func() {
+			r.cleanupOldData(ctx, daysAgo)
+		}).
+		// Panic 处理
+		OnPanic(func(rec any) {
+			r.logger.Errorf("⚠️ 离线消息清理任务 panic: %v", rec)
+		}).
+		// 优雅关闭
+		OnShutdown(func() {
+			r.logger.Info("🛑 离线消息清理任务已停止")
+		}).
+		Run()
+}
+
+// cleanupOldData 清理N天前的历史数据
+func (r *GormOfflineMessageRepository) cleanupOldData(ctx context.Context, daysAgo int) {
+	if daysAgo <= 0 {
+		return
+	}
+
+	before := time.Now().AddDate(0, 0, -daysAgo)
+
+	// 清理旧记录
+	deleted, err := r.CleanupOld(ctx, before)
+	if err != nil {
+		r.logger.Warnf("⚠️ 清理历史离线消息失败: %v", err)
+	} else if deleted > 0 {
+		r.logger.Infof("🧹 已清理 %d 天前的历史离线消息，删除 %d 条", daysAgo, deleted)
+	}
+
+	// 同时清理过期消息
+	expiredDeleted, err := r.DeleteExpired(ctx)
+	if err != nil {
+		r.logger.Warnf("⚠️ 清理过期离线消息失败: %v", err)
+	} else if expiredDeleted > 0 {
+		r.logger.Infof("🧹 已清理过期离线消息，删除 %d 条", expiredDeleted)
+	}
+}
+
+// Close 关闭仓库，停止后台清理任务
+func (r *GormOfflineMessageRepository) Close() error {
+	if r.cancelFunc != nil {
+		r.cancelFunc()
+		r.logger.Info("🛑 OfflineMessageRepository 已关闭")
+	}
+	return nil
 }

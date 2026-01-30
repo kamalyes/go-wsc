@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-toolbox/pkg/idgen"
 	"github.com/kamalyes/go-toolbox/pkg/osx"
 	"github.com/kamalyes/go-toolbox/pkg/zipx"
@@ -47,7 +48,7 @@ func newTestOfflineRepoContext(t *testing.T, userSuffix string) *testOfflineRepo
 	tc := &testOfflineRepoContext{
 		t:           t,
 		db:          getTestOfflineDB(t),
-		repo:        NewGormOfflineMessageRepository(getTestOfflineDB(t)),
+		repo:        NewGormOfflineMessageRepository(getTestOfflineDB(t),nil,NewDefaultWSCLogger()),
 		ctx:         context.Background(),
 		userID:      "user-" + userSuffix,
 		sessionID:   "session-" + userSuffix,
@@ -681,7 +682,7 @@ func TestOfflineMessageRepositoryGetByReceiverLargeLimit(t *testing.T) {
 
 func TestOfflineMessageRepositoryMultipleSessionMessages(t *testing.T) {
 	db := getTestOfflineDB(t)
-	repo := NewGormOfflineMessageRepository(db)
+	repo := NewGormOfflineMessageRepository(db, nil, NewDefaultWSCLogger())
 	ctx := context.Background()
 
 	userID := "user-022"
@@ -735,7 +736,7 @@ func TestOfflineMessageRepositoryMultipleSessionMessages(t *testing.T) {
 
 func TestOfflineMessageRepositoryMultipleSendersToSameReceiver(t *testing.T) {
 	db := getTestOfflineDB(t)
-	repo := NewGormOfflineMessageRepository(db)
+	repo := NewGormOfflineMessageRepository(db, nil, NewDefaultWSCLogger())
 	ctx := context.Background()
 
 	userID := "user-023"
@@ -786,7 +787,7 @@ func TestOfflineMessageRepositoryMultipleSendersToSameReceiver(t *testing.T) {
 
 func TestOfflineMessageRepositoryExpireAtBoundary(t *testing.T) {
 	db := getTestOfflineDB(t)
-	repo := NewGormOfflineMessageRepository(db)
+	repo := NewGormOfflineMessageRepository(db, nil, NewDefaultWSCLogger())
 	ctx := context.Background()
 
 	userID := "user-024"
@@ -820,7 +821,7 @@ func TestOfflineMessageRepositoryExpireAtBoundary(t *testing.T) {
 
 func TestOfflineMessageRepositoryConcurrentDeleteAndQuery(t *testing.T) {
 	db := getTestOfflineDB(t)
-	repo := NewGormOfflineMessageRepository(db)
+	repo := NewGormOfflineMessageRepository(db, nil, NewDefaultWSCLogger())
 	ctx := context.Background()
 
 	userID := "user-025"
@@ -885,7 +886,7 @@ func TestOfflineMessageRepositoryConcurrentDeleteAndQuery(t *testing.T) {
 
 func TestOfflineMessageRepositoryGetBySenderWithLimit(t *testing.T) {
 	db := getTestOfflineDB(t)
-	repo := NewGormOfflineMessageRepository(db)
+	repo := NewGormOfflineMessageRepository(db, nil, NewDefaultWSCLogger())
 	ctx := context.Background()
 
 	senderID := "sender-026"
@@ -925,7 +926,7 @@ func TestOfflineMessageRepositoryGetBySenderWithLimit(t *testing.T) {
 
 func TestOfflineMessageRepositoryDeleteExpiredBatchProcessing(t *testing.T) {
 	db := getTestOfflineDB(t)
-	repo := NewGormOfflineMessageRepository(db)
+	repo := NewGormOfflineMessageRepository(db, nil, NewDefaultWSCLogger())
 	ctx := context.Background()
 
 	userID := "user-027"
@@ -966,7 +967,7 @@ func TestOfflineMessageRepositoryDeleteExpiredBatchProcessing(t *testing.T) {
 
 func TestOfflineMessageRepositorySaveWithCustomExpireTime(t *testing.T) {
 	db := getTestOfflineDB(t)
-	repo := NewGormOfflineMessageRepository(db)
+	repo := NewGormOfflineMessageRepository(db, nil, NewDefaultWSCLogger())
 	ctx := context.Background()
 
 	userID := "user-028"
@@ -995,7 +996,7 @@ func TestOfflineMessageRepositorySaveWithCustomExpireTime(t *testing.T) {
 
 func TestOfflineMessageRepositoryClearByReceiverWithMultipleSenders(t *testing.T) {
 	db := getTestOfflineDB(t)
-	repo := NewGormOfflineMessageRepository(db)
+	repo := NewGormOfflineMessageRepository(db, nil, NewDefaultWSCLogger())
 	ctx := context.Background()
 
 	userID := "user-029"
@@ -1158,7 +1159,7 @@ func TestOfflineMessageRepositorySpecialCharactersInUserID(t *testing.T) {
 
 	for _, userID := range specialUserIDs {
 		t.Run(userID, func(t *testing.T) {
-			repo := NewGormOfflineMessageRepository(getTestOfflineDB(t))
+			repo := NewGormOfflineMessageRepository(getTestOfflineDB(t),nil,NewDefaultWSCLogger())
 			ctx := context.Background()
 
 			msgID := osx.HashUnixMicroCipherText()
@@ -1323,5 +1324,365 @@ func TestOfflineMessageRepositoryIdempotentOperations(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		err := tc.repo.DeleteByMessageIDs(tc.ctx, tc.userID, []string{"non-existent-id"})
 		assert.NoError(t, err)
+	}
+}
+
+// TestOfflineMessageRepositoryCleanupOld 测试清理旧记录
+func TestOfflineMessageRepositoryCleanupOld(t *testing.T) {
+	tc := newTestOfflineRepoContext(t, "cleanup-old")
+	defer tc.cleanup()
+
+	now := time.Now()
+
+	// 创建3条旧的已成功推送的消息（10天前）
+	oldSuccessMsgIDs := make([]string, 3)
+	for i := 0; i < 3; i++ {
+		msgID := osx.HashUnixMicroCipherText()
+		oldSuccessMsgIDs[i] = msgID
+		tc.cleanupIDs = append(tc.cleanupIDs, msgID)
+
+		record := CreateTestOfflineMessageRecord(msgID, tc.userID, tc.sessionID)
+		record.Status = MessageSendStatusSuccess
+		record.CreatedAt = now.AddDate(0, 0, -10)
+		err := tc.db.Create(record).Error
+		require.NoError(t, err)
+	}
+
+	// 创建2条旧的已过期消息（10天前）
+	oldExpiredMsgIDs := make([]string, 2)
+	for i := 0; i < 2; i++ {
+		msgID := osx.HashUnixMicroCipherText()
+		oldExpiredMsgIDs[i] = msgID
+		tc.cleanupIDs = append(tc.cleanupIDs, msgID)
+
+		record := CreateTestOfflineMessageRecord(msgID, tc.userID, tc.sessionID)
+		record.Status = MessageSendStatusUserOffline
+		record.ExpireAt = now.Add(-1 * time.Hour)
+		record.CreatedAt = now.AddDate(0, 0, -10)
+		err := tc.db.Create(record).Error
+		require.NoError(t, err)
+	}
+
+	// 创建1条旧的待推送消息（10天前，未过期）
+	oldPendingMsgID := osx.HashUnixMicroCipherText()
+	tc.cleanupIDs = append(tc.cleanupIDs, oldPendingMsgID)
+	oldPendingRecord := CreateTestOfflineMessageRecord(oldPendingMsgID, tc.userID, tc.sessionID)
+	oldPendingRecord.Status = MessageSendStatusUserOffline
+	oldPendingRecord.CreatedAt = now.AddDate(0, 0, -10)
+	oldPendingRecord.ExpireAt = now.Add(24 * time.Hour)
+	err := tc.db.Create(oldPendingRecord).Error
+	require.NoError(t, err)
+
+	// 创建1条新的已成功推送的消息（1天前）
+	newSuccessMsgID := osx.HashUnixMicroCipherText()
+	tc.cleanupIDs = append(tc.cleanupIDs, newSuccessMsgID)
+	newSuccessRecord := CreateTestOfflineMessageRecord(newSuccessMsgID, tc.userID, tc.sessionID)
+	newSuccessRecord.Status = MessageSendStatusSuccess
+	newSuccessRecord.CreatedAt = now.AddDate(0, 0, -1)
+	err = tc.db.Create(newSuccessRecord).Error
+	require.NoError(t, err)
+
+	// 执行清理：清理7天前的数据
+	before := now.AddDate(0, 0, -7)
+	deletedCount, err := tc.repo.CleanupOld(tc.ctx, before)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(5), deletedCount, "应该删除3条已成功+2条已过期的消息")
+
+	// 验证剩余消息
+	var remainingRecords []OfflineMessageRecord
+	err = tc.db.Where("receiver = ?", tc.userID).Find(&remainingRecords).Error
+	assert.NoError(t, err)
+	assert.Len(t, remainingRecords, 2, "应该剩余2条消息")
+
+	// 验证剩余的是待推送和新成功的消息
+	remainingIDs := make(map[string]bool)
+	for _, record := range remainingRecords {
+		remainingIDs[record.MessageID] = true
+	}
+	assert.True(t, remainingIDs[oldPendingMsgID], "旧的待推送消息应该保留")
+	assert.True(t, remainingIDs[newSuccessMsgID], "新的成功消息应该保留")
+}
+
+// TestOfflineMessageRepositoryCleanupOldEmptyResult 测试清理旧记录无数据情况
+func TestOfflineMessageRepositoryCleanupOldEmptyResult(t *testing.T) {
+	tc := newTestOfflineRepoContext(t, "cleanup-empty")
+	defer tc.cleanup()
+
+	// 创建1条新消息
+	_, record := tc.createMessage()
+	err := tc.repo.Save(tc.ctx, record)
+	require.NoError(t, err)
+
+	// 清理10天前的数据，应该没有删除
+	before := time.Now().AddDate(0, 0, -10)
+	deletedCount, err := tc.repo.CleanupOld(tc.ctx, before)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(0), deletedCount)
+
+	// 验证消息仍然存在
+	count, err := tc.repo.GetCountByReceiver(tc.ctx, tc.userID)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(1), count)
+}
+
+// TestOfflineMessageRepositoryCleanupOldOnlySuccess 测试只清理已成功的旧消息
+func TestOfflineMessageRepositoryCleanupOldOnlySuccess(t *testing.T) {
+	tc := newTestOfflineRepoContext(t, "cleanup-success")
+	defer tc.cleanup()
+
+	now := time.Now()
+
+	// 创建旧的已成功消息
+	successMsgID := osx.HashUnixMicroCipherText()
+	tc.cleanupIDs = append(tc.cleanupIDs, successMsgID)
+	successRecord := CreateTestOfflineMessageRecord(successMsgID, tc.userID, tc.sessionID)
+	successRecord.Status = MessageSendStatusSuccess
+	successRecord.CreatedAt = now.AddDate(0, 0, -10)
+	err := tc.db.Create(successRecord).Error
+	require.NoError(t, err)
+
+	// 创建旧的失败消息（未过期）
+	failedMsgID := osx.HashUnixMicroCipherText()
+	tc.cleanupIDs = append(tc.cleanupIDs, failedMsgID)
+	failedRecord := CreateTestOfflineMessageRecord(failedMsgID, tc.userID, tc.sessionID)
+	failedRecord.Status = MessageSendStatusFailed
+	failedRecord.CreatedAt = now.AddDate(0, 0, -10)
+	failedRecord.ExpireAt = now.Add(24 * time.Hour)
+	err = tc.db.Create(failedRecord).Error
+	require.NoError(t, err)
+
+	// 清理7天前的数据
+	before := now.AddDate(0, 0, -7)
+	deletedCount, err := tc.repo.CleanupOld(tc.ctx, before)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(1), deletedCount, "只应该删除已成功的消息")
+
+	// 验证失败的消息仍然存在
+	var remainingRecord OfflineMessageRecord
+	err = tc.db.Where("message_id = ?", failedMsgID).First(&remainingRecord).Error
+	assert.NoError(t, err)
+	assert.Equal(t, MessageSendStatusFailed, remainingRecord.Status)
+}
+
+// TestOfflineMessageRepositoryCleanupOldWithExpired 测试同时清理旧记录和过期消息
+func TestOfflineMessageRepositoryCleanupOldWithExpired(t *testing.T) {
+	tc := newTestOfflineRepoContext(t, "cleanup-mixed")
+	defer tc.cleanup()
+
+	now := time.Now()
+
+	// 创建旧的已成功消息
+	oldSuccessMsgID := osx.HashUnixMicroCipherText()
+	tc.cleanupIDs = append(tc.cleanupIDs, oldSuccessMsgID)
+	oldSuccessRecord := CreateTestOfflineMessageRecord(oldSuccessMsgID, tc.userID, tc.sessionID)
+	oldSuccessRecord.Status = MessageSendStatusSuccess
+	oldSuccessRecord.CreatedAt = now.AddDate(0, 0, -10)
+	err := tc.db.Create(oldSuccessRecord).Error
+	require.NoError(t, err)
+
+	// 创建新的已过期消息
+	newExpiredMsgID := osx.HashUnixMicroCipherText()
+	tc.cleanupIDs = append(tc.cleanupIDs, newExpiredMsgID)
+	newExpiredRecord := CreateTestOfflineMessageRecord(newExpiredMsgID, tc.userID, tc.sessionID)
+	newExpiredRecord.Status = MessageSendStatusUserOffline
+	newExpiredRecord.ExpireAt = now.Add(-1 * time.Hour)
+	newExpiredRecord.CreatedAt = now.AddDate(0, 0, -1)
+	err = tc.db.Create(newExpiredRecord).Error
+	require.NoError(t, err)
+
+	// 清理7天前的数据
+	before := now.AddDate(0, 0, -7)
+	deletedCount, err := tc.repo.CleanupOld(tc.ctx, before)
+	assert.NoError(t, err)
+	// 旧成功消息(10天前)会被删除，新过期消息(1天前)也会被删除
+	assert.GreaterOrEqual(t, deletedCount, int64(1), "应该至少删除1条消息")
+
+	// 验证都被删除
+	count, err := tc.repo.GetCountByReceiver(tc.ctx, tc.userID)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(0), count)
+}
+
+// TestOfflineMessageRepositoryClose 测试关闭仓库
+func TestOfflineMessageRepositoryClose(t *testing.T) {
+	db := getTestOfflineDB(t)
+	repo := NewGormOfflineMessageRepository(db, nil, NewDefaultWSCLogger())
+
+	// 关闭应该不报错
+	err := repo.Close()
+	assert.NoError(t, err)
+
+	// 多次关闭应该不报错
+	err = repo.Close()
+	assert.NoError(t, err)
+}
+
+// TestOfflineMessageRepositoryAutoCleanupDisabled 测试禁用自动清理
+func TestOfflineMessageRepositoryAutoCleanupDisabled(t *testing.T) {
+	db := getTestOfflineDB(t)
+
+	// 创建配置：禁用自动清理
+	config := &wscconfig.OfflineMessage{
+		EnableAutoCleanup: false,
+		CleanupDaysAgo:    7,
+	}
+
+	repo := NewGormOfflineMessageRepository(db, config, NewDefaultWSCLogger())
+	defer repo.Close()
+
+	// 仓库应该正常工作
+	ctx := context.Background()
+	userID := "user-no-cleanup"
+	msgID := osx.HashUnixMicroCipherText()
+	record := CreateTestOfflineMessageRecord(msgID, userID, "session-no-cleanup")
+
+	err := repo.Save(ctx, record)
+	assert.NoError(t, err)
+
+	// 清理
+	_ = repo.DeleteByMessageIDs(ctx, userID, []string{msgID})
+}
+
+// TestOfflineMessageRepositoryAutoCleanupZeroDays 测试自动清理天数为0
+func TestOfflineMessageRepositoryAutoCleanupZeroDays(t *testing.T) {
+	db := getTestOfflineDB(t)
+
+	// 创建配置：清理天数为0
+	config := &wscconfig.OfflineMessage{
+		EnableAutoCleanup: true,
+		CleanupDaysAgo:    0,
+	}
+
+	repo := NewGormOfflineMessageRepository(db, config, NewDefaultWSCLogger())
+	defer repo.Close()
+
+	// 仓库应该正常工作，但不会执行清理
+	ctx := context.Background()
+	userID := "user-zero-days"
+	msgID := osx.HashUnixMicroCipherText()
+	record := CreateTestOfflineMessageRecord(msgID, userID, "session-zero-days")
+
+	err := repo.Save(ctx, record)
+	assert.NoError(t, err)
+
+	// 清理
+	_ = repo.DeleteByMessageIDs(ctx, userID, []string{msgID})
+}
+
+// TestOfflineMessageRepositoryRetryCountIncrement 测试重试次数递增
+func TestOfflineMessageRepositoryRetryCountIncrement(t *testing.T) {
+	tc := newTestOfflineRepoContext(t, "retry-count")
+	defer tc.cleanup()
+
+	msgID, record := tc.createMessage()
+	err := tc.repo.Save(tc.ctx, record)
+	require.NoError(t, err)
+
+	// 第一次失败
+	err = tc.repo.UpdatePushStatus(tc.ctx, []string{msgID}, MessageSendStatusFailed, "error 1")
+	assert.NoError(t, err)
+
+	var record1 OfflineMessageRecord
+	err = tc.db.Where("message_id = ?", msgID).First(&record1).Error
+	assert.NoError(t, err)
+	assert.Equal(t, 1, record1.RetryCount)
+
+	// 第二次失败
+	err = tc.repo.UpdatePushStatus(tc.ctx, []string{msgID}, MessageSendStatusFailed, "error 2")
+	assert.NoError(t, err)
+
+	var record2 OfflineMessageRecord
+	err = tc.db.Where("message_id = ?", msgID).First(&record2).Error
+	assert.NoError(t, err)
+	assert.Equal(t, 2, record2.RetryCount)
+
+	// 第三次失败
+	err = tc.repo.UpdatePushStatus(tc.ctx, []string{msgID}, MessageSendStatusFailed, "error 3")
+	assert.NoError(t, err)
+
+	var record3 OfflineMessageRecord
+	err = tc.db.Where("message_id = ?", msgID).First(&record3).Error
+	assert.NoError(t, err)
+	assert.Equal(t, 3, record3.RetryCount)
+	assert.Equal(t, "error 3", record3.ErrorMessage)
+}
+
+// TestOfflineMessageRepositoryFirstPushAtOnlySetOnce 测试FirstPushAt只设置一次
+func TestOfflineMessageRepositoryFirstPushAtOnlySetOnce(t *testing.T) {
+	tc := newTestOfflineRepoContext(t, "first-push-once")
+	defer tc.cleanup()
+
+	msgID, record := tc.createMessage()
+	err := tc.repo.Save(tc.ctx, record)
+	require.NoError(t, err)
+
+	// 第一次推送失败
+	err = tc.repo.UpdatePushStatus(tc.ctx, []string{msgID}, MessageSendStatusFailed, "first error")
+	assert.NoError(t, err)
+
+	var record1 OfflineMessageRecord
+	err = tc.db.Where("message_id = ?", msgID).First(&record1).Error
+	assert.NoError(t, err)
+	assert.NotNil(t, record1.FirstPushAt)
+	firstPushTime := *record1.FirstPushAt
+
+	time.Sleep(100 * time.Millisecond)
+
+	// 第二次推送失败
+	err = tc.repo.UpdatePushStatus(tc.ctx, []string{msgID}, MessageSendStatusFailed, "second error")
+	assert.NoError(t, err)
+
+	var record2 OfflineMessageRecord
+	err = tc.db.Where("message_id = ?", msgID).First(&record2).Error
+	assert.NoError(t, err)
+	assert.NotNil(t, record2.FirstPushAt)
+	assert.Equal(t, firstPushTime.Unix(), record2.FirstPushAt.Unix(), "FirstPushAt不应该改变")
+	assert.True(t, record2.LastPushAt.After(firstPushTime), "LastPushAt应该更新")
+}
+
+// TestOfflineMessageRepositoryBatchSaveLargeDataset 测试批量保存大数据集
+func TestOfflineMessageRepositoryBatchSaveLargeDataset(t *testing.T) {
+	tc := newTestOfflineRepoContext(t, "batch-large")
+	defer tc.cleanup()
+
+	// 创建2500条消息（超过单批1000的限制）
+	batchSize := 2500
+	_, records := tc.createMessages(batchSize)
+
+	// 批量保存
+	err := tc.repo.BatchSave(tc.ctx, records)
+	assert.NoError(t, err)
+
+	// 验证保存成功
+	count, err := tc.repo.GetCountByReceiver(tc.ctx, tc.userID)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(batchSize), count)
+}
+
+// TestOfflineMessageRepositoryGetByReceiverOrderConsistency 测试查询结果顺序一致性
+func TestOfflineMessageRepositoryGetByReceiverOrderConsistency(t *testing.T) {
+	tc := newTestOfflineRepoContext(t, "order-consistency")
+	defer tc.cleanup()
+
+	// 创建10条消息
+	_, records := tc.createMessages(10)
+	tc.saveMessages(records, true)
+
+	// 多次查询，验证顺序一致
+	var previousOrder []string
+	for i := 0; i < 5; i++ {
+		result, err := tc.repo.GetByReceiver(tc.ctx, tc.userID, 10)
+		assert.NoError(t, err)
+		assert.Len(t, result, 10)
+
+		currentOrder := make([]string, len(result))
+		for j, record := range result {
+			currentOrder[j] = record.MessageID
+		}
+
+		if i > 0 {
+			assert.Equal(t, previousOrder, currentOrder, "查询顺序应该保持一致")
+		}
+		previousOrder = currentOrder
 	}
 }

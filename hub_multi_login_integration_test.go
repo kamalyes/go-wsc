@@ -120,7 +120,6 @@ func TestMultiLoginWithWorkloadSync(t *testing.T) {
 	// 创建负载管理仓库
 	workloadRepo := NewRedisWorkloadRepository(redisClient, &wscconfig.Workload{
 		KeyPrefix: "wsc:test:multilogin:workload:",
-		TTL:       10 * time.Minute,
 	}, NewDefaultWSCLogger())
 
 	// 创建 Hub 配置

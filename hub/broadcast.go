@@ -29,6 +29,9 @@ func (h *Hub) Broadcast(ctx context.Context, msg *HubMessage) {
 	// 创建消息副本，避免并发修改
 	msg = msg.Clone()
 
+	// 自动设置为全局广播类型
+	msg.BroadcastType = mathx.IfEmpty(msg.BroadcastType, BroadcastTypeGlobal)
+
 	if msg.CreateAt.IsZero() {
 		msg.CreateAt = time.Now()
 	}

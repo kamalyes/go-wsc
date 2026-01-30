@@ -27,7 +27,7 @@ import (
 func TestHubUpdateMessageSendStatusSuccess(t *testing.T) {
 	db := getTestDB(t)
 	ctx := context.Background()
-	repo := NewMessageRecordRepository(db)
+	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 	hub := NewHub(wscconfig.Default())
 	hub.SetMessageRecordRepository(repo)
 
@@ -64,7 +64,7 @@ func TestHubUpdateMessageSendStatusSuccess(t *testing.T) {
 func TestHubUpdateMessageSendStatusFailed(t *testing.T) {
 	db := getTestDB(t)
 	ctx := context.Background()
-	repo := NewMessageRecordRepository(db)
+	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 	hub := NewHub(wscconfig.Default())
 	hub.SetMessageRecordRepository(repo)
 
@@ -103,7 +103,7 @@ func TestHubUpdateMessageSendStatusFailed(t *testing.T) {
 func TestHubUpdateMessageSendStatusRecordNotExist(t *testing.T) {
 	db := getTestDB(t)
 	ctx := context.Background()
-	repo := NewMessageRecordRepository(db)
+	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 	hub := NewHub(wscconfig.Default())
 	hub.SetMessageRecordRepository(repo)
 
@@ -127,7 +127,7 @@ func TestHubUpdateMessageSendStatusRecordNotExist(t *testing.T) {
 func TestHubUpdateMessageSendStatusRetryMechanism(t *testing.T) {
 	db := getTestDB(t)
 	ctx := context.Background()
-	repo := NewMessageRecordRepository(db)
+	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 	hub := NewHub(wscconfig.Default())
 	hub.SetMessageRecordRepository(repo)
 
@@ -160,7 +160,7 @@ func TestHubUpdateMessageSendStatusRetryMechanism(t *testing.T) {
 func TestHubUpdateMessageSendStatusConcurrent(t *testing.T) {
 	db := getTestDB(t)
 	ctx := context.Background()
-	repo := NewMessageRecordRepository(db)
+	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 	hub := NewHub(wscconfig.Default())
 	hub.SetMessageRecordRepository(repo)
 
@@ -205,7 +205,7 @@ func TestHubUpdateMessageSendStatusConcurrent(t *testing.T) {
 func TestHubUpdateMessageSendStatusMultipleMessages(t *testing.T) {
 	db := getTestDB(t)
 	ctx := context.Background()
-	repo := NewMessageRecordRepository(db)
+	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 	hub := NewHub(wscconfig.Default())
 	hub.SetMessageRecordRepository(repo)
 

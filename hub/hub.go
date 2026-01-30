@@ -256,6 +256,10 @@ type Hub struct {
 	// SSE 连接（使用统一的 Client 结构）
 	sseClients map[string]*Client
 
+	// 原子计数器：用于快速获取连接数，避免加锁
+	activeClientsCount atomic.Int64
+	sseClientsCount    atomic.Int64
+
 	register        chan *Client
 	unregister      chan *Client
 	broadcast       chan *HubMessage

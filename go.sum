@@ -58,8 +58,8 @@ github.com/json-iterator/go v1.1.12 h1:PV8peI4a0ysnczrg+LtxykD8LfKY9ML6u2jnxaEnr
 github.com/json-iterator/go v1.1.12/go.mod h1:e30LSqwooZae/UwlEbR2852Gd8hjQvJoHmT4TnhNGBo=
 github.com/kamalyes/go-cachex v0.1.9-0.20260113075842-a052631b57e8 h1:Xd5E5/RcYuFvb7sqtAFdoZ71Vlbpu50wLFAzZOiMejs=
 github.com/kamalyes/go-cachex v0.1.9-0.20260113075842-a052631b57e8/go.mod h1:Zy9EkR1zmZhjg2GkbHKpSP4Q/wsbSxIBb7fxAMcerpk=
-github.com/kamalyes/go-config v0.12.14-0.20260130072258-3dd05192f3e0 h1:81VYNfSaXXrMJqYN8sLxoT4GP6KGElEgNwxzEApDeWQ=
-github.com/kamalyes/go-config v0.12.14-0.20260130072258-3dd05192f3e0/go.mod h1:Qd5j3n9JtPVkin+dbQWoTVsIEbbVnlCpG2rCx0czObI=
+github.com/kamalyes/go-config v0.12.14-0.20260130095810-88e5d76a90c5 h1:DRrFDYiRqO7hbW0ibktthc+Vg9+pNbAhMCD1y9sjAKE=
+github.com/kamalyes/go-config v0.12.14-0.20260130095810-88e5d76a90c5/go.mod h1:Qd5j3n9JtPVkin+dbQWoTVsIEbbVnlCpG2rCx0czObI=
 github.com/kamalyes/go-jsonpath v0.0.0-20260129163507-0b67ed48bb28 h1:mftqfK+BB1eE+aXca1zAMyKUAGPlcKFwQS7og7bq3Qk=
 github.com/kamalyes/go-jsonpath v0.0.0-20260129163507-0b67ed48bb28/go.mod h1:Yu4Vw7F4dOKlhHK5RzBHYDvoSRdeHJgVwAjqXHXu4p4=
 github.com/kamalyes/go-logger v0.4.6-0.20260113073109-516d3a52d3ee h1:48HWtpxyklG9kaUUOA9FnSY5iIN0QWK9xgFpBO6SEro=

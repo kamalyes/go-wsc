@@ -36,7 +36,7 @@ type testMessageRecordContext struct {
 func newTestMessageRecordContext(t *testing.T) *testMessageRecordContext {
 	return &testMessageRecordContext{
 		t:          t,
-		repo:       NewMessageRecordRepository(getTestDB(t)),
+		repo:       NewMessageRecordRepository(getTestDB(t),nil, NewDefaultWSCLogger()),
 		cleanupIDs: make([]string, 0),
 	}
 }
@@ -323,7 +323,7 @@ func TestMessageRecordRepositoryIncrementRetry(t *testing.T) {
 
 func TestMessageRecordRepositoryFindByStatus(t *testing.T) {
 	db := getTestDB(t)
-	repo := NewMessageRecordRepository(db)
+	repo := NewMessageRecordRepository(db,nil, NewDefaultWSCLogger())
 
 	ctx := context.Background()
 
@@ -377,7 +377,7 @@ func TestMessageRecordRepositoryFindByStatus(t *testing.T) {
 
 func TestMessageRecordRepositoryFindBySenderAndReceiver(t *testing.T) {
 	db := getTestDB(t)
-	repo := NewMessageRecordRepository(db)
+	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 
 	ctx := context.Background()
 	msgID := osx.HashUnixMicroCipherText()
@@ -419,7 +419,7 @@ func TestMessageRecordRepositoryFindBySenderAndReceiver(t *testing.T) {
 
 func TestMessageRecordRepositoryFindByNodeIPAndClientIP(t *testing.T) {
 	db := getTestDB(t)
-	repo := NewMessageRecordRepository(db)
+	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 
 	ctx := context.Background()
 
@@ -473,7 +473,7 @@ func TestMessageRecordRepositoryFindByNodeIPAndClientIP(t *testing.T) {
 
 func TestMessageRecordRepositoryFindRetryable(t *testing.T) {
 	db := getTestDB(t)
-	repo := NewMessageRecordRepository(db)
+	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 
 	ctx := context.Background()
 
@@ -521,7 +521,7 @@ func TestMessageRecordRepositoryFindRetryable(t *testing.T) {
 
 func TestMessageRecordRepositoryDeleteExpired(t *testing.T) {
 	db := getTestDB(t)
-	repo := NewMessageRecordRepository(db)
+	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 
 	ctx := context.Background()
 
@@ -551,7 +551,7 @@ func TestMessageRecordRepositoryDeleteExpired(t *testing.T) {
 
 func TestMessageRecordRepositoryGetStatistics(t *testing.T) {
 	db := getTestDB(t)
-	repo := NewMessageRecordRepository(db)
+	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 
 	ctx := context.Background()
 	stats, err := repo.GetStatistics(ctx)
@@ -565,7 +565,7 @@ func TestMessageRecordRepositoryGetStatistics(t *testing.T) {
 
 func TestMessageRecordRepositoryCleanupOld(t *testing.T) {
 	db := getTestDB(t)
-	repo := NewMessageRecordRepository(db)
+	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 
 	msgID := osx.HashUnixMicroCipherText()
 	ctx := context.Background()
@@ -598,7 +598,7 @@ func TestMessageRecordRepositoryCleanupOld(t *testing.T) {
 
 func TestMessageSendRecordJSONFields(t *testing.T) {
 	db := getTestDB(t)
-	repo := NewMessageRecordRepository(db)
+	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 
 	msgID := osx.HashUnixMicroCipherText()
 	ctx := context.Background()
@@ -643,7 +643,7 @@ func TestMessageSendRecordJSONFields(t *testing.T) {
 
 func TestMessageRecordRepositoryConcurrency(t *testing.T) {
 	db := getTestDB(t)
-	repo := NewMessageRecordRepository(db)
+	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 
 	// 并发创建记录
 	const goroutines = 10
@@ -675,7 +675,7 @@ func TestMessageRecordRepositoryConcurrency(t *testing.T) {
 // TestMessageRecordStatusUpdateFields 测试消息状态更新时字段是否正确更新
 func TestMessageRecordStatusUpdateFields(t *testing.T) {
 	db := getTestDB(t)
-	repo := NewMessageRecordRepository(db)
+	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 
 	msgID := osx.HashUnixMicroCipherText()
 	ctx := context.Background()
@@ -728,7 +728,7 @@ func TestMessageRecordStatusUpdateFields(t *testing.T) {
 // TestMessageRecordFailureFields 测试消息发送失败时字段是否正确更新
 func TestMessageRecordFailureFields(t *testing.T) {
 	db := getTestDB(t)
-	repo := NewMessageRecordRepository(db)
+	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 
 	msgID := osx.HashUnixMicroCipherText()
 	ctx := context.Background()
@@ -792,7 +792,7 @@ func TestMessageRecordFailureFields(t *testing.T) {
 // TestMessageRecordRetryFields 测试消息重试时字段是否正确更新
 func TestMessageRecordRetryFields(t *testing.T) {
 	db := getTestDB(t)
-	repo := NewMessageRecordRepository(db)
+	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 
 	msgID := osx.HashUnixMicroCipherText()
 	ctx := context.Background()

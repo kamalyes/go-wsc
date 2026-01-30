@@ -342,6 +342,9 @@ func (h *Hub) GetClientStats(clientID string) map[string]interface{} {
 
 // FilterClients 按条件过滤客户端
 func (h *Hub) FilterClients(predicate func(*Client) bool) []*Client {
+	if predicate == nil {
+		return []*Client{}
+	}
 	allClients := h.GetClientsCopy()
 	return mathx.FilterSlice(allClients, predicate)
 }

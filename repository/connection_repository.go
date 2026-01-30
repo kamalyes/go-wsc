@@ -16,6 +16,9 @@ import (
 	"fmt"
 	"time"
 
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-logger"
+	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/models"
 	"gorm.io/gorm"
 )
@@ -148,6 +151,9 @@ type ConnectionRecordRepository interface {
 	// processor: 处理函数，接收读取到的记录进行自定义处理（如写入归档表、导出文件等）
 	// 返回处理的记录数和错误
 	ArchiveOldRecords(ctx context.Context, before time.Time, processor func([]*models.ConnectionRecord) error) (int64, error)
+
+	// Close 关闭仓库，停止后台任务
+	Close() error
 }
 
 // ========== 统计结构体定义 ==========
@@ -199,14 +205,32 @@ type UserReconnectStats struct {
 
 // connectionRecordRepositoryImpl WebSocket连接记录仓储实现
 type connectionRecordRepositoryImpl struct {
-	db *gorm.DB
+	db         *gorm.DB
+	logger     logger.ILogger
+	cancelFunc context.CancelFunc // 用于停止清理任务
 }
 
 // NewConnectionRecordRepository 创建连接记录仓储实例
-func NewConnectionRecordRepository(db *gorm.DB) ConnectionRecordRepository {
-	return &connectionRecordRepositoryImpl{
-		db: db,
+// 参数:
+//   - db: GORM 数据库实例
+//   - config: 连接记录配置对象（可选，传 nil 则不启用自动清理）
+//   - log: 日志记录器
+func NewConnectionRecordRepository(db *gorm.DB, config *wscconfig.ConnectionRecord, log logger.ILogger) ConnectionRecordRepository {
+	// 创建可取消的 context
+	ctx, cancel := context.WithCancel(context.Background())
+
+	repo := &connectionRecordRepositoryImpl{
+		db:         db,
+		logger:     log,
+		cancelFunc: cancel,
 	}
+
+	// 🧹 启动定时清理任务（根据配置）
+	if config != nil && config.EnableAutoCleanup && config.CleanupDaysAgo > 0 {
+		go repo.startCleanupScheduler(ctx, config.CleanupDaysAgo)
+	}
+
+	return repo
 }
 
 // ========== 基础CRUD操作 ==========
@@ -803,4 +827,58 @@ func (r *connectionRecordRepositoryImpl) ArchiveOldRecords(ctx context.Context, 
 	return totalProcessed, nil
 }
 
+// startCleanupScheduler 启动定时清理任务（使用 EventLoop，每天执行一次）
+func (r *connectionRecordRepositoryImpl) startCleanupScheduler(ctx context.Context, daysAgo int) {
+	// 立即执行一次清理
+	r.cleanupOldData(ctx, daysAgo)
 
+	// 使用 EventLoop 管理定时任务
+	syncx.NewEventLoop(ctx).
+		// 每天执行一次清理
+		OnTicker(24*time.Hour, func() {
+			r.cleanupOldData(ctx, daysAgo)
+		}).
+		// Panic 处理
+		OnPanic(func(rec any) {
+			r.logger.Errorf("⚠️ 连接记录清理任务 panic: %v", rec)
+		}).
+		// 优雅关闭
+		OnShutdown(func() {
+			r.logger.Info("🛑 连接记录清理任务已停止")
+		}).
+		Run()
+}
+
+// cleanupOldData 清理N天前的历史数据
+//
+// 设计说明：
+//   - 清理非活跃的历史连接记录，释放数据库空间
+//   - 保留活跃连接记录，避免误删
+//
+// 参数：
+//   - daysAgo: 清理多少天前的数据（例如：30 表示清理30天前的非活跃连接记录）
+func (r *connectionRecordRepositoryImpl) cleanupOldData(ctx context.Context, daysAgo int) {
+	if daysAgo <= 0 {
+		return
+	}
+
+	// 计算清理时间点
+	before := time.Now().AddDate(0, 0, -daysAgo)
+
+	// 清理旧记录
+	deleted, err := r.CleanupOldRecords(ctx, before)
+	if err != nil {
+		r.logger.Warnf("⚠️ 清理历史连接记录失败: %v", err)
+	} else if deleted > 0 {
+		r.logger.Infof("🧹 已清理 %d 天前的历史连接记录，删除 %d 条", daysAgo, deleted)
+	}
+}
+
+// Close 关闭仓库，停止后台清理任务
+func (r *connectionRecordRepositoryImpl) Close() error {
+	if r.cancelFunc != nil {
+		r.cancelFunc()
+		r.logger.Info("🛑 ConnectionRecordRepository 已关闭")
+	}
+	return nil
+}

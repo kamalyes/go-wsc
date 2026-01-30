@@ -45,6 +45,7 @@ func (h *Hub) SendToUserWithAck(ctx context.Context, toUserID string, msg *HubMe
 	// 生成消息ID
 	msg.ID = mathx.IfNotEmpty(msg.ID, fmt.Sprintf("%s-%s", toUserID, h.idGenerator.GenerateRequestID()))
 
+	// 设置消息必要字段
 	msg.RequireAck = true
 
 	// 记录ACK发送开始

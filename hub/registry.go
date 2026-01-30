@@ -307,6 +307,13 @@ func (h *Hub) logClientDisconnection(client *Client) {
 func (h *Hub) removeClientFromMaps(client *Client) {
 	delete(h.clients, client.ID)
 
+	// 更新原子计数器
+	if client.ConnectionType == ConnectionTypeSSE {
+		h.sseClientsCount.Add(-1)
+	} else {
+		h.activeClientsCount.Add(-1)
+	}
+
 	// 从用户连接列表中移除
 	if clientMap, exists := h.userToClients[client.UserID]; exists {
 		delete(clientMap, client.ID)

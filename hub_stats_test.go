@@ -48,7 +48,7 @@ func TestHubRedisStatistics(t *testing.T) {
 		KeyPrefix: "wsc:test:hubstats:online:",
 		TTL:       5 * time.Minute,
 	}))
-	hub.SetMessageRecordRepository(NewMessageRecordRepository(GetTestDB(t))) // 使用测试数据库
+	hub.SetMessageRecordRepository(NewMessageRecordRepository(GetTestDB(t), nil, NewDefaultWSCLogger())) // 使用测试数据库
 
 	// 4. 启动 Hub
 	go hub.Run()
@@ -195,7 +195,7 @@ func TestHubClusterStatistics(t *testing.T) {
 		KeyPrefix: "wsc:test:cluster:online:",
 		TTL:       5 * time.Minute,
 	}))
-	hub1.SetMessageRecordRepository(NewMessageRecordRepository(GetTestDB(t)))
+	hub1.SetMessageRecordRepository(NewMessageRecordRepository(GetTestDB(t),nil, NewDefaultWSCLogger()))
 
 	node2Config := wscconfig.Default().
 		WithNodeInfo("192.168.1.11", 8081).
@@ -207,7 +207,7 @@ func TestHubClusterStatistics(t *testing.T) {
 		KeyPrefix: "wsc:test:cluster:online:",
 		TTL:       5 * time.Minute,
 	}))
-	hub2.SetMessageRecordRepository(NewMessageRecordRepository(GetTestDB(t)))
+	hub2.SetMessageRecordRepository(NewMessageRecordRepository(GetTestDB(t),nil, NewDefaultWSCLogger()))
 
 	// 3. 启动两个节点
 	go hub1.Run()
@@ -253,7 +253,6 @@ func TestHubClusterStatistics(t *testing.T) {
 	clusterStats, err := statsRepo.GetTotalStats(ctx)
 	require.NoError(t, err)
 	require.NotNil(t, clusterStats)
-
 	assert.GreaterOrEqual(t, clusterStats.TotalConnections, int64(5), "集群总连接数应至少为5")
 	assert.GreaterOrEqual(t, clusterStats.ActiveConnections, int64(5), "集群活跃连接数应至少为5")
 	assert.Equal(t, 2, clusterStats.TotalNodes, "集群节点数应为2")

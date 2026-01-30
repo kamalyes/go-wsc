@@ -109,7 +109,7 @@ func NewHybridOfflineMessageHandler(redisClient redis.UniversalClient, db *gorm.
 
 	handler := &HybridOfflineMessageHandler{
 		queueRepo:  NewRedisMessageQueueRepository(redisClient, keyPrefix, queueTTL),
-		dbRepo:     NewGormOfflineMessageRepository(db),
+		dbRepo:     NewGormOfflineMessageRepository(db, nil, NewDefaultWSCLogger()),
 		logger:     log,
 		keyPrefix:  keyPrefix,
 		messageTTL: queueTTL, // 使用 QueueTTL 作为消息过期时间

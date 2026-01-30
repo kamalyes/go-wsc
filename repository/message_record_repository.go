@@ -14,6 +14,9 @@ import (
 	"context"
 	"time"
 
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-logger"
+	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"gorm.io/gorm"
 )
 
@@ -75,16 +78,38 @@ type MessageRecordRepository interface {
 
 	// GetDB 获取底层 GORM DB（用于复杂查询）
 	GetDB() *gorm.DB
+
+	// Close 关闭仓库，停止后台任务
+	Close() error
 }
 
 // MessageRecordGormRepository GORM 实现
 type MessageRecordGormRepository struct {
-	db *gorm.DB
+	db         *gorm.DB
+	logger     logger.ILogger
+	cancelFunc context.CancelFunc
 }
 
 // NewMessageRecordRepository 创建消息记录仓库
-func NewMessageRecordRepository(db *gorm.DB) MessageRecordRepository {
-	return &MessageRecordGormRepository{db: db}
+// 参数:
+//   - db: GORM 数据库实例
+//   - config: 消息记录配置对象（可选，传 nil 则不启用自动清理）
+//   - log: 日志记录器
+func NewMessageRecordRepository(db *gorm.DB, config *wscconfig.MessageRecord, log logger.ILogger) MessageRecordRepository {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	repo := &MessageRecordGormRepository{
+		db:         db,
+		logger:     log,
+		cancelFunc: cancel,
+	}
+
+	// 启动定时清理任务
+	if config != nil && config.EnableAutoCleanup && config.CleanupDaysAgo > 0 {
+		go repo.startCleanupScheduler(ctx, config.CleanupDaysAgo)
+	}
+
+	return repo
 }
 
 // Create 创建记录
@@ -359,6 +384,54 @@ func (r *MessageRecordGormRepository) CleanupOld(ctx context.Context, before tim
 // GetDB 获取底层 GORM DB
 func (r *MessageRecordGormRepository) GetDB() *gorm.DB {
 	return r.db
+}
+
+// startCleanupScheduler 启动定时清理任务
+func (r *MessageRecordGormRepository) startCleanupScheduler(ctx context.Context, daysAgo int) {
+	// 立即执行一次清理
+	r.cleanupOldData(ctx, daysAgo)
+
+	// 使用 EventLoop 管理定时任务
+	syncx.NewEventLoop(ctx).
+		// 每天执行一次清理
+		OnTicker(24*time.Hour, func() {
+			r.cleanupOldData(ctx, daysAgo)
+		}).
+		// Panic 处理
+		OnPanic(func(rec any) {
+			r.logger.Errorf("⚠️ 消息发送记录清理任务 panic: %v", rec)
+		}).
+		// 优雅关闭
+		OnShutdown(func() {
+			r.logger.Info("🛑 消息发送记录清理任务已停止")
+		}).
+		Run()
+}
+
+// cleanupOldData 清理N天前的历史数据
+func (r *MessageRecordGormRepository) cleanupOldData(ctx context.Context, daysAgo int) {
+	if daysAgo <= 0 {
+		return
+	}
+
+	before := time.Now().AddDate(0, 0, -daysAgo)
+
+	// 清理旧记录
+	deleted, err := r.CleanupOld(ctx, before)
+	if err != nil {
+		r.logger.Warnf("⚠️ 清理历史消息发送记录失败: %v", err)
+	} else if deleted > 0 {
+		r.logger.Infof("🧹 已清理 %d 天前的历史消息发送记录，删除 %d 条", daysAgo, deleted)
+	}
+}
+
+// Close 关闭仓库，停止后台清理任务
+func (r *MessageRecordGormRepository) Close() error {
+	if r.cancelFunc != nil {
+		r.cancelFunc()
+		r.logger.Info("🛑 MessageRecordRepository 已关闭")
+	}
+	return nil
 }
 
 // MessageRecordHooks 消息记录钩子函数接口

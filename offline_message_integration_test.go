@@ -41,7 +41,7 @@ func TestOfflineMessageRealWorldScenario(t *testing.T) {
 		KeyPrefix: "wsc:test:offline:online:",
 		TTL:       5 * time.Minute,
 	})
-	messageRecordRepo := NewMessageRecordRepository(db)
+	messageRecordRepo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 
 	// 创建离线消息处理器
 	offlineHandler := NewHybridOfflineMessageHandler(redisClient, db, &wscconfig.OfflineMessage{
@@ -395,7 +395,7 @@ func TestOfflineMessage30MessagesStressTest(t *testing.T) {
 		KeyPrefix: "wsc:test:stress:online:",
 		TTL:       5 * time.Minute,
 	})
-	messageRecordRepo := NewMessageRecordRepository(db)
+	messageRecordRepo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 
 	// 创建离线消息处理器
 	offlineHandler := NewHybridOfflineMessageHandler(redisClient, db, &wscconfig.OfflineMessage{

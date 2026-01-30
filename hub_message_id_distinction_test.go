@@ -23,7 +23,7 @@ import (
 func TestHubMessageIDVsHubIDDistinction(t *testing.T) {
 	ctx := context.Background()
 	db := getTestDB(t)
-	repo := NewMessageRecordRepository(db)
+	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 
 	businessMsgID := osx.HashUnixMicroCipherText()
 	defer func() {
@@ -108,7 +108,7 @@ func TestMessageRecordIDFields(t *testing.T) {
 // TestRetryWithCorrectMessageID 测试重试时使用正确的 MessageID
 func TestRetryWithCorrectMessageID(t *testing.T) {
 	db := getTestDB(t)
-	repo := NewMessageRecordRepository(db)
+	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 
 	businessMsgID := osx.HashUnixMicroCipherText()
 	ctx := context.Background()

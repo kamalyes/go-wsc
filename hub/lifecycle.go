@@ -102,9 +102,9 @@ func (h *Hub) Run() {
 
 // reportPerformanceMetrics 报告性能指标
 func (h *Hub) reportPerformanceMetrics() {
-	activeClients, sseClients := syncx.WithRLockReturnWithE(&h.mutex, func() (int, int) {
-		return len(h.clients), len(h.sseClients)
-	})
+	// 使用原子计数器快速获取连接数，避免加锁
+	activeClients := h.activeClientsCount.Load()
+	sseClients := h.sseClientsCount.Load()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -125,7 +125,7 @@ func (h *Hub) reportPerformanceMetrics() {
 	cg.Group("📊 Hub 性能指标报告 [节点: %s]", h.nodeID)
 
 	// 连接统计
-	connectionStats := map[string]interface{}{
+	connectionStats := map[string]any{
 		"WebSocket 连接数": activeClients,
 		"SSE 连接数":       sseClients,
 		"历史总连接数":        stats.TotalConnections,
@@ -133,7 +133,7 @@ func (h *Hub) reportPerformanceMetrics() {
 	cg.Table(connectionStats)
 
 	// 消息统计
-	messageStats := map[string]interface{}{
+	messageStats := map[string]any{
 		"已发送消息数":  stats.MessagesSent,
 		"已广播消息数":  stats.BroadcastsSent,
 		"运行时长(秒)": stats.Uptime,
@@ -235,20 +235,27 @@ func (h *Hub) SafeShutdown() error {
 	// 等待一小段时间让goroutine有机会响应取消信号
 	time.Sleep(10 * time.Millisecond)
 
-	// 根据连接数动态计算超时时间
+	// 使用原子计数器快速计算超时时间
 	// 基础超时：从配置读取（默认5秒）
 	// 最大超时：从配置读取（默认60秒）
+	// 动态计算：基础超时 + (连接数 * 10ms)，但不超过最大超时
+	baseTimeout := mathx.IfNotZero(h.config.ShutdownBaseTimeout, 5*time.Second)
 	maxTimeout := mathx.IfNotZero(h.config.ShutdownMaxTimeout, 60*time.Second)
 
-	// 使用最大超时，避免在关闭流程中获取锁导致死锁
-	// TODO: 后续可以使用原子计数器优化
-	calculatedTimeout := maxTimeout
+	// 使用原子计数器获取连接数（无需加锁）
+	totalClients := h.activeClientsCount.Load() + h.sseClientsCount.Load()
+	
+	// 每个连接增加10ms超时时间
+	calculatedTimeout := baseTimeout + time.Duration(totalClients)*10*time.Millisecond
+	if calculatedTimeout > maxTimeout {
+		calculatedTimeout = maxTimeout
+	}
 
 	// 等待所有goroutine完成，带超时保护
 	cg.Info("→ 等待所有协程完成...")
 	done := make(chan struct{})
 	syncx.Go(h.ctx).
-		OnPanic(func(r interface{}) {
+		OnPanic(func(r any) {
 			h.logger.ErrorKV("WaitGroup等待崩溃", "panic", r)
 		}).
 		Exec(func() {
@@ -259,7 +266,7 @@ func (h *Hub) SafeShutdown() error {
 	select {
 	case <-done:
 		// 正常关闭
-		finalStats := map[string]interface{}{
+		finalStats := map[string]any{
 			"total_connections": int64(0),
 			"messages_sent":     int64(0),
 			"broadcasts_sent":   int64(0),

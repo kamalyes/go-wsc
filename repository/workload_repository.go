@@ -21,6 +21,7 @@ import (
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/random"
+	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -56,6 +57,9 @@ type WorkloadRepository interface {
 
 	// BatchSetAgentWorkload 批量设置客服负载
 	BatchSetAgentWorkload(ctx context.Context, workloads map[string]int64) error
+
+	// Close 关闭仓库，停止后台任务
+	Close() error
 }
 
 // RedisWorkloadRepository Redis 实现
@@ -64,6 +68,7 @@ type RedisWorkloadRepository struct {
 	keyPrefix  string         // key 前缀
 	defaultTTL time.Duration  // 默认过期时间
 	logger     logger.ILogger // 日志记录器
+	cancelFunc context.CancelFunc // 用于停止清理任务
 }
 
 // NewRedisWorkloadRepository 创建 Redis 负载管理仓库
@@ -75,12 +80,23 @@ func NewRedisWorkloadRepository(client *redis.Client, config *wscconfig.Workload
 	keyPrefix := mathx.IF(config.KeyPrefix == "", "wsc:workload:", config.KeyPrefix)
 	ttl := mathx.IF(config.TTL == 0, 72*time.Hour, config.TTL)
 
-	return &RedisWorkloadRepository{
+	// 创建可取消的 context
+	ctx, cancel := context.WithCancel(context.Background())
+
+	repo := &RedisWorkloadRepository{
 		client:     client,
 		keyPrefix:  keyPrefix,
 		defaultTTL: ttl,
 		logger:     log,
+		cancelFunc: cancel,
 	}
+
+	// 🧹 启动定时清理任务（根据配置）
+	if config.EnableAutoCleanup && config.CleanupDaysAgo > 0 {
+		go repo.startCleanupScheduler(ctx, config.CleanupDaysAgo)
+	}
+
+	return repo
 }
 
 // GetTodayKey 获取今天的日期键（格式：20251218）
@@ -291,7 +307,7 @@ func (r *RedisWorkloadRepository) GetLeastLoadedAgent(ctx context.Context, onlin
 
 	// 解析结果
 	if result != nil {
-		if resultArray, ok := result.([]interface{}); ok && len(resultArray) == 2 {
+		if resultArray, ok := result.([]any); ok && len(resultArray) == 2 {
 			agentID := resultArray[0].(string)
 			var workload int64
 			// Redis Lua 返回的数字可能是 int64 或 float64
@@ -376,6 +392,66 @@ func (r *RedisWorkloadRepository) GetAllAgentWorkloads(ctx context.Context, limi
 	return workloads, nil
 }
 
+// startCleanupScheduler 启动定时清理任务（使用 EventLoop，每2天执行一次）
+func (r *RedisWorkloadRepository) startCleanupScheduler(ctx context.Context, daysAgo int) {
+	// 立即执行一次清理
+	r.cleanupOldData(ctx, daysAgo)
+
+	// 使用 EventLoop 管理定时任务
+	syncx.NewEventLoop(ctx).
+		// 每3天执行一次清理
+		OnTicker(36*time.Hour, func() {
+			r.cleanupOldData(ctx, daysAgo)
+		}).
+		// Panic 处理
+		OnPanic(func(rec any) {
+			r.logger.Errorf("⚠️ 清理任务 panic: %v", rec)
+		}).
+		// 优雅关闭
+		OnShutdown(func() {
+			r.logger.Info("🛑 清理任务已停止")
+		}).
+		Run()
+}
+
+// cleanupOldData 清理N天前的历史数据（仅清理 ZSet，agent key 依赖 TTL 自动过期）
+//
+// 设计说明：
+//   - ZSet key 需要主动清理：历史日期的 ZSet 不再使用，应释放内存
+//   - agent key 无需清理：已设置 TTL，Redis 会自动过期删除
+//   - 避免 SCAN 开销：不扫描 agent key，减少 Redis 负担
+//
+// 参数：
+//   - daysAgo: 清理多少天前的数据（例如：3 表示清理3天及更早的所有历史数据）
+func (r *RedisWorkloadRepository) cleanupOldData(ctx context.Context, daysAgo int) {
+	if daysAgo <= 0 {
+		return
+	}
+
+	// 清理 daysAgo 天之前的所有历史 ZSet（最多清理 30 天）
+	now := time.Now()
+	var zsetKeys []string
+
+	// 从 daysAgo 天前开始，往前清理最多 30 天的历史数据
+	maxCleanupDays := 30
+	for i := daysAgo; i <= daysAgo+maxCleanupDays; i++ {
+		oldDate := now.AddDate(0, 0, -i)
+		dateKey := oldDate.Format("20060102")
+		zsetKey := fmt.Sprintf("%s%s:zset", r.keyPrefix, dateKey)
+		zsetKeys = append(zsetKeys, zsetKey)
+	}
+
+	// 批量删除 ZSet（agent key 依赖 TTL 自动过期，无需主动删除）
+	if len(zsetKeys) > 0 {
+		deleted, err := r.client.Del(ctx, zsetKeys...).Result()
+		if err != nil {
+			r.logger.Warnf("⚠️ 清理历史 ZSet 失败: %v", err)
+		} else if deleted > 0 {
+			r.logger.Infof("🧹 已清理 %d 天前的历史 ZSet，删除 %d 个 key", daysAgo, deleted)
+		}
+	}
+}
+
 // BatchSetAgentWorkload 批量设置客服负载
 func (r *RedisWorkloadRepository) BatchSetAgentWorkload(ctx context.Context, workloads map[string]int64) error {
 	if len(workloads) == 0 {
@@ -410,7 +486,7 @@ func (r *RedisWorkloadRepository) BatchSetAgentWorkload(ctx context.Context, wor
 	// 准备参数
 	dateKey := r.GetTodayKey()
 	ttlSeconds := int64(r.defaultTTL.Seconds())
-	args := []interface{}{r.keyPrefix, dateKey, ttlSeconds}
+	args := []any{r.keyPrefix, dateKey, ttlSeconds}
 
 	for agentID, workload := range workloads {
 		args = append(args, agentID, workload)
@@ -423,5 +499,14 @@ func (r *RedisWorkloadRepository) BatchSetAgentWorkload(ctx context.Context, wor
 	}
 
 	r.logger.Debugf("✅ 批量设置 %v 个客服负载", result)
+	return nil
+}
+
+// Close 关闭仓库，停止后台清理任务
+func (r *RedisWorkloadRepository) Close() error {
+	if r.cancelFunc != nil {
+		r.cancelFunc()
+		r.logger.Info("🛑 WorkloadRepository 已关闭")
+	}
 	return nil
 }

@@ -6,10 +6,10 @@ require (
 	github.com/gorilla/websocket v1.4.2
 	github.com/jpillora/backoff v1.0.0
 	github.com/kamalyes/go-cachex v0.1.9-0.20260113075842-a052631b57e8
-	github.com/kamalyes/go-config v0.12.14-0.20260130030908-c12bdbbc1da4
+	github.com/kamalyes/go-config v0.12.14-0.20260130053709-42a276eddedf
 	github.com/kamalyes/go-logger v0.4.6-0.20260113073109-516d3a52d3ee
 	github.com/kamalyes/go-sqlbuilder v0.3.6-0.20260105051012-7fd1f605db72
-	github.com/kamalyes/go-toolbox v0.11.87-0.20260129163643-734ed1032874
+	github.com/kamalyes/go-toolbox v0.11.87-0.20260130052916-b1a1dedd2346
 	github.com/redis/go-redis/v9 v9.17.2
 	github.com/stretchr/testify v1.11.1
 	gorm.io/driver/mysql v1.6.0

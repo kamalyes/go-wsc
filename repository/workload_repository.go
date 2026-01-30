@@ -114,6 +114,8 @@ func (r *RedisWorkloadRepository) SetAgentWorkload(ctx context.Context, agentID 
 		redis.call('SET', workloadKey, workload, 'EX', ttl)
 		-- 更新 ZSet
 		redis.call('ZADD', zsetKey, workload, agentID)
+		-- 设置 ZSet 的过期时间
+		redis.call('EXPIRE', zsetKey, ttl)
 		
 		return workload
 	`
@@ -167,6 +169,8 @@ func (r *RedisWorkloadRepository) IncrementAgentWorkload(ctx context.Context, ag
 		redis.call('EXPIRE', workloadKey, ttl)
 		-- 更新 ZSet
 		redis.call('ZINCRBY', zsetKey, 1, agentID)
+		-- 刷新 ZSet 的 TTL
+		redis.call('EXPIRE', zsetKey, ttl)
 		
 		return newWorkload
 	`
@@ -310,11 +314,16 @@ func (r *RedisWorkloadRepository) GetLeastLoadedAgent(ctx context.Context, onlin
 	workload, _ := r.GetAgentWorkload(ctx, selectedAgent)
 	r.logger.Debugf("⚠️ ZSet中未找到在线客服，随机选择: %s (负载: %d)", selectedAgent, workload)
 
-	// 同步到ZSet
-	r.client.ZAdd(ctx, zsetKey, redis.Z{
+	// 同步到ZSet并设置TTL
+	pipe := r.client.Pipeline()
+	pipe.ZAdd(ctx, zsetKey, redis.Z{
 		Score:  float64(workload),
 		Member: selectedAgent,
 	})
+	pipe.Expire(ctx, zsetKey, r.defaultTTL)
+	if _, err := pipe.Exec(ctx); err != nil {
+		r.logger.Warnf("⚠️ 同步ZSet失败: %v", err)
+	}
 
 	return selectedAgent, workload, nil
 }
@@ -391,6 +400,9 @@ func (r *RedisWorkloadRepository) BatchSetAgentWorkload(ctx context.Context, wor
 			-- 更新 ZSet
 			redis.call('ZADD', zsetKey, workload, agentID)
 		end
+		
+		-- 设置 ZSet 的过期时间
+		redis.call('EXPIRE', zsetKey, ttl)
 		
 		return #ARGV / 2 - 1
 	`

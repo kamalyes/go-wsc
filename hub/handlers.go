@@ -19,6 +19,7 @@ import (
 
 	"github.com/kamalyes/go-logger"
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
+	"github.com/kamalyes/go-toolbox/pkg/syncx"
 )
 
 // ============================================================================
@@ -133,18 +134,23 @@ func (h *Hub) DisconnectClient(clientID string, reason string) error {
 func (h *Hub) disconnectKickedClient(ctx context.Context, client *Client, userID, reason string) {
 	// 调用断开回调
 	if h.clientDisconnectCallback != nil {
-		go func(c *Client) {
-			if err := h.clientDisconnectCallback(ctx, c, DisconnectReasonKickOut); err != nil {
+		syncx.Go(h.ctx).
+			OnPanic(func(r any) {
+				h.logger.ErrorKV("踢出用户断开回调 panic", "panic", r, "client_id", client.ID)
+			}).
+			OnError(func(err error) {
 				h.logger.ErrorKV("踢出用户时断开回调执行失败",
-					"client_id", c.ID,
-					"user_id", c.UserID,
+					"client_id", client.ID,
+					"user_id", client.UserID,
 					"error", err,
 				)
 				if h.errorCallback != nil {
 					_ = h.errorCallback(ctx, err, ErrorSeverityWarning)
 				}
-			}
-		}(client)
+			}).
+			ExecWithContext(func(execCtx context.Context) error {
+				return h.clientDisconnectCallback(execCtx, client, DisconnectReasonKickOut)
+			})
 	}
 
 	// 关闭连接

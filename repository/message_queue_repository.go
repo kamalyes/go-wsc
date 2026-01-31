@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
+	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-toolbox/pkg/zipx"
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/redis/go-redis/v9"
@@ -157,21 +158,26 @@ func (r *RedisMessageQueueRepository) DequeueWithWatchdog(ctx context.Context, q
 
 	// 启动看门狗goroutine自动续期
 	watchdogDone := make(chan struct{})
-	go func() {
-		defer close(watchdogDone)
-		ticker := time.NewTicker(renewInterval)
-		defer ticker.Stop()
+	syncx.Go(lockCtx).
+		OnPanic(func(r any) {
+			// 看门狗 panic，记录日志但不影响主流程
+			close(watchdogDone)
+		}).
+		Exec(func() {
+			defer close(watchdogDone)
+			ticker := time.NewTicker(renewInterval)
+			defer ticker.Stop()
 
-		for {
-			select {
-			case <-lockCtx.Done():
-				return
-			case <-ticker.C:
-				// 续期锁
-				_, _ = r.client.Expire(lockCtx, lockKey, lockExpiry).Result()
+			for {
+				select {
+				case <-lockCtx.Done():
+					return
+				case <-ticker.C:
+					// 续期锁
+					_, _ = r.client.Expire(lockCtx, lockKey, lockExpiry).Result()
+				}
 			}
-		}
-	}()
+		})
 
 	// 4. 处理消息
 	processErr := processFunc(msg)

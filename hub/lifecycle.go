@@ -65,7 +65,47 @@ func (h *Hub) Run() {
 	}
 
 	// 启动待发送消息处理goroutine
-	go h.processPendingMessages()
+	syncx.Go(h.ctx).
+		OnPanic(func(r any) {
+			h.logger.ErrorKV("待发送消息处理器 panic", "panic", r, "node_id", h.nodeID)
+		}).
+		Exec(h.processPendingMessages)
+
+	// 🌐 启动分布式服务（如果启用了 PubSub）
+	if h.pubsub != nil {
+		// 启动节点心跳
+		syncx.Go(h.ctx).
+			OnPanic(func(r any) {
+				h.logger.ErrorKV("节点心跳 panic", "panic", r, "node_id", h.nodeID)
+			}).
+			Exec(func() {
+				h.StartNodeHeartbeat(h.ctx)
+			})
+
+		// 订阅节点间消息
+		syncx.Go(h.ctx).
+			OnPanic(func(r any) {
+				h.logger.ErrorKV("订阅节点消息 panic", "panic", r, "node_id", h.nodeID)
+			}).
+			Exec(func() {
+				if err := h.SubscribeNodeMessages(h.ctx); err != nil {
+					h.logger.ErrorKV("订阅节点消息失败", "error", err)
+				}
+			})
+
+		// 订阅全局广播频道
+		syncx.Go(h.ctx).
+			OnPanic(func(r any) {
+				h.logger.ErrorKV("订阅广播频道 panic", "panic", r, "node_id", h.nodeID)
+			}).
+			Exec(func() {
+				if err := h.SubscribeBroadcastChannel(h.ctx); err != nil {
+					h.logger.ErrorKV("订阅广播频道失败", "error", err)
+				}
+			})
+
+		h.logger.InfoKV("🌐 分布式服务已启动", "node_id", h.nodeID)
+	}
 
 	// 🌐 启动分布式服务（如果启用了 PubSub）
 	if h.pubsub != nil {
@@ -266,7 +306,7 @@ func (h *Hub) SafeShutdown() error {
 
 	// 使用原子计数器获取连接数（无需加锁）
 	totalClients := h.activeClientsCount.Load() + h.sseClientsCount.Load()
-	
+
 	// 每个连接增加10ms超时时间
 	calculatedTimeout := baseTimeout + time.Duration(totalClients)*10*time.Millisecond
 	if calculatedTimeout > maxTimeout {

@@ -52,7 +52,7 @@ type RedisMessageQueueRepository struct {
 
 // NewRedisMessageQueueRepository 创建Redis消息队列仓库
 func NewRedisMessageQueueRepository(client redis.UniversalClient, prefix string, ttl time.Duration) *RedisMessageQueueRepository {
-	prefix = mathx.IF(prefix == "", "wsc:queue:", prefix)
+	prefix = mathx.IF(prefix == "", DefaultQueueKeyPrefix, prefix)
 	ttl = mathx.IF(ttl < 0, 24*time.Hour, ttl)
 
 	return &RedisMessageQueueRepository{

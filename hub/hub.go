@@ -148,6 +148,12 @@ const (
 	BroadcastTypeGlobal = models.BroadcastTypeGlobal
 )
 
+var (
+	OperationTypeSendMessage = models.OperationTypeSendMessage
+	OperationTypeKickUser    = models.OperationTypeKickUser
+	OperationTypeBroadcast   = models.OperationTypeBroadcast
+)
+
 // NewHubMessage 创建新的 HubMessage
 var (
 	NewHubMessage = models.NewHubMessage
@@ -309,7 +315,10 @@ type Hub struct {
 // NewHub 创建新的Hub
 func NewHub(config *wscconfig.WSC) *Hub {
 	ctx, cancel := context.WithCancel(context.Background())
-	nodeID := fmt.Sprintf("%s-%d", config.NodeIP, config.NodePort)
+
+	// 生成节点ID（支持K8s环境）
+	nodeID := generateNodeID(config)
+
 	workerID := osx.GetWorkerIdForSnowflake()
 	idGenerator := idgen.NewShortFlakeGenerator(workerID)
 
@@ -355,15 +364,16 @@ func NewHub(config *wscconfig.WSC) *Hub {
 // 基础 Getter/Setter 方法
 // ============================================================================
 
-func (h *Hub) GetNodeID() string           { return h.nodeID }
-func (h *Hub) GetWorkerID() int64          { return h.workerID }
-func (h *Hub) GetIDGenerator() IDGenerator { return h.idGenerator }
-func (h *Hub) GetLogger() WSCLogger        { return h.logger }
-func (h *Hub) GetContext() context.Context { return h.ctx }
-func (h *Hub) IsStarted() bool             { return h.started.Load() }
-func (h *Hub) IsShutdown() bool            { return h.shutdown.Load() }
-func (h *Hub) GetConfig() *wscconfig.WSC   { return h.config }
-func (h *Hub) Context() context.Context    { return h.ctx }
+func (h *Hub) GetNodeID() string                           { return h.nodeID }
+func (h *Hub) GetWorkerID() int64                          { return h.workerID }
+func (h *Hub) GetIDGenerator() IDGenerator                 { return h.idGenerator }
+func (h *Hub) GetLogger() WSCLogger                        { return h.logger }
+func (h *Hub) GetContext() context.Context                 { return h.ctx }
+func (h *Hub) IsStarted() bool                             { return h.started.Load() }
+func (h *Hub) IsShutdown() bool                            { return h.shutdown.Load() }
+func (h *Hub) GetConfig() *wscconfig.WSC                   { return h.config }
+func (h *Hub) GetOnlineStatusRepo() OnlineStatusRepository { return h.onlineStatusRepo }
+func (h *Hub) Context() context.Context                    { return h.ctx }
 
 func (h *Hub) SetIDGenerator(generator IDGenerator) {
 	h.idGenerator = generator
@@ -389,4 +399,34 @@ func (h *Hub) SetPubSub(pubsub *cachex.PubSub) {
 
 func (h *Hub) GetPubSub() *cachex.PubSub {
 	return h.pubsub
+}
+
+// ============================================================================
+// K8s 兼容的节点ID生成
+// ============================================================================
+
+// generateNodeID 生成节点ID（支持K8s环境）
+// 优先级：
+// 1. 环境变量 POD_NAME（K8s推荐）
+// 2. 环境变量 HOSTNAME（容器环境）
+// 3. 环境变量 NODE_ID（自定义）
+// 4. IP:Port（传统方式）
+func generateNodeID(config *wscconfig.WSC) string {
+	// 1. 优先使用 K8s Pod Name
+	if podName := osx.Getenv("POD_NAME", ""); podName != "" {
+		return podName
+	}
+
+	// 2. 使用 Hostname（容器环境）
+	if hostname := osx.Getenv("HOSTNAME", ""); hostname != "" {
+		return hostname
+	}
+
+	// 3. 使用自定义 NODE_ID
+	if nodeID := osx.Getenv("NODE_ID", ""); nodeID != "" {
+		return nodeID
+	}
+
+	// 4. 回退到 IP:Port（传统方式）
+	return fmt.Sprintf("%s-%d", config.NodeIP, config.NodePort)
 }

@@ -74,7 +74,7 @@ type RedisWorkloadRepository struct {
 //   - config: 负载管理配置对象
 //   - log: 日志记录器
 func NewRedisWorkloadRepository(client *redis.Client, config *wscconfig.Workload, log logger.ILogger) WorkloadRepository {
-	keyPrefix := mathx.IF(config.KeyPrefix == "", "wsc:workload:", config.KeyPrefix)
+	keyPrefix := mathx.IF(config.KeyPrefix == "", DefaultWorkloadKeyPrefix, config.KeyPrefix)
 
 	repo := &RedisWorkloadRepository{
 		client:     client,

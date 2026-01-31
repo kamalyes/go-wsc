@@ -25,6 +25,7 @@ import (
 // ============================================================================
 
 // Broadcast 广播消息给所有客户端
+// 自动支持分布式：会同时广播到所有节点
 func (h *Hub) Broadcast(ctx context.Context, msg *HubMessage) {
 	// 创建消息副本，避免并发修改
 	msg = msg.Clone()
@@ -36,6 +37,16 @@ func (h *Hub) Broadcast(ctx context.Context, msg *HubMessage) {
 		msg.CreateAt = time.Now()
 	}
 
+	// 🌐 分布式广播：发送到所有节点
+	if h.pubsub != nil {
+		go func() {
+			if err := h.broadcastToAllNodes(ctx, msg); err != nil {
+				h.logger.ErrorKV("跨节点广播失败", "error", err, "message_id", msg.ID)
+			}
+		}()
+	}
+
+	// 本地广播
 	select {
 	case h.broadcast <- msg:
 		// 成功放入广播队列

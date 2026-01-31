@@ -182,8 +182,7 @@ func TestUserOfflineEvent(t *testing.T) {
 
 	// 设置 PubSub
 	pubsub := cachex.NewPubSub(redisClient, cachex.PubSubConfig{
-		Namespace:     "wsc",
-		EnableLogging: false,
+		Namespace: "wsc",
 	})
 	hub.SetPubSub(pubsub)
 
@@ -236,8 +235,7 @@ func TestMultipleSubscribers(t *testing.T) {
 
 	// 设置 PubSub
 	pubsub := cachex.NewPubSub(redisClient, cachex.PubSubConfig{
-		Namespace:     "wsc",
-		EnableLogging: false,
+		Namespace: "wsc",
 	})
 	hub.SetPubSub(pubsub)
 
@@ -302,8 +300,7 @@ func TestTicketQueuePushedEvent(t *testing.T) {
 
 	// 设置 PubSub
 	pubsub := cachex.NewPubSub(redisClient, cachex.PubSubConfig{
-		Namespace:     "wsc",
-		EnableLogging: false,
+		Namespace: "wsc",
 	})
 	hub.SetPubSub(pubsub)
 
@@ -359,8 +356,7 @@ func TestUnsubscribe(t *testing.T) {
 
 	// 设置 PubSub
 	pubsub := cachex.NewPubSub(redisClient, cachex.PubSubConfig{
-		Namespace:     "wsc",
-		EnableLogging: false,
+		Namespace: "wsc",
 	})
 	hub.SetPubSub(pubsub)
 
@@ -450,8 +446,7 @@ func TestCrossNodeEvents(t *testing.T) {
 
 	// 为两个 Hub 设置相同的 PubSub（模拟共享 Redis）
 	pubsubConfig := cachex.PubSubConfig{
-		Namespace:     "wsc",
-		EnableLogging: false,
+		Namespace: "wsc",
 	}
 	pubsub1 := cachex.NewPubSub(redisClient, pubsubConfig)
 	pubsub2 := cachex.NewPubSub(redisClient, pubsubConfig)
@@ -509,8 +504,7 @@ func TestEventsConcurrency(t *testing.T) {
 	defer hub.Shutdown()
 
 	pubsub := cachex.NewPubSub(redisClient, cachex.PubSubConfig{
-		Namespace:     "wsc",
-		EnableLogging: false,
+		Namespace: "wsc",
 	})
 	hub.SetPubSub(pubsub)
 
@@ -571,8 +565,7 @@ func TestEventHandlerError(t *testing.T) {
 	defer hub.Shutdown()
 
 	pubsub := cachex.NewPubSub(redisClient, cachex.PubSubConfig{
-		Namespace:     "wsc",
-		EnableLogging: false,
+		Namespace: "wsc",
 	})
 	hub.SetPubSub(pubsub)
 
@@ -620,8 +613,7 @@ func TestEventContent(t *testing.T) {
 	defer hub.Shutdown()
 
 	pubsub := cachex.NewPubSub(redisClient, cachex.PubSubConfig{
-		Namespace:     "wsc",
-		EnableLogging: false,
+		Namespace: "wsc",
 	})
 	hub.SetPubSub(pubsub)
 

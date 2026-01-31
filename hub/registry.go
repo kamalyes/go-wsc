@@ -98,6 +98,9 @@ func (h *Hub) handleRegister(client *Client) {
 	go h.syncOnlineStatus(client)
 	go h.pushOfflineMessagesOnConnect(client)
 
+	// 🌐 分布式：记录用户所在节点
+	go h.recordUserNode(client)
+
 	// 📡 发布用户上线事件（所有用户类型）
 	go events.PublishUserOnline(h, client.UserID, client.UserType, client.ID)
 
@@ -463,4 +466,28 @@ func (h *Hub) closeClientConnection(client *Client) {
 	if client.Conn != nil {
 		client.Conn.Close()
 	}
+}
+
+// ============================================================================
+// 分布式相关辅助方法
+// ============================================================================
+
+// recordUserNode 记录用户所在节点 (分布式支持)
+func (h *Hub) recordUserNode(client *Client) {
+	if h.onlineStatusRepo == nil || h.pubsub == nil {
+		return // 单机模式或未启用分布式
+	}
+
+	syncx.Go(h.ctx).
+		WithTimeout(3 * time.Second).
+		OnError(func(err error) {
+			h.logger.ErrorKV("记录用户节点失败",
+				"user_id", client.UserID,
+				"node_id", h.nodeID,
+				"error", err,
+			)
+		}).
+		ExecWithContext(func(ctx context.Context) error {
+			return h.onlineStatusRepo.SetUserNode(ctx, client.UserID, h.nodeID)
+		})
 }

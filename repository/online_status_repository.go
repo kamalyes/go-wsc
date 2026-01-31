@@ -13,6 +13,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
@@ -60,6 +61,17 @@ type OnlineStatusRepository interface {
 
 	// CleanupExpired 清理过期的在线状态（可选，Redis 会自动过期）
 	CleanupExpired(ctx context.Context) (int64, error)
+
+	// ========== 分布式节点相关方法 ==========
+
+	// SetUserNode 设置用户所在节点
+	SetUserNode(ctx context.Context, userID string, nodeID string) error
+
+	// GetUserNode 获取用户所在节点
+	GetUserNode(ctx context.Context, userID string) (string, error)
+
+	// GetNodeUsers 获取节点的所有在线用户
+	GetNodeUsers(ctx context.Context, nodeID string) ([]string, error)
 }
 
 // RedisOnlineStatusRepository Redis 实现
@@ -76,7 +88,7 @@ type RedisOnlineStatusRepository struct {
 func NewRedisOnlineStatusRepository(client *redis.Client, config *wscconfig.OnlineStatus) OnlineStatusRepository {
 	return &RedisOnlineStatusRepository{
 		client:    client,
-		keyPrefix: mathx.IF(config.KeyPrefix == "", "wsc:online:", config.KeyPrefix),
+		keyPrefix: mathx.IF(config.KeyPrefix == "", DefaultOnlineKeyPrefix, config.KeyPrefix),
 		ttl:       mathx.IF(config.TTL == 0, 5*time.Minute, config.TTL),
 	}
 }
@@ -332,4 +344,54 @@ func (r *RedisOnlineStatusRepository) CleanupExpired(ctx context.Context) (int64
 	}
 
 	return cleaned, nil
+}
+
+// ============================================================================
+// 分布式节点相关方法实现
+// ============================================================================
+
+// SetUserNode 设置用户所在节点
+func (r *RedisOnlineStatusRepository) SetUserNode(ctx context.Context, userID string, nodeID string) error {
+	key := fmt.Sprintf("%suser_node:%s", r.keyPrefix, userID)
+	return r.client.Set(ctx, key, nodeID, r.ttl).Err()
+}
+
+// GetUserNode 获取用户所在节点
+func (r *RedisOnlineStatusRepository) GetUserNode(ctx context.Context, userID string) (string, error) {
+	key := fmt.Sprintf("%suser_node:%s", r.keyPrefix, userID)
+	result, err := r.client.Get(ctx, key).Result()
+	if err == redis.Nil {
+		return "", nil // 用户不在线或未记录节点
+	}
+	return result, err
+}
+
+// GetNodeUsers 获取节点的所有在线用户
+func (r *RedisOnlineStatusRepository) GetNodeUsers(ctx context.Context, nodeID string) ([]string, error) {
+	pattern := fmt.Sprintf("%suser_node:*", r.keyPrefix)
+
+	var users []string
+	iter := r.client.Scan(ctx, 0, pattern, 0).Iterator()
+
+	for iter.Next(ctx) {
+		key := iter.Val()
+		node, err := r.client.Get(ctx, key).Result()
+		if err != nil || node != nodeID {
+			continue
+		}
+
+		// 从 key 中提取 userID
+		// key 格式: wsc:online:user_node:user123
+		parts := strings.Split(key, ":")
+		if len(parts) >= 3 {
+			userID := parts[len(parts)-1]
+			users = append(users, userID)
+		}
+	}
+
+	if err := iter.Err(); err != nil {
+		return nil, err
+	}
+
+	return users, nil
 }

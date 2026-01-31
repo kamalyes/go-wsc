@@ -38,14 +38,36 @@ const (
 )
 
 // sendToUser 发送消息给指定用户（内部方法）
+// 自动支持分布式：如果用户在其他节点，会自动路由过去
 func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) error {
-	msg.ReceiverNode = mathx.IfEmpty(msg.ReceiverNode,h.nodeID)
+	msg.ReceiverNode = mathx.IfEmpty(msg.ReceiverNode, h.nodeID)
 	msg.CreateAt = mathx.IfNotZero(msg.CreateAt, time.Now())
 
+	// 🌐 分布式路由：检查用户是否在其他节点
+	routed, err := h.checkAndRouteToNode(ctx, toUserID, msg)
+	if err != nil {
+		// 路由失败，记录错误但继续尝试本地发送
+		h.logger.WarnKV("跨节点路由失败，尝试本地发送",
+			"user_id", toUserID,
+			"message_id", msg.ID,
+			"error", err,
+		)
+	}
+	if routed {
+		// 消息已路由到其他节点，本地不需要处理
+		h.logger.DebugContextKV(ctx, "消息已路由到其他节点",
+			"message_id", msg.ID,
+			"user_id", toUserID,
+		)
+		go h.recordMessageToDatabase(msg, nil)
+		return nil
+	}
+
+	// 用户在本节点或单机模式，正常发送
 	// 尝试发送到broadcast队列
 	select {
 	case h.broadcast <- msg:
-		h.logger.DebugContextKV(ctx,"消息已广播", "message_id", msg.ID, "from", msg.Sender, "to", msg.Receiver, "type", msg.MessageType)
+		h.logger.DebugContextKV(ctx, "消息已广播", "message_id", msg.ID, "from", msg.Sender, "to", msg.Receiver, "type", msg.MessageType)
 		// 记录消息到数据库 - 创建时已标记为Sending状态
 		go h.recordMessageToDatabase(msg, nil)
 		return nil
@@ -53,14 +75,14 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 		// broadcast队列满，尝试放入待发送队列
 		select {
 		case h.pendingMessages <- msg:
-			h.logger.DebugContextKV(ctx,"消息已放入待发送队列", "message_id", msg.ID, "from", msg.Sender, "to", msg.Receiver, "type", msg.MessageType)
+			h.logger.DebugContextKV(ctx, "消息已放入待发送队列", "message_id", msg.ID, "from", msg.Sender, "to", msg.Receiver, "type", msg.MessageType)
 			// 记录消息到数据库 - 创建时已标记为Sending状态
 			go h.recordMessageToDatabase(msg, nil)
 			return nil
 		default:
 			err := ErrQueueAndPendingFull
 			// 记录消息发送失败日志
-			h.logger.DebugContextKV(ctx,"消息发送失败", "message_id", msg.ID, "from", msg.Sender, "to", msg.Receiver, "type", msg.MessageType, "error", err)
+			h.logger.DebugContextKV(ctx, "消息发送失败", "message_id", msg.ID, "from", msg.Sender, "to", msg.Receiver, "type", msg.MessageType, "error", err)
 			// 记录失败消息到数据库
 			go h.recordMessageToDatabase(msg, err)
 			// 通知队列满处理器

@@ -23,6 +23,8 @@ github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/dgraph-io/ristretto/v2 v2.3.0 h1:qTQ38m7oIyd4GAed/QkUZyPFNMnvVWyazGXRwvOt5zk=
 github.com/dgraph-io/ristretto/v2 v2.3.0/go.mod h1:gpoRV3VzrEY1a9dWAYV6T1U7YzfgttXdd/ZzL1s9OZM=
+github.com/dgraph-io/ristretto/v2 v2.4.0 h1:I/w09yLjhdcVD2QV192UJcq8dPBaAJb9pOuMyNy0XlU=
+github.com/dgraph-io/ristretto/v2 v2.4.0/go.mod h1:0KsrXtXvnv0EqnzyowllbVJB8yBonswa2lTCK2gGo9E=
 github.com/dgryski/go-farm v0.0.0-20240924180020-3414d57e47da h1:aIftn67I1fkbMa512G+w+Pxci9hJPB8oMnkcP3iZF38=
 github.com/dgryski/go-farm v0.0.0-20240924180020-3414d57e47da/go.mod h1:SqUrOPUnsFjfmXRMNPybcSiG0BgUW2AuFH8PAnS2iTw=
 github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f h1:lO4WD4F/rVNCu3HqELle0jiPLLBs70cWOduZpkS1E78=
@@ -58,6 +60,8 @@ github.com/json-iterator/go v1.1.12 h1:PV8peI4a0ysnczrg+LtxykD8LfKY9ML6u2jnxaEnr
 github.com/json-iterator/go v1.1.12/go.mod h1:e30LSqwooZae/UwlEbR2852Gd8hjQvJoHmT4TnhNGBo=
 github.com/kamalyes/go-cachex v0.1.9-0.20260113075842-a052631b57e8 h1:Xd5E5/RcYuFvb7sqtAFdoZ71Vlbpu50wLFAzZOiMejs=
 github.com/kamalyes/go-cachex v0.1.9-0.20260113075842-a052631b57e8/go.mod h1:Zy9EkR1zmZhjg2GkbHKpSP4Q/wsbSxIBb7fxAMcerpk=
+github.com/kamalyes/go-cachex v0.1.9-0.20260130162314-1dd2c64245bb h1:CjXcmBJHLHR0ZtTJwInUOuO3+GMDj+ZmyUFOTlm32/w=
+github.com/kamalyes/go-cachex v0.1.9-0.20260130162314-1dd2c64245bb/go.mod h1:Zy9EkR1zmZhjg2GkbHKpSP4Q/wsbSxIBb7fxAMcerpk=
 github.com/kamalyes/go-config v0.12.14-0.20260130095810-88e5d76a90c5 h1:DRrFDYiRqO7hbW0ibktthc+Vg9+pNbAhMCD1y9sjAKE=
 github.com/kamalyes/go-config v0.12.14-0.20260130095810-88e5d76a90c5/go.mod h1:Qd5j3n9JtPVkin+dbQWoTVsIEbbVnlCpG2rCx0czObI=
 github.com/kamalyes/go-jsonpath v0.0.0-20260129163507-0b67ed48bb28 h1:mftqfK+BB1eE+aXca1zAMyKUAGPlcKFwQS7og7bq3Qk=
@@ -87,6 +91,8 @@ github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 h1:Jamvg5psRI
 github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/redis/go-redis/v9 v9.17.2 h1:P2EGsA4qVIM3Pp+aPocCJ7DguDHhqrXNhVcEp4ViluI=
 github.com/redis/go-redis/v9 v9.17.2/go.mod h1:u410H11HMLoB+TP67dz8rL9s6QW2j76l0//kSOd3370=
+github.com/redis/go-redis/v9 v9.17.3 h1:fN29NdNrE17KttK5Ndf20buqfDZwGNgoUr9qjl1DQx4=
+github.com/redis/go-redis/v9 v9.17.3/go.mod h1:u410H11HMLoB+TP67dz8rL9s6QW2j76l0//kSOd3370=
 github.com/rogpeppe/go-internal v1.9.0 h1:73kH8U+JUqXU8lRuOHeVHaa/SZPifC7BkcraZVejAe8=
 github.com/rogpeppe/go-internal v1.9.0/go.mod h1:WtVeX8xhTBvf0smdhujwtBcq4Qrzq/fJaraNFVN+nFs=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=

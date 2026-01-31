@@ -99,7 +99,7 @@ type RedisHubStatsRepository struct {
 //   - client: Redis 客户端 (github.com/redis/go-redis/v9)
 //   - config: 统计配置对象
 func NewRedisHubStatsRepository(client *redis.Client, config *wscconfig.Stats) *RedisHubStatsRepository {
-	keyPrefix := mathx.IF(config.KeyPrefix == "", "wsc:stats:", config.KeyPrefix)
+	keyPrefix := mathx.IF(config.KeyPrefix == "", DefaultStatsKeyPrefix, config.KeyPrefix)
 	ttl := mathx.IF(config.TTL == 0, 7*24*time.Hour, config.TTL)
 
 	return &RedisHubStatsRepository{

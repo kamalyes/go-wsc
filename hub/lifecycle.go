@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-12-28 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-01-03 12:32:47
+ * @LastEditTime: 2026-01-30 23:55:51
  * @FilePath: \go-wsc\hub\lifecycle.go
  * @Description: Hub 生命周期管理
  *
@@ -66,6 +66,28 @@ func (h *Hub) Run() {
 
 	// 启动待发送消息处理goroutine
 	go h.processPendingMessages()
+
+	// 🌐 启动分布式服务（如果启用了 PubSub）
+	if h.pubsub != nil {
+		// 启动节点心跳
+		go h.StartNodeHeartbeat(h.ctx)
+
+		// 订阅节点间消息
+		go func() {
+			if err := h.SubscribeNodeMessages(h.ctx); err != nil {
+				h.logger.ErrorKV("订阅节点消息失败", "error", err)
+			}
+		}()
+
+		// 订阅全局广播频道
+		go func() {
+			if err := h.SubscribeBroadcastChannel(h.ctx); err != nil {
+				h.logger.ErrorKV("订阅广播频道失败", "error", err)
+			}
+		}()
+
+		h.logger.InfoKV("🌐 分布式服务已启动", "node_id", h.nodeID)
+	}
 
 	// 使用 EventLoop 管理事件循环
 	// 统一处理客户端注册/注销、消息广播和定时任务

@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>go-wsc WebSocket 演示</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 800px;
+            width: 100%;
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 28px;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            opacity: 0.9;
+            font-size: 14px;
+        }
+
+        .status {
+            padding: 20px 30px;
+            background: #f8f9fa;
+            border-bottom: 1px solid #e9ecef;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #dc3545;
+            animation: pulse 2s infinite;
+        }
+
+        .status-dot.connected {
+            background: #28a745;
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.5;
+            }
+        }
+
+        .status-text {
+            font-weight: 600;
+            color: #495057;
+        }
+
+        .status-info {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+            align-items: flex-end;
+        }
+
+        .user-id {
+            font-size: 12px;
+            color: #6c757d;
+            background: white;
+            padding: 5px 12px;
+            border-radius: 20px;
+        }
+
+        .ws-url {
+            font-size: 10px;
+            color: #6c757d;
+            background: white;
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-family: 'Courier New', monospace;
+            max-width: 400px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .messages {
+            height: 400px;
+            overflow-y: auto;
+            padding: 20px 30px;
+            background: #ffffff;
+        }
+
+        .message {
+            margin-bottom: 15px;
+            animation: slideIn 0.3s ease-out;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .message-time {
+            font-size: 11px;
+            color: #6c757d;
+            margin-bottom: 5px;
+        }
+
+        .message-content {
+            padding: 12px 16px;
+            border-radius: 12px;
+            max-width: 80%;
+            word-wrap: break-word;
+        }
+
+        .message.server .message-content {
+            background: #e3f2fd;
+            color: #1976d2;
+            border: 1px solid #bbdefb;
+        }
+
+        .message.client .message-content {
+            background: #f3e5f5;
+            color: #7b1fa2;
+            border: 1px solid #e1bee7;
+            margin-left: auto;
+        }
+
+        .message.system .message-content {
+            background: #fff3e0;
+            color: #e65100;
+            border: 1px solid #ffe0b2;
+            text-align: center;
+            margin: 0 auto;
+        }
+
+        .input-area {
+            padding: 20px 30px;
+            background: #f8f9fa;
+            border-top: 1px solid #e9ecef;
+        }
+
+        .input-group {
+            display: flex;
+            gap: 10px;
+        }
+
+        .input-group input {
+            flex: 1;
+            padding: 12px 16px;
+            border: 2px solid #e9ecef;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+
+        .input-group input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .input-group button {
+            padding: 12px 24px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .input-group button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        .input-group button:active {
+            transform: translateY(0);
+        }
+
+        .input-group button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .footer {
+            padding: 15px 30px;
+            background: #f8f9fa;
+            text-align: center;
+            font-size: 12px;
+            color: #6c757d;
+        }
+
+        .footer a {
+            color: #667eea;
+            text-decoration: none;
+        }
+
+        .footer a:hover {
+            text-decoration: underline;
+        }
+
+        .messages::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .messages::-webkit-scrollbar-track {
+            background: #f1f1f1;
+        }
+
+        .messages::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 4px;
+        }
+
+        .messages::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚀 go-wsc WebSocket 演示</h1>
+            <p>实时双向通信演示 - 发送消息，服务器会自动回复</p>
+        </div>
+
+        <div class="status">
+            <div class="status-indicator">
+                <div class="status-dot" id="statusDot"></div>
+                <span class="status-text" id="statusText">未连接</span>
+            </div>
+            <div class="status-info">
+                <div class="user-id" id="userId">用户ID: demo-user-001</div>
+                <div class="ws-url" id="wsUrl" title="">ws://localhost:8080/ws</div>
+            </div>
+        </div>
+
+        <div class="messages" id="messages">
+            <div class="message system">
+                <div class="message-content">
+                    正在连接到服务器...
+                </div>
+            </div>
+        </div>
+
+        <div class="input-area">
+            <div class="input-group">
+                <input type="text" id="messageInput" placeholder="输入消息..." disabled autocomplete="off">
+                <button id="sendButton" disabled>发送</button>
+            </div>
+        </div>
+
+        <div class="footer">
+            <p>
+                由 <a href="https://github.com/kamalyes/go-wsc" target="_blank">go-wsc</a> 驱动 |
+                <a href="https://github.com/kamalyes/go-wsc/tree/main/examples" target="_blank">查看更多示例</a>
+            </p>
+        </div>
+    </div>
+
+    <script>
+        const userId = 'demo-user-' + Math.random().toString(36).substr(2, 9);
+        const wsUrl = `ws://localhost:8080/ws?user_id=${userId}`;
+        let ws = null;
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 5;
+
+        const messagesDiv = document.getElementById('messages');
+        const messageInput = document.getElementById('messageInput');
+        const sendButton = document.getElementById('sendButton');
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+        const userIdSpan = document.getElementById('userId');
+        const wsUrlSpan = document.getElementById('wsUrl');
+
+        userIdSpan.textContent = `用户ID: ${userId}`;
+        wsUrlSpan.textContent = wsUrl;
+        wsUrlSpan.title = wsUrl;
+
+        function addMessage(type, content) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${type}`;
+
+            const time = new Date().toLocaleTimeString('zh-CN', {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            });
+
+            messageDiv.innerHTML = `
+                <div class="message-time">${time}</div>
+                <div class="message-content">${escapeHtml(content)}</div>
+            `;
+
+            messagesDiv.appendChild(messageDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function updateStatus(connected) {
+            if (connected) {
+                statusDot.classList.add('connected');
+                statusText.textContent = '已连接';
+                messageInput.disabled = false;
+                sendButton.disabled = false;
+                messageInput.focus();
+            } else {
+                statusDot.classList.remove('connected');
+                statusText.textContent = '未连接';
+                messageInput.disabled = true;
+                sendButton.disabled = true;
+            }
+        }
+
+        function connect() {
+            try {
+                ws = new WebSocket(wsUrl);
+
+                ws.onopen = function () {
+                    console.log('✅ WebSocket 连接成功');
+                    reconnectAttempts = 0;
+                    updateStatus(true);
+                    addMessage('system', '✅ 已连接到服务器');
+                };
+
+                ws.onmessage = function (event) {
+                    console.log('📨 收到消息:', event.data);
+                    addMessage('server', event.data);
+                };
+
+                ws.onerror = function (error) {
+                    console.error('❌ WebSocket 错误:', error);
+                    addMessage('system', '❌ 连接错误');
+                };
+
+                ws.onclose = function () {
+                    console.log('👋 WebSocket 连接关闭');
+                    updateStatus(false);
+                    addMessage('system', '❌ 连接已断开');
+
+                    if (reconnectAttempts < maxReconnectAttempts) {
+                        reconnectAttempts++;
+                        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 10000);
+                        addMessage('system', `⏳ ${delay / 1000}秒后尝试重连... (${reconnectAttempts}/${maxReconnectAttempts})`);
+                        setTimeout(connect, delay);
+                    } else {
+                        addMessage('system', '❌ 重连失败，请刷新页面重试');
+                    }
+                };
+            } catch (error) {
+                console.error('连接失败:', error);
+                addMessage('system', '❌ 连接失败: ' + error.message);
+            }
+        }
+
+        function sendMessage() {
+            const message = messageInput.value.trim();
+            if (!message) return;
+
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(message);
+                addMessage('client', message);
+                messageInput.value = '';
+                messageInput.focus();
+            } else {
+                addMessage('system', '❌ 未连接到服务器');
+            }
+        }
+
+        sendButton.addEventListener('click', sendMessage);
+        messageInput.addEventListener('keypress', function (e) {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        });
+
+        window.addEventListener('load', function () {
+            connect();
+        });
+
+        window.addEventListener('beforeunload', function () {
+            if (ws) {
+                ws.close();
+            }
+        });
+    </script>
+</body>
+
+</html>

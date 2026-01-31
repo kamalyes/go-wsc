@@ -11,218 +11,197 @@
 
 **go-wsc** 是一个企业级 Go WebSocket 框架，专注于高性能实时通信。提供智能重连、消息确认(ACK)、连接池管理等关键特性，支持百万级并发连接。
 
-## 📦 项目结构
-
-```
-go-wsc/
-├── client/          # WebSocket客户端封装
-│   ├── websocket.go # 核心WebSocket连接(Getter方法、线程安全)
-│   ├── wsc.go       # 客户端逻辑(回调检测、重连机制)
-│   ├── connection.go# 连接管理
-│   └── aliases.go   # 类型别名
-├── hub/            # 服务端核心(模块化拆分)
-│   ├── hub.go      # Hub核心结构
-│   ├── send.go     # 消息发送与重试
-│   ├── ack.go      # ACK确认机制
-│   ├── batch_sender.go # 批量发送器
-│   ├── broadcast.go    # 广播逻辑
-│   ├── query.go        # 查询接口
-│   ├── registry.go     # 注册管理
-│   ├── lifecycle.go    # 生命周期
-│   ├── handlers.go     # 消息处理
-│   ├── callbacks.go    # 回调管理
-│   ├── sse.go          # SSE支持
-│   ├── vip.go          # VIP管理
-│   ├── utils.go        # 工具函数
-│   ├── context.go      # 上下文
-│   └── repository.go   # 仓库集成
-├── models/         # 数据模型层
-│   ├── message.go      # 消息模型
-│   ├── message_record.go  # 消息记录
-│   ├── offline_message.go # 离线消息
-│   ├── connection.go   # 连接模型
-│   ├── enums.go        # 枚举定义
-│   ├── message_type.go # 消息类型
-│   ├── types.go        # 核心类型
-│   ├── templates.go    # 模板
-│   ├── errors.go       # 错误定义
-│   └── validator.go    # 验证器
-├── repository/     # 数据访问层
-│   ├── message_record_repository.go
-│   ├── offline_message_repository.go
-│   ├── online_status_repository.go
-│   ├── connection_repository.go
-│   ├── message_queue_repository.go
-│   ├── hub_stats_repository.go
-│   ├── workload_repository.go
-│   └── aliases.go
-├── handler/        # 业务逻辑层
-│   ├── offline_message.go  # 离线消息处理
-│   └── aliases.go
-├── middleware/     # 中间件层
-│   ├── logger.go
-│   ├── rate_limiter.go
-│   └── rate_limit_alert.go
-├── protocol/       # 协议层
-│   └── ack.go
-└── exports_*.go    # 向后兼容导出(7个文件)
-```
-
-### 架构特点
-
-- **模块化设计**: 从单体4885行重构为6大核心模块
-- **职责清晰**: handler(业务逻辑) vs repository(数据访问) 明确分离
-- **完整封装**: 30+公共方法，测试代码零私有字段访问
-- **向后兼容**: exports文件保证老代码平滑迁移
-- **线程安全**: Getter方法使用mutex保护并发访问
-
 ## 🏗️ 系统架构
 
 ```mermaid
 graph TB
     subgraph "客户端层 Client Layer"
+        direction LR
         WSC[WebSocket 客户端<br/>go-wsc]
         TSC[TypeScript 客户端<br/>Advanced WebSocket]
+        React[React Hook]
+        Vue[Vue.js 组合式 API]
+        Angular[Angular Service]
+    end
+    
+    subgraph "负载均衡层 Load Balancer Layer"
+        direction LR
+        LB[Nginx/HAProxy<br/>IP Hash 会话保持]
+        Gateway[API 网关<br/>认证/限流]
+    end
+    
+    subgraph "分布式 Hub 集群 Distributed Hub Cluster"
+        direction LR
+        Hub1[Hub Node 1<br/>192.168.1.101:8080]
+        Hub2[Hub Node 2<br/>192.168.1.102:8080]
+        Hub3[Hub Node 3<br/>192.168.1.103:8080]
+        HubN[Hub Node N<br/>192.168.1.10N:8080]
+    end
+    
+    subgraph "核心服务层 Core Services Layer"
+        direction LR
         
-        subgraph "前端框架 Frontend"
-            React[React Hook<br/>useWebSocket]
-            Vue[Vue.js 组合式 API<br/>useWebSocket]
-            Angular[Angular Service<br/>WebSocketService]
+        subgraph "连接管理"
+            ConnRegistry[连接注册中心]
+            NodeDiscovery[节点发现]
+        end
+        
+        subgraph "消息路由"
+            MsgRouter[消息路由器]
+            CrossNodeRouter[跨节点路由]
+        end
+        
+        subgraph "分布式通信"
+            PubSub[Redis PubSub<br/>消息总线]
+            BroadcastMgr[全局广播]
         end
     end
     
-    subgraph "网络层 Network Layer"
-        WS[WebSocket 连接<br/>ws://]
-        SSE[SSE 连接<br/>Server-Sent Events]
-    end
-    
-    subgraph "服务端层 Server Layer"
-        subgraph "Hub 核心 Hub Core"
-            HubManager[Hub 管理器<br/>连接池 + 路由]
-            ConnRegistry[连接注册中心<br/>Client Registry]
-            MsgRouter[消息路由器<br/>点对点/群组/广播]
+    subgraph "可靠性层 Reliability Layer"
+        direction LR
+        
+        subgraph "消息确认"
+            ACKMgr[ACK 管理器]
+            MsgRecord[消息记录]
         end
         
-        subgraph "可靠性保障 Reliability"
-            ACKMgr[ACK 管理器<br/>确认 + 重试]
-            MsgRecord[消息记录系统<br/>状态跟踪]
-            OfflineHandler[离线处理器<br/>持久化存储]
+        subgraph "失败处理"
+            RetryEngine[重试引擎]
+            FailureRouter[失败路由器]
         end
         
-        subgraph "失败处理系统 Failure Handling"
-            RetryEngine[go-toolbox 重试引擎<br/>智能重试机制]
-            FailureHandler[5类失败处理器<br/>专业化处理]
-            
-            subgraph "处理器类型"
-                SendHandler[通用发送失败]
-                QueueHandler[队列满处理]
-                OfflineUserHandler[用户离线处理]  
-                ConnHandler[连接错误处理]
-                TimeoutHandler[超时处理]
-            end
-        end
-        
-        subgraph "性能优化 Performance"
-            AtomicOps[原子操作<br/>无锁统计]
-            DynamicQueue[动态队列<br/>自适应缓冲]
-            WorkerPool[协程池<br/>并发处理]
-        end
-        
-        subgraph "监控告警 Monitoring"
-            MetricsCol[指标收集器<br/>实时统计]
-            AlertMgr[告警管理<br/>阈值监控]
-            Dashboard[监控面板<br/>Grafana/Prometheus]
+        subgraph "离线处理"
+            OfflineHandler[离线处理器]
+            QueueHandler[队列处理器]
         end
     end
     
-    subgraph "配置层 Configuration"
-        ConfigMgr[go-config/wsc<br/>统一配置管理]
-        RetryConfig[重试参数配置<br/>MaxRetries/BaseDelay]
-        ErrorConfig[错误分类配置<br/>可重试/不可重试]
+    subgraph "性能与监控层 Performance & Monitoring Layer"
+        direction LR
+        
+        subgraph "性能优化"
+            AtomicOps[原子操作]
+            WorkerPool[协程池]
+        end
+        
+        subgraph "监控告警"
+            MetricsCol[指标收集]
+            AlertMgr[告警管理]
+        end
+        
+        subgraph "配置管理"
+            ConfigMgr[配置中心]
+            NodeConfig[节点配置]
+        end
     end
     
     subgraph "存储层 Storage Layer"
-        Redis[(Redis<br/>分布式消息队列)]
-        Database[(Database<br/>离线消息存储)]
+        direction LR
+        RedisCluster[(Redis Cluster<br/>缓存/队列/PubSub)]
+        Database[(Database<br/>离线消息/状态)]
         LogStore[(日志存储<br/>审计追踪)]
     end
     
-    %% 连接关系
-    WSC -.->|WebSocket| WS
-    TSC -.->|WebSocket| WS
+    %% 客户端到负载均衡
+    WSC -.->|WebSocket| LB
+    TSC -.->|WebSocket| LB
     React --> TSC
-    Vue --> TSC  
+    Vue --> TSC
     Angular --> TSC
     
-    WS --> HubManager
-    SSE --> HubManager
+    %% 负载均衡到 Hub 集群
+    LB --> Gateway
+    Gateway --> Hub1
+    Gateway --> Hub2
+    Gateway --> Hub3
+    Gateway --> HubN
     
-    HubManager --> ConnRegistry
-    HubManager --> MsgRouter
+    %% Hub 到核心服务
+    Hub1 --> ConnRegistry
+    Hub2 --> ConnRegistry
+    Hub3 --> ConnRegistry
+    HubN --> ConnRegistry
+    
+    ConnRegistry --> MsgRouter
+    NodeDiscovery --> MsgRouter
+    MsgRouter --> CrossNodeRouter
+    
+    %% 分布式通信
+    CrossNodeRouter --> PubSub
+    BroadcastMgr --> PubSub
+    Hub1 <-.->|订阅/发布| PubSub
+    Hub2 <-.->|订阅/发布| PubSub
+    Hub3 <-.->|订阅/发布| PubSub
+    HubN <-.->|订阅/发布| PubSub
+    
+    %% 可靠性流程
     MsgRouter --> ACKMgr
     ACKMgr --> MsgRecord
-    MsgRecord --> OfflineHandler
-    
-    %% 失败处理流程
     MsgRouter --> RetryEngine
-    RetryEngine --> FailureHandler
-    FailureHandler --> SendHandler
-    FailureHandler --> QueueHandler
-    FailureHandler --> OfflineUserHandler
-    FailureHandler --> ConnHandler
-    FailureHandler --> TimeoutHandler
+    RetryEngine --> FailureRouter
+    FailureRouter --> OfflineHandler
+    FailureRouter --> QueueHandler
     
-    %% 配置管理
-    ConfigMgr --> RetryEngine
-    ConfigMgr --> RetryConfig
-    ConfigMgr --> ErrorConfig
-    
-    HubManager --> AtomicOps
-    HubManager --> DynamicQueue
-    HubManager --> WorkerPool
-    
-    HubManager --> MetricsCol
+    %% 性能与监控
+    MsgRouter --> AtomicOps
+    MsgRouter --> WorkerPool
+    Hub1 --> MetricsCol
+    Hub2 --> MetricsCol
+    Hub3 --> MetricsCol
+    HubN --> MetricsCol
     MetricsCol --> AlertMgr
-    MetricsCol --> Dashboard
+    ConfigMgr --> RetryEngine
+    ConfigMgr --> NodeConfig
     
-    ACKMgr -.->|缓存| Redis
+    %% 存储连接
+    PubSub -.->|消息总线| RedisCluster
+    ACKMgr -.->|缓存| RedisCluster
+    ConnRegistry -.->|映射| RedisCluster
+    NodeDiscovery -.->|注册| RedisCluster
     OfflineHandler --> Database
+    QueueHandler --> Database
     MsgRecord --> LogStore
-    QueueHandler -.->|备用存储| Redis
-    OfflineUserHandler --> Database
     
     %% 样式定义
     classDef clientStyle fill:#e1f5fe,stroke:#01579b,stroke-width:2px
-    classDef serverStyle fill:#f3e5f5,stroke:#4a148c,stroke-width:2px  
+    classDef lbStyle fill:#fff9c4,stroke:#f57f17,stroke-width:2px
+    classDef hubStyle fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    classDef coreStyle fill:#e8eaf6,stroke:#283593,stroke-width:2px
+    classDef reliabilityStyle fill:#ffebee,stroke:#c62828,stroke-width:2px
+    classDef perfStyle fill:#fff3e0,stroke:#e65100,stroke-width:2px
     classDef storageStyle fill:#e8f5e8,stroke:#1b5e20,stroke-width:2px
-    classDef coreStyle fill:#fff3e0,stroke:#e65100,stroke-width:2px
-    classDef failureStyle fill:#ffebee,stroke:#c62828,stroke-width:2px
-    classDef configStyle fill:#f1f8e9,stroke:#33691e,stroke-width:2px
     
     class WSC,TSC,React,Vue,Angular clientStyle
-    class HubManager,ConnRegistry,MsgRouter,ACKMgr,MsgRecord serverStyle
-    class Redis,Database,LogStore storageStyle
-    class AtomicOps,DynamicQueue,WorkerPool,MetricsCol coreStyle
-    class RetryEngine,FailureHandler,SendHandler,QueueHandler,OfflineUserHandler,ConnHandler,TimeoutHandler failureStyle
-    class ConfigMgr,RetryConfig,ErrorConfig configStyle
+    class LB,Gateway lbStyle
+    class Hub1,Hub2,Hub3,HubN hubStyle
+    class ConnRegistry,NodeDiscovery,MsgRouter,CrossNodeRouter,PubSub,BroadcastMgr coreStyle
+    class ACKMgr,MsgRecord,RetryEngine,FailureRouter,OfflineHandler,QueueHandler reliabilityStyle
+    class AtomicOps,WorkerPool,MetricsCol,AlertMgr,ConfigMgr,NodeConfig perfStyle
+    class RedisCluster,Database,LogStore storageStyle
 ```
 
 ### 架构特点
 
-- **分层设计**: 客户端层 → 网络层 → 服务端层 → 配置层 → 存储层
+- **分布式集群**: 多节点 Hub 集群 + Redis PubSub 消息总线 + 自动节点发现
+- **负载均衡**: Nginx/HAProxy IP Hash 会话保持 + 智能流量分发
+- **跨节点通信**: 
+  - 同节点通信: 内存直达，延迟 < 1ms
+  - 跨节点通信: Redis PubSub，延迟 5-10ms
+  - 全局广播: 自动同步到所有节点
 - **高可靠性**: ACK 确认机制 + 消息记录 + 离线处理 + 智能重试
 - **失败处理**: 5类专业化失败处理器 + go-toolbox重试引擎
-- **配置统一**: go-config/wsc 统一管理重试参数和错误分类
+- **配置统一**: go-config/wsc 统一管理重试参数、错误分类和节点配置
 - **高性能**: 原子操作 + 动态队列 + 协程池优化  
 - **可观测**: 全链路监控 + 实时告警 + 可视化面板
-- **可扩展**: 分布式架构 + 水平扩展支持
+- **水平扩展**: 无状态设计 + 弹性伸缩 + 节点自动注册/心跳
+- **高可用**: 节点故障自动恢复 + 客户端自动重连 + 会话保持
 
 ## ✨ 核心特性
 
 ### 🎯 客户端能力
 
 - **智能重连**：指数退避 + 抖动算法
-- **消息类型**：文本/二进制/Ping/Pong
+- **消息类型**：文本/二进制/Ping/Pong等103种
 - **状态管理**：连接生命周期跟踪
 - **缓冲机制**：可配置消息队列
 
@@ -251,8 +230,8 @@ graph TB
 
 ### 📖 核心文档
 
-- [🚀 快速开始](#-快速开始) - 5分钟上手指南
 - [📦 安装配置](#-安装) - 依赖和环境要求
+- [🚀 快速开始](#-快速开始) - 5分钟上手指南
 - [⚡ 性能表现](#-性能表现) - 基准测试结果
 
 ### 🔧 集成指南  
@@ -280,481 +259,46 @@ go get github.com/kamalyes/go-wsc
 
 ## 🚀 快速开始
 
-### 基础客户端 (5分钟上手)
+### 🎮 交互式演示（推荐）
 
-```go
-package main
+最快的上手方式！运行完整的交互式 demo，体验客户端和服务端的实时通信：
 
-import (
-    "fmt"
-    "log"
-    "github.com/kamalyes/go-wsc"
-)
-
-func main() {
-    // 1. 创建客户端
-    client := wsc.NewWsc("ws://localhost:8080/ws")
-    
-    // 2. 设置回调处理
-    client.OnConnected(func() {
-        fmt.Println("✅ 连接成功")
-    })
-    
-    client.OnTextMessage(func(message string) {
-        fmt.Printf("📨 收到消息: %s\n", message)
-    })
-    
-    client.OnDisconnected(func(err error) {
-        log.Printf("❌ 连接断开: %v\n", err)
-    })
-    
-    // 3. 连接并发送消息
-    if err := client.Connect(); err != nil {
-        log.Fatal(err)
-    }
-    
-    client.SendText("Hello WebSocket!")
-    
-    select {} // 保持运行
-}
+```bash
+# 1. 启动演示服务器
+cd examples/demo
+go run server.go
 ```
 
-### 基础服务端
+**演示特点**:
+- ✅ 服务端自动发送欢迎消息
+- ✅ 服务端回复客户端消息
+- ✅ 完整的双向通信流程
 
-```go
-package main
+### 完整示例代码
 
-import (
-    "log"
-    "net/http"
-    
-    "github.com/kamalyes/go-wsc"
-    "github.com/kamalyes/go-wsc/middleware"
-)
+所有示例代码都在 `examples/` 目录中，可以直接运行：
 
-func main() {
-    // 1. 创建Hub并配置中间件
-    logger := middleware.NewDefaultWSCLogger()
-    hub := wsc.NewHub(
-        wsc.WithLogger(logger),
-        wsc.WithMessageBufferSize(256),
-    )
-    
-    // 2. 设置回调处理
-    hub.OnClientConnected(func(conn *wsc.Connection) {
-        log.Printf("👤 客户端连接: %s\n", conn.GetUserID())
-    })
-    
-    hub.OnClientDisconnected(func(conn *wsc.Connection) {
-        log.Printf("👋 客户端断开: %s\n", conn.GetUserID())
-    })
-    
-    hub.OnMessageReceived(func(conn *wsc.Connection, msg *wsc.HubMessage) {
-        log.Printf("📨 收到消息: %s -> %s\n", conn.GetUserID(), msg.Content)
-    })
-    
-    // 3. 启动Hub
-    go hub.Run()
-    defer hub.Shutdown()
-    
-    // 4. 配置HTTP路由
-    http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-        userID := r.URL.Query().Get("user_id")
-        if userID == "" {
-            http.Error(w, "缺少user_id参数", http.StatusBadRequest)
-            return
-        }
-        wsc.ServeWs(hub, w, r, userID)
-    })
-    
-    log.Println("🚀 服务器启动: http://localhost:8080")
-    if err := http.ListenAndServe(":8080", nil); err != nil {
-        log.Fatal(err)
-    }
-}
-```
+> - **[examples/demo](./examples/demo/server.go)** - 🎮 交互式演示（推荐从这里开始！）
+> - **[examples/basic-client](./examples/basic-client/main.go)** - 基础 WebSocket 客户端
+> - **[examples/basic-server](./examples/basic-server/main.go)** - 基础 WebSocket 服务端
+> - **[examples/distributed-server](./examples/distributed-server/main.go)** - 分布式服务端
+> - **[examples/message-send](./examples/message-send/main.go)** - 各种消息发送模式
+> - **[examples/README.md](./examples/README.md)** - 详细说明请查看：
 
-### 消息发送与广播
-
-```go
-// 发送给单个用户
-func sendToUser(hub *wsc.Hub, userID string, content string) {
-    msg := &wsc.HubMessage{
-        Type:    wsc.TextMessage,
-        Content: content,
-    }
-    hub.SendToUser(userID, msg)
-}
-
-// 批量发送
-func batchSend(hub *wsc.Hub) {
-    sender := hub.NewBatchSender().
-        SetBeforeSendCallback(func(userID string, msg *wsc.HubMessage) {
-            log.Printf("准备发送: %s -> %s\n", userID, msg.ID)
-        }).
-        SetAfterSendCallback(func(userID string, msg *wsc.HubMessage, err error) {
-            if err != nil {
-                log.Printf("发送失败: %s -> %s: %v\n", userID, msg.ID, err)
-            }
-        })
-    
-    // 添加消息
-    sender.AddMessage("user1", &wsc.HubMessage{Type: wsc.TextMessage, Content: "Hello User1"})
-    sender.AddMessage("user2", &wsc.HubMessage{Type: wsc.TextMessage, Content: "Hello User2"})
-    
-    // 执行发送
-    sender.Send()
-}
-
-// 广播消息
-func broadcast(hub *wsc.Hub, content string) {
-    msg := &wsc.HubMessage{
-        Type:    wsc.TextMessage,
-        Content: content,
-    }
-    hub.Broadcast(msg)
-}
-
-// 发送给用户组
-func sendToGroup(hub *wsc.Hub, userIDs []string, content string) {
-    msg := &wsc.HubMessage{
-        Type:    wsc.TextMessage,
-        Content: content,
-    }
-    hub.SendToMultipleUsers(userIDs, msg)
-}
-```
-
-### 带ACK确认的可靠消息
-
-```go
-// 发送需要ACK确认的消息
-func sendWithAck(hub *wsc.Hub, userID string, content string) {
-    msg := &wsc.HubMessage{
-        Type:    wsc.TextMessage,
-        Content: content,
-    }
-    
-    // 发送并等待ACK
-    err := hub.SendToUserWithAck(userID, msg, 5*time.Second)
-    if err != nil {
-        log.Printf("❌ 消息未确认: %v\n", err)
-        // 自动存储到离线消息
-    } else {
-        log.Printf("✅ 消息已确认\n")
-    }
-}
-
-// 客户端确认消息
-func clientAckHandler(client *wsc.Wsc) {
-    client.OnTextMessage(func(message string) {
-        // 解析消息
-        var msg wsc.HubMessage
-        if err := json.Unmarshal([]byte(message), &msg); err != nil {
-            return
-        }
-        
-        // 如果需要ACK，发送确认
-        if msg.RequireAck {
-            ackMsg := wsc.CreateAckResponse(msg.ID)
-            client.SendMessage(ackMsg)
-        }
-        
-        // 处理业务逻辑
-        handleBusinessLogic(&msg)
-    })
-}
-```
-
-### 离线消息处理
-
-```go
-// 配置离线消息处理器
-func setupOfflineHandler(hub *wsc.Hub) {
-    // 使用Redis+MySQL混合存储
-    offlineHandler := wsc.NewHybridOfflineMessageHandler(
-        redisClient,
-        database,
-        middleware.NewDefaultWSCLogger(),
-    )
-    
-    hub.SetOfflineMessageHandler(offlineHandler)
-}
-
-// 用户上线后推送离线消息
-func pushOfflineMessages(hub *wsc.Hub, userID string) {
-    messages, err := hub.GetOfflineMessages(userID, 100)
-    if err != nil {
-        log.Printf("获取离线消息失败: %v\n", err)
-        return
-    }
-    
-    for _, msg := range messages {
-        hub.SendToUser(userID, msg)
-    }
-    
-    // 标记为已推送
-    hub.MarkOfflineMessagesAsPushed(userID, getMessageIDs(messages))
-}
-```
-
-> 💡 **深入学习**: 查看 [客户端API文档](./docs/Client_API.md) 和 [Hub API文档](./docs/Hub_API.md)
+📖 **详细文档**: 
+> - [分布式架构](./docs/DISTRIBUTED_ARCHITECTURE.md) - 多节点集群部署
+> - [K8s 部署](./docs/K8S_DEPLOYMENT.md) - Kubernetes 环境部署
+> - [客户端 API](./docs/Client_API.md) - 完整接口说明
+> - [服务端 Hub API](./docs/Hub_API.md) - Hub 管理接口
 
 ## ⚡ 性能表现
-
-### 基准测试结果
 
 - **吞吐量**: 720万条消息/秒
 - **客户端注册**: ~2,430 ns/op  
 - **消息发送**: ~138 ns/op
 - **并发连接**: 百万级支持
 
-### 关键优化
-
-- **原子操作**: 无锁统计和状态管理
-- **动态队列**: 自适应缓冲区大小调整
-- **协程池**: 高效的并发消息处理
-- **内存池**: 减少 GC 压力的对象重用
-
 > 📊 **详细分析**: 查看 [性能优化指南](./docs/Performance_Guide.md) 获取调优建议
-
-## 🔧 高级配置
-
-### 客户端配置
-
-```go
-import (
-    "time"
-    "github.com/kamalyes/go-wsc/client"
-)
-
-// 创建自定义配置的客户端
-ws := client.NewWebSocket(
-    "ws://localhost:8080/ws",
-    client.WithWriteWait(10*time.Second),
-    client.WithPongWait(60*time.Second),
-    client.WithPingPeriod(54*time.Second),
-    client.WithMaxMessageSize(1024*1024), // 1MB
-    client.WithSendChanSize(512),
-)
-
-// 使用Wsc包装器
-wscClient := client.NewWsc(ws)
-
-// 配置自动重连
-wscClient.SetAutoReconnect(true)
-wscClient.SetReconnectConfig(
-    1*time.Second,  // 最小重连间隔
-    30*time.Second, // 最大重连间隔
-    2.0,           // 退避因子
-)
-
-// 设置完整回调
-wscClient.OnConnected(func() {
-    log.Println("✅ 已连接")
-})
-
-wscClient.OnConnectError(func(err error) {
-    log.Printf("❌ 连接错误: %v\n", err)
-})
-
-wscClient.OnDisconnected(func(err error) {
-    log.Printf("👋 断开连接: %v\n", err)
-})
-
-wscClient.OnReconnecting(func(attempt int, delay time.Duration) {
-    log.Printf("🔄 重连中 (第%d次, 延迟%v)\n", attempt, delay)
-})
-
-wscClient.OnClose(func(code int, text string) {
-    log.Printf("🚪 连接关闭: %d - %s\n", code, text)
-})
-
-// 消息处理
-wscClient.OnTextMessage(func(msg string) {
-    log.Printf("📨 文本消息: %s\n", msg)
-})
-
-wscClient.OnBinaryMessage(func(data []byte) {
-    log.Printf("📦 二进制消息: %d bytes\n", len(data))
-})
-```
-
-### 服务端配置
-
-```go
-import (
-    "github.com/kamalyes/go-wsc/hub"
-    "github.com/kamalyes/go-wsc/middleware"
-    "github.com/kamalyes/go-wsc/repository"
-    "github.com/kamalyes/go-wsc/handler"
-)
-
-func setupHub() *hub.Hub {
-    // 1. 创建日志器
-    logger := middleware.NewDefaultWSCLogger()
-    
-    // 2. 创建仓库
-    redisClient := createRedisClient()
-    db := createDatabaseConnection()
-    
-    onlineStatusRepo := repository.NewRedisOnlineStatusRepository(redisClient, logger)
-    messageRecordRepo := repository.NewRedisMessageRecordRepository(redisClient, logger)
-    workloadRepo := repository.NewRedisWorkloadRepository(redisClient, logger)
-    messageQueueRepo := repository.NewRedisMessageQueueRepository(redisClient, logger)
-    offlineMessageRepo := repository.NewMySQLOfflineMessageRepository(db, logger)
-    
-    // 3. 创建离线消息处理器
-    offlineHandler := handler.NewHybridOfflineMessageHandler(
-        redisClient,
-        db,
-        logger,
-        handler.WithMaxOfflineMessages(1000),
-        handler.WithTTL(7*24*time.Hour),
-    )
-    
-    // 4. 创建Hub
-    h := hub.New(
-        logger,
-        onlineStatusRepo,
-        messageRecordRepo,
-        workloadRepo,
-        messageQueueRepo,
-        offlineMessageRepo,
-        hub.WithMessageBufferSize(512),
-        hub.WithWriteWait(10*time.Second),
-        hub.WithPongWait(60*time.Second),
-        hub.WithPingPeriod(54*time.Second),
-        hub.WithMaxMessageSize(1024*1024),
-    )
-    
-    // 5. 设置离线消息处理器
-    h.SetOfflineMessageHandler(offlineHandler)
-    
-    // 6. 配置回调
-    setupHubCallbacks(h)
-    
-    return h
-}
-
-func setupHubCallbacks(h *hub.Hub) {
-    // 客户端连接回调
-    h.OnClientConnected(func(conn *hub.Connection) {
-        userID := conn.GetUserID()
-        log.Printf("👤 用户上线: %s\n", userID)
-        
-        // 推送离线消息
-        go pushOfflineMessages(h, userID)
-    })
-    
-    // 客户端断开回调
-    h.OnClientDisconnected(func(conn *hub.Connection) {
-        userID := conn.GetUserID()
-        log.Printf("👋 用户离线: %s\n", userID)
-    })
-    
-    // 消息接收回调
-    h.OnMessageReceived(func(conn *hub.Connection, msg *hub.HubMessage) {
-        log.Printf("📨 收到消息: %s -> %s\n", conn.GetUserID(), msg.ID)
-    })
-    
-    // 消息发送成功回调
-    h.OnMessageSent(func(userID string, msg *hub.HubMessage) {
-        log.Printf("✅ 消息已送达: %s -> %s\n", userID, msg.ID)
-    })
-    
-    // 消息发送失败回调
-    h.OnMessageSendFailed(func(userID string, msg *hub.HubMessage, err error) {
-        log.Printf("❌ 消息发送失败: %s -> %s: %v\n", userID, msg.ID, err)
-    })
-}
-```
-
-### ACK消息确认配置
-
-```go
-// 服务端发送需要ACK的消息
-func sendWithAck(h *hub.Hub, userID string, content string) {
-    msg := &hub.HubMessage{
-        Type:       hub.TextMessage,
-        Content:    content,
-        RequireAck: true,
-    }
-    
-    // 带超时的ACK发送
-    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-    defer cancel()
-    
-    err := h.SendToUserWithAck(ctx, userID, msg)
-    if err != nil {
-        log.Printf("❌ ACK超时或失败: %v\n", err)
-        // 自动存储到离线消息
-    } else {
-        log.Printf("✅ 消息已确认\n")
-    }
-}
-
-// 客户端自动ACK
-wscClient.OnTextMessage(func(message string) {
-    var msg hub.HubMessage
-    if err := json.Unmarshal([]byte(message), &msg); err != nil {
-        return
-    }
-    
-    // 自动发送ACK
-    if msg.RequireAck {
-        ackMsg := protocol.CreateAckMessage(msg.ID)
-        wscClient.SendMessage(ackMsg)
-    }
-    
-    // 处理消息
-    handleMessage(&msg)
-})
-```
-
-### 批量发送配置
-
-```go
-// 创建批量发送器
-sender := h.NewBatchSender()
-
-// 配置回调
-sender.SetBeforeSendCallback(func(userID string, msg *hub.HubMessage) {
-    log.Printf("⏩ 准备发送: %s\n", msg.ID)
-})
-
-sender.SetAfterSendCallback(func(userID string, msg *hub.HubMessage, err error) {
-    if err != nil {
-        log.Printf("❌ 发送失败: %s: %v\n", msg.ID, err)
-        // 记录失败信息
-    } else {
-        log.Printf("✅ 发送成功: %s\n", msg.ID)
-    }
-})
-
-// 添加消息
-for _, user := range userList {
-    msg := &hub.HubMessage{
-        Type:    hub.TextMessage,
-        Content: fmt.Sprintf("通知给 %s", user),
-    }
-    sender.AddMessage(user, msg)
-}
-
-// 批量添加
-messages := map[string]*hub.HubMessage{
-    "user1": {Type: hub.TextMessage, Content: "Hello User1"},
-    "user2": {Type: hub.TextMessage, Content: "Hello User2"},
-    "user3": {Type: hub.TextMessage, Content: "Hello User3"},
-}
-sender.AddMessages(messages)
-
-// 配置超时并发送
-sender.SetTimeout(5 * time.Second)
-sender.Send()
-```
-
-> 🔗 **深入了解**: 查看 [ACK 消息确认机制](./docs/ACK_Mechanism.md) 了解可靠消息传输
 
 ## 🧪 测试与质量
 
@@ -796,10 +340,19 @@ go test -v ./... -timeout 5m 2>&1 | Select-String -Pattern "(FAIL|ERROR|panic)" 
 
 ### 分布式架构
 
-- **节点发现**: 自动服务发现和负载均衡
-- **消息路由**: 跨节点消息传递和状态同步  
-- **故障转移**: 自动故障检测和流量切换
-- **水平扩展**: 无状态设计支持弹性伸缩
+- **零侵入部署**: 现有代码无需修改，自动支持分布式
+- **节点发现**: 自动服务注册、心跳检测和节点发现
+- **智能路由**: 
+  - 同节点通信: 内存直达，延迟 < 1ms
+  - 跨节点通信: Redis PubSub，延迟 5-10ms
+  - 自动路由到用户所在节点
+- **全局广播**: 自动同步到所有节点的所有客户端
+- **会话保持**: Nginx IP Hash 保证用户连接稳定性
+- **故障转移**: 节点故障自动检测和客户端自动重连
+- **水平扩展**: 无状态设计支持弹性伸缩，线性扩展并发能力
+- **高可用**: 多节点冗余 + 自动故障恢复 + 负载均衡
+
+> 📘 **详细文档**: 查看 [分布式架构指南](./docs/DISTRIBUTED_ARCHITECTURE.md) 和 [K8s 部署指南](./docs/K8S_DEPLOYMENT.md)
 
 ## 🤝 社区与支持
 
@@ -807,7 +360,6 @@ go test -v ./... -timeout 5m 2>&1 | Select-String -Pattern "(FAIL|ERROR|panic)" 
 
 - **问题报告**: [GitHub Issues](https://github.com/kamalyes/go-wsc/issues)
 - **功能请求**: [GitHub Discussions](https://github.com/kamalyes/go-wsc/discussions)
-- **安全问题**: [security@example.com](mailto:security@example.com)
 
 ### 贡献指南
 

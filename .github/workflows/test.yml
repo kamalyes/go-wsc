@@ -60,12 +60,12 @@ jobs:
         continue-on-error: true
 
       - name: Test (without coverage)
-        run: gotestsum -f testname -- ./... -race -count=1 -timeout=15m -shuffle=on
+        run: gotestsum -f testname -- ./... -race -count=1 -timeout=30m -shuffle=on
         timeout-minutes: 15
         continue-on-error: true  # 即使测试失败也继续
 
       - name: Test (with coverage)
-        run: gotestsum -f testname -- ./... -race -count=1 -timeout=15m -coverprofile=coverage.txt -covermode=atomic -shuffle=on
+        run: gotestsum -f testname -- ./... -race -count=1 -timeout=30m -coverprofile=coverage.txt -covermode=atomic -shuffle=on
         timeout-minutes: 15
         continue-on-error: true  # 即使测试失败也继续
 

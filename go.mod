@@ -5,11 +5,11 @@ go 1.24.0
 require (
 	github.com/gorilla/websocket v1.4.2
 	github.com/jpillora/backoff v1.0.0
-	github.com/kamalyes/go-cachex v0.1.9-0.20260130162314-1dd2c64245bb
-	github.com/kamalyes/go-config v0.12.14-0.20260130095810-88e5d76a90c5
-	github.com/kamalyes/go-logger v0.4.6-0.20260113073109-516d3a52d3ee
-	github.com/kamalyes/go-sqlbuilder v0.3.6-0.20260105051012-7fd1f605db72
-	github.com/kamalyes/go-toolbox v0.11.87-0.20260130052916-b1a1dedd2346
+	github.com/kamalyes/go-cachex v0.1.9-0.20260203155925-76292b3cdf66
+	github.com/kamalyes/go-config v0.12.14-0.20260203085905-11fc03a76dc2
+	github.com/kamalyes/go-logger v0.4.6-0.20260203085022-0f0923bdc1b1
+	github.com/kamalyes/go-sqlbuilder v0.3.6-0.20260203090730-fcf395c2af15
+	github.com/kamalyes/go-toolbox v0.11.87-0.20260203051032-5f35aa1388aa
 	github.com/redis/go-redis/v9 v9.17.3
 	github.com/stretchr/testify v1.11.1
 	gorm.io/driver/mysql v1.6.0
@@ -27,7 +27,7 @@ require (
 	github.com/dgraph-io/ristretto/v2 v2.4.0 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/gabriel-vasile/mimetype v1.4.12 // indirect
+	github.com/gabriel-vasile/mimetype v1.4.13 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/go-playground/validator/v10 v10.30.1 // indirect
@@ -38,11 +38,11 @@ require (
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/kamalyes/go-jsonpath v0.0.0-20260129163507-0b67ed48bb28 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
-	github.com/kr/pretty v0.3.1 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
+	github.com/rogpeppe/go-internal v1.9.0 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	golang.org/x/arch v0.23.0 // indirect
 	golang.org/x/crypto v0.47.0 // indirect

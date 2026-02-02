@@ -61,6 +61,7 @@ const (
 	UserTypeBot      = models.UserTypeBot
 	UserTypeVIP      = models.UserTypeVIP
 	UserTypeSystem   = models.UserTypeSystem
+	UserTypeObserver = models.UserTypeObserver
 )
 
 // ==================== 枚举常量 - UserStatus ====================

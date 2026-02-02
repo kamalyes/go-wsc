@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
@@ -46,19 +47,17 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMe
 
 	// 3. 用户在其他节点，通过 PubSub 转发
 	h.logger.DebugKV("跨节点路由消息",
-		"message_id", msg.ID,
+		"message_id", msg.MessageID,
 		"user_id", userID,
 		"from_node", h.nodeID,
 		"to_node", nodeID,
 	)
 
 	distMsg := &DistributedMessage{
-		Type:     OperationTypeSendMessage,
-		NodeID:   h.nodeID,
-		TargetID: userID,
-		Data: map[string]any{
-			"message": msg,
-		},
+		Type:      OperationTypeSendMessage,
+		NodeID:    h.nodeID,
+		TargetID:  userID,
+		Message:   msg,
 		Timestamp: time.Now(),
 	}
 
@@ -69,7 +68,7 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMe
 		h.logger.ErrorKV("跨节点消息发布失败",
 			"error", err,
 			"target_node", nodeID,
-			"message_id", msg.ID,
+			"message_id", msg.MessageID,
 		)
 		return true, ErrPubSubPublishFailed
 	}
@@ -104,7 +103,8 @@ func (h *Hub) SubscribeNodeMessages(ctx context.Context) error {
 					return err
 				}
 
-				return h.handleDistributedMessage(ctx, &distMsg)
+				// 使用订阅回调提供的 subCtx，而不是外层的 ctx
+				return h.handleDistributedMessage(subCtx, &distMsg)
 			})
 
 			if err != nil {
@@ -124,6 +124,11 @@ func (h *Hub) SubscribeNodeMessages(ctx context.Context) error {
 
 // handleDistributedMessage 处理从其他节点转发来的消息
 func (h *Hub) handleDistributedMessage(ctx context.Context, distMsg *DistributedMessage) error {
+	// 参数验证
+	if distMsg == nil {
+		return fmt.Errorf("distributed message is nil")
+	}
+
 	h.logger.DebugKV("收到分布式消息",
 		"type", distMsg.Type,
 		"from_node", distMsg.NodeID,
@@ -140,6 +145,9 @@ func (h *Hub) handleDistributedMessage(ctx context.Context, distMsg *Distributed
 	case OperationTypeBroadcast:
 		return h.handleDistributedBroadcast(ctx, distMsg)
 
+	case OperationTypeObserverNotify:
+		return h.handleDistributedObserverNotify(ctx, distMsg)
+
 	default:
 		h.logger.WarnKV("未知的分布式消息类型", "type", distMsg.Type)
 		return fmt.Errorf("unknown message type: %s", distMsg.Type)
@@ -148,46 +156,77 @@ func (h *Hub) handleDistributedMessage(ctx context.Context, distMsg *Distributed
 
 // handleDistributedSendMessage 处理跨节点发送消息
 func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *DistributedMessage) error {
-	msgData, ok := distMsg.Data["message"]
-	if !ok {
+	if distMsg.Message == nil {
 		return fmt.Errorf("message data not found")
 	}
 
-	// 反序列化消息
-	msgBytes, _ := json.Marshal(msgData)
-	var msg HubMessage
-	if err := json.Unmarshal(msgBytes, &msg); err != nil {
-		return fmt.Errorf("unmarshal message failed: %w", err)
-	}
-
-	// 直接发送到本地用户，跳过分布式路由检查（避免循环）
+	// 查找用户的所有客户端（使用 userToClients 而不是 clients）
 	h.mutex.RLock()
-	client, exists := h.clients[distMsg.TargetID]
+	userClients, exists := h.userToClients[distMsg.TargetID]
 	h.mutex.RUnlock()
 
-	if !exists {
+	if !exists || len(userClients) == 0 {
+		h.logger.DebugKV("用户不在本节点", "user_id", distMsg.TargetID)
 		return fmt.Errorf("user not found on this node: %s", distMsg.TargetID)
 	}
 
 	// 序列化消息为字节
-	msgData2, err := json.Marshal(&msg)
+	msgData, err := json.Marshal(distMsg.Message)
 	if err != nil {
 		return fmt.Errorf("marshal message failed: %w", err)
 	}
 
-	// 直接发送到客户端，不经过 sendToUser（避免再次路由）
-	select {
-	case client.SendChan <- msgData2:
-		h.logger.DebugKV("跨节点消息已发送到本地客户端",
-			"message_id", msg.ID,
-			"user_id", distMsg.TargetID,
-		)
-		return nil
-	case <-ctx.Done():
-		return fmt.Errorf("context cancelled: %w", ctx.Err())
-	default:
-		return fmt.Errorf("client send buffer full: %s", distMsg.TargetID)
+	// 发送到用户的所有客户端（支持多端登录）
+	successCount := 0
+	for _, client := range userClients {
+		if client.IsClosed() {
+			continue
+		}
+
+		if client.SendChan == nil {
+			continue
+		}
+
+		select {
+		case client.SendChan <- msgData:
+			successCount++
+		case <-ctx.Done():
+			return fmt.Errorf("context cancelled: %w", ctx.Err())
+		default:
+			h.logger.WarnKV("跨节点消息发送失败：发送缓冲区满",
+				"client_id", client.ID,
+				"user_id", distMsg.TargetID,
+				"message_id", distMsg.Message.MessageID,
+			)
+		}
 	}
+
+	if successCount == 0 {
+		h.handleSendFailure(ctx, distMsg.TargetID, distMsg.Message, "all clients unavailable")
+		return fmt.Errorf("failed to send to any client: %s", distMsg.TargetID)
+	}
+
+	h.logger.DebugKV("跨节点消息已发送到本地客户端",
+		"message_id", distMsg.Message.MessageID,
+		"user_id", distMsg.TargetID,
+		"success_count", successCount,
+		"total_clients", len(userClients),
+	)
+
+	// 🔔 通知观察者（跨节点消息也需要通知观察者）
+	h.notifyObservers(distMsg.Message)
+
+	return nil
+}
+
+// handleSendFailure 处理跨节点消息发送失败
+func (h *Hub) handleSendFailure(ctx context.Context, userID string, msg *HubMessage, reason string) {
+	h.logger.WarnContextKV(ctx, "跨节点消息发送失败",
+		"user_id", userID,
+		"message_id", msg.MessageID,
+		"source", msg.Source,
+		"reason", reason,
+	)
 }
 
 // handleDistributedKickUser 处理跨节点踢人
@@ -196,33 +235,25 @@ func (h *Hub) handleDistributedKickUser(ctx context.Context, distMsg *Distribute
 	case <-ctx.Done():
 		return fmt.Errorf("context cancelled: %w", ctx.Err())
 	default:
-		reason, _ := distMsg.Data["reason"].(string)
-		h.KickUserSimple(distMsg.TargetID, reason)
+		h.KickUserSimple(distMsg.TargetID, distMsg.Reason)
 		return nil
 	}
 }
 
 // handleDistributedBroadcast 处理跨节点广播
 func (h *Hub) handleDistributedBroadcast(ctx context.Context, distMsg *DistributedMessage) error {
-	msgData, ok := distMsg.Data["message"]
-	if !ok {
+	if distMsg.Message == nil {
 		return fmt.Errorf("message data not found")
-	}
-
-	msgBytes, _ := json.Marshal(msgData)
-	var msg HubMessage
-	if err := json.Unmarshal(msgBytes, &msg); err != nil {
-		return fmt.Errorf("unmarshal message failed: %w", err)
 	}
 
 	// 广播给本节点的所有客户端
 	select {
-	case h.broadcast <- &msg:
+	case h.broadcast <- distMsg.Message:
 		return nil
 	case <-ctx.Done():
 		return fmt.Errorf("context cancelled: %w", ctx.Err())
 	default:
-		h.logger.WarnKV("广播队列已满", "message_id", msg.ID)
+		h.logger.WarnKV("广播队列已满", "message_id", distMsg.Message.MessageID)
 		return nil
 	}
 }
@@ -426,12 +457,9 @@ func (h *Hub) broadcastToAllNodes(ctx context.Context, msg *HubMessage) error {
 	}
 
 	distMsg := &DistributedMessage{
-		Type:     OperationTypeBroadcast,
-		NodeID:   h.nodeID,
-		TargetID: "",
-		Data: map[string]any{
-			"message": msg,
-		},
+		Type:      OperationTypeBroadcast,
+		NodeID:    h.nodeID,
+		Message:   msg,
 		Timestamp: time.Now(),
 	}
 
@@ -440,6 +468,67 @@ func (h *Hub) broadcastToAllNodes(ctx context.Context, msg *HubMessage) error {
 	data, _ := json.Marshal(distMsg)
 
 	return h.pubsub.Publish(ctx, channel, string(data))
+}
+
+// handleDistributedObserverNotify 处理跨节点观察者通知
+func (h *Hub) handleDistributedObserverNotify(ctx context.Context, distMsg *DistributedMessage) error {
+	// 忽略自己发出的通知（本地观察者已经在 notifyObservers 中收到了）
+	if distMsg.NodeID == h.nodeID {
+		h.logger.DebugContextKV(ctx, "忽略自己发出的观察者通知",
+			"from_node", distMsg.NodeID,
+		)
+		return nil
+	}
+
+	if distMsg.Message == nil {
+		h.logger.ErrorContextKV(ctx, "观察者通知缺少消息数据",
+			"from_node", distMsg.NodeID,
+		)
+		return fmt.Errorf("message data not found")
+	}
+
+	// 获取本节点的所有观察者
+	observers := h.GetObserverClients()
+	if len(observers) == 0 {
+		h.logger.DebugContextKV(ctx, "本节点无观察者，跳过通知",
+			"message_id", distMsg.Message.MessageID,
+			"from_node", distMsg.NodeID,
+		)
+		return nil
+	}
+
+	h.logger.DebugContextKV(ctx, "开始处理跨节点观察者通知",
+		"message_id", distMsg.Message.MessageID,
+		"from_node", distMsg.NodeID,
+		"observer_count", len(observers),
+	)
+
+	// 通知本节点的所有观察者
+	var successCount atomic.Int32
+	syncx.NewParallelSliceExecutor[*Client, error](observers).
+		OnSuccess(func(idx int, client *Client, result error) {
+			successCount.Add(1)
+		}).
+		OnError(func(idx int, client *Client, err error) {
+			h.logger.WarnContextKV(ctx, "跨节点通知观察者失败",
+				"observer_id", client.UserID,
+				"client_id", client.ID,
+				"message_id", distMsg.Message.MessageID,
+				"error", err,
+			)
+		}).
+		Execute(func(idx int, observer *Client) (error, error) {
+			return h.sendToObserver(observer, distMsg.Message), nil
+		})
+
+	h.logger.DebugContextKV(ctx, "已处理跨节点观察者通知",
+		"message_id", distMsg.Message.MessageID,
+		"from_node", distMsg.NodeID,
+		"total_observers", len(observers),
+		"success_count", successCount.Load(),
+	)
+
+	return nil
 }
 
 // SubscribeBroadcastChannel 订阅全局广播频道
@@ -470,7 +559,8 @@ func (h *Hub) SubscribeBroadcastChannel(ctx context.Context) error {
 					return nil
 				}
 
-				return h.handleDistributedMessage(ctx, &distMsg)
+				// 使用订阅回调提供的 subCtx，而不是外层的 ctx
+				return h.handleDistributedMessage(subCtx, &distMsg)
 			})
 
 			if err != nil {
@@ -481,6 +571,48 @@ func (h *Hub) SubscribeBroadcastChannel(ctx context.Context) error {
 			syncx.NewEventLoop(ctx).
 				OnShutdown(func() {
 					h.logger.InfoKV("广播频道订阅已停止", "channel", channel)
+				}).
+				Run()
+		})
+
+	return nil
+}
+
+// SubscribeObserverChannel 订阅观察者通知频道
+func (h *Hub) SubscribeObserverChannel(ctx context.Context) error {
+	if h.pubsub == nil {
+		return ErrPubSubNotSet
+	}
+
+	channel := "wsc:observers"
+
+	h.logger.InfoKV("订阅观察者通知频道", "channel", channel)
+
+	// 使用 EventLoop 包装订阅过程，提供 panic 恢复和优雅关闭
+	syncx.Go(ctx).
+		OnPanic(func(r any) {
+			h.logger.ErrorKV("观察者频道订阅 panic", "panic", r, "channel", channel)
+		}).
+		Exec(func() {
+			_, err := h.pubsub.Subscribe([]string{channel}, func(subCtx context.Context, ch string, msg string) error {
+				var distMsg DistributedMessage
+				if err := json.Unmarshal([]byte(msg), &distMsg); err != nil {
+					h.logger.ErrorKV("解析观察者通知失败", "error", err)
+					return err
+				}
+
+				// 使用订阅回调提供的 subCtx，而不是外层的 ctx
+				return h.handleDistributedMessage(subCtx, &distMsg)
+			})
+
+			if err != nil {
+				h.logger.ErrorKV("订阅观察者频道失败", "error", err, "channel", channel)
+			}
+
+			// 使用 EventLoop 保持订阅活跃，直到 context 取消
+			syncx.NewEventLoop(ctx).
+				OnShutdown(func() {
+					h.logger.InfoKV("观察者频道订阅已停止", "channel", channel)
 				}).
 				Run()
 		})

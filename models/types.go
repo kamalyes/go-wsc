@@ -44,11 +44,12 @@ type HubStats struct {
 
 // DistributedMessage 分布式消息结构
 type DistributedMessage struct {
-	Type      OperationType          `json:"type"`      // 操作类型
-	NodeID    string                 `json:"node_id"`   // 源节点ID
-	TargetID  string                 `json:"target_id"` // 目标ID（用户ID、节点ID等）
-	Data      map[string]interface{} `json:"data"`      // 消息数据
-	Timestamp time.Time              `json:"timestamp"` // 时间戳
+	Type      OperationType `json:"type"`      // 操作类型
+	NodeID    string        `json:"node_id"`   // 源节点ID
+	TargetID  string        `json:"target_id"` // 目标ID（用户ID、节点ID等）
+	Message   *HubMessage   `json:"message"`   // 消息数据（用于 send_message, broadcast, observer_notify）
+	Reason    string        `json:"reason"`    // 原因
+	Timestamp time.Time     `json:"timestamp"` // 时间戳
 }
 
 // SendAttempt 发送尝试记录

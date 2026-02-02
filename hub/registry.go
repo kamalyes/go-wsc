@@ -94,12 +94,12 @@ func (h *Hub) handleRegister(client *Client) {
 		}
 	}
 
+	// 🌐 分布式：记录用户所在节点（同步执行，确保路由信息及时更新）
+	h.recordUserNode(client)
+
 	// 异步任务
 	go h.syncOnlineStatus(client)
 	go h.pushOfflineMessagesOnConnect(client)
-
-	// 🌐 分布式：记录用户所在节点
-	go h.recordUserNode(client)
 
 	// 📡 发布用户上线事件（所有用户类型）
 	go events.PublishUserOnline(h, client.UserID, client.UserType, client.ID)
@@ -333,6 +333,11 @@ func (h *Hub) removeClientFromMaps(client *Client) {
 		h.sseMutex.Unlock()
 	}
 
+	// 如果是观察者，从观察者映射中移除 - O(1)
+	if client.UserType == UserTypeObserver {
+		h.removeObserver(client)
+	}
+
 	// 从客服连接列表中移除
 	if client.UserType == UserTypeAgent || client.UserType == UserTypeBot {
 		if agentMap, exists := h.agentClients[client.UserID]; exists {
@@ -372,7 +377,7 @@ func (h *Hub) syncActiveConnectionsToRedis() {
 	}
 
 	// 在新goroutine中异步同步连接数
-	syncx.Go(h.ctx).
+	syncx.Go().
 		WithTimeout(2 * time.Second).
 		OnPanic(func(r interface{}) {
 			h.logger.ErrorKV("同步活跃连接数到Redis崩溃", "panic", r)
@@ -395,7 +400,9 @@ func (h *Hub) removeOnlineStatusFromRedis(client *Client) {
 	if h.onlineStatusRepo == nil {
 		return
 	}
-	syncx.Go(contextx.OrBackground(h.ctx)).
+	// 使用独立的 context，不依赖 Hub 的生命周期
+	// 确保在 Hub 关闭时仍能完成清理操作
+	syncx.Go(context.Background()).
 		WithTimeout(3 * time.Second).
 		OnError(func(err error) {
 			h.logger.ErrorKV("从Redis移除在线状态失败",
@@ -414,7 +421,7 @@ func (h *Hub) removeAgentWorkloadIfNeeded(client *Client) {
 		return
 	}
 
-	syncx.Go(h.ctx).
+	syncx.Go().
 		WithTimeout(2 * time.Second).
 		OnPanic(func(r interface{}) {
 			h.logger.ErrorKV("移除客服负载崩溃", "panic", r, "user_id", client.UserID)
@@ -473,12 +480,13 @@ func (h *Hub) closeClientConnection(client *Client) {
 // ============================================================================
 
 // recordUserNode 记录用户所在节点 (分布式支持)
+// 改为同步执行，确保路由信息及时更新
 func (h *Hub) recordUserNode(client *Client) {
 	if h.onlineStatusRepo == nil || h.pubsub == nil {
 		return // 单机模式或未启用分布式
 	}
 
-	syncx.Go(h.ctx).
+	syncx.Go().
 		WithTimeout(3 * time.Second).
 		OnError(func(err error) {
 			h.logger.ErrorKV("记录用户节点失败",

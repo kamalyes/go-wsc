@@ -264,6 +264,8 @@ var (
 	ErrOnlineStatusRepositoryNotSet = errorx.NewError(ErrTypeOnlineStatusRepositoryNotSet)
 	ErrStatsRepositoryNotSet        = errorx.NewError(ErrTypeStatsRepositoryNotSet)
 	ErrSendChannelFull              = errorx.NewError(ErrTypeSendChannelFull)
+	ErrClientNotFound               = errorx.NewError(ErrTypeClientNotFound)
+	ErrClientDisconnected           = errorx.NewError(ErrTypeClientDisconnected)
 )
 
 // PubSub相关错误变量

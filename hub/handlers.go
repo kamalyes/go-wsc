@@ -134,7 +134,7 @@ func (h *Hub) DisconnectClient(clientID string, reason string) error {
 func (h *Hub) disconnectKickedClient(ctx context.Context, client *Client, userID, reason string) {
 	// 调用断开回调
 	if h.clientDisconnectCallback != nil {
-		syncx.Go(h.ctx).
+		syncx.Go().
 			OnPanic(func(r any) {
 				h.logger.ErrorKV("踢出用户断开回调 panic", "panic", r, "client_id", client.ID)
 			}).

@@ -41,7 +41,7 @@ func (h *Hub) Broadcast(ctx context.Context, msg *HubMessage) {
 	if h.pubsub != nil {
 		go func() {
 			if err := h.broadcastToAllNodes(ctx, msg); err != nil {
-				h.logger.ErrorKV("跨节点广播失败", "error", err, "message_id", msg.ID)
+				h.logger.ErrorKV("跨节点广播失败", "error", err, "message_id", msg.MessageID)
 			}
 		}()
 	}
@@ -53,7 +53,7 @@ func (h *Hub) Broadcast(ctx context.Context, msg *HubMessage) {
 	default:
 		// broadcast队列满，尝试放入待发送队列
 		h.logger.WarnKV("广播队列已满，尝试使用待发送队列",
-			"message_id", msg.ID,
+			"message_id", msg.MessageID,
 			"sender", msg.Sender,
 			"message_type", msg.MessageType,
 		)
@@ -63,7 +63,7 @@ func (h *Hub) Broadcast(ctx context.Context, msg *HubMessage) {
 		default:
 			// 两个队列都满，静默丢弃（广播消息不返回错误）
 			h.logger.ErrorKV("所有队列已满，丢弃广播消息",
-				"message_id", msg.ID,
+				"message_id", msg.MessageID,
 				"sender", msg.Sender,
 				"message_type", msg.MessageType,
 				"content_length", len(msg.Content),

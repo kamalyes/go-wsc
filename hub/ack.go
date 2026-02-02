@@ -35,7 +35,7 @@ func (h *Hub) SendToUserWithAck(ctx context.Context, toUserID string, msg *HubMe
 	if !enableAck {
 		// 如果未启用ACK，直接发送
 		h.logger.InfoKV("ACK未启用，使用重试发送",
-			"message_id", msg.ID,
+			"message_id", msg.MessageID,
 			"to_user", toUserID,
 		)
 		result := h.SendToUserWithRetry(ctx, toUserID, msg)
@@ -50,7 +50,7 @@ func (h *Hub) SendToUserWithAck(ctx context.Context, toUserID string, msg *HubMe
 
 	// 记录ACK发送开始
 	h.logger.InfoKV("ACK消息发送开始",
-		"message_id", msg.ID,
+		"message_id", msg.MessageID,
 		"to_user", toUserID,
 		"timeout", timeout,
 		"max_retry", maxRetry,
@@ -75,7 +75,7 @@ func (h *Hub) SendToUserWithAck(ctx context.Context, toUserID string, msg *HubMe
 	// 首次发送
 	if err := retryFunc(); err != nil {
 		return &AckMessage{
-			MessageID: msg.ID,
+			MessageID: msg.MessageID,
 			Status:    AckStatusFailed,
 			Timestamp: time.Now(),
 			Error:     err.Error(),
@@ -127,18 +127,18 @@ func (h *Hub) handleOfflineAckMessage(ctx context.Context, toUserID string, msg 
 		// 存储离线消息
 		if err := h.offlineMessageHandler.StoreOfflineMessage(ctx, toUserID, msg); err != nil {
 			h.logger.ErrorKV("ACK消息-存储离线消息失败",
-				"message_id", msg.ID,
+				"message_id", msg.MessageID,
 				"user_id", toUserID,
 				"error", err,
 			)
 		} else {
 			h.logger.InfoKV("ACK消息-用户离线，已存储离线消息",
-				"message_id", msg.ID,
+				"message_id", msg.MessageID,
 				"user_id", toUserID,
 			)
 		}
 		return &AckMessage{
-			MessageID: msg.ID,
+			MessageID: msg.MessageID,
 			Status:    AckStatusConfirmed,
 			Timestamp: time.Now(),
 			Error:     "用户离线，消息已存储，将在用户上线时推送",
@@ -148,7 +148,7 @@ func (h *Hub) handleOfflineAckMessage(ctx context.Context, toUserID string, msg 
 	err := errorx.NewError(ErrTypeUserOffline, toUserID)
 
 	return &AckMessage{
-		MessageID: msg.ID,
+		MessageID: msg.MessageID,
 		Status:    AckStatusFailed,
 		Timestamp: time.Now(),
 		Error:     "用户离线且未配置离线消息处理器",
@@ -163,7 +163,7 @@ func (h *Hub) createAckRetryFunc(ctx context.Context, toUserID string, msg *HubM
 
 		// 记录重试尝试
 		if *attemptNum > 1 && h.messageRecordRepo != nil {
-			h.recordAckRetryAttempt(msg.ID, *attemptNum, err)
+			h.recordAckRetryAttempt(msg.MessageID, *attemptNum, err)
 		}
 
 		return err
@@ -182,7 +182,7 @@ func (h *Hub) recordAckRetryAttempt(messageID string, attemptNum int, err error)
 		retryAttempt.Error = err.Error()
 	}
 
-	syncx.Go(h.ctx).
+	syncx.Go().
 		OnPanic(func(r interface{}) {
 			h.logger.ErrorKV("ACK重试记录更新崩溃", "panic", r, "message_id", messageID)
 		}).

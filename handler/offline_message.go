@@ -169,7 +169,7 @@ func (h *HybridOfflineMessageHandler) shouldSkipOfflineStorage(userID string, ms
 	if msg.MessageType.IsSystemType() {
 		h.logger.DebugKV("跳过系统消息的离线存储",
 			"user_id", userID,
-			"message_id", msg.ID,
+			"message_id", msg.MessageID,
 			"sender", msg.Sender,
 			"sender_type", msg.SenderType,
 			"message_type", msg.MessageType,

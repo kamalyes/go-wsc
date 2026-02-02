@@ -33,7 +33,7 @@ func NewDefaultWSCLogger() WSCLogger {
 		WithPrefix("[WSC] ").
 		WithShowCaller(false).
 		WithColorful(true).
-		WithTimeFormat("2006-01-02 15:04:05")
+		WithTimeFormat(time.RFC3339Nano)
 
 	return logger.NewLogger(config)
 }
@@ -63,7 +63,7 @@ func InitLogger(config *wscconfig.WSC) WSCLogger {
 	if config.Logging != nil && config.Logging.Enabled {
 		// 转换配置到 go-logger 的配置
 		loggerConfig := logger.DefaultConfig().
-			WithLevel(parseLogLevel(config.Logging.Level)).
+			WithLevel(logger.DEBUG).
 			WithPrefix("[WSC] ").
 			WithShowCaller(false).
 			WithColorful(true).
@@ -98,22 +98,4 @@ func InitLogger(config *wscconfig.WSC) WSCLogger {
 
 	// 使用默认配置
 	return NewDefaultWSCLogger()
-}
-
-// parseLogLevel 解析日志级别字符串
-func parseLogLevel(level string) logger.LogLevel {
-	switch level {
-	case "debug", "DEBUG":
-		return logger.DEBUG
-	case "info", "INFO":
-		return logger.INFO
-	case "warn", "WARN", "warning", "WARNING":
-		return logger.WARN
-	case "error", "ERROR":
-		return logger.ERROR
-	case "fatal", "FATAL":
-		return logger.FATAL
-	default:
-		return logger.INFO // 默认级别
-	}
 }

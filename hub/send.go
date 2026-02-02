@@ -49,14 +49,14 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 		// 路由失败，记录错误但继续尝试本地发送
 		h.logger.WarnKV("跨节点路由失败，尝试本地发送",
 			"user_id", toUserID,
-			"message_id", msg.ID,
+			"message_id", msg.MessageID,
 			"error", err,
 		)
 	}
 	if routed {
 		// 消息已路由到其他节点，本地不需要处理
 		h.logger.DebugContextKV(ctx, "消息已路由到其他节点",
-			"message_id", msg.ID,
+			"message_id", msg.MessageID,
 			"user_id", toUserID,
 		)
 		go h.recordMessageToDatabase(msg, nil)
@@ -67,7 +67,7 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 	// 尝试发送到broadcast队列
 	select {
 	case h.broadcast <- msg:
-		h.logger.DebugContextKV(ctx, "消息已广播", "message_id", msg.ID, "from", msg.Sender, "to", msg.Receiver, "type", msg.MessageType)
+		h.logger.DebugContextKV(ctx, "消息已广播", "message_id", msg.MessageID, "from", msg.Sender, "to", msg.Receiver, "type", msg.MessageType)
 		// 记录消息到数据库 - 创建时已标记为Sending状态
 		go h.recordMessageToDatabase(msg, nil)
 		return nil
@@ -75,14 +75,14 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 		// broadcast队列满，尝试放入待发送队列
 		select {
 		case h.pendingMessages <- msg:
-			h.logger.DebugContextKV(ctx, "消息已放入待发送队列", "message_id", msg.ID, "from", msg.Sender, "to", msg.Receiver, "type", msg.MessageType)
+			h.logger.DebugContextKV(ctx, "消息已放入待发送队列", "message_id", msg.MessageID, "from", msg.Sender, "to", msg.Receiver, "type", msg.MessageType)
 			// 记录消息到数据库 - 创建时已标记为Sending状态
 			go h.recordMessageToDatabase(msg, nil)
 			return nil
 		default:
 			err := ErrQueueAndPendingFull
 			// 记录消息发送失败日志
-			h.logger.DebugContextKV(ctx, "消息发送失败", "message_id", msg.ID, "from", msg.Sender, "to", msg.Receiver, "type", msg.MessageType, "error", err)
+			h.logger.DebugContextKV(ctx, "消息发送失败", "message_id", msg.MessageID, "from", msg.Sender, "to", msg.Receiver, "type", msg.MessageType, "error", err)
 			// 记录失败消息到数据库
 			go h.recordMessageToDatabase(msg, err)
 			// 通知队列满处理器
@@ -104,7 +104,10 @@ func (h *Hub) SendToUserWithRetry(ctx context.Context, toUserID string, msg *Hub
 
 	startTime := time.Now()
 
-	// 直接修改副本对象
+	// 立即创建消息副本，避免并发修改原始消息
+	msg = msg.Clone()
+
+	// 修改副本对象
 	if msg.Sender == "" {
 		if senderID, ok := ctx.Value(ContextKeySenderID).(string); ok {
 			msg.Sender = senderID
@@ -126,9 +129,6 @@ func (h *Hub) SendToUserWithRetry(ctx context.Context, toUserID string, msg *Hub
 	// 若业务消息ID为空，则使用Hub生成的ID
 	msg.MessageID = mathx.IfNotEmpty(msg.MessageID, snowflakeId)
 
-	// 创建消息副本，避免并发修改原始消息
-	msg = msg.Clone()
-
 	// 检查用户是否在线
 	isOnline := h.checkUserOnline(toUserID)
 	if !isOnline {
@@ -138,7 +138,7 @@ func (h *Hub) SendToUserWithRetry(ctx context.Context, toUserID string, msg *Hub
 			if err := h.offlineMessageHandler.StoreOfflineMessage(ctx, toUserID, msg); err != nil {
 				h.logger.ErrorKV("存储离线消息失败",
 					"user_id", toUserID,
-					"message_id", msg.ID,
+					"message_id", msg.MessageID,
 					"error", err,
 				)
 				result.FinalError = err
@@ -148,7 +148,7 @@ func (h *Hub) SendToUserWithRetry(ctx context.Context, toUserID string, msg *Hub
 			}
 			h.logger.InfoKV("用户离线，消息已存储，将在用户上线时推送",
 				"user_id", toUserID,
-				"message_id", msg.ID,
+				"message_id", msg.MessageID,
 			)
 			result.Success = true
 			result.TotalDuration = time.Since(startTime)
@@ -269,7 +269,7 @@ func (h *Hub) invokeMessageSendCallback(msg *HubMessage, result *SendResult) {
 	syncx.Go().
 		OnPanic(func(r interface{}) {
 			h.logger.ErrorKV("消息发送回调panic",
-				"message_id", msg.ID,
+				"message_id", msg.MessageID,
 				"panic", r,
 			)
 		}).
@@ -463,7 +463,7 @@ func (h *Hub) notifyQueueFull(msg *HubMessage, recipient string, queueType Queue
 	syncx.Go().
 		OnPanic(func(r interface{}) {
 			h.logger.ErrorKV("队列满回调panic",
-				"message_id", msg.ID,
+				"message_id", msg.MessageID,
 				"panic", r,
 			)
 		}).
@@ -484,7 +484,7 @@ func (h *Hub) SendWithCallback(ctx context.Context, userID string, msg *HubMessa
 		OnPanic(func(r interface{}) {
 			h.logger.ErrorKV("SendWithCallback panic",
 				"user_id", userID,
-				"message_id", msg.ID,
+				"message_id", msg.MessageID,
 				"panic", r,
 			)
 		}).

@@ -28,9 +28,11 @@ type HubMessage struct {
 	ID                  string                 `json:"id"`                              // 消息ID（用于ACK）
 	MessageType         MessageType            `json:"message_type"`                    // 消息类型
 	Sender              string                 `json:"sender"`                          // 发送者 (从上下文获取)
+	SenderName          string                 `json:"sender_name"`                     // 发送者昵称
 	SenderType          UserType               `json:"sender_type"`                     // 发送者类型
 	SenderClient        string                 `json:"sender_client,omitempty"`         // 发送者客户端ID（多端同步标识）
 	Receiver            string                 `json:"receiver"`                        // 接收者用户ID
+	ReceiverName        string                 `json:"receiver_name"`                   // 接收者昵称
 	ReceiverType        UserType               `json:"receiver_type"`                   // 接收者用户类型
 	ReceiverClient      string                 `json:"receiver_client,omitempty"`       // 接收者客户端ID
 	ReceiverNode        string                 `json:"receiver_node,omitempty"`         // 接收者所在节点ID
@@ -68,6 +70,12 @@ func (m *HubMessage) SetSender(sender string) *HubMessage {
 	return m
 }
 
+// SetSenderName 设置发送者昵称
+func (m *HubMessage) SetSenderName(name string) *HubMessage {
+	m.SenderName = name
+	return m
+}
+
 // SetSenderType 设置发送者类型
 func (m *HubMessage) SetSenderType(senderType UserType) *HubMessage {
 	m.SenderType = senderType
@@ -77,6 +85,12 @@ func (m *HubMessage) SetSenderType(senderType UserType) *HubMessage {
 // SetReceiver 设置接收者
 func (m *HubMessage) SetReceiver(receiver string) *HubMessage {
 	m.Receiver = receiver
+	return m
+}
+
+// SetReceiverName 设置接收者昵称
+func (m *HubMessage) SetReceiverName(name string) *HubMessage {
+	m.ReceiverName = name
 	return m
 }
 

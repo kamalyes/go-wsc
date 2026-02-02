@@ -147,9 +147,6 @@ func (bs *BatchSender) Execute() *BatchSendResult {
 
 	// 并发发送每个用户的消息
 	for userID, msgs := range messagesCopy {
-		userID := userID
-		msgs := msgs
-
 		syncx.Go(bs.ctx).Exec(func() {
 			defer wg.Done()
 			bs.sendUserMessages(userID, msgs, result)

@@ -279,11 +279,9 @@ func TestSubscribeNodeMessages(t *testing.T) {
 		Type:     models.OperationTypeSendMessage,
 		NodeID:   "node-2",
 		TargetID: "user-123",
-		Data: map[string]interface{}{
-			"message": &HubMessage{
-				ID:      "msg-1",
-				Content: "test",
-			},
+		Message: &HubMessage{
+			ID:      "msg-1",
+			Content: "test",
 		},
 		Timestamp: time.Now(),
 	}
@@ -316,11 +314,9 @@ func TestSubscribeBroadcastChannel(t *testing.T) {
 	distMsg := &DistributedMessage{
 		Type:   models.OperationTypeBroadcast,
 		NodeID: "node-2", // 来自其他节点
-		Data: map[string]interface{}{
-			"message": &HubMessage{
-				ID:      "broadcast-1",
-				Content: "test broadcast",
-			},
+		Message: &HubMessage{
+			ID:      "broadcast-1",
+			Content: "test broadcast",
 		},
 		Timestamp: time.Now(),
 	}
@@ -374,13 +370,11 @@ func TestDistributedMessageTypes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			distMsg := &DistributedMessage{
-				Type:     tt.msgType,
-				NodeID:   "node-2",
-				TargetID: "user-123",
-				Data: map[string]interface{}{
-					"message": &HubMessage{ID: "msg-1"},
-					"reason":  "test",
-				},
+				Type:      tt.msgType,
+				NodeID:    "node-2",
+				TargetID:  "user-123",
+				Message:   &HubMessage{ID: "msg-1"},
+				Reason:    "test",
 				Timestamp: time.Now(),
 			}
 
@@ -427,11 +421,9 @@ func TestDistributedMessageSerialization(t *testing.T) {
 		Type:     models.OperationTypeSendMessage,
 		NodeID:   "node-1",
 		TargetID: "user-123",
-		Data: map[string]interface{}{
-			"message": map[string]interface{}{
-				"id":      "msg-1",
-				"content": "test",
-			},
+		Message: &HubMessage{
+			ID:      "msg-1",
+			Content: "test",
 		},
 		Timestamp: time.Now(),
 	}
@@ -448,6 +440,9 @@ func TestDistributedMessageSerialization(t *testing.T) {
 	assert.Equal(t, distMsg.Type, decoded.Type)
 	assert.Equal(t, distMsg.NodeID, decoded.NodeID)
 	assert.Equal(t, distMsg.TargetID, decoded.TargetID)
+	assert.NotNil(t, decoded.Message)
+	assert.Equal(t, "msg-1", decoded.Message.ID)
+	assert.Equal(t, "test", decoded.Message.Content)
 }
 
 // TestMultiNodeScenario 测试多节点场景

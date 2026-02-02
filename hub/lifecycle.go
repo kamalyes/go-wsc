@@ -65,7 +65,7 @@ func (h *Hub) Run() {
 	}
 
 	// 启动待发送消息处理goroutine
-	syncx.Go(h.ctx).
+	syncx.Go().
 		OnPanic(func(r any) {
 			h.logger.ErrorKV("待发送消息处理器 panic", "panic", r, "node_id", h.nodeID)
 		}).
@@ -74,7 +74,7 @@ func (h *Hub) Run() {
 	// 🌐 启动分布式服务（如果启用了 PubSub）
 	if h.pubsub != nil {
 		// 启动节点心跳
-		syncx.Go(h.ctx).
+		syncx.Go().
 			OnPanic(func(r any) {
 				h.logger.ErrorKV("节点心跳 panic", "panic", r, "node_id", h.nodeID)
 			}).
@@ -83,7 +83,7 @@ func (h *Hub) Run() {
 			})
 
 		// 订阅节点间消息
-		syncx.Go(h.ctx).
+		syncx.Go().
 			OnPanic(func(r any) {
 				h.logger.ErrorKV("订阅节点消息 panic", "panic", r, "node_id", h.nodeID)
 			}).
@@ -94,7 +94,7 @@ func (h *Hub) Run() {
 			})
 
 		// 订阅全局广播频道
-		syncx.Go(h.ctx).
+		syncx.Go().
 			OnPanic(func(r any) {
 				h.logger.ErrorKV("订阅广播频道 panic", "panic", r, "node_id", h.nodeID)
 			}).
@@ -104,27 +104,16 @@ func (h *Hub) Run() {
 				}
 			})
 
-		h.logger.InfoKV("🌐 分布式服务已启动", "node_id", h.nodeID)
-	}
-
-	// 🌐 启动分布式服务（如果启用了 PubSub）
-	if h.pubsub != nil {
-		// 启动节点心跳
-		go h.StartNodeHeartbeat(h.ctx)
-
-		// 订阅节点间消息
-		go func() {
-			if err := h.SubscribeNodeMessages(h.ctx); err != nil {
-				h.logger.ErrorKV("订阅节点消息失败", "error", err)
-			}
-		}()
-
-		// 订阅全局广播频道
-		go func() {
-			if err := h.SubscribeBroadcastChannel(h.ctx); err != nil {
-				h.logger.ErrorKV("订阅广播频道失败", "error", err)
-			}
-		}()
+		// 订阅观察者通知频道
+		syncx.Go().
+			OnPanic(func(r any) {
+				h.logger.ErrorKV("订阅观察者频道 panic", "panic", r, "node_id", h.nodeID)
+			}).
+			Exec(func() {
+				if err := h.SubscribeObserverChannel(h.ctx); err != nil {
+					h.logger.ErrorKV("订阅观察者频道失败", "error", err)
+				}
+			})
 
 		h.logger.InfoKV("🌐 分布式服务已启动", "node_id", h.nodeID)
 	}
@@ -316,7 +305,7 @@ func (h *Hub) SafeShutdown() error {
 	// 等待所有goroutine完成，带超时保护
 	cg.Info("→ 等待所有协程完成...")
 	done := make(chan struct{})
-	syncx.Go(h.ctx).
+	syncx.Go().
 		OnPanic(func(r any) {
 			h.logger.ErrorKV("WaitGroup等待崩溃", "panic", r)
 		}).
@@ -387,7 +376,7 @@ func (h *Hub) processPendingMessages() {
 			case <-time.After(5 * time.Second):
 				timeoutCount++
 				h.logger.WarnKV("待发送消息处理超时",
-					"message_id", msg.ID,
+					"message_id", msg.MessageID,
 					"sender", msg.Sender,
 					"receiver", msg.Receiver,
 					"message_type", msg.MessageType,

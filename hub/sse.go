@@ -97,7 +97,7 @@ func (h *Hub) SendToUserViaSSE(userID string, msg *HubMessage) bool {
 	if !exists {
 		h.logger.WarnKV("SSE用户不存在",
 			"user_id", userID,
-			"message_id", msg.ID,
+			"message_id", msg.MessageID,
 			"message_type", msg.MessageType,
 		)
 		return false
@@ -107,10 +107,10 @@ func (h *Hub) SendToUserViaSSE(userID string, msg *HubMessage) bool {
 	case client.SSEMessageCh <- msg:
 		client.LastSeen = time.Now()
 		// 记录SSE消息发送成功
-		h.logger.DebugKV("SSE消息发送", "message_id", msg.ID, "from", msg.Sender, "to", userID, "type", msg.MessageType)
+		h.logger.DebugKV("SSE消息发送", "message_id", msg.MessageID, "from", msg.Sender, "to", userID, "type", msg.MessageType)
 		h.logger.InfoKV("SSE消息发送成功",
 			"user_id", userID,
-			"message_id", msg.ID,
+			"message_id", msg.MessageID,
 			"message_type", msg.MessageType,
 		)
 		return true
@@ -118,7 +118,7 @@ func (h *Hub) SendToUserViaSSE(userID string, msg *HubMessage) bool {
 		// SSE消息队列满
 		h.logger.WarnKV("SSE消息队列已满",
 			"user_id", userID,
-			"message_id", msg.ID,
+			"message_id", msg.MessageID,
 			"message_type", msg.MessageType,
 		)
 		return false

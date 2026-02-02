@@ -40,6 +40,7 @@ const (
 	UserTypeBot      UserType = "bot"      // 机器人客服
 	UserTypeVIP      UserType = "vip"      // VIP客户
 	UserTypeSystem   UserType = "system"   // 系统用户
+	UserTypeObserver UserType = "observer" // 观察者用户（可接收所有消息）
 )
 
 // String 实现Stringer接口
@@ -252,17 +253,18 @@ func (s ConnectionStatus) IsValid() bool {
 type OperationType string
 
 const (
-	OperationTypeJoin         OperationType = "join"         // 加入
-	OperationTypeLeave        OperationType = "leave"        // 离开
-	OperationTypeMessage      OperationType = "message"      // 消息
-	OperationTypeBroadcast    OperationType = "broadcast"    // 广播
-	OperationTypeNotify       OperationType = "notify"       // 通知
-	OperationTypeHeartbeat    OperationType = "heartbeat"    // 心跳
-	OperationTypeAuth         OperationType = "auth"         // 认证
-	OperationTypeSync         OperationType = "sync"         // 同步
-	OperationTypeSendMessage  OperationType = "send_message" // 跨节点发送消息
-	OperationTypeKickUser     OperationType = "kick_user"    // 跨节点踢人
-	OperationTypeNodeRegister OperationType = "node_register" // 节点注册
+	OperationTypeJoin           OperationType = "join"            // 加入
+	OperationTypeLeave          OperationType = "leave"           // 离开
+	OperationTypeMessage        OperationType = "message"         // 消息
+	OperationTypeBroadcast      OperationType = "broadcast"       // 广播
+	OperationTypeNotify         OperationType = "notify"          // 通知
+	OperationTypeHeartbeat      OperationType = "heartbeat"       // 心跳
+	OperationTypeAuth           OperationType = "auth"            // 认证
+	OperationTypeSync           OperationType = "sync"            // 同步
+	OperationTypeSendMessage    OperationType = "send_message"    // 跨节点发送消息
+	OperationTypeKickUser       OperationType = "kick_user"       // 跨节点踢人
+	OperationTypeNodeRegister   OperationType = "node_register"   // 节点注册
+	OperationTypeObserverNotify OperationType = "observer_notify" // 跨节点观察者通知
 )
 
 // String 实现Stringer接口

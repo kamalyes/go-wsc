@@ -81,6 +81,8 @@ type (
 	BroadcastResult            = models.BroadcastResult
 	HubHealthInfo              = models.HubHealthInfo
 	ConnectionType             = models.ConnectionType
+	ObserverManagerStats       = models.ObserverManagerStats
+	ObserverStats              = models.ObserverStats
 )
 
 // 函数导入
@@ -116,6 +118,7 @@ const (
 	UserTypeBot      = models.UserTypeBot
 	UserTypeVIP      = models.UserTypeVIP
 	UserTypeSystem   = models.UserTypeSystem
+	UserTypeObserver = models.UserTypeObserver
 
 	// MessageType 常量
 	MessageTypeWelcome   = models.MessageTypeWelcome
@@ -143,15 +146,17 @@ const (
 	AckStatusFailed    = protocol.AckStatusFailed
 	AckStatusConfirmed = protocol.AckStatusConfirmed
 
-	MessageSourceOnline = models.MessageSourceOnline
+	MessageSourceOnline  = models.MessageSourceOnline
+	MessageSourceOffline = models.MessageSourceOffline
 
 	BroadcastTypeGlobal = models.BroadcastTypeGlobal
 )
 
 var (
-	OperationTypeSendMessage = models.OperationTypeSendMessage
-	OperationTypeKickUser    = models.OperationTypeKickUser
-	OperationTypeBroadcast   = models.OperationTypeBroadcast
+	OperationTypeSendMessage    = models.OperationTypeSendMessage
+	OperationTypeKickUser       = models.OperationTypeKickUser
+	OperationTypeBroadcast      = models.OperationTypeBroadcast
+	OperationTypeObserverNotify = models.OperationTypeObserverNotify
 )
 
 // NewHubMessage 创建新的 HubMessage
@@ -174,6 +179,8 @@ var (
 	ErrQueueAndPendingFull          = models.ErrQueueAndPendingFull
 	ErrPubSubNotSet                 = models.ErrPubSubNotSet
 	ErrPubSubPublishFailed          = models.ErrPubSubPublishFailed
+	ErrClientNotFound               = models.ErrClientNotFound
+	ErrClientDisconnected           = models.ErrClientDisconnected
 
 	// ErrorType 常量
 	ErrTypeUserNotFound   = models.ErrTypeUserNotFound
@@ -259,6 +266,9 @@ type Hub struct {
 	userToClients map[string]map[string]*Client
 	agentClients  map[string]map[string]*Client
 
+	// 观察者专用映射 - 支持多端登录 - O(1) 访问
+	observerClients map[string]map[string]*Client
+
 	// SSE 连接（使用统一的 Client 结构）
 	sseClients map[string]*Client
 
@@ -338,6 +348,7 @@ func NewHub(config *wscconfig.WSC) *Hub {
 		clients:         make(map[string]*Client),
 		userToClients:   make(map[string]map[string]*Client),
 		agentClients:    make(map[string]map[string]*Client),
+		observerClients: make(map[string]map[string]*Client),
 		sseClients:      make(map[string]*Client),
 		register:        make(chan *Client, config.MessageBufferSize),
 		unregister:      make(chan *Client, config.MessageBufferSize),

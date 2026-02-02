@@ -74,7 +74,7 @@ func (h *Hub) syncClientStats(clientCount int) {
 		return
 	}
 
-	syncx.Go(h.ctx).
+	syncx.Go().
 		WithTimeout(2 * time.Second).
 		OnPanic(func(r interface{}) {
 			h.logger.ErrorKV("同步客户端统计崩溃", "panic", r)
@@ -166,7 +166,7 @@ func (h *Hub) saveConnectionRecord(record *ConnectionRecord) {
 		return
 	}
 
-	syncx.Go(h.ctx).
+	syncx.Go().
 		WithTimeout(5 * time.Second).
 		OnPanic(func(r interface{}) {
 			h.logger.ErrorKV("保存连接记录崩溃", "panic", r, "connection_id", record.ConnectionID)
@@ -190,7 +190,7 @@ func (h *Hub) updateConnectionOnDisconnect(client *Client, reason DisconnectReas
 		return
 	}
 
-	syncx.Go(h.ctx).
+	syncx.Go().
 		WithTimeout(5 * time.Second).
 		OnPanic(func(r interface{}) {
 			h.logger.ErrorKV("更新连接断开记录崩溃", "panic", r, "connection_id", client.ID)
@@ -494,10 +494,10 @@ func (h *Hub) handleTextMessage(client *Client, data []byte) {
 
 	// 🔄 自动转发可转发类型的消息（异步执行，避免阻塞）
 	if models.MessageType(msg.MessageType).IsForwardableType() {
-		syncx.Go(h.ctx).
+		syncx.Go().
 			WithTimeout(5 * time.Second).
 			OnPanic(func(r interface{}) {
-				h.logger.ErrorKV("转发消息panic", "panic", r, "message_id", msg.ID)
+				h.logger.ErrorKV("转发消息panic", "panic", r, "message_id", msg.MessageID)
 			}).
 			ExecWithContext(func(ctx context.Context) error {
 				return h.handleForwardableMessage(ctx, msg)
@@ -524,7 +524,7 @@ func (h *Hub) handleForwardableMessage(ctx context.Context, msg *HubMessage) err
 		"message_type", msg.MessageType,
 		"from", msg.Sender,
 		"to", msg.Receiver,
-		"message_id", msg.ID,
+		"message_id", msg.MessageID,
 	)
 
 	// 检查接收者是否指定
@@ -645,6 +645,9 @@ func (h *Hub) checkWebSocketTimeout(now time.Time, clients []*Client) int {
 
 // handleBroadcast 处理广播消息
 func (h *Hub) handleBroadcast(msg *HubMessage) {
+	// 🔍 通知所有观察者（异步，不阻塞主流程）
+	h.notifyObservers(msg)
+
 	if msg.BroadcastType == BroadcastTypeGlobal {
 		h.handleBroadcastMessage(msg)
 		return
@@ -660,7 +663,7 @@ func (h *Hub) handleDirectMessage(msg *HubMessage) {
 	if len(receiverClients) > 0 {
 		// 增加消息发送统计
 		if h.statsRepo != nil {
-			syncx.Go(h.ctx).
+			syncx.Go().
 				WithTimeout(1 * time.Second).
 				ExecWithContext(func(ctx context.Context) error {
 					return h.statsRepo.IncrementMessagesSent(ctx, h.nodeID, 1)
@@ -675,14 +678,14 @@ func (h *Hub) handleDirectMessage(msg *HubMessage) {
 	}
 
 	if h.SendToUserViaSSE(msg.Receiver, msg) {
-		h.logger.DebugKV("消息已通过SSE发送", "message_id", msg.ID)
+		h.logger.DebugKV("消息已通过SSE发送", "message_id", msg.MessageID)
 	}
 }
 
 // handleBroadcastMessage 处理广播消息
 func (h *Hub) handleBroadcastMessage(msg *HubMessage) {
 	if h.statsRepo != nil {
-		syncx.Go(h.ctx).
+		syncx.Go().
 			WithTimeout(1 * time.Second).
 			ExecWithContext(func(ctx context.Context) error {
 				return h.statsRepo.IncrementBroadcastsSent(ctx, h.nodeID, 1)
@@ -782,7 +785,7 @@ func (h *Hub) sendToClient(client *Client, msg *HubMessage) {
 	if client.ConnectionType == ConnectionTypeSSE {
 		if client.TrySendSSE(msg) {
 			client.LastSeen = time.Now()
-			h.logger.DebugKV("SSE消息发送", "message_id", msg.ID, "client_id", client.ID, "user_id", client.UserID)
+			h.logger.DebugKV("SSE消息发送", "message_id", msg.MessageID, "client_id", client.ID, "user_id", client.UserID)
 			// SSE消息成功发送，更新为成功状态
 			if h.messageRecordRepo != nil {
 				go contextx.WithTimeoutOrBackground(h.ctx, 2*time.Second, func(ctx context.Context) error {
@@ -852,6 +855,12 @@ func (h *Hub) addNewClient(client *Client) {
 		h.sseMutex.Unlock()
 	}
 
+	// 如果是观察者，添加到观察者映射 - O(1)
+	if client.UserType == UserTypeObserver {
+		h.addObserver(client)
+	}
+
+	// 如果是客服或机器人，添加到客服映射
 	if client.UserType == UserTypeAgent || client.UserType == UserTypeBot {
 		if _, exists := h.agentClients[client.UserID]; !exists {
 			h.agentClients[client.UserID] = make(map[string]*Client)
@@ -953,12 +962,31 @@ func (h *Hub) sendKickNotificationToClients(clients []*Client, msg *HubMessage) 
 	return true
 }
 
-// checkUserOnline 检查用户是否在线（简化版）
+// checkUserOnline 检查用户是否在线（支持分布式）
 func (h *Hub) checkUserOnline(userID string) bool {
+	// 1. 先检查本地是否在线
 	h.mutex.RLock()
-	_, exists := h.userToClients[userID]
+	_, existsLocal := h.userToClients[userID]
 	h.mutex.RUnlock()
-	return exists
+
+	if existsLocal {
+		return true
+	}
+
+	// 2. 如果本地不在线，且启用了分布式，则查询Redis
+	if h.onlineStatusRepo != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		defer cancel()
+
+		nodeID, err := h.onlineStatusRepo.GetUserNode(ctx, userID)
+		if err == nil && nodeID != "" {
+			// 用户在其他节点在线
+			return true
+		}
+	}
+
+	// 3. 本地和Redis都没有，用户离线
+	return false
 }
 
 // GetClientByIDWithLock 获取客户端(带锁,返回是否存在)

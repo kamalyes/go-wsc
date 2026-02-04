@@ -848,10 +848,13 @@ func (h *Hub) addNewClient(client *Client) {
 	}
 	h.userToClients[client.UserID][client.ID] = client
 
-	// SSE 客户端单独存储
+	// SSE 客户端单独存储（支持多设备）
 	if client.ConnectionType == ConnectionTypeSSE {
 		h.sseMutex.Lock()
-		h.sseClients[client.UserID] = client
+		if _, exists := h.sseClients[client.UserID]; !exists {
+			h.sseClients[client.UserID] = make(map[string]*Client)
+		}
+		h.sseClients[client.UserID][client.ID] = client
 		h.sseMutex.Unlock()
 	}
 

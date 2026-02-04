@@ -67,8 +67,8 @@ func (h *Hub) HasUserClient(userID string) bool {
 // HasSSEClient 检查是否存在指定用户ID的SSE连接
 func (h *Hub) HasSSEClient(userID string) bool {
 	return syncx.WithRLockReturnValue(&h.sseMutex, func() bool {
-		_, exists := h.sseClients[userID]
-		return exists
+		clientMap, exists := h.sseClients[userID]
+		return exists && len(clientMap) > 0
 	})
 }
 

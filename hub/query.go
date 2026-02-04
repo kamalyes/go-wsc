@@ -137,8 +137,8 @@ func (h *Hub) IsUserOnline(userID string) (bool, error) {
 
 	// 检查 SSE 连接
 	sseExists := syncx.WithRLockReturnValue(&h.sseMutex, func() bool {
-		_, exists := h.sseClients[userID]
-		return exists
+		clientMap, exists := h.sseClients[userID]
+		return exists && len(clientMap) > 0
 	})
 
 	if sseExists {

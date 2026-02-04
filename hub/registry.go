@@ -329,7 +329,13 @@ func (h *Hub) removeClientFromMaps(client *Client) {
 	// SSE 客户端从专用 map 中移除
 	if client.ConnectionType == ConnectionTypeSSE {
 		h.sseMutex.Lock()
-		delete(h.sseClients, client.UserID)
+		if sseMap, exists := h.sseClients[client.UserID]; exists {
+			delete(sseMap, client.ID)
+			// 如果该用户没有其他 SSE 连接了，删除整个 map
+			if len(sseMap) == 0 {
+				delete(h.sseClients, client.UserID)
+			}
+		}
 		h.sseMutex.Unlock()
 	}
 

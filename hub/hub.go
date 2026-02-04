@@ -269,8 +269,8 @@ type Hub struct {
 	// 观察者专用映射 - 支持多端登录 - O(1) 访问
 	observerClients map[string]map[string]*Client
 
-	// SSE 连接（使用统一的 Client 结构）
-	sseClients map[string]*Client
+	// SSE 连接（使用统一的 Client 结构）- 支持多设备
+	sseClients map[string]map[string]*Client
 
 	// 原子计数器：用于快速获取连接数，避免加锁
 	activeClientsCount atomic.Int64
@@ -349,7 +349,7 @@ func NewHub(config *wscconfig.WSC) *Hub {
 		userToClients:   make(map[string]map[string]*Client),
 		agentClients:    make(map[string]map[string]*Client),
 		observerClients: make(map[string]map[string]*Client),
-		sseClients:      make(map[string]*Client),
+		sseClients:      make(map[string]map[string]*Client),
 		register:        make(chan *Client, config.MessageBufferSize),
 		unregister:      make(chan *Client, config.MessageBufferSize),
 		broadcast:       make(chan *HubMessage, config.MessageBufferSize*4),

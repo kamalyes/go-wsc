@@ -88,13 +88,13 @@ func (h *Hub) UnregisterSSE(clientID string) {
 // SSE 消息发送方法
 // ============================================================================
 
-// SendToUserViaSSE 通过SSE发送消息给指定用户
+// SendToUserViaSSE 通过SSE发送消息给指定用户（支持多设备）
 func (h *Hub) SendToUserViaSSE(userID string, msg *HubMessage) bool {
 	h.sseMutex.RLock()
-	client, exists := h.sseClients[userID]
+	clientMap, exists := h.sseClients[userID]
 	h.sseMutex.RUnlock()
 
-	if !exists {
+	if !exists || len(clientMap) == 0 {
 		h.logger.WarnKV("SSE用户不存在",
 			"user_id", userID,
 			"message_id", msg.MessageID,
@@ -103,40 +103,60 @@ func (h *Hub) SendToUserViaSSE(userID string, msg *HubMessage) bool {
 		return false
 	}
 
-	select {
-	case client.SSEMessageCh <- msg:
-		client.LastSeen = time.Now()
-		// 记录SSE消息发送成功
-		h.logger.DebugKV("SSE消息发送", "message_id", msg.MessageID, "from", msg.Sender, "to", userID, "type", msg.MessageType)
+	// 发送到该用户的所有 SSE 设备
+	successCount := 0
+	for clientID, client := range clientMap {
+		select {
+		case client.SSEMessageCh <- msg:
+			client.LastSeen = time.Now()
+			successCount++
+			h.logger.DebugKV("SSE消息发送",
+				"message_id", msg.MessageID,
+				"from", msg.Sender,
+				"to", userID,
+				"client_id", clientID,
+				"type", msg.MessageType,
+			)
+		default:
+			// SSE消息队列满
+			h.logger.WarnKV("SSE消息队列已满",
+				"user_id", userID,
+				"client_id", clientID,
+				"message_id", msg.MessageID,
+				"message_type", msg.MessageType,
+			)
+		}
+	}
+
+	if successCount > 0 {
 		h.logger.InfoKV("SSE消息发送成功",
 			"user_id", userID,
 			"message_id", msg.MessageID,
 			"message_type", msg.MessageType,
+			"success_devices", successCount,
+			"total_devices", len(clientMap),
 		)
 		return true
-	default:
-		// SSE消息队列满
-		h.logger.WarnKV("SSE消息队列已满",
-			"user_id", userID,
-			"message_id", msg.MessageID,
-			"message_type", msg.MessageType,
-		)
-		return false
 	}
+
+	return false
 }
 
 // broadcastToSSEClients 广播消息到所有SSE客户端
 func (h *Hub) broadcastToSSEClients(msg *HubMessage) {
 	syncx.WithRLock(&h.sseMutex, func() {
-		for _, client := range h.sseClients {
-			select {
-			case client.SSEMessageCh <- msg:
-				client.LastSeen = time.Now()
-			default:
-				// 消息通道满，跳过
-				h.logger.WarnKV("SSE客户端消息通道已满，跳过",
-					"user_id", client.UserID,
-				)
+		for userID, clientMap := range h.sseClients {
+			for clientID, client := range clientMap {
+				select {
+				case client.SSEMessageCh <- msg:
+					client.LastSeen = time.Now()
+				default:
+					// 消息通道满，跳过
+					h.logger.WarnKV("SSE客户端消息通道已满，跳过",
+						"user_id", userID,
+						"client_id", clientID,
+					)
+				}
 			}
 		}
 	})
@@ -150,20 +170,30 @@ func (h *Hub) broadcastToSSEClients(msg *HubMessage) {
 func (h *Hub) GetSSEClientCount() int {
 	h.sseMutex.RLock()
 	defer h.sseMutex.RUnlock()
-	return len(h.sseClients)
+	count := 0
+	for _, clientMap := range h.sseClients {
+		count += len(clientMap)
+	}
+	return count
 }
 
 // GetSSEClients 获取所有SSE客户端列表
 func (h *Hub) GetSSEClients() []*Client {
 	h.sseMutex.RLock()
 	defer h.sseMutex.RUnlock()
-	return CopyClientsFromMap(h.sseClients)
+	clients := make([]*Client, 0)
+	for _, clientMap := range h.sseClients {
+		for _, client := range clientMap {
+			clients = append(clients, client)
+		}
+	}
+	return clients
 }
 
 // IsSSEClientOnline 检查SSE客户端是否在线
 func (h *Hub) IsSSEClientOnline(userID string) bool {
 	h.sseMutex.RLock()
 	defer h.sseMutex.RUnlock()
-	_, exists := h.sseClients[userID]
-	return exists
+	clientMap, exists := h.sseClients[userID]
+	return exists && len(clientMap) > 0
 }

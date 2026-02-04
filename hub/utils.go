@@ -843,6 +843,13 @@ func (h *Hub) sendToClient(client *Client, msg *HubMessage) {
 func (h *Hub) addNewClient(client *Client) {
 	h.clients[client.ID] = client
 
+	// 更新原子计数器
+	if client.ConnectionType == ConnectionTypeSSE {
+		h.sseClientsCount.Add(1)
+	} else {
+		h.activeClientsCount.Add(1)
+	}
+
 	if _, exists := h.userToClients[client.UserID]; !exists {
 		h.userToClients[client.UserID] = make(map[string]*Client)
 	}

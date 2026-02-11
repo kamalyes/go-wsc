@@ -717,40 +717,33 @@ func (h *Hub) normalizeMessageFields(client *Client, msg *HubMessage) {
 func (h *Hub) checkHeartbeat() {
 	allClients := h.GetClientsCopy()
 	now := time.Now()
-	timeoutClients := h.checkWebSocketTimeout(now, allClients)
-
-	if timeoutClients > 0 {
-		h.logger.InfoKV("心跳检查完成",
-			"timeout_clients", timeoutClients,
-		)
-	}
-}
-
-// checkWebSocketTimeout 检查WebSocket超时
-func (h *Hub) checkWebSocketTimeout(now time.Time, clients []*Client) int {
-	timeoutCount := 0
-	for _, client := range clients {
+	for _, client := range allClients {
 		// 加锁读取时间戳以避免数据竞争
 		h.mutex.RLock()
 		// SSE 客户端使用 LastSeen，WebSocket 使用 LastHeartbeat
-		var lastActive time.Time
-		if client.ConnectionType == ConnectionTypeSSE {
-			lastActive = client.LastSeen
-		} else {
-			lastActive = client.LastHeartbeat
-		}
+		lastActive := mathx.IF(client.ConnectionType == ConnectionTypeSSE, client.LastSeen, client.LastHeartbeat)
 		h.mutex.RUnlock()
 
-		if now.Sub(lastActive) > h.config.ClientTimeout {
+		// 检查是否超时
+		inactiveDuration := now.Sub(lastActive)
+		if inactiveDuration > h.config.ClientTimeout {
+			h.logger.Debug("❤️ 检测到心跳超时，注销客户端",
+				"client_id", client.ID,
+				"user_id", client.UserID,
+				"user_type", client.UserType,
+				"connection_type", client.ConnectionType,
+				"last_active", lastActive,
+				"inactive_duration", inactiveDuration.String(),
+				"timeout_threshold", h.config.ClientTimeout.String(),
+			)
+
 			h.Unregister(client)
-			timeoutCount++
 
 			if h.heartbeatTimeoutCallback != nil {
 				h.heartbeatTimeoutCallback(client.ID, client.UserID, lastActive)
 			}
 		}
 	}
-	return timeoutCount
 }
 
 // ============================================================================

@@ -126,13 +126,14 @@ const (
 	UserTypeObserver = models.UserTypeObserver
 
 	// MessageType 常量
-	MessageTypeWelcome   = models.MessageTypeWelcome
-	MessageTypeKickOut   = models.MessageTypeKickOut
-	MessageTypeText      = models.MessageTypeText
-	MessageTypePong      = models.MessageTypePong
-	MessageTypePing      = models.MessageTypePing
-	MessageTypeHeartbeat = models.MessageTypeHeartbeat
-	MessageTypeAck       = models.MessageTypeAck
+	MessageTypeWelcome          = models.MessageTypeWelcome
+	MessageTypeKickOut          = models.MessageTypeKickOut
+	MessageTypeText             = models.MessageTypeText
+	MessageTypePong             = models.MessageTypePong
+	MessageTypePing             = models.MessageTypePing
+	MessageTypeHeartbeat        = models.MessageTypeHeartbeat
+	MessageTypeAck              = models.MessageTypeAck
+	MessageTypeClientRegistered = models.MessageTypeClientRegistered
 
 	// QueueType 常量
 	QueueTypeAllQueues = models.QueueTypeAllQueues
@@ -168,6 +169,11 @@ var (
 // NewHubMessage 创建新的 HubMessage
 var (
 	NewHubMessage = models.NewHubMessage
+)
+
+// NewClient 创建新的 Client
+var (
+	NewClient = models.NewClient
 )
 
 // WsCloseCodeMap WebSocket 关闭代码映射

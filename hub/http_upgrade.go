@@ -74,47 +74,19 @@ func (h *Hub) createOriginChecker() func(*http.Request) bool {
 //   - *Client: 创建的客户端实例
 func (h *Hub) CreateClientFromRequest(r *http.Request, conn *websocket.Conn) *Client {
 	clientID, userID, userType := h.extractClientAttributes(r)
-	// 若终端未传入则自动生成一个
-	clientID = mathx.IfEmpty(clientID, h.idGenerator.GenerateRequestID())
-	clientUserType := UserType(userType)
 
 	// 使用 metadata 提取所有请求元数据
 	requestMeta := metadata.ExtractRequestMetadata(r)
 	metaMap := requestMeta.ToMap()
 
-	now := time.Now()
-
-	client := &Client{
-		// 基础标识字段
-		ID:       clientID,
-		UserID:   userID,
-		UserType: clientUserType,
-
-		// 连接信息字段
-		ClientIP:       requestMeta.ClientIP,                              // 从 metadata 提取 ClientIP
-		ClientType:     MapDeviceTypeToClientType(requestMeta.DeviceType), // 映射设备类型到客户端类型
-		ConnectionType: ConnectionTypeWebSocket,                           // 连接类型为 WebSocket
-
-		// 设置客户端所在节点信息
-		NodeID:   h.nodeID,
-		NodeIP:   h.config.NodeIP,
-		NodePort: h.config.NodePort,
-
-		// WebSocket 连接字段
-		Conn: conn,
-
-		// 时间字段
-		ConnectedAt:   now,
-		LastSeen:      now,
-		LastHeartbeat: now,
-
-		// 状态字段
-		Status: UserStatusOnline,
-
-		// 上下文和元数据
-		Context:  context.WithValue(r.Context(), ContextKeySenderID, userID),
-		Metadata: metaMap,
-	}
+	// 使用 NewClient 构造函数创建客户端（自动初始化时间和状态）
+	client := NewClient(clientID, userID, UserType(userType)).
+		WithClientIP(requestMeta.ClientIP).
+		WithClientType(MapDeviceTypeToClientType(requestMeta.DeviceType)).
+		WithWebSocketConn(conn).
+		WithNodeInfo(h.nodeID, h.config.NodeIP, h.config.NodePort).
+		WithMetadataMap(metaMap).
+		WithContext(context.WithValue(r.Context(), ContextKeySenderID, userID))
 
 	// 初始化客户端 SendChan（根据客户端类型使用配置的容量）
 	h.initClientSendChan(client)
@@ -181,65 +153,127 @@ func (h *Hub) HandleWebSocketUpgrade(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	ctx := r.Context()
 
-	// 提取客户端属性
-	clientID, userID, userType := h.extractClientAttributes(r)
-
-	// 记录 WebSocket 升级请求开始（包含完整的请求信息）
-	h.logger.InfoContextKV(ctx, "[WebSocket] 升级请求",
-		"method", r.Method,
-		"path", r.URL.Path,
-		"query", r.URL.RawQuery,
-		"client_id", clientID,
-		"user_id", userID,
-		"user_type", userType,
-		"remote_addr", r.RemoteAddr,
-		"user_agent", r.Header.Get("User-Agent"),
-		"origin", r.Header.Get("Origin"),
-		"sec_websocket_key", r.Header.Get("Sec-WebSocket-Key"),
-		"sec_websocket_version", r.Header.Get("Sec-WebSocket-Version"),
-		"sec_websocket_protocol", r.Header.Get("Sec-WebSocket-Protocol"),
-		"connection", r.Header.Get("Connection"),
-		"upgrade", r.Header.Get("Upgrade"),
+	var (
+		client  *Client
+		err     error
+		stage   string = "upgrade" // 当前阶段：upgrade/register
+		success bool
 	)
 
-	// 配置并升级 WebSocket 连接
+	// defer 统一记录日志
+	defer func() {
+		logFields := h.buildWebSocketUpgradeLogFields(r, start, client, stage, success)
+		if err != nil {
+			h.logger.WithError(err).ErrorContextKV(ctx, "[WebSocket] 处理失败", logFields...)
+		} else {
+			h.logger.InfoContextKV(ctx, "[WebSocket] 处理成功", logFields...)
+		}
+	}()
+
+	// 提取客户端属性
+	clientID := h.extractAttribute(r, h.config.ClientAttributes.ClientIDSources)
+	// 若终端未传入则自动生成一个
+	clientID = mathx.IfEmpty(clientID, h.idGenerator.GenerateRequestID())
+
+	// 配置升级器并设置响应头
 	upgrader := h.ConfigureUpgrader()
-	conn, err := upgrader.Upgrade(w, r, nil)
+	responseHeader := http.Header{}
+
+	// 如果启用了响应头配置，则添加服务端信息
+	if h.config.ResponseHeaders != nil && h.config.ResponseHeaders.Enabled {
+		respHeaders := h.config.ResponseHeaders
+
+		// 服务端分配的客户端ID
+		responseHeader.Set(respHeaders.GetClientIDKey(), clientID)
+
+		// 服务端节点信息（分布式场景下很有用）
+		responseHeader.Set(respHeaders.GetNodeIDKey(), h.nodeID)
+
+		// 添加自定义响应头
+		for key, value := range respHeaders.CustomHeaders {
+			responseHeader.Set(key, value)
+		}
+	}
+
+	// 升级连接
+	conn, err := upgrader.Upgrade(w, r, responseHeader)
 	if err != nil {
-		// 记录升级失败日志
-		h.logger.WithError(err).ErrorContextKV(ctx, "[WebSocket] 升级失败",
-			"client_id", clientID,
-			"user_id", userID,
-			"duration_ms", time.Since(start).Milliseconds(),
-			"error", err.Error(),
-			"upgrade_failed", true,
-		)
 		return
 	}
 
-	// 记录升级成功日志（升级后响应已发送，记录连接信息）
-	h.logger.InfoContextKV(ctx, "[WebSocket] 升级成功",
-		"client_id", clientID,
-		"user_id", userID,
-		"user_type", userType,
-		"status_code", 101, // WebSocket 升级成功状态码固定为 101
-		"protocol", conn.Subprotocol(),
-		"remote_addr", conn.RemoteAddr().String(),
-		"local_addr", conn.LocalAddr().String(),
-		"duration_ms", time.Since(start).Milliseconds(),
-		"upgrade_success", true,
-	)
-
-	// 创建客户端
-	client := h.CreateClientFromRequest(r, conn)
-
-	// 注册到 Hub（go-wsc 接管后续所有处理，包括消息读取）
+	// 创建并注册客户端
+	stage = "register"
+	client = h.CreateClientFromRequest(r, conn)
+	client.ID = clientID
 	h.Register(client)
+	success = true
 
-	// 记录客户端注册成功日志
-	h.logger.InfoContextKV(ctx, "[WebSocket] 客户端注册成功",
-		"client_id", client.ID,
-		"user_id", client.UserID,
-		"user_type", string(client.UserType),
-	)
+	// 发送客户端注册成功确认消息（如果配置启用）
+	if h.config.ResponseHeaders != nil && h.config.ResponseHeaders.SendRegisteredMessage {
+		h.sendClientRegisteredMessage(client)
+	}
+}
+
+// buildWebSocketUpgradeLogFields 构建 WebSocket 升级日志字段
+func (h *Hub) buildWebSocketUpgradeLogFields(r *http.Request, start time.Time, client *Client, stage string, success bool) []any {
+	logFields := []any{
+		"method", r.Method,
+		"path", r.URL.Path,
+		"query", r.URL.RawQuery,
+		"remote_addr", r.RemoteAddr,
+		"user_agent", r.Header.Get("User-Agent"),
+		"origin", r.Header.Get("Origin"),
+		"duration_ms", time.Since(start).Milliseconds(),
+		"stage", stage,
+		"success", success,
+	}
+
+	if client != nil {
+		logFields = append(logFields,
+			"client_id", client.ID,
+			"user_id", client.UserID,
+			"user_type", client.UserType.String(),
+			"protocol", client.Conn.Subprotocol(),
+			"conn_remote_addr", client.Conn.RemoteAddr().String(),
+			"conn_local_addr", client.Conn.LocalAddr().String(),
+		)
+	}
+
+	return logFields
+}
+
+// sendClientRegisteredMessage 发送客户端注册成功确认消息
+func (h *Hub) sendClientRegisteredMessage(client *Client) {
+	// 获取自定义消息内容
+	content := "Client registered successfully"
+	if h.config.ResponseHeaders != nil && h.config.ResponseHeaders.RegisteredMessageContent != "" {
+		content = h.config.ResponseHeaders.RegisteredMessageContent
+	}
+
+	// 构建客户端注册成功消息
+	registeredMsg := NewHubMessage().
+		SetID(h.idGenerator.GenerateRequestID()).
+		SetMessageType(MessageTypeClientRegistered).
+		SetSender(UserTypeSystem.String()).
+		SetSenderType(UserTypeSystem).
+		SetReceiver(client.UserID).
+		SetReceiverType(client.UserType).
+		SetReceiverClient(client.ID).
+		SetContent(content).
+		WithOption("status", "ok").
+		WithOption("client_id", client.ID).
+		WithOption("user_id", client.UserID).
+		WithOption("user_type", client.UserType.String()).
+		WithOption("node_id", client.NodeID).
+		WithOption("timestamp", time.Now().Unix())
+
+	// 添加服务端信息（来自 CustomHeaders）
+	if h.config.ResponseHeaders != nil && h.config.ResponseHeaders.Enabled {
+		for key, value := range h.config.ResponseHeaders.CustomHeaders {
+			registeredMsg.WithOption(key, value)
+		}
+	}
+
+	// 发送注册成功消息
+	h.sendToClient(client, registeredMsg)
 }

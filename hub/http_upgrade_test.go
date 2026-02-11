@@ -338,7 +338,10 @@ func TestCreateClientFromRequest(t *testing.T) {
 	assert.Equal(t, userType, string(client.UserType), "client.UserType 不匹配")
 	assert.Equal(t, ConnectionTypeWebSocket, client.ConnectionType, "client.ConnectionType 不匹配")
 	assert.Equal(t, hub.GetNodeID(), client.NodeID, "client.NodeID 不匹配")
-	assert.Equal(t, 256, cap(client.SendChan), "client.SendChan 容量不匹配")
+
+	// 验证 SendChan 容量（根据配置的 Customer 容量）
+	expectedCapacity := config.ClientCapacity.Customer
+	assert.Equal(t, expectedCapacity, cap(client.SendChan), "client.SendChan 容量不匹配")
 }
 
 // TestHandleWebSocketUpgrade 测试 WebSocket 升级处理

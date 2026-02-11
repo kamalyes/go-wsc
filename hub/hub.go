@@ -24,6 +24,7 @@ import (
 	"github.com/kamalyes/go-toolbox/pkg/idgen"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/osx"
+	"github.com/kamalyes/go-toolbox/pkg/safe"
 
 	"github.com/kamalyes/go-wsc/handler"
 	"github.com/kamalyes/go-wsc/middleware"
@@ -336,8 +337,8 @@ type Hub struct {
 func NewHub(config *wscconfig.WSC) *Hub {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// 生成节点ID（支持K8s环境）
-	nodeID := generateNodeID(config)
+	// 生成节点ID（支持K8s环境），统一使用短哈希格式
+	nodeID := safe.ShortHash(generateNodeID(config))
 
 	workerID := osx.GetWorkerIdForSnowflake()
 	idGenerator := idgen.NewShortFlakeGenerator(workerID)

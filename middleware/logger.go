@@ -11,7 +11,6 @@
 package middleware
 
 import (
-	"os"
 	"time"
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
@@ -59,43 +58,10 @@ func SetDefaultLogger(l WSCLogger) {
 
 // InitLogger 根据配置初始化日志器
 func InitLogger(config *wscconfig.WSC) WSCLogger {
-	// 如果配置中有日志配置且启用，使用配置中的
-	if config.Logging != nil && config.Logging.Enabled {
-		// 转换配置到 go-logger 的配置
-		loggerConfig := logger.DefaultConfig().
-			WithLevel(logger.DEBUG).
-			WithPrefix("[WSC] ").
-			WithShowCaller(false).
-			WithColorful(true).
-			WithTimeFormat(time.DateTime)
-
-		// 根据输出类型配置输出
-		switch config.Logging.Output {
-		case "file":
-			if config.Logging.FilePath != "" {
-				// 根据是否需要轮转决定使用哪种文件写入器
-				if config.Logging.MaxSize > 0 && config.Logging.MaxBackups > 0 {
-					// 使用轮转文件写入器
-					rotateWriter := logger.NewRotateWriter(
-						config.Logging.FilePath,
-						int64(config.Logging.MaxSize)*1024*1024, // 转换为字节
-						config.Logging.MaxBackups,
-					)
-					loggerConfig = loggerConfig.WithOutput(rotateWriter)
-				} else {
-					// 使用简单文件写入器
-					fileWriter := logger.NewFileWriter(config.Logging.FilePath)
-					loggerConfig = loggerConfig.WithOutput(fileWriter)
-				}
-			}
-		default:
-			// 默认使用控制台输出
-			loggerConfig = loggerConfig.WithOutput(logger.NewConsoleWriter(os.Stdout))
-		}
-
-		return logger.NewLogger(loggerConfig)
+	if config.Logging == nil || !config.Logging.Enabled {
+		return NewDefaultWSCLogger()
 	}
 
-	// 使用默认配置
-	return NewDefaultWSCLogger()
+	loggerConfig := config.Logging.ToLoggerConfig()
+	return logger.NewLogger(loggerConfig)
 }

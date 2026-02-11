@@ -3,7 +3,7 @@
  * @Date: 2025-09-06 09:50:55
  * @LastEditors: kamalyes 501893067@qq.com
  * @LastEditTime: 2025-12-28 00:00:00
- * @FilePath: \go-wsc\models\message_record_repository.go
+ * @FilePath: \go-wsc\repository\message_record_repository.go
  * @Description: 消息发送记录管理 - 使用 GORM 数据库持久化
  *
  * Copyright (c) 2025 by kamalyes, All Rights Reserved.
@@ -16,9 +16,29 @@ import (
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-logger"
+	sqlbuilder "github.com/kamalyes/go-sqlbuilder/repository"
+	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"gorm.io/gorm"
 )
+
+// MessageRecordFilter 消息记录查询过滤器
+type MessageRecordFilter struct {
+	// Status 按状态查询（可选）
+	Status *MessageSendStatus
+	// Sender 按发送者查询（可选）
+	Sender string
+	// Receiver 按接收者查询（可选）
+	Receiver string
+	// NodeIP 按节点IP查询（可选）
+	NodeIP string
+	// ClientIP 按客户端IP查询（可选）
+	ClientIP string
+	// Limit 查询数量限制
+	Limit int
+	// OrderDesc 是否降序排序（默认降序，false为升序）
+	OrderDesc bool
+}
 
 // MessageRecordRepository 消息记录仓库接口
 type MessageRecordRepository interface {
@@ -37,20 +57,8 @@ type MessageRecordRepository interface {
 	// FindByMessageID 根据消息ID查找
 	FindByMessageID(ctx context.Context, messageID string) (*MessageSendRecord, error)
 
-	// FindByStatus 根据状态查找
-	FindByStatus(ctx context.Context, status MessageSendStatus, limit int) ([]*MessageSendRecord, error)
-
-	// FindBySender 根据发送者查找
-	FindBySender(ctx context.Context, sender string, limit int) ([]*MessageSendRecord, error)
-
-	// FindByReceiver 根据接收者查找
-	FindByReceiver(ctx context.Context, receiver string, limit int) ([]*MessageSendRecord, error)
-
-	// FindByNodeIP 根据节点IP查找
-	FindByNodeIP(ctx context.Context, nodeIP string, limit int) ([]*MessageSendRecord, error)
-
-	// FindByClientIP 根据客户端IP查找
-	FindByClientIP(ctx context.Context, clientIP string, limit int) ([]*MessageSendRecord, error)
+	// QueryRecords 查询消息记录（支持按状态、发送者、接收者、节点IP、客户端IP等条件过滤）
+	QueryRecords(ctx context.Context, filter *MessageRecordFilter) ([]*MessageSendRecord, error)
 
 	// FindRetryable 查找可重试的记录
 	FindRetryable(ctx context.Context, limit int) ([]*MessageSendRecord, error)
@@ -120,6 +128,8 @@ func (r *MessageRecordGormRepository) Create(ctx context.Context, record *Messag
 // CreateFromMessage 从 HubMessage 创建记录
 func (r *MessageRecordGormRepository) CreateFromMessage(ctx context.Context, msg *HubMessage, maxRetry int, expiresAt *time.Time) (*MessageSendRecord, error) {
 	record := &MessageSendRecord{
+		MessageID:  msg.MessageID, // 业务消息ID
+		HubID:      msg.ID,        // Hub内部ID
 		Status:     MessageSendStatusPending,
 		CreateTime: time.Now(),
 		MaxRetry:   maxRetry,
@@ -163,58 +173,32 @@ func (r *MessageRecordGormRepository) FindByMessageID(ctx context.Context, messa
 	return &record, nil
 }
 
-// FindByStatus 根据状态查找
-func (r *MessageRecordGormRepository) FindByStatus(ctx context.Context, status MessageSendStatus, limit int) ([]*MessageSendRecord, error) {
+// QueryRecords 查询消息记录（支持按状态、发送者、接收者、节点IP、客户端IP等条件过滤）
+func (r *MessageRecordGormRepository) QueryRecords(ctx context.Context, filter *MessageRecordFilter) ([]*MessageSendRecord, error) {
 	var records []*MessageSendRecord
-	query := r.db.WithContext(ctx).Where("status = ?", status).Order(OrderByCreateTimeDesc)
-	if limit > 0 {
-		query = query.Limit(limit)
-	}
-	err := query.Find(&records).Error
-	return records, err
-}
 
-// FindBySender 根据发送者查找
-func (r *MessageRecordGormRepository) FindBySender(ctx context.Context, sender string, limit int) ([]*MessageSendRecord, error) {
-	var records []*MessageSendRecord
-	query := r.db.WithContext(ctx).Where("sender = ?", sender).Order(OrderByCreateTimeDesc)
-	if limit > 0 {
-		query = query.Limit(limit)
-	}
-	err := query.Find(&records).Error
-	return records, err
-}
+	query := sqlbuilder.NewQuery().
+		AddFilterIfNotEmpty("status", filter.Status).
+		AddFilterIfNotEmpty("sender", filter.Sender).
+		AddFilterIfNotEmpty("receiver", filter.Receiver).
+		AddFilterIfNotEmpty("node_ip", filter.NodeIP).
+		AddFilterIfNotEmpty("client_ip", filter.ClientIP).
+		AddOrder("create_time", mathx.IF(filter.OrderDesc, "DESC", "ASC"))
 
-// FindByReceiver 根据接收者查找
-func (r *MessageRecordGormRepository) FindByReceiver(ctx context.Context, receiver string, limit int) ([]*MessageSendRecord, error) {
-	var records []*MessageSendRecord
-	query := r.db.WithContext(ctx).Where("receiver = ?", receiver).Order(OrderByCreateTimeDesc)
-	if limit > 0 {
-		query = query.Limit(limit)
+	// 限制数量
+	if filter.Limit > 0 {
+		query.Limit(filter.Limit)
 	}
-	err := query.Find(&records).Error
-	return records, err
-}
 
-// FindByNodeIP 根据节点IP查找
-func (r *MessageRecordGormRepository) FindByNodeIP(ctx context.Context, nodeIP string, limit int) ([]*MessageSendRecord, error) {
-	var records []*MessageSendRecord
-	query := r.db.WithContext(ctx).Where("node_ip = ?", nodeIP).Order(OrderByCreateTimeDesc)
-	if limit > 0 {
-		query = query.Limit(limit)
+	// 将 Query 应用到 GORM
+	gormDB := r.db.WithContext(ctx)
+	gormDB = sqlbuilder.ApplyFilters(gormDB, query.Filters)
+	gormDB = sqlbuilder.ApplyOrders(gormDB, query.Orders)
+	if query.LimitValue != nil {
+		gormDB = gormDB.Limit(*query.LimitValue)
 	}
-	err := query.Find(&records).Error
-	return records, err
-}
 
-// FindByClientIP 根据客户端IP查找
-func (r *MessageRecordGormRepository) FindByClientIP(ctx context.Context, clientIP string, limit int) ([]*MessageSendRecord, error) {
-	var records []*MessageSendRecord
-	query := r.db.WithContext(ctx).Where("client_ip = ?", clientIP).Order(OrderByCreateTimeDesc)
-	if limit > 0 {
-		query = query.Limit(limit)
-	}
-	err := query.Find(&records).Error
+	err := gormDB.Find(&records).Error
 	return records, err
 }
 
@@ -222,16 +206,32 @@ func (r *MessageRecordGormRepository) FindByClientIP(ctx context.Context, client
 func (r *MessageRecordGormRepository) FindRetryable(ctx context.Context, limit int) ([]*MessageSendRecord, error) {
 	var records []*MessageSendRecord
 	now := time.Now()
-	query := r.db.WithContext(ctx).Where("status IN ? AND retry_count < max_retry", []MessageSendStatus{
+
+	// 使用 go-sqlbuilder 构建基础查询
+	retryableStatuses := []interface{}{
 		MessageSendStatusFailed,
 		MessageSendStatusAckTimeout,
-	}).Where("expires_at IS NULL OR expires_at > ?", now).
-		Order(OrderByCreateTimeAsc)
+	}
+
+	query := sqlbuilder.NewQuery().
+		AddInFilterIfNotEmpty("status", retryableStatuses).
+		AddOrder("create_time", "ASC")
 
 	if limit > 0 {
-		query = query.Limit(limit)
+		query.Limit(limit)
 	}
-	err := query.Find(&records).Error
+
+	// 应用到 GORM 并添加原始 WHERE 条件
+	gormDB := r.db.WithContext(ctx)
+	gormDB = sqlbuilder.ApplyFilters(gormDB, query.Filters)
+	gormDB = gormDB.Where("retry_count < max_retry")
+	gormDB = gormDB.Where("expires_at IS NULL OR expires_at > ?", now)
+	gormDB = sqlbuilder.ApplyOrders(gormDB, query.Orders)
+	if query.LimitValue != nil {
+		gormDB = gormDB.Limit(*query.LimitValue)
+	}
+
+	err := gormDB.Find(&records).Error
 	return records, err
 }
 

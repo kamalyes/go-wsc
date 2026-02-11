@@ -42,6 +42,8 @@ type (
 	BatchSendResult            = hub.BatchSendResult
 	UserResult                 = hub.UserResult
 	HubHealthInfo              = hub.HubHealthInfo
+	ObserverManagerStats       = hub.ObserverManagerStats
+	ObserverStats              = hub.ObserverStats
 )
 
 // 常量导出
@@ -65,9 +67,17 @@ var (
 // 注意：以下是 Hub 类型的方法列表，通过 Hub 实例调用
 // 例如：hub := wsc.NewHub(config); hub.Register(client)
 
+// HTTP WebSocket 升级方法：
+// - ConfigureUpgrader() *websocket.Upgrader: 配置 WebSocket 升级器
+// - CreateClientFromRequest(r *http.Request, conn *websocket.Conn) *Client: 从 HTTP 请求创建客户端
+// - HandleWebSocketUpgrade(w http.ResponseWriter, r *http.Request): 处理 WebSocket 升级请求
+
+// 仓库初始化方法：
+// - InitializeRepositories(redisClient *cachex.Client, db *gorm.DB) error: 初始化所有仓库
+
 // 客户端注册与管理方法：
 // - Register(client *Client): 注册客户端
-// - Unregister(client *Client): 注销客户端  
+// - Unregister(client *Client): 注销客户端
 // - KickUser(userID, reason string, sendNotification bool, notificationMsg string) *KickUserResult: 踢出用户
 // - KickUserWithMessage(userID, reason, message string) error: 带消息踢出用户
 // - KickUserSimple(userID, reason string) int: 简单踢出用户

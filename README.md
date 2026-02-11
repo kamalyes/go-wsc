@@ -23,13 +23,13 @@ graph TB
         Vue[Vue.js 组合式 API]
         Angular[Angular Service]
     end
-    
+
     subgraph "负载均衡层 Load Balancer Layer"
         direction LR
         LB[Nginx/HAProxy<br/>IP Hash 会话保持]
         Gateway[API 网关<br/>认证/限流]
     end
-    
+
     subgraph "分布式 Hub 集群 Distributed Hub Cluster"
         direction LR
         Hub1[Hub Node 1<br/>192.168.1.101:8080]
@@ -37,95 +37,95 @@ graph TB
         Hub3[Hub Node 3<br/>192.168.1.103:8080]
         HubN[Hub Node N<br/>192.168.1.10N:8080]
     end
-    
+
     subgraph "核心服务层 Core Services Layer"
         direction LR
-        
+
         subgraph "连接管理"
             ConnRegistry[连接注册中心]
             NodeDiscovery[节点发现]
         end
-        
+
         subgraph "消息路由"
             MsgRouter[消息路由器]
             CrossNodeRouter[跨节点路由]
         end
-        
+
         subgraph "分布式通信"
             PubSub[Redis PubSub<br/>消息总线]
             BroadcastMgr[全局广播]
         end
     end
-    
+
     subgraph "可靠性层 Reliability Layer"
         direction LR
-        
+
         subgraph "消息确认"
             ACKMgr[ACK 管理器]
             MsgRecord[消息记录]
         end
-        
+
         subgraph "失败处理"
             RetryEngine[重试引擎]
             FailureRouter[失败路由器]
         end
-        
+
         subgraph "离线处理"
             OfflineHandler[离线处理器]
             QueueHandler[队列处理器]
         end
     end
-    
+
     subgraph "性能与监控层 Performance & Monitoring Layer"
         direction LR
-        
+
         subgraph "性能优化"
             AtomicOps[原子操作]
             WorkerPool[协程池]
         end
-        
+
         subgraph "监控告警"
             MetricsCol[指标收集]
             AlertMgr[告警管理]
         end
-        
+
         subgraph "配置管理"
             ConfigMgr[配置中心]
             NodeConfig[节点配置]
         end
     end
-    
+
     subgraph "存储层 Storage Layer"
         direction LR
         RedisCluster[(Redis Cluster<br/>缓存/队列/PubSub)]
         Database[(Database<br/>离线消息/状态)]
         LogStore[(日志存储<br/>审计追踪)]
     end
-    
+
     %% 客户端到负载均衡
     WSC -.->|WebSocket| LB
     TSC -.->|WebSocket| LB
     React --> TSC
     Vue --> TSC
     Angular --> TSC
-    
+
     %% 负载均衡到 Hub 集群
     LB --> Gateway
     Gateway --> Hub1
     Gateway --> Hub2
     Gateway --> Hub3
     Gateway --> HubN
-    
+
     %% Hub 到核心服务
     Hub1 --> ConnRegistry
     Hub2 --> ConnRegistry
     Hub3 --> ConnRegistry
     HubN --> ConnRegistry
-    
+
     ConnRegistry --> MsgRouter
     NodeDiscovery --> MsgRouter
     MsgRouter --> CrossNodeRouter
-    
+
     %% 分布式通信
     CrossNodeRouter --> PubSub
     BroadcastMgr --> PubSub
@@ -133,7 +133,7 @@ graph TB
     Hub2 <-.->|订阅/发布| PubSub
     Hub3 <-.->|订阅/发布| PubSub
     HubN <-.->|订阅/发布| PubSub
-    
+
     %% 可靠性流程
     MsgRouter --> ACKMgr
     ACKMgr --> MsgRecord
@@ -141,7 +141,7 @@ graph TB
     RetryEngine --> FailureRouter
     FailureRouter --> OfflineHandler
     FailureRouter --> QueueHandler
-    
+
     %% 性能与监控
     MsgRouter --> AtomicOps
     MsgRouter --> WorkerPool
@@ -152,7 +152,7 @@ graph TB
     MetricsCol --> AlertMgr
     ConfigMgr --> RetryEngine
     ConfigMgr --> NodeConfig
-    
+
     %% 存储连接
     PubSub -.->|消息总线| RedisCluster
     ACKMgr -.->|缓存| RedisCluster
@@ -161,7 +161,7 @@ graph TB
     OfflineHandler --> Database
     QueueHandler --> Database
     MsgRecord --> LogStore
-    
+
     %% 样式定义
     classDef clientStyle fill:#e1f5fe,stroke:#01579b,stroke-width:2px
     classDef lbStyle fill:#fff9c4,stroke:#f57f17,stroke-width:2px
@@ -170,7 +170,7 @@ graph TB
     classDef reliabilityStyle fill:#ffebee,stroke:#c62828,stroke-width:2px
     classDef perfStyle fill:#fff3e0,stroke:#e65100,stroke-width:2px
     classDef storageStyle fill:#e8f5e8,stroke:#1b5e20,stroke-width:2px
-    
+
     class WSC,TSC,React,Vue,Angular clientStyle
     class LB,Gateway lbStyle
     class Hub1,Hub2,Hub3,HubN hubStyle
@@ -184,14 +184,14 @@ graph TB
 
 - **分布式集群**: 多节点 Hub 集群 + Redis PubSub 消息总线 + 自动节点发现
 - **负载均衡**: Nginx/HAProxy IP Hash 会话保持 + 智能流量分发
-- **跨节点通信**: 
+- **跨节点通信**:
   - 同节点通信: 内存直达，延迟 < 1ms
   - 跨节点通信: Redis PubSub，延迟 5-10ms
   - 全局广播: 自动同步到所有节点
 - **高可靠性**: ACK 确认机制 + 消息记录 + 离线处理 + 智能重试
 - **失败处理**: 5类专业化失败处理器 + go-toolbox重试引擎
 - **配置统一**: go-config/wsc 统一管理重试参数、错误分类和节点配置
-- **高性能**: 原子操作 + 动态队列 + 协程池优化  
+- **高性能**: 原子操作 + 动态队列 + 协程池优化
 - **可观测**: 全链路监控 + 实时告警 + 可视化面板
 - **水平扩展**: 无状态设计 + 弹性伸缩 + 节点自动注册/心跳
 - **高可用**: 节点故障自动恢复 + 客户端自动重连 + 会话保持
@@ -205,7 +205,7 @@ graph TB
 - **状态管理**：连接生命周期跟踪
 - **缓冲机制**：可配置消息队列
 
-### 🏢 服务端能力  
+### 🏢 服务端能力
 
 - **高并发**：百万级连接支持
 - **消息路由**：点对点/群组/广播
@@ -234,7 +234,7 @@ graph TB
 - [🚀 快速开始](#-快速开始) - 5分钟上手指南
 - [⚡ 性能表现](#-性能表现) - 基准测试结果
 
-### 🔧 集成指南  
+### 🔧 集成指南
 
 - [🎯 TypeScript 前端集成](./docs/TypeScript_Integration.md) - React/Vue/Angular 示例
 - [☕ Java 客户端集成](./docs/Java_Client_Integration.md) - 企业级 Java 客户端实现
@@ -245,7 +245,7 @@ graph TB
 
 ### 📋 API 参考
 
-- [🔌 客户端 API](./docs/Client_API.md) - 完整接口说明  
+- [🔌 客户端 API](./docs/Client_API.md) - 完整接口说明
 - [🏢 服务端 Hub API](./docs/Hub_API.md) - Hub 管理接口与失败处理器
 - [🧪 测试覆盖报告](./docs/Test_Coverage.md) - 测试用例和覆盖率
 
@@ -270,6 +270,7 @@ go run server.go
 ```
 
 **演示特点**:
+
 - ✅ 服务端自动发送欢迎消息
 - ✅ 服务端回复客户端消息
 - ✅ 完整的双向通信流程
@@ -285,7 +286,8 @@ go run server.go
 > - **[examples/message-send](./examples/message-send/main.go)** - 各种消息发送模式
 > - **[examples/README.md](./examples/README.md)** - 详细说明请查看：
 
-📖 **详细文档**: 
+📖 **详细文档**:
+
 > - [分布式架构](./docs/DISTRIBUTED_ARCHITECTURE.md) - 多节点集群部署
 > - [K8s 部署](./docs/K8S_DEPLOYMENT.md) - Kubernetes 环境部署
 > - [客户端 API](./docs/Client_API.md) - 完整接口说明
@@ -294,7 +296,7 @@ go run server.go
 ## ⚡ 性能表现
 
 - **吞吐量**: 720万条消息/秒
-- **客户端注册**: ~2,430 ns/op  
+- **客户端注册**: ~2,430 ns/op
 - **消息发送**: ~138 ns/op
 - **并发连接**: 百万级支持
 
@@ -304,7 +306,7 @@ go run server.go
 
 ### 测试覆盖
 
-- **测试用例**: 368个
+- **测试用例**: 880个（2个跳过）
 - **通过率**: 100%
 - **覆盖范围**: 单元测试 + 集成测试 + 竞态检测
 - **基准测试**: 性能回归保护
@@ -325,6 +327,7 @@ go test -race ./...
 go test -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out
 go test -v ./... -timeout 5m 2>&1 | Select-String -Pattern "(FAIL|ERROR|panic)" -Context 1,0
+gotestsum -f testname -- ./... -race -count=1 -timeout=30m -coverprofile=coverage.txt -covermode=atomic -shuffle=on | Select-String -Pattern "(FAIL|ERROR|panic|fatal)"
 ```
 
 > 📋 **测试报告**: 查看 [测试覆盖报告](./docs/Test_Coverage.md) 了解详细测试情况
@@ -342,7 +345,7 @@ go test -v ./... -timeout 5m 2>&1 | Select-String -Pattern "(FAIL|ERROR|panic)" 
 
 - **零侵入部署**: 现有代码无需修改，自动支持分布式
 - **节点发现**: 自动服务注册、心跳检测和节点发现
-- **智能路由**: 
+- **智能路由**:
   - 同节点通信: 内存直达，延迟 < 1ms
   - 跨节点通信: Redis PubSub，延迟 5-10ms
   - 自动路由到用户所在节点
@@ -376,26 +379,26 @@ go test -v ./... -timeout 5m 2>&1 | Select-String -Pattern "(FAIL|ERROR|panic)" 
 
 在本项目的提交记录中，我们使用以下 emoji 标记不同类型的变更：
 
-| Emoji | 类型 | 说明 |
-|-------|------|------|
-| 🔥 | feat | 新增功能或重大重构 |
-| 🐛 | fix | Bug 修复 |
-| ➕ | add | 添加新模块/文件 |
-| 📊 | data | 连接记录、数据持久化 |
-| 📈 | stats | 统计信息、监控指标 |
-| 📮 | queue | 消息队列相关 |
-| 💾 | database | 数据库、GORM 相关 |
-| 📦 | storage | 离线消息、存储层 |
-| 🟢 | status | 在线状态管理 |
-| ⚖️ | balance | 负载管理、负载均衡 |
-| 🗑️ | remove | 移除文件、清理代码 |
-| ✅ | test | 修复测试、测试相关 |
-| ⚡ | perf | 性能优化 |
-| 📝 | docs | 文档更新 |
-| 🎨 | style | 代码格式、样式调整 |
-| ♻️ | refactor | 代码重构 |
-| 🔒 | security | 安全相关 |
-| 🚀 | deploy | 部署、发布相关 |
+| Emoji | 类型     | 说明                 |
+| ----- | -------- | -------------------- |
+| 🔥    | feat     | 新增功能或重大重构   |
+| 🐛    | fix      | Bug 修复             |
+| ➕    | add      | 添加新模块/文件      |
+| 📊    | data     | 连接记录、数据持久化 |
+| 📈    | stats    | 统计信息、监控指标   |
+| 📮    | queue    | 消息队列相关         |
+| 💾    | database | 数据库、GORM 相关    |
+| 📦    | storage  | 离线消息、存储层     |
+| 🟢    | status   | 在线状态管理         |
+| ⚖️    | balance  | 负载管理、负载均衡   |
+| 🗑️    | remove   | 移除文件、清理代码   |
+| ✅    | test     | 修复测试、测试相关   |
+| ⚡    | perf     | 性能优化             |
+| 📝    | docs     | 文档更新             |
+| 🎨    | style    | 代码格式、样式调整   |
+| ♻️    | refactor | 代码重构             |
+| 🔒    | security | 安全相关             |
+| 🚀    | deploy   | 部署、发布相关       |
 
 ---
 

@@ -316,7 +316,12 @@ func (h *HybridOfflineMessageHandler) GetOfflineMessages(ctx context.Context, us
 		"cursor", cursor,
 	)
 
-	records, err := h.dbRepo.GetByReceiver(ctx, userID, limit, cursor)
+	records, err := h.dbRepo.QueryMessages(ctx, &OfflineMessageFilter{
+		UserID: userID,
+		Role:   MessageRoleReceiver,
+		Limit:  limit,
+		Cursor: cursor,
+	})
 	if err != nil {
 		h.logger.ErrorKV("从 MySQL 读取离线消息失败",
 			"user_id", userID,

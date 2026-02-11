@@ -22,8 +22,28 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// Redis Hash 字段常量
+const (
+	FieldTotalConnections  = "total_connections"
+	FieldActiveConnections = "active_connections"
+	FieldMessagesSent      = "messages_sent"
+	FieldMessagesReceived  = "messages_received"
+	FieldBroadcastsSent    = "broadcasts_sent"
+	FieldStartTime         = "start_time"
+)
+
+// Redis Key 前缀常量
+const (
+	KeyPrefixNode      = "node:"
+	KeyPrefixHeartbeat = "heartbeat:"
+	KeySuffixNodes     = "nodes"
+)
+
 // HubStatsRepository Hub 统计信息仓库接口
 type HubStatsRepository interface {
+	// UpdateConnectionStats 批量更新连接统计(总连接数+1,活跃连接数,心跳时间)
+	UpdateConnectionStats(ctx context.Context, nodeID string, activeCount int64) error
+
 	// IncrementTotalConnections 增加总连接数
 	IncrementTotalConnections(ctx context.Context, nodeID string, delta int64) error
 
@@ -39,8 +59,8 @@ type HubStatsRepository interface {
 	// IncrementBroadcastsSent 增加已发送广播数
 	IncrementBroadcastsSent(ctx context.Context, nodeID string, delta int64) error
 
-	// SetStartTime 设置 Hub 启动时间
-	SetStartTime(ctx context.Context, nodeID string, startTime int64) error
+	// RegisterNode 注册节点并初始化统计信息（设置启动时间、添加到节点集合）
+	RegisterNode(ctx context.Context, nodeID string, startTime int64) error
 
 	// GetNodeStats 获取指定节点的统计信息
 	GetNodeStats(ctx context.Context, nodeID string) (*NodeStats, error)
@@ -63,15 +83,15 @@ type HubStatsRepository interface {
 
 // NodeStats 节点统计信息
 type NodeStats struct {
-	NodeID            string    `json:"node_id"`
-	TotalConnections  int64     `json:"total_connections"`
-	ActiveConnections int64     `json:"active_connections"`
-	MessagesSent      int64     `json:"messages_sent"`
-	MessagesReceived  int64     `json:"messages_received"`
-	BroadcastsSent    int64     `json:"broadcasts_sent"`
-	StartTime         int64     `json:"start_time"`
-	LastHeartbeat     time.Time `json:"last_heartbeat"`
-	Uptime            int64     `json:"uptime"` // 运行时间（秒）
+	NodeID            string    `json:"node_id" redis:"-"`
+	TotalConnections  int64     `json:"total_connections" redis:"total_connections"`
+	ActiveConnections int64     `json:"active_connections" redis:"active_connections"`
+	MessagesSent      int64     `json:"messages_sent" redis:"messages_sent"`
+	MessagesReceived  int64     `json:"messages_received" redis:"messages_received"`
+	BroadcastsSent    int64     `json:"broadcasts_sent" redis:"broadcasts_sent"`
+	StartTime         int64     `json:"start_time" redis:"start_time"`
+	LastHeartbeat     time.Time `json:"last_heartbeat" redis:"-"`
+	Uptime            int64     `json:"uptime" redis:"-"` // 运行时间(秒),计算字段
 }
 
 // ClusterStats 集群统计信息
@@ -111,24 +131,47 @@ func NewRedisHubStatsRepository(client *redis.Client, config *wscconfig.Stats) *
 
 // GetNodeKey 获取节点统计的 Redis key
 func (r *RedisHubStatsRepository) GetNodeKey(nodeID string) string {
-	return r.keyPrefix + "node:" + nodeID
+	return r.keyPrefix + KeyPrefixNode + nodeID
 }
 
 // GetHeartbeatKey 获取节点心跳的 Redis key
 func (r *RedisHubStatsRepository) GetHeartbeatKey(nodeID string) string {
-	return r.keyPrefix + "heartbeat:" + nodeID
+	return r.keyPrefix + KeyPrefixHeartbeat + nodeID
 }
 
 // GetNodesSetKey 获取节点集合的 Redis key
 func (r *RedisHubStatsRepository) GetNodesSetKey() string {
-	return r.keyPrefix + "nodes"
+	return r.keyPrefix + KeySuffixNodes
+}
+
+// UpdateConnectionStats 批量更新连接统计(总连接数+1,活跃连接数,心跳时间)
+// 这个方法将3个Redis操作合并到一个Pipeline中,提高性能
+func (r *RedisHubStatsRepository) UpdateConnectionStats(ctx context.Context, nodeID string, activeCount int64) error {
+	key := r.GetNodeKey(nodeID)
+	heartbeatKey := r.GetHeartbeatKey(nodeID)
+	nodesSetKey := r.GetNodesSetKey()
+
+	pipe := r.client.Pipeline()
+	// 增加总连接数
+	pipe.HIncrBy(ctx, key, FieldTotalConnections, 1)
+	// 设置活跃连接数
+	pipe.HSet(ctx, key, FieldActiveConnections, activeCount)
+	// 设置过期时间
+	pipe.Expire(ctx, key, r.statsExpire)
+	// 添加到节点集合
+	pipe.SAdd(ctx, nodesSetKey, nodeID)
+	// 更新心跳时间
+	pipe.Set(ctx, heartbeatKey, time.Now().Unix(), r.statsExpire)
+
+	_, err := pipe.Exec(ctx)
+	return err
 }
 
 // IncrementTotalConnections 增加总连接数
 func (r *RedisHubStatsRepository) IncrementTotalConnections(ctx context.Context, nodeID string, delta int64) error {
 	key := r.GetNodeKey(nodeID)
 	pipe := r.client.Pipeline()
-	pipe.HIncrBy(ctx, key, "total_connections", delta)
+	pipe.HIncrBy(ctx, key, FieldTotalConnections, delta)
 	pipe.Expire(ctx, key, r.statsExpire)
 	pipe.SAdd(ctx, r.GetNodesSetKey(), nodeID)
 	_, err := pipe.Exec(ctx)
@@ -139,7 +182,7 @@ func (r *RedisHubStatsRepository) IncrementTotalConnections(ctx context.Context,
 func (r *RedisHubStatsRepository) SetActiveConnections(ctx context.Context, nodeID string, count int64) error {
 	key := r.GetNodeKey(nodeID)
 	pipe := r.client.Pipeline()
-	pipe.HSet(ctx, key, "active_connections", count)
+	pipe.HSet(ctx, key, FieldActiveConnections, count)
 	pipe.Expire(ctx, key, r.statsExpire)
 	_, err := pipe.Exec(ctx)
 	return err
@@ -149,7 +192,7 @@ func (r *RedisHubStatsRepository) SetActiveConnections(ctx context.Context, node
 func (r *RedisHubStatsRepository) IncrementMessagesSent(ctx context.Context, nodeID string, delta int64) error {
 	key := r.GetNodeKey(nodeID)
 	pipe := r.client.Pipeline()
-	pipe.HIncrBy(ctx, key, "messages_sent", delta)
+	pipe.HIncrBy(ctx, key, FieldMessagesSent, delta)
 	pipe.Expire(ctx, key, r.statsExpire)
 	_, err := pipe.Exec(ctx)
 	return err
@@ -159,7 +202,7 @@ func (r *RedisHubStatsRepository) IncrementMessagesSent(ctx context.Context, nod
 func (r *RedisHubStatsRepository) IncrementMessagesReceived(ctx context.Context, nodeID string, delta int64) error {
 	key := r.GetNodeKey(nodeID)
 	pipe := r.client.Pipeline()
-	pipe.HIncrBy(ctx, key, "messages_received", delta)
+	pipe.HIncrBy(ctx, key, FieldMessagesReceived, delta)
 	pipe.Expire(ctx, key, r.statsExpire)
 	_, err := pipe.Exec(ctx)
 	return err
@@ -169,18 +212,19 @@ func (r *RedisHubStatsRepository) IncrementMessagesReceived(ctx context.Context,
 func (r *RedisHubStatsRepository) IncrementBroadcastsSent(ctx context.Context, nodeID string, delta int64) error {
 	key := r.GetNodeKey(nodeID)
 	pipe := r.client.Pipeline()
-	pipe.HIncrBy(ctx, key, "broadcasts_sent", delta)
+	pipe.HIncrBy(ctx, key, FieldBroadcastsSent, delta)
 	pipe.Expire(ctx, key, r.statsExpire)
 	_, err := pipe.Exec(ctx)
 	return err
 }
 
-// SetStartTime 设置 Hub 启动时间
-func (r *RedisHubStatsRepository) SetStartTime(ctx context.Context, nodeID string, startTime int64) error {
+// RegisterNode 注册节点并初始化统计信息
+func (r *RedisHubStatsRepository) RegisterNode(ctx context.Context, nodeID string, startTime int64) error {
 	key := r.GetNodeKey(nodeID)
 	pipe := r.client.Pipeline()
-	pipe.HSet(ctx, key, "start_time", startTime)
+	pipe.HSet(ctx, key, FieldStartTime, startTime)
 	pipe.Expire(ctx, key, r.statsExpire)
+	pipe.SAdd(ctx, r.GetNodesSetKey(), nodeID)
 	_, err := pipe.Exec(ctx)
 	return err
 }
@@ -194,39 +238,21 @@ func (r *RedisHubStatsRepository) UpdateNodeHeartbeat(ctx context.Context, nodeI
 // GetNodeStats 获取指定节点的统计信息
 func (r *RedisHubStatsRepository) GetNodeStats(ctx context.Context, nodeID string) (*NodeStats, error) {
 	key := r.GetNodeKey(nodeID)
-	result, err := r.client.HGetAll(ctx, key).Result()
-	if err != nil {
+
+	// 使用Scan直接映射到结构体
+	stats := &NodeStats{NodeID: nodeID}
+	if err := r.client.HGetAll(ctx, key).Scan(stats); err != nil {
 		return nil, err
 	}
 
-	if len(result) == 0 {
+	// 检查是否找到数据
+	if stats.TotalConnections == 0 && stats.ActiveConnections == 0 && stats.StartTime == 0 {
 		return nil, fmt.Errorf("node stats not found: %s", nodeID)
 	}
 
-	stats := &NodeStats{
-		NodeID: nodeID,
-	}
-
-	if val, ok := result["total_connections"]; ok {
-		stats.TotalConnections, _ = convert.MustIntT[int64](val, nil)
-	}
-	if val, ok := result["active_connections"]; ok {
-		stats.ActiveConnections, _ = convert.MustIntT[int64](val, nil)
-	}
-	if val, ok := result["messages_sent"]; ok {
-		stats.MessagesSent, _ = convert.MustIntT[int64](val, nil)
-	}
-	if val, ok := result["messages_received"]; ok {
-		stats.MessagesReceived, _ = convert.MustIntT[int64](val, nil)
-	}
-	if val, ok := result["broadcasts_sent"]; ok {
-		stats.BroadcastsSent, _ = convert.MustIntT[int64](val, nil)
-	}
-	if val, ok := result["start_time"]; ok {
-		stats.StartTime, _ = convert.MustIntT[int64](val, nil)
-		if stats.StartTime > 0 {
-			stats.Uptime = time.Now().Unix() - stats.StartTime
-		}
+	// 计算运行时间
+	if stats.StartTime > 0 {
+		stats.Uptime = time.Now().Unix() - stats.StartTime
 	}
 
 	// 获取心跳时间
@@ -293,9 +319,7 @@ func (r *RedisHubStatsRepository) GetTotalStats(ctx context.Context) (*ClusterSt
 
 // GetActiveNodes 获取活跃的节点列表（基于心跳）
 func (r *RedisHubStatsRepository) GetActiveNodes(ctx context.Context, timeout time.Duration) ([]string, error) {
-	if timeout <= 0 {
-		timeout = 5 * time.Minute // 默认 5 分钟
-	}
+	timeout = mathx.IfEmpty(timeout, 5*time.Minute)
 
 	nodeIDs, err := r.client.SMembers(ctx, r.GetNodesSetKey()).Result()
 	if err != nil {

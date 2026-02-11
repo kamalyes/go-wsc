@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
-	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-toolbox/pkg/zipx"
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/redis/go-redis/v9"
@@ -30,9 +29,6 @@ type MessageQueueRepository interface {
 
 	// Dequeue 出队消息(阻塞式,带看门狗锁)
 	Dequeue(ctx context.Context, queueName string, timeout time.Duration) (*models.HubMessage, error)
-
-	// DequeueWithWatchdog 出队消息并启动看门狗锁
-	DequeueWithWatchdog(ctx context.Context, queueName string, timeout time.Duration, processFunc func(*models.HubMessage) error) error
 
 	// GetLength 获取队列长度
 	GetLength(ctx context.Context, queueName string) (int64, error)
@@ -117,90 +113,6 @@ func (r *RedisMessageQueueRepository) Dequeue(ctx context.Context, queueName str
 	return msg, nil
 }
 
-// DequeueWithWatchdog 出队消息并启动看门狗锁
-// 使用处理队列和看门狗机制防止消息丢失
-func (r *RedisMessageQueueRepository) DequeueWithWatchdog(ctx context.Context, queueName string, timeout time.Duration, processFunc func(*models.HubMessage) error) error {
-	sourceKey := r.prefix + queueName
-	processingKey := r.prefix + queueName + ":processing"
-
-	// 1. 使用 BRPOPLPUSH 原子性地从源队列移到处理队列
-	//    这样即使进程崩溃,消息仍在processing队列中
-	result, err := r.client.BRPopLPush(ctx, sourceKey, processingKey, timeout).Result()
-	if err != nil {
-		if err == redis.Nil {
-			return nil // 超时,无数据
-		}
-		return fmt.Errorf("brpoplpush failed: %w", err)
-	}
-
-	// 2. 使用 Zlib 解压缩消息
-	msg, err := zipx.ZlibDecompressObject[*models.HubMessage]([]byte(result))
-	if err != nil {
-		return fmt.Errorf(models.ErrMsgDecompressFailed, err)
-	}
-
-	// 3. 使用per-message lock key防止并发冲突
-	lockKey := r.prefix + queueName + ":lock:" + msg.ID
-
-	// 启动看门狗锁
-	lockCtx, cancelLock := context.WithCancel(ctx)
-	defer cancelLock()
-
-	lockExpiry := 30 * time.Second
-	renewInterval := 10 * time.Second
-
-	// 获取初始锁
-	locked, err := r.client.SetNX(lockCtx, lockKey, msg.ID, lockExpiry).Result()
-	if err != nil || !locked {
-		// 锁被占用,可能是重复处理,跳过
-		return fmt.Errorf("failed to acquire lock for message %s", msg.ID)
-	}
-
-	// 启动看门狗goroutine自动续期
-	watchdogDone := make(chan struct{})
-	syncx.Go(lockCtx).
-		OnPanic(func(r any) {
-			// 看门狗 panic，记录日志但不影响主流程
-			close(watchdogDone)
-		}).
-		Exec(func() {
-			defer close(watchdogDone)
-			ticker := time.NewTicker(renewInterval)
-			defer ticker.Stop()
-
-			for {
-				select {
-				case <-lockCtx.Done():
-					return
-				case <-ticker.C:
-					// 续期锁
-					_, _ = r.client.Expire(lockCtx, lockKey, lockExpiry).Result()
-				}
-			}
-		})
-
-	// 4. 处理消息
-	processErr := processFunc(msg)
-
-	// 5. 停止看门狗
-	cancelLock()
-	<-watchdogDone
-
-	// 6. 删除锁
-	r.client.Del(ctx, lockKey)
-
-	// 7. 从处理队列中移除消息(无论成功还是失败)
-	r.client.LRem(ctx, processingKey, 1, result)
-
-	// 8. 如果处理失败,可以选择重新入队或记录错误
-	if processErr != nil {
-		// 这里可以实现重试逻辑,暂时只返回错误
-		return fmt.Errorf("process message failed: %w", processErr)
-	}
-
-	return nil
-}
-
 // GetLength 获取队列长度
 func (r *RedisMessageQueueRepository) GetLength(ctx context.Context, queueName string) (int64, error) {
 	key := r.prefix + queueName
@@ -241,4 +153,3 @@ func (r *RedisMessageQueueRepository) Peek(ctx context.Context, queueName string
 
 	return msg, nil
 }
-

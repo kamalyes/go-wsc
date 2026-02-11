@@ -22,7 +22,6 @@ import (
 	"github.com/kamalyes/go-sqlbuilder"
 	"github.com/kamalyes/go-toolbox/pkg/contextx"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
-	"github.com/kamalyes/go-toolbox/pkg/metadata"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/protocol"
@@ -68,21 +67,23 @@ func (h *Hub) logWithClient(level logger.LogLevel, msg string, client *Client, e
 // 客户端管理辅助方法
 // ============================================================================
 
-// syncClientStats 同步客户端统计信息到Redis
-func (h *Hub) syncClientStats(clientCount int) {
+// syncClientStats 同步客户端统计信息到Redis（内部获取最新连接数）
+func (h *Hub) syncClientStats() {
 	if h.statsRepo == nil {
 		return
 	}
 
 	syncx.Go().
-		WithTimeout(2 * time.Second).
+		WithTimeout(5 * time.Second).
 		OnPanic(func(r interface{}) {
 			h.logger.ErrorKV("同步客户端统计崩溃", "panic", r)
 		}).
 		ExecWithContext(func(ctx context.Context) error {
-			_ = h.statsRepo.IncrementTotalConnections(ctx, h.nodeID, 1)
-			_ = h.statsRepo.SetActiveConnections(ctx, h.nodeID, int64(clientCount))
-			_ = h.statsRepo.UpdateNodeHeartbeat(ctx, h.nodeID)
+			// 在异步任务中读取最新连接数
+			count := syncx.WithRLockReturnValue(&h.mutex, func() int {
+				return len(h.clients)
+			})
+			_ = h.statsRepo.UpdateConnectionStats(ctx, h.nodeID, int64(count))
 			return nil
 		})
 }
@@ -112,75 +113,64 @@ func (h *Hub) syncOnlineStatus(client *Client) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
+	h.logger.DebugKV("开始同步在线状态到Redis",
+		"user_id", client.UserID,
+		"client_id", client.ID,
+	)
+
 	if err := h.onlineStatusRepo.SetOnline(ctx, client); err != nil {
 		h.logger.ErrorKV("同步在线状态到Redis失败",
 			"user_id", client.UserID,
 			"error", err,
+		)
+	} else {
+		h.logger.DebugKV("同步在线状态到Redis成功",
+			"user_id", client.UserID,
+			"client_id", client.ID,
 		)
 	}
 }
 
 // CreateConnectionRecord 从 Client 创建连接记录
 func (h *Hub) CreateConnectionRecord(client *Client) *ConnectionRecord {
-	now := time.Now()
-
 	record := &ConnectionRecord{
 		ConnectionID: client.ID,
 		UserID:       client.UserID,
-		NodeID:       h.GetNodeID(),
-		ClientType:   string(client.ClientType),
-		ConnectedAt:  now,
+		NodeID:       client.NodeID,
+		NodeIP:       client.NodeIP,
+		NodePort:     client.NodePort,
+		Protocol:     client.ConnectionType,
+		ClientType:   client.ClientType,
+		ConnectedAt:  client.ConnectedAt,
 		IsActive:     true,
 	}
 
-	// 设置节点信息
-	if h.config != nil {
-		record.NodeIP = h.config.NodeIP
-		record.NodePort = h.config.NodePort
-	}
-
-	// 从 Metadata 提取索引字段
-	if client.Metadata != nil {
-		meta := metadata.FromMap(client.Metadata)
-		record.ClientIP = meta.ClientIP
-		if meta.Protocol != "" {
-			record.Protocol = meta.Protocol
-		} else {
-			record.Protocol = "websocket"
-		}
-	} else {
-		record.Protocol = "websocket"
-	}
-
-	// 设置 metadata (如果存在)
-	if client.Metadata != nil {
-		record.Metadata = sqlbuilder.MapAny(client.Metadata)
-	}
+	// 设置 metadata
+	record.Metadata = sqlbuilder.MapAny(client.Metadata)
 
 	return record
 }
 
-// saveConnectionRecord 保存连接记录到数据库
+// saveConnectionRecord 保存或更新连接记录到数据库
 func (h *Hub) saveConnectionRecord(record *ConnectionRecord) {
 	if h.connectionRecordRepo == nil {
 		return
 	}
 
 	syncx.Go().
-		WithTimeout(5 * time.Second).
+		WithTimeout(10 * time.Second).
 		OnPanic(func(r interface{}) {
-			h.logger.ErrorKV("保存连接记录崩溃", "panic", r, "connection_id", record.ConnectionID)
+			h.logger.ErrorKV("保存连接记录崩溃", "panic", r, "user_id", record.UserID)
+		}).
+		OnError(func(err error) {
+			h.logger.ErrorKV("保存连接记录失败",
+				"user_id", record.UserID,
+				"connection_id", record.ConnectionID,
+				"error", err,
+			)
 		}).
 		ExecWithContext(func(ctx context.Context) error {
-			err := h.connectionRecordRepo.Create(ctx, record)
-			if err == nil {
-				h.logger.InfoKV("连接记录已保存",
-					"connection_id", record.ConnectionID,
-					"user_id", record.UserID,
-					"client_ip", record.ClientIP,
-				)
-			}
-			return err
+			return h.connectionRecordRepo.Upsert(ctx, record)
 		})
 }
 
@@ -193,7 +183,7 @@ func (h *Hub) updateConnectionOnDisconnect(client *Client, reason DisconnectReas
 	syncx.Go().
 		WithTimeout(5 * time.Second).
 		OnPanic(func(r interface{}) {
-			h.logger.ErrorKV("更新连接断开记录崩溃", "panic", r, "connection_id", client.ID)
+			h.logger.ErrorKV("更新连接断开记录崩溃", "panic", r, "user_id", client.UserID)
 		}).
 		ExecWithContext(func(ctx context.Context) error {
 			return h.connectionRecordRepo.MarkDisconnected(ctx, client.ID, reason, 1000, string(reason))
@@ -440,6 +430,8 @@ func (h *Hub) handleClientRead(client *Client) {
 			} else {
 				// 异常断开 - 记录详细信息用于排查
 				h.logWithClient(logger.WARN, "客户端异常断开", client, "close_code", closeCode, "code_desc", codeDesc, "error", errStr)
+				// 记录错误到连接记录
+				h.trackConnectionError(client.ID, client.UserType, err)
 			}
 			return
 		}
@@ -560,6 +552,10 @@ func (h *Hub) InvokeMessageReceivedCallback(ctx context.Context, client *Client,
 	if h.messageReceivedCallback == nil {
 		return nil
 	}
+
+	// 规范化消息字段（补充发送者信息等）
+	h.normalizeMessageFields(client, msg)
+
 	return h.messageReceivedCallback(ctx, client, msg)
 }
 
@@ -570,6 +566,124 @@ func (h *Hub) InvokeErrorCallback(ctx context.Context, err error, severity Error
 		return nil
 	}
 	return h.errorCallback(ctx, err, severity)
+}
+
+// ============================================================================
+// 连接统计辅助方法
+// ============================================================================
+
+// shouldTrackUserStats 判断是否应该追踪用户统计（排除系统、机器人、观察者）
+func (h *Hub) shouldTrackUserStats(userType UserType) bool {
+	return userType != UserTypeSystem &&
+		userType != UserTypeBot &&
+		userType != UserTypeObserver
+}
+
+// trackSenderMessageStats 追踪发送者的消息统计
+func (h *Hub) trackSenderMessageStats(connectionID string, senderType UserType) {
+	if h.connectionRecordRepo == nil || connectionID == "" {
+		return
+	}
+
+	// 排除系统、机器人、观察者
+	if !h.shouldTrackUserStats(senderType) {
+		return
+	}
+
+	syncx.Go().
+		WithTimeout(5 * time.Second).
+		OnPanic(func(r any) {
+			h.logger.ErrorKV("更新发送统计崩溃", "panic", r, "connection_id", connectionID)
+		}).
+		ExecWithContext(func(ctx context.Context) error {
+			if err := h.connectionRecordRepo.IncrementMessageStats(ctx, connectionID, 1, 0); err != nil {
+				h.logger.DebugKV("更新发送消息统计失败", "connection_id", connectionID, "error", err)
+			}
+			return nil
+		})
+}
+
+// trackReceiverMessageStats 追踪接收者的消息和字节统计
+func (h *Hub) trackReceiverMessageStats(connectionID string, receiverType UserType, dataSize int) {
+	if h.connectionRecordRepo == nil || connectionID == "" {
+		return
+	}
+
+	// 排除系统、机器人、观察者
+	if !h.shouldTrackUserStats(receiverType) {
+		return
+	}
+
+	syncx.Go().
+		WithTimeout(5 * time.Second).
+		OnPanic(func(r any) {
+			h.logger.ErrorKV("更新接收统计崩溃", "panic", r, "connection_id", connectionID)
+		}).
+		ExecWithContext(func(ctx context.Context) error {
+			// 增加接收消息计数
+			if err := h.connectionRecordRepo.IncrementMessageStats(ctx, connectionID, 0, 1); err != nil {
+				h.logger.DebugKV("更新接收消息统计失败", "connection_id", connectionID, "error", err)
+			}
+			// 增加接收字节数
+			if err := h.connectionRecordRepo.IncrementBytesStats(ctx, connectionID, 0, int64(dataSize)); err != nil {
+				h.logger.DebugKV("更新接收字节统计失败", "connection_id", connectionID, "error", err)
+			}
+			return nil
+		})
+}
+
+// trackConnectionError 追踪连接错误
+func (h *Hub) trackConnectionError(connectionID string, userType UserType, err error) {
+	if h.connectionRecordRepo == nil || connectionID == "" || err == nil {
+		return
+	}
+
+	// 排除系统、机器人、观察者
+	if !h.shouldTrackUserStats(userType) {
+		return
+	}
+
+	syncx.Go().
+		WithTimeout(5 * time.Second).
+		OnPanic(func(r any) {
+			h.logger.ErrorKV("记录连接错误崩溃", "panic", r, "connection_id", connectionID)
+		}).
+		ExecWithContext(func(ctx context.Context) error {
+			return h.connectionRecordRepo.AddError(ctx, connectionID, err)
+		})
+}
+
+// trackHeartbeatStats 追踪心跳和Ping统计
+func (h *Hub) trackHeartbeatStats(client *Client) {
+	if h.connectionRecordRepo == nil || client == nil {
+		return
+	}
+
+	// 排除系统、机器人、观察者
+	if !h.shouldTrackUserStats(client.UserType) {
+		return
+	}
+
+	now := time.Now()
+	syncx.Go().
+		WithTimeout(5 * time.Second).
+		OnPanic(func(r any) {
+			h.logger.ErrorKV("更新心跳统计崩溃", "panic", r, "user_id", client.UserID)
+		}).
+		ExecWithContext(func(ctx context.Context) error {
+			if err := h.connectionRecordRepo.UpdateHeartbeat(ctx, client.ID, &client.LastHeartbeat, &client.LastPong); err != nil {
+				h.logger.DebugKV("更新连接记录心跳失败", "user_id", client.UserID, "error", err)
+			}
+
+			// 计算Ping延迟（如果客户端有上次心跳时间）
+			if !client.LastHeartbeat.IsZero() {
+				pingMs := float64(now.Sub(client.LastHeartbeat).Milliseconds())
+				if err := h.connectionRecordRepo.UpdatePingStats(ctx, client.ID, pingMs); err != nil {
+					h.logger.DebugKV("更新Ping统计失败", "user_id", client.UserID, "error", err)
+				}
+			}
+			return nil
+		})
 }
 
 // normalizeMessageFields 规范化消息字段（补充缺失的字段）
@@ -661,10 +775,13 @@ func (h *Hub) handleDirectMessage(msg *HubMessage) {
 	receiverClients := h.GetClientsCopyForUser(msg.Receiver, msg.ReceiverClient)
 
 	if len(receiverClients) > 0 {
-		// 增加消息发送统计
+		// 增加消息发送统计（异步更新，避免阻塞消息发送）
 		if h.statsRepo != nil {
 			syncx.Go().
 				WithTimeout(1 * time.Second).
+				OnError(func(err error) {
+					h.logger.ErrorKV("更新消息统计失败", "error", err, "node_id", h.nodeID)
+				}).
 				ExecWithContext(func(ctx context.Context) error {
 					return h.statsRepo.IncrementMessagesSent(ctx, h.nodeID, 1)
 				})
@@ -674,11 +791,13 @@ func (h *Hub) handleDirectMessage(msg *HubMessage) {
 		for _, receiverClient := range receiverClients {
 			h.sendToClient(receiverClient, msg)
 		}
-		return
+	} else if h.SendToUserViaSSE(msg.Receiver, msg) {
+		h.logger.DebugKV("消息已通过SSE发送", "message_id", msg.MessageID)
 	}
 
-	if h.SendToUserViaSSE(msg.Receiver, msg) {
-		h.logger.DebugKV("消息已通过SSE发送", "message_id", msg.MessageID)
+	// 🔥 多端同步：如果发送者有多个设备在线，同步给发送者的其他设备（排除当前发送设备）
+	if msg.Sender != "" && msg.SenderClient != "" {
+		h.syncToSenderDevices(msg)
 	}
 }
 
@@ -687,6 +806,9 @@ func (h *Hub) handleBroadcastMessage(msg *HubMessage) {
 	if h.statsRepo != nil {
 		syncx.Go().
 			WithTimeout(1 * time.Second).
+			OnError(func(err error) {
+				h.logger.ErrorKV("更新广播统计失败", "error", err, "node_id", h.nodeID)
+			}).
 			ExecWithContext(func(ctx context.Context) error {
 				return h.statsRepo.IncrementBroadcastsSent(ctx, h.nodeID, 1)
 			})
@@ -824,6 +946,9 @@ func (h *Hub) sendToClient(client *Client, msg *HubMessage) {
 				return h.messageRecordRepo.UpdateStatus(ctx, msgID, MessageSendStatusSuccess, "", "")
 			})
 		}
+
+		// 更新接收者的消息统计和字节统计
+		h.trackReceiverMessageStats(client.ID, client.UserType, len(data))
 	} else {
 		h.logger.WarnKV("客户端发送通道已满或已关闭", "client_id", client.ID)
 		// 发送通道已满或已关闭，更新为失败状态
@@ -880,49 +1005,62 @@ func (h *Hub) addNewClient(client *Client) {
 }
 
 // kickExistingClientsUnsafe 踢掉现有客户端（不加锁）
-func (h *Hub) kickExistingClientsUnsafe(userID string, clients map[string]*Client, reason DisconnectReason) {
+func (h *Hub) kickExistingClientsUnsafe(clients map[string]*Client, reason DisconnectReason) {
 	for _, client := range clients {
-		// 1. 发送强制下线通知给旧连接
-		if client.Conn != nil {
-			forceOfflineMsg := models.NewHubMessage().
-				SetMessageType(models.MessageTypeForceOffline).
-				SetSender("system").
-				SetSenderType(models.UserTypeSystem).
-				SetReceiver(client.UserID).
-				SetReceiverType(client.UserType).
-				SetContent("您的账号在其他设备登录，当前连接将被断开")
+		h.kickClientWithNotification(client, reason, "您的账号在其他设备登录，当前连接将被断开")
 
-			// 同步发送通知（确保在断开前送达）
-			h.sendToClient(client, forceOfflineMsg)
-			// 等待消息发送完成
-			time.Sleep(100 * time.Millisecond)
-		}
-
-		// 2. 记录日志并注销连接
 		h.logger.InfoKV("踢出旧连接",
-			"user_id", userID,
+			"user_id", client.UserID,
 			"client_id", client.ID,
 			"reason", reason,
 		)
-		h.Unregister(client)
 	}
 }
 
-// kickOldestConnection 踢掉最早的连接
+// kickOldestConnection 踢掉最不活跃的连接（基于最后心跳时间）
+// 优先踢掉长时间没有心跳的连接，保留活跃连接
 func (h *Hub) kickOldestConnection(clients map[string]*Client) {
 	var oldestClient *Client
 	var oldestTime time.Time
 
+	// 找出最久没有心跳的客户端
 	for _, client := range clients {
-		if oldestClient == nil || client.LastSeen.Before(oldestTime) {
+		if oldestClient == nil || client.LastHeartbeat.Before(oldestTime) {
 			oldestClient = client
-			oldestTime = client.LastSeen
+			oldestTime = client.LastHeartbeat
 		}
 	}
 
-	if oldestClient != nil {
-		h.Unregister(oldestClient)
+	if oldestClient == nil {
+		return
 	}
+
+	h.logger.InfoKV("踢掉最不活跃的连接",
+		"client_id", oldestClient.ID,
+		"user_id", oldestClient.UserID,
+		"last_heartbeat", oldestClient.LastHeartbeat,
+		"connected_at", oldestClient.ConnectedAt,
+	)
+
+	h.kickClientWithNotification(oldestClient, DisconnectReasonForceOffline, "连接数已达上限，当前连接将被断开")
+}
+
+// kickClientWithNotification 踢掉客户端并发送通知（公共方法）
+func (h *Hub) kickClientWithNotification(client *Client, reason DisconnectReason, message string) {
+	// 发送强制下线通知
+	if client.Conn != nil {
+		forceOfflineMsg := models.NewHubMessage().
+			SetMessageType(models.MessageTypeForceOffline).
+			SetSender("system").
+			SetSenderType(models.UserTypeSystem).
+			SetReceiver(client.UserID).
+			SetReceiverType(client.UserType).
+			SetContent(message)
+
+		h.sendToClient(client, forceOfflineMsg)
+		time.Sleep(100 * time.Millisecond) // 等待消息发送
+	}
+	h.Unregister(client)
 }
 
 // ============================================================================
@@ -1088,4 +1226,40 @@ func CopyClientsFromMap(clientMap map[string]*Client) []*Client {
 		clients = append(clients, client)
 	}
 	return clients
+}
+
+// syncToSenderDevices 同步消息给发送者的其他设备（多端同步）
+// 场景：用户A在设备B、C、D登录，设备B发送消息给用户F，设备C和D应该收到此消息
+func (h *Hub) syncToSenderDevices(msg *HubMessage) {
+	if msg.Sender == "" {
+		return
+	}
+
+	// 获取发送者的所有在线设备
+	senderClients := h.GetClientsCopyForUser(msg.Sender, "")
+	if len(senderClients) <= 1 {
+		// 只有一个设备或没有设备，无需同步
+		return
+	}
+
+	// 过滤掉发送消息的设备（排除自己）
+	otherDevices := mathx.FilterSlice(senderClients, func(client *Client) bool {
+		return client.ID != msg.SenderClient
+	})
+
+	if len(otherDevices) == 0 {
+		return
+	}
+
+	h.logger.DebugKV("🔄 多端同步消息给发送者的其他设备",
+		"sender", msg.Sender,
+		"sender_client", msg.SenderClient,
+		"other_devices_count", len(otherDevices),
+		"message_id", msg.MessageID,
+	)
+
+	// 发送给发送者的其他设备
+	for _, device := range otherDevices {
+		h.sendToClient(device, msg)
+	}
 }

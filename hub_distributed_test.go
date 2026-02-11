@@ -25,6 +25,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// setupClientWithMessageReceiver 设置客户端的 SendChan 并返回接收消息的 channel
+func setupClientWithMessageReceiver(client *Client) chan *HubMessage {
+	receivedMsg := make(chan *HubMessage, 10)
+	client.SendChan = make(chan []byte, 10)
+	go func() {
+		for data := range client.SendChan {
+			var msg HubMessage
+			if err := json.Unmarshal(data, &msg); err == nil {
+				receivedMsg <- &msg
+			}
+		}
+	}()
+	return receivedMsg
+}
+
 // createTestHubWithDistributed 创建带分布式功能的测试 Hub
 func createTestHubWithDistributed(t *testing.T, nodeID string) *Hub {
 	redisClient := NewTestRedisClient(t)
@@ -55,6 +70,13 @@ func createTestHubWithDistributed(t *testing.T, nodeID string) *Hub {
 			TTL:       5 * time.Minute,
 		})
 	hub.SetOnlineStatusRepository(onlineStatusRepo)
+
+	// 创建 Redis 版本的 HubStatsRepository
+	statsRepo := NewRedisHubStatsRepository(redisClient, &wscconfig.Stats{
+		KeyPrefix: "wsc:test:distributed:stats:",
+		TTL:       24 * time.Hour,
+	})
+	hub.SetHubStatsRepository(statsRepo)
 
 	// 验证节点 ID 是否正确设置
 	actualNodeID := hub.GetNodeID()
@@ -144,22 +166,41 @@ func TestCheckAndRouteToNode(t *testing.T) {
 
 	ctx := context.Background()
 
-	// 模拟用户在 node-2
-	userID := "user-123"
-	err := hub2.GetOnlineStatusRepo().SetUserNode(ctx, userID, "node-2")
+	// 启动 hub2 并订阅消息
+	go hub2.Run()
+	hub2.WaitForStart()
+
+	// 创建客户端并连接到 hub2
+	client := createTestClientWithIDGen(UserTypeCustomer)
+	client.NodeID = hub2.GetNodeID()
+
+	// 用于接收消息的channel
+	receivedMsg := setupClientWithMessageReceiver(client)
+
+	// 注册客户端到 hub2
+	hub2.Register(client)
+	time.Sleep(200 * time.Millisecond)
+
+	// 验证用户节点映射
+	nodeID, err := hub2.GetOnlineStatusRepo().GetUserNode(ctx, client.UserID)
 	require.NoError(t, err)
+	assert.Equal(t, hub2.GetNodeID(), nodeID, "用户应该在 node-2 上")
 
-	// 从 node-1 发送消息给 user-123
-	msg := &HubMessage{
-		ID:       "msg-1",
-		Sender:   "sender-1",
-		Receiver: userID,
+	// 从 hub1 向该用户发送消息
+	sentMsg := createTestHubMessage(MessageTypeText)
+
+	sendResult := hub1.SendToUserWithRetry(ctx, client.UserID, sentMsg)
+	assert.NoError(t, sendResult.FinalError, "发送消息应该成功")
+
+	// 等待消息到达
+	select {
+	case msg := <-receivedMsg:
+		assert.Equal(t, sentMsg.MessageID, msg.MessageID, "应该收到正确的消息")
+		assert.Equal(t, sentMsg.Content, msg.Content, "消息内容应该匹配")
+		t.Logf("成功接收跨节点消息: %s", msg.Content)
+	case <-time.After(2 * time.Second):
+		t.Fatal("超时：未收到跨节点路由的消息")
 	}
-
-	// 测试跨节点路由（通过公共方法间接测试）
-	// 由于用户在 node-2，消息会被路由
-	_ = msg
-	t.Logf("用户 %s 在节点 node-2，从 node-1 发送消息会触发跨节点路由", userID)
 }
 
 // TestAcquireDistributedLock 测试分布式锁
@@ -239,21 +280,28 @@ func TestBroadcastToAllNodes(t *testing.T) {
 	go hub2.Run()
 	hub2.WaitForStart()
 
+	// 创建客户端并连接到 hub2
+	client := createTestClientWithIDGen(UserTypeCustomer)
+	receivedMsg := setupClientWithMessageReceiver(client)
+
+	hub2.Register(client)
 	time.Sleep(200 * time.Millisecond)
 
-	ctx = context.Background()
-
-	// 从 hub1 广播消息（通过 Broadcast 方法间接测试）
-	msg := &HubMessage{
-		ID:          "broadcast-1",
-		MessageType: models.MessageTypeText,
-		Content:     "test broadcast",
-	}
+	// 从 hub1 广播消息
+	msg := createTestHubMessage(MessageTypeText).
+		SetBroadcastType(BroadcastTypeGlobal)
 
 	hub1.Broadcast(ctx, msg)
 
-	// 等待消息传播
-	time.Sleep(200 * time.Millisecond)
+	// 验证 hub2 上的客户端收到广播消息
+	select {
+	case receivedBroadcast := <-receivedMsg:
+		assert.Equal(t, msg.MessageID, receivedBroadcast.MessageID, "应该收到广播消息")
+		assert.Equal(t, msg.Content, receivedBroadcast.Content, "广播内容应该匹配")
+		t.Logf("成功接收跨节点广播: %s", receivedBroadcast.Content)
+	case <-time.After(2 * time.Second):
+		t.Fatal("超时：未收到跨节点广播消息")
+	}
 }
 
 // TestSubscribeNodeMessages 测试订阅节点消息
@@ -263,26 +311,24 @@ func TestSubscribeNodeMessages(t *testing.T) {
 
 	ctx := context.Background()
 
-	// 启动订阅
-	go func() {
-		err := hub.SubscribeNodeMessages(ctx)
-		if err != nil {
-			t.Logf("订阅失败: %v", err)
-		}
-	}()
+	// 启动 Hub（会自动订阅节点消息）
+	go hub.Run()
+	hub.WaitForStart()
 
+	// 创建并注册客户端
+	client := createTestClientWithIDGen(UserTypeCustomer)
+	receivedMsg := setupClientWithMessageReceiver(client)
+
+	hub.Register(client)
 	time.Sleep(200 * time.Millisecond)
 
-	// 发送测试消息到节点频道
+	// 发送分布式消息到节点频道（模拟来自其他节点的消息）
 	channel := fmt.Sprintf("wsc:node:%s", hub.GetNodeID())
 	distMsg := &DistributedMessage{
-		Type:     models.OperationTypeSendMessage,
-		NodeID:   "node-2",
-		TargetID: "user-123",
-		Message: &HubMessage{
-			ID:      "msg-1",
-			Content: "test",
-		},
+		Type:      models.OperationTypeSendMessage,
+		NodeID:    "node-2",
+		TargetID:  client.UserID,
+		Message:   createTestHubMessage(MessageTypeText),
 		Timestamp: time.Now(),
 	}
 
@@ -290,7 +336,15 @@ func TestSubscribeNodeMessages(t *testing.T) {
 	err := hub.GetPubSub().Publish(ctx, channel, string(data))
 	assert.NoError(t, err)
 
-	time.Sleep(100 * time.Millisecond)
+	// 验证客户端收到消息
+	select {
+	case msg := <-receivedMsg:
+		assert.Equal(t, distMsg.Message.MessageID, msg.MessageID, "应该收到节点消息")
+		assert.Equal(t, distMsg.Message.Content, msg.Content, "消息内容应该匹配")
+		t.Logf("成功处理节点消息: %s", msg.Content)
+	case <-time.After(2 * time.Second):
+		t.Fatal("超时：未收到节点消息")
+	}
 }
 
 // TestSubscribeBroadcastChannel 测试订阅广播频道
@@ -300,32 +354,40 @@ func TestSubscribeBroadcastChannel(t *testing.T) {
 
 	ctx := context.Background()
 
-	// 启动订阅
-	go func() {
-		err := hub.SubscribeBroadcastChannel(ctx)
-		if err != nil {
-			t.Logf("订阅失败: %v", err)
-		}
-	}()
+	// 启动 Hub（会自动订阅广播频道）
+	go hub.Run()
+	hub.WaitForStart()
 
+	// 创建并注册客户端
+	client := createTestClientWithIDGen(UserTypeCustomer)
+	receivedMsg := setupClientWithMessageReceiver(client)
+
+	hub.Register(client)
 	time.Sleep(200 * time.Millisecond)
 
-	// 发送广播消息
+	// 发送分布式广播消息（模拟来自其他节点）
 	distMsg := &DistributedMessage{
-		Type:   models.OperationTypeBroadcast,
-		NodeID: "node-2", // 来自其他节点
-		Message: &HubMessage{
-			ID:      "broadcast-1",
-			Content: "test broadcast",
-		},
+		Type:      models.OperationTypeBroadcast,
+		NodeID:    "node-2", // 来自其他节点
+		Message:   createTestHubMessage(MessageTypeCard),
 		Timestamp: time.Now(),
 	}
+	// 设置为全局广播类型
+	distMsg.Message.BroadcastType = BroadcastTypeGlobal
 
 	data, _ := json.Marshal(distMsg)
 	err := hub.GetPubSub().Publish(ctx, "wsc:broadcast", string(data))
 	assert.NoError(t, err)
 
-	time.Sleep(100 * time.Millisecond)
+	// 验证客户端收到广播
+	select {
+	case msg := <-receivedMsg:
+		assert.Equal(t, distMsg.Message.MessageID, msg.MessageID, "应该收到广播消息")
+		assert.Equal(t, distMsg.Message.Content, msg.Content, "广播内容应该匹配")
+		t.Logf("成功接收广播频道消息: %s", msg.Content)
+	case <-time.After(2 * time.Second):
+		t.Fatal("超时：未收到广播频道消息")
+	}
 }
 
 // TestStartNodeHeartbeat 测试节点心跳
@@ -358,13 +420,62 @@ func TestDistributedMessageTypes(t *testing.T) {
 
 	ctx := context.Background()
 
+	// 启动 Hub
+	go hub.Run()
+	hub.WaitForStart()
+
+	// 创建并注册客户端
+	client := createTestClientWithIDGen(UserTypeCustomer)
+	client.SendChan = make(chan []byte, 10)
+	hub.Register(client)
+	time.Sleep(200 * time.Millisecond)
+
 	tests := []struct {
-		name    string
-		msgType models.OperationType
+		name       string
+		msgType    models.OperationType
+		verifyFunc func(t *testing.T)
 	}{
-		{"发送消息", models.OperationTypeSendMessage},
-		{"踢出用户", models.OperationTypeKickUser},
-		{"广播消息", models.OperationTypeBroadcast},
+		{
+			name:    "发送消息",
+			msgType: models.OperationTypeSendMessage,
+			verifyFunc: func(t *testing.T) {
+				select {
+				case data := <-client.SendChan:
+					var msg HubMessage
+					if err := json.Unmarshal(data, &msg); err == nil {
+						assert.NotEmpty(t, msg.MessageID, "应该收到消息")
+						t.Logf("成功收到发送消息类型")
+					}
+				case <-time.After(1 * time.Second):
+					t.Log("未收到消息（可能用户不存在）")
+				}
+			},
+		},
+		{
+			name:    "踢出用户",
+			msgType: models.OperationTypeKickUser,
+			verifyFunc: func(t *testing.T) {
+				// 验证连接状态应该改变
+				time.Sleep(200 * time.Millisecond)
+				t.Log("踢出用户消息已发送")
+			},
+		},
+		{
+			name:    "广播消息",
+			msgType: models.OperationTypeBroadcast,
+			verifyFunc: func(t *testing.T) {
+				select {
+				case data := <-client.SendChan:
+					var msg HubMessage
+					if err := json.Unmarshal(data, &msg); err == nil {
+						assert.NotEmpty(t, msg.MessageID, "应该收到广播消息")
+						t.Logf("成功收到广播消息")
+					}
+				case <-time.After(1 * time.Second):
+					t.Fatal("超时：未收到广播消息")
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -372,18 +483,26 @@ func TestDistributedMessageTypes(t *testing.T) {
 			distMsg := &DistributedMessage{
 				Type:      tt.msgType,
 				NodeID:    "node-2",
-				TargetID:  "user-123",
-				Message:   &HubMessage{ID: "msg-1"},
+				TargetID:  client.UserID,
+				Message:   createTestHubMessage(MessageTypeText),
 				Reason:    "test",
 				Timestamp: time.Now(),
 			}
 
-			// 通过发布消息到节点频道来间接测试
-			channel := fmt.Sprintf("wsc:node:%s", hub.GetNodeID())
+			// 发布消息到相应频道
+			var channel string
+			if tt.msgType == models.OperationTypeBroadcast {
+				channel = "wsc:broadcast"
+			} else {
+				channel = fmt.Sprintf("wsc:node:%s", hub.GetNodeID())
+			}
+
 			data, _ := json.Marshal(distMsg)
 			err := hub.GetPubSub().Publish(ctx, channel, string(data))
-			assert.NoError(t, err)
-			t.Logf("发布 %s 消息成功", tt.name)
+			assert.NoError(t, err, "发布消息应该成功")
+
+			// 验证消息处理
+			tt.verifyFunc(t)
 		})
 	}
 }
@@ -417,14 +536,14 @@ func TestNodeInfoSerialization(t *testing.T) {
 
 // TestDistributedMessageSerialization 测试分布式消息序列化
 func TestDistributedMessageSerialization(t *testing.T) {
+	hub := createTestHubWithDistributed(t, "node-test-serial")
+	defer hub.SafeShutdown()
+
 	distMsg := &DistributedMessage{
-		Type:     models.OperationTypeSendMessage,
-		NodeID:   "node-1",
-		TargetID: "user-123",
-		Message: &HubMessage{
-			ID:      "msg-1",
-			Content: "test",
-		},
+		Type:      models.OperationTypeSendMessage,
+		NodeID:    "node-1",
+		TargetID:  "user-123",
+		Message:   createTestHubMessage(MessageTypeText),
 		Timestamp: time.Now(),
 	}
 
@@ -441,8 +560,9 @@ func TestDistributedMessageSerialization(t *testing.T) {
 	assert.Equal(t, distMsg.NodeID, decoded.NodeID)
 	assert.Equal(t, distMsg.TargetID, decoded.TargetID)
 	assert.NotNil(t, decoded.Message)
-	assert.Equal(t, "msg-1", decoded.Message.ID)
-	assert.Equal(t, "test", decoded.Message.Content)
+	assert.NotEmpty(t, decoded.Message.ID)
+	assert.NotEmpty(t, decoded.Message.MessageID)
+	assert.Equal(t, distMsg.Message.Content, decoded.Message.Content)
 }
 
 // TestMultiNodeScenario 测试多节点场景

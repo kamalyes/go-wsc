@@ -18,11 +18,12 @@ import (
 )
 
 // ConnectionRecord WebSocket连接记录模型 - 详细记录每次连接的完整信息
+// 设计说明：支持多设备登录，每个连接维护一条独立记录
 type ConnectionRecord struct {
 	// ========== 基础标识信息 ==========
 	ID           uint64 `gorm:"primaryKey;autoIncrement;comment:自增主键" json:"id"`
-	ConnectionID string `gorm:"column:connection_id;size:64;uniqueIndex;not null;comment:连接ID(唯一)" json:"connection_id"`
-	UserID       string `gorm:"column:user_id;size:64;not null;index;comment:用户ID" json:"user_id"`
+	ConnectionID string `gorm:"column:connection_id;size:64;uniqueIndex;not null;comment:连接ID(唯一标识,支持多设备登录)" json:"connection_id"`
+	UserID       string `gorm:"column:user_id;size:64;not null;index;comment:用户ID(同一用户可有多条记录)" json:"user_id"`
 
 	// ========== 服务器节点信息 ==========
 	NodeID   string `gorm:"column:node_id;size:100;index;comment:服务器节点ID" json:"node_id"`
@@ -30,11 +31,11 @@ type ConnectionRecord struct {
 	NodePort int    `gorm:"column:node_port;comment:服务器端口" json:"node_port"`
 
 	// ========== 客户端信息 ==========
-	ClientIP   string `gorm:"column:client_ip;size:45;index;comment:客户端IP地址(用于索引查询)" json:"client_ip"`
-	ClientType string `gorm:"column:client_type;size:20;comment:客户端类型(web/mobile/desktop/sdk)" json:"client_type"`
+	ClientIP   string     `gorm:"column:client_ip;size:45;index;comment:客户端IP地址(用于索引查询)" json:"client_ip"`
+	ClientType ClientType `gorm:"column:client_type;size:20;comment:客户端类型(web/mobile/desktop/sdk)" json:"client_type"`
 
 	// ========== 连接协议信息 ==========
-	Protocol string `gorm:"column:protocol;size:20;default:websocket;comment:协议类型(websocket/sse/http)" json:"protocol"`
+	Protocol ConnectionType `gorm:"column:protocol;size:20;default:websocket;comment:协议类型(websocket/sse/http)" json:"protocol"`
 
 	// ========== 连接时间信息 ==========
 	ConnectedAt    time.Time  `gorm:"column:connected_at;index;not null;comment:连接建立时间" json:"connected_at"`
@@ -65,9 +66,9 @@ type ConnectionRecord struct {
 	LastErrorAt *time.Time `gorm:"column:last_error_at;comment:最后错误时间" json:"last_error_at,omitempty"`
 
 	// ========== 状态标识 ==========
-	IsActive        bool `gorm:"column:is_active;default:true;index;comment:是否活跃连接" json:"is_active"`
-	IsForcedOffline bool `gorm:"column:is_forced_offline;default:false;comment:是否被强制下线" json:"is_forced_offline"`
-	IsAbnormal      bool `gorm:"column:is_abnormal;default:false;index;comment:是否异常断开" json:"is_abnormal"`
+	IsActive        bool `gorm:"column:is_active;index;comment:是否活跃连接" json:"is_active"`
+	IsForcedOffline bool `gorm:"column:is_forced_offline;comment:是否被强制下线" json:"is_forced_offline"`
+	IsAbnormal      bool `gorm:"column:is_abnormal;index;comment:是否异常断开" json:"is_abnormal"`
 
 	// ========== 元数据 ==========
 	Metadata sqlbuilder.MapAny `gorm:"column:metadata;type:json;comment:请求元数据JSON(包含所有HTTP头信息)" json:"metadata,omitempty"`
@@ -84,7 +85,7 @@ func (ConnectionRecord) TableName() string {
 
 // TableComment 表注释
 func (ConnectionRecord) TableComment() string {
-	return "WebSocket连接历史记录表-详细记录每次连接的完整信息用于审计和分析"
+	return "WebSocket连接记录表-支持多设备登录-每个连接独立记录-用于审计和分析"
 }
 
 // ========== 辅助方法 ==========

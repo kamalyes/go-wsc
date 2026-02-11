@@ -19,6 +19,7 @@ import (
 	"github.com/jpillora/backoff"
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
+	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/repository"
 )
@@ -130,7 +131,7 @@ func (am *AckManager) AddPendingMessageWithExpire(msg *models.HubMessage, timeou
 	}
 
 	am.mu.Lock()
-	am.pending[msg.ID] = pm
+	am.pending[msg.MessageID] = pm
 	am.mu.Unlock()
 
 	return pm
@@ -173,10 +174,10 @@ func (am *AckManager) RemovePendingMessage(messageID string) {
 
 // GetPendingMessage 获取待确认消息
 func (am *AckManager) GetPendingMessage(messageID string) (*PendingMessage, bool) {
-	am.mu.RLock()
-	defer am.mu.RUnlock()
-	pm, exists := am.pending[messageID]
-	return pm, exists
+	return syncx.WithRLockReturnWithE(&am.mu, func() (*PendingMessage, bool) {
+		pm, exists := am.pending[messageID]
+		return pm, exists
+	})
 }
 
 // WaitForAck 等待ACK确认
@@ -196,38 +197,57 @@ func (pm *PendingMessage) WaitForAck() (*AckMessage, error) {
 
 // WaitForAckWithRetry 等待ACK确认并支持重试
 func (pm *PendingMessage) WaitForAckWithRetry(retryFunc func() error) (*AckMessage, error) {
-	// 使用timer而不是ticker,确保每次超时后可以重新设置
 	timer := time.NewTimer(pm.Timeout)
 	defer timer.Stop()
+
+	// 辅助函数：尝试非阻塞接收 ACK
+	tryReceiveAck := func() (*AckMessage, bool) {
+		select {
+		case ack := <-pm.AckChan:
+			return ack, true
+		default:
+			return nil, false
+		}
+	}
+
+	// 辅助函数：创建错误响应
+	newErrorAck := func(status AckStatus, errMsg string, err error) (*AckMessage, error) {
+		return &AckMessage{
+			MessageID: pm.Message.MessageID,
+			Status:    status,
+			Timestamp: time.Now(),
+			Error:     errMsg,
+		}, err
+	}
 
 	for {
 		select {
 		case ack := <-pm.AckChan:
-			// 立即返回ACK,优先处理
 			return ack, nil
+
 		case <-timer.C:
-			// 超时，尝试重试
-			if pm.Retry >= pm.MaxRetry {
-				return &AckMessage{
-					MessageID: pm.Message.MessageID,
-					Status:    AckStatusTimeout,
-					Timestamp: time.Now(),
-					Error:     fmt.Sprintf("ACK timeout after %d retries", pm.Retry),
-				}, errorx.NewError(models.ErrTypeAckTimeoutRetries, pm.Retry, pm.Message.MessageID)
+			// 超时后双重检查是否有 ACK（避免竞态）
+			if ack, ok := tryReceiveAck(); ok {
+				return ack, nil
 			}
 
+			// 检查是否达到重试上限
+			if pm.Retry >= pm.MaxRetry {
+				return newErrorAck(
+					AckStatusTimeout,
+					fmt.Sprintf("ACK timeout after %d retries", pm.Retry),
+					errorx.NewError(models.ErrTypeAckTimeoutRetries, pm.Retry, pm.Message.MessageID),
+				)
+			}
+
+			// 执行重试
 			pm.Retry++
 			if retryFunc != nil {
 				if err := retryFunc(); err != nil {
-					return &AckMessage{
-						MessageID: pm.Message.MessageID,
-						Status:    AckStatusFailed,
-						Timestamp: time.Now(),
-						Error:     err.Error(),
-					}, err
+					return newErrorAck(AckStatusFailed, err.Error(), err)
 				}
 			}
-			
+
 			// 重置timer等待下一次ACK
 			if !timer.Stop() {
 				select {
@@ -236,87 +256,86 @@ func (pm *PendingMessage) WaitForAckWithRetry(retryFunc func() error) (*AckMessa
 				}
 			}
 			timer.Reset(pm.Timeout)
+
+			// 重置后立即检查是否有ACK（处理同步发送的情况）
+			if ack, ok := tryReceiveAck(); ok {
+				return ack, nil
+			}
+
 		case <-pm.ctx.Done():
-			return &AckMessage{
-				MessageID: pm.Message.MessageID,
-				Status:    AckStatusTimeout,
-				Timestamp: time.Now(),
-				Error:     "Context cancelled",
-			}, errorx.NewError(models.ErrTypeContextCancelled, pm.Message.MessageID)
+			// Context 取消时双重检查 ACK
+			if ack, ok := tryReceiveAck(); ok {
+				return ack, nil
+			}
+			return newErrorAck(
+				AckStatusTimeout,
+				"Context cancelled",
+				errorx.NewError(models.ErrTypeContextCancelled, pm.Message.MessageID),
+			)
 		}
 	}
 }
 
 // CleanupExpired 清理过期的待确认消息
 func (am *AckManager) CleanupExpired() int {
-	am.mu.Lock()
-	defer am.mu.Unlock()
+	return syncx.WithLockReturnValue(&am.mu, func() int {
+		cleaned := 0
 
-	cleaned := 0
-
-	for msgID, pm := range am.pending {
-		// 检查context是否已经过期
-		select {
-		case <-pm.ctx.Done():
-			// Context已过期,清理消息
-			// TODO: 离线消息存储需要完整实现
-			// if am.offlineRepo != nil {
-			// 	_ = am.offlineRepo.Save(context.Background(), &repository.OfflineMessageRecord{})
-			// }
-			pm.cancel()
-			delete(am.pending, msgID)
-			cleaned++
-		default:
-			// Context还未过期
+		for msgID, pm := range am.pending {
+			// 检查context是否已经过期（使用 Err() 更可靠）
+			if pm.ctx.Err() != nil {
+				pm.cancel()
+				delete(am.pending, msgID)
+				cleaned++
+			}
 		}
-	}
 
-	return cleaned
+		return cleaned
+	})
 }
 
 // GetPendingCount 获取待确认消息数量
 func (am *AckManager) GetPendingCount() int {
-	am.mu.RLock()
-	defer am.mu.RUnlock()
-	return len(am.pending)
+	return syncx.WithRLockReturnValue(&am.mu, func() int {
+		return len(am.pending)
+	})
 }
 
 // SetOfflineRepo 设置离线消息处理器
 // 用于统一使用 Hub 的离线消息处理器
 func (am *AckManager) SetOfflineRepo(handler repository.OfflineMessageDBRepository) {
-	am.mu.Lock()
-	defer am.mu.Unlock()
-	am.offlineRepo = handler
+	syncx.WithLock(&am.mu, func() {
+		am.offlineRepo = handler
+	})
 }
 
 // SetExpireDuration 设置消息过期时间
 func (am *AckManager) SetExpireDuration(duration time.Duration) {
-	am.mu.Lock()
-	defer am.mu.Unlock()
-	am.expireDuration = duration
+	syncx.WithLock(&am.mu, func() {
+		am.expireDuration = duration
+	})
 }
 
 // GetTimeout 获取ACK超时时间
 func (am *AckManager) GetTimeout() time.Duration {
-	am.mu.RLock()
-	defer am.mu.RUnlock()
-	return am.timeout
+	return syncx.WithRLockReturnValue(&am.mu, func() time.Duration {
+		return am.timeout
+	})
 }
 
 // GetMaxRetry 获取最大重试次数
 func (am *AckManager) GetMaxRetry() int {
-	am.mu.RLock()
-	defer am.mu.RUnlock()
-	return am.maxRetry
+	return syncx.WithRLockReturnValue(&am.mu, func() int {
+		return am.maxRetry
+	})
 }
 
 // Shutdown 关闭ACK管理器
 func (am *AckManager) Shutdown() {
-	am.mu.Lock()
-	defer am.mu.Unlock()
-
-	for _, pm := range am.pending {
-		pm.cancel()
-	}
-	am.pending = make(map[string]*PendingMessage)
+	syncx.WithLock(&am.mu, func() {
+		for _, pm := range am.pending {
+			pm.cancel()
+		}
+		am.pending = make(map[string]*PendingMessage)
+	})
 }

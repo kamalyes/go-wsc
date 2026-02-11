@@ -59,60 +59,55 @@ func (h *Hub) NewBatchSender(ctx context.Context) *BatchSender {
 
 // AddMessage 为用户添加一条消息（支持链式调用）
 func (bs *BatchSender) AddMessage(userID string, msg *HubMessage) *BatchSender {
-	bs.mu.Lock()
-	defer bs.mu.Unlock()
-
-	if bs.messages[userID] == nil {
-		bs.messages[userID] = make([]*HubMessage, 0)
-	}
-	bs.messages[userID] = append(bs.messages[userID], msg)
+	syncx.WithLock(&bs.mu, func() {
+		if bs.messages[userID] == nil {
+			bs.messages[userID] = make([]*HubMessage, 0)
+		}
+		bs.messages[userID] = append(bs.messages[userID], msg)
+	})
 	return bs
 }
 
 // AddMessages 为用户添加多条消息（支持链式调用）
 func (bs *BatchSender) AddMessages(userID string, msgs ...*HubMessage) *BatchSender {
-	bs.mu.Lock()
-	defer bs.mu.Unlock()
-
-	if bs.messages[userID] == nil {
-		bs.messages[userID] = make([]*HubMessage, 0, len(msgs))
-	}
-	bs.messages[userID] = append(bs.messages[userID], msgs...)
+	syncx.WithLock(&bs.mu, func() {
+		if bs.messages[userID] == nil {
+			bs.messages[userID] = make([]*HubMessage, 0, len(msgs))
+		}
+		bs.messages[userID] = append(bs.messages[userID], msgs...)
+	})
 	return bs
 }
 
 // AddUserMessages 批量添加用户消息映射（支持链式调用）
 func (bs *BatchSender) AddUserMessages(userMessages map[string][]*HubMessage) *BatchSender {
-	bs.mu.Lock()
-	defer bs.mu.Unlock()
-
-	for userID, msgs := range userMessages {
-		if bs.messages[userID] == nil {
-			bs.messages[userID] = make([]*HubMessage, 0, len(msgs))
+	syncx.WithLock(&bs.mu, func() {
+		for userID, msgs := range userMessages {
+			if bs.messages[userID] == nil {
+				bs.messages[userID] = make([]*HubMessage, 0, len(msgs))
+			}
+			bs.messages[userID] = append(bs.messages[userID], msgs...)
 		}
-		bs.messages[userID] = append(bs.messages[userID], msgs...)
-	}
+	})
 	return bs
 }
 
 // Count 获取当前待发送的消息统计
 func (bs *BatchSender) Count() (users int, messages int) {
-	bs.mu.RLock()
-	defer bs.mu.RUnlock()
-
-	users = len(bs.messages)
-	for _, msgs := range bs.messages {
-		messages += len(msgs)
-	}
-	return
+	return syncx.WithRLockReturnWithE(&bs.mu, func() (int, int) {
+		users = len(bs.messages)
+		for _, msgs := range bs.messages {
+			messages += len(msgs)
+		}
+		return users, messages
+	})
 }
 
 // Clear 清空所有待发送消息
 func (bs *BatchSender) Clear() *BatchSender {
-	bs.mu.Lock()
-	defer bs.mu.Unlock()
-
-	bs.messages = make(map[string][]*HubMessage)
+	syncx.WithLock(&bs.mu, func() {
+		bs.messages = make(map[string][]*HubMessage)
+	})
 	return bs
 }
 
@@ -147,6 +142,8 @@ func (bs *BatchSender) Execute() *BatchSendResult {
 
 	// 并发发送每个用户的消息
 	for userID, msgs := range messagesCopy {
+		userID := userID   // 捕获循环变量
+		msgs := msgs       // 捕获循环变量
 		syncx.Go(bs.ctx).Exec(func() {
 			defer wg.Done()
 			bs.sendUserMessages(userID, msgs, result)

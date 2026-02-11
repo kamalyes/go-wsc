@@ -66,14 +66,37 @@ func GetTestRedisClient(t *testing.T) *redis.Client {
 			Addr:     addr,
 			Password: password,
 			DB:       defaultRedisDB,
+			// 增加连接池大小以支持高并发测试
+			PoolSize:        1000,                   // 增加到1000个连接，支持500并发×2
+			MinIdleConns:    100,                    // 增加最小空闲连接，减少建立新连接的开销
+			MaxRetries:      5,                      // 增加重试次数，应对网络波动
+			DialTimeout:     60 * time.Second,       // 大幅增加连接超时，应对网络延迟
+			ReadTimeout:     30 * time.Second,       // 大幅增加读超时
+			WriteTimeout:    30 * time.Second,       // 大幅增加写超时
+			PoolTimeout:     60 * time.Second,       // 大幅增加连接池超时，避免高并发时获取连接超时
+			MinRetryBackoff: 200 * time.Millisecond, // 重试最小间隔
+			MaxRetryBackoff: 1 * time.Second,        // 重试最大间隔
+			// 连接保活配置，防止长时间空闲导致连接断开
+			ConnMaxIdleTime: 5 * time.Minute,
+			ConnMaxLifetime: 30 * time.Minute,
 		})
 
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
+		// 测试连接，增加重试机制
+		var err error
+		for retry := 0; retry < 3; retry++ {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err = testRedisInstance.Ping(ctx).Err()
+			cancel()
 
-		// 测试连接
-		err := testRedisInstance.Ping(ctx).Err()
-		require.NoError(t, err, "Redis 连接失败，请检查配置")
+			if err == nil {
+				break
+			}
+			if retry < 2 {
+				t.Logf("⚠️ Redis连接失败（重试 %d/3）: %v", retry+1, err)
+				time.Sleep(time.Second * time.Duration(retry+1))
+			}
+		}
+		require.NoError(t, err, "Redis 连接失败（已重试3次），请检查配置和网络")
 	})
 	// 并发安全检查: 如果初始化失败, testRedisInstance 可能为 nil
 	if testRedisInstance == nil {
@@ -175,10 +198,16 @@ func GetTestDB(t *testing.T) *gorm.DB {
 		// 配置连接池 - 增加连接数以支持并发测试
 		sqlDB, err := db.DB()
 		require.NoError(t, err, "获取底层 DB 失败")
-		sqlDB.SetMaxIdleConns(20) // 增加空闲连接数
-		sqlDB.SetMaxOpenConns(50) // 增加最大连接数
-		sqlDB.SetConnMaxLifetime(time.Hour)
-		sqlDB.SetConnMaxIdleTime(10 * time.Minute) // 设置空闲连接超时
+		sqlDB.SetMaxIdleConns(20)                  // 增加空闲连接数
+		sqlDB.SetMaxOpenConns(50)                  // 增加最大连接数
+		sqlDB.SetConnMaxLifetime(30 * time.Minute) // 减少连接生命周期，避免长时间测试中连接失效
+		sqlDB.SetConnMaxIdleTime(5 * time.Minute)  // 减少空闲连接超时时间
+
+		// 验证数据库连接
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		err = sqlDB.PingContext(ctx)
+		require.NoError(t, err, "数据库连接验证失败,请检查MySQL服务和网络状态")
 
 		testDBInstance = db
 	})

@@ -33,9 +33,11 @@ func TestBatchSender_Basic(t *testing.T) {
 	sender := hub.NewBatchSender(context.Background())
 
 	// 为 user-1 添加 5 条消息
+	idGen := hub.GetIDGenerator()
 	for i := 0; i < 5; i++ {
 		sender.AddMessage("user-1", &HubMessage{
-			ID:          fmt.Sprintf("msg-user1-%d", i),
+			ID:          idGen.GenerateTraceID(),
+			MessageID:   idGen.GenerateRequestID(),
 			MessageType: MessageTypeText,
 			Content:     fmt.Sprintf("Message %d for user-1", i),
 		})
@@ -43,16 +45,16 @@ func TestBatchSender_Basic(t *testing.T) {
 
 	// 为 user-2 添加 3 条消息
 	sender.AddMessages("user-2",
-		&HubMessage{ID: "msg-user2-1", MessageType: MessageTypeText, Content: "Message 1 for user-2"},
-		&HubMessage{ID: "msg-user2-2", MessageType: MessageTypeText, Content: "Message 2 for user-2"},
-		&HubMessage{ID: "msg-user2-3", MessageType: MessageTypeText, Content: "Message 3 for user-2"},
+		&HubMessage{ID: idGen.GenerateTraceID(), MessageID: idGen.GenerateRequestID(), MessageType: MessageTypeText, Content: "Message 1 for user-2"},
+		&HubMessage{ID: idGen.GenerateTraceID(), MessageID: idGen.GenerateRequestID(), MessageType: MessageTypeText, Content: "Message 2 for user-2"},
+		&HubMessage{ID: idGen.GenerateTraceID(), MessageID: idGen.GenerateRequestID(), MessageType: MessageTypeText, Content: "Message 3 for user-2"},
 	)
 
 	// 为 user-3 添加 2 条消息
 	sender.AddUserMessages(map[string][]*HubMessage{
 		"user-3": {
-			{ID: "msg-user3-1", MessageType: MessageTypeText, Content: "Message 1 for user-3"},
-			{ID: "msg-user3-2", MessageType: MessageTypeText, Content: "Message 2 for user-3"},
+			{ID: idGen.GenerateTraceID(), MessageID: idGen.GenerateRequestID(), MessageType: MessageTypeText, Content: "Message 1 for user-3"},
+			{ID: idGen.GenerateTraceID(), MessageID: idGen.GenerateRequestID(), MessageType: MessageTypeText, Content: "Message 2 for user-3"},
 		},
 	})
 
@@ -79,10 +81,11 @@ func TestBatchSender_ChainCall(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// 测试链式调用
+	idGen := hub.GetIDGenerator()
 	result := hub.NewBatchSender(context.Background()).
-		AddMessage("test-user", &HubMessage{ID: "msg-1", MessageType: MessageTypeText, Content: "Message 1"}).
-		AddMessage("test-user", &HubMessage{ID: "msg-2", MessageType: MessageTypeText, Content: "Message 2"}).
-		AddMessage("test-user", &HubMessage{ID: "msg-3", MessageType: MessageTypeText, Content: "Message 3"}).
+		AddMessage("test-user", &HubMessage{ID: idGen.GenerateTraceID(), MessageID: idGen.GenerateRequestID(), MessageType: MessageTypeText, Content: "Message 1"}).
+		AddMessage("test-user", &HubMessage{ID: idGen.GenerateTraceID(), MessageID: idGen.GenerateRequestID(), MessageType: MessageTypeText, Content: "Message 2"}).
+		AddMessage("test-user", &HubMessage{ID: idGen.GenerateTraceID(), MessageID: idGen.GenerateRequestID(), MessageType: MessageTypeText, Content: "Message 3"}).
 		Execute()
 
 	assert.Equal(t, 1, result.TotalUsers)
@@ -111,8 +114,10 @@ func TestBatchSender_NonExistentUser(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	sender := hub.NewBatchSender(context.Background())
+	idGen := hub.GetIDGenerator()
 	sender.AddMessage("non-existent-user", &HubMessage{
-		ID:          "msg-1",
+		ID:          idGen.GenerateTraceID(),
+		MessageID:   idGen.GenerateRequestID(),
 		MessageType: MessageTypeText,
 		Content:     "Test message",
 	})
@@ -132,8 +137,9 @@ func TestBatchSender_Clear(t *testing.T) {
 	go hub.Run()
 
 	sender := hub.NewBatchSender(context.Background())
-	sender.AddMessage("user-1", &HubMessage{ID: "msg-1", MessageType: MessageTypeText, Content: "Test"})
-	sender.AddMessage("user-2", &HubMessage{ID: "msg-2", MessageType: MessageTypeText, Content: "Test"})
+	idGen := hub.GetIDGenerator()
+	sender.AddMessage("user-1", &HubMessage{ID: idGen.GenerateTraceID(), MessageID: idGen.GenerateRequestID(), MessageType: MessageTypeText, Content: "Test"})
+	sender.AddMessage("user-2", &HubMessage{ID: idGen.GenerateTraceID(), MessageID: idGen.GenerateRequestID(), MessageType: MessageTypeText, Content: "Test"})
 
 	users, messages := sender.Count()
 	assert.Equal(t, 2, users)
@@ -155,12 +161,14 @@ func TestBatchSender_Concurrent(t *testing.T) {
 	sender := hub.NewBatchSender(context.Background())
 
 	// 为每个用户添加50条消息
+	idGen := hub.GetIDGenerator()
 	for i := 0; i < 10; i++ {
 		userID := fmt.Sprintf("user-%d", i)
 		msgs := make([]*HubMessage, 50)
 		for j := 0; j < 50; j++ {
 			msgs[j] = &HubMessage{
-				ID:          fmt.Sprintf("msg-%s-%d", userID, j),
+				ID:          idGen.GenerateTraceID(),
+				MessageID:   idGen.GenerateRequestID(),
 				MessageType: MessageTypeText,
 				Content:     fmt.Sprintf("Message %d for %s", j, userID),
 			}
@@ -191,8 +199,10 @@ func TestBatchSender_ExecuteAsync(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	sender := hub.NewBatchSender(context.Background())
+	idGen := hub.GetIDGenerator()
 	sender.AddMessage("test-user", &HubMessage{
-		ID:          "async-msg-1",
+		ID:          idGen.GenerateTraceID(),
+		MessageID:   idGen.GenerateRequestID(),
 		MessageType: MessageTypeText,
 		Content:     "Async message",
 	})
@@ -222,9 +232,10 @@ func TestBatchSender_MixedSuccess(t *testing.T) {
 	sender := hub.NewBatchSender(context.Background())
 
 	// 添加多个用户的消息（都不在线，会失败）
-	sender.AddMessage("user-1", &HubMessage{ID: "msg-1", MessageType: MessageTypeText, Content: "For user-1"})
-	sender.AddMessage("user-1", &HubMessage{ID: "msg-2", MessageType: MessageTypeText, Content: "For user-1"})
-	sender.AddMessage("user-2", &HubMessage{ID: "msg-3", MessageType: MessageTypeText, Content: "For user-2"})
+	idGen := hub.GetIDGenerator()
+	sender.AddMessage("user-1", &HubMessage{ID: idGen.GenerateTraceID(), MessageID: idGen.GenerateRequestID(), MessageType: MessageTypeText, Content: "For user-1"})
+	sender.AddMessage("user-1", &HubMessage{ID: idGen.GenerateTraceID(), MessageID: idGen.GenerateRequestID(), MessageType: MessageTypeText, Content: "For user-1"})
+	sender.AddMessage("user-2", &HubMessage{ID: idGen.GenerateTraceID(), MessageID: idGen.GenerateRequestID(), MessageType: MessageTypeText, Content: "For user-2"})
 
 	result := sender.Execute()
 
@@ -268,14 +279,15 @@ func TestBatchSender_FailureCallback(t *testing.T) {
 	sender := hub.NewBatchSender(context.Background())
 
 	// 添加多个用户的消息
+	idGen := hub.GetIDGenerator()
 	sender.AddMessages("user-1",
-		&HubMessage{ID: "msg-1", MessageType: MessageTypeText, Content: "Message 1"},
-		&HubMessage{ID: "msg-2", MessageType: MessageTypeText, Content: "Message 2"},
+		&HubMessage{ID: idGen.GenerateTraceID(), MessageID: idGen.GenerateRequestID(), MessageType: MessageTypeText, Content: "Message 1"},
+		&HubMessage{ID: idGen.GenerateTraceID(), MessageID: idGen.GenerateRequestID(), MessageType: MessageTypeText, Content: "Message 2"},
 	)
 	sender.AddMessages("user-2",
-		&HubMessage{ID: "msg-3", MessageType: MessageTypeText, Content: "Message 3"},
-		&HubMessage{ID: "msg-4", MessageType: MessageTypeText, Content: "Message 4"},
-		&HubMessage{ID: "msg-5", MessageType: MessageTypeText, Content: "Message 5"},
+		&HubMessage{ID: idGen.GenerateTraceID(), MessageID: idGen.GenerateRequestID(), MessageType: MessageTypeText, Content: "Message 3"},
+		&HubMessage{ID: idGen.GenerateTraceID(), MessageID: idGen.GenerateRequestID(), MessageType: MessageTypeText, Content: "Message 4"},
+		&HubMessage{ID: idGen.GenerateTraceID(), MessageID: idGen.GenerateRequestID(), MessageType: MessageTypeText, Content: "Message 5"},
 	)
 
 	result := sender.Execute()

@@ -50,6 +50,14 @@ func (h *Hub) RemoveAgentWorkload(agentID string) error {
 	return h.workloadRepo.RemoveAgentWorkload(h.ctx, agentID)
 }
 
+// SyncAgentWorkloadToZSet 客服重新加入时，从单个key同步负载到ZSet
+func (h *Hub) SyncAgentWorkloadToZSet(agentID string) error {
+	if err := h.checkWorkloadRepo("同步工作负载到ZSet"); err != nil {
+		return err
+	}
+	return h.workloadRepo.SyncAgentWorkloadToZSet(h.ctx, agentID)
+}
+
 // IncrementAgentWorkload 增加客服工作负载
 func (h *Hub) IncrementAgentWorkload(agentID string) error {
 	if err := h.checkWorkloadRepo("增加工作负载"); err != nil {

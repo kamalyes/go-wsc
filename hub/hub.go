@@ -22,6 +22,7 @@ import (
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"github.com/kamalyes/go-toolbox/pkg/idgen"
+	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/osx"
 
 	"github.com/kamalyes/go-wsc/handler"
@@ -83,6 +84,9 @@ type (
 	ConnectionType             = models.ConnectionType
 	ObserverManagerStats       = models.ObserverManagerStats
 	ObserverStats              = models.ObserverStats
+	MessageRecordFilter        = repository.MessageRecordFilter
+	OfflineMessageFilter       = repository.OfflineMessageFilter
+	MessageRole                = repository.MessageRole
 )
 
 // 函数导入
@@ -157,6 +161,7 @@ var (
 	OperationTypeKickUser       = models.OperationTypeKickUser
 	OperationTypeBroadcast      = models.OperationTypeBroadcast
 	OperationTypeObserverNotify = models.OperationTypeObserverNotify
+	MapDeviceTypeToClientType   = models.MapDeviceTypeToClientType
 )
 
 // NewHubMessage 创建新的 HubMessage
@@ -310,6 +315,11 @@ type Hub struct {
 	started  atomic.Bool
 	startCh  chan struct{}
 
+	// 活跃连接数同步防抖
+	syncActiveConnTimer   *time.Timer
+	syncActiveConnMutex   sync.Mutex
+	syncActiveConnPending atomic.Bool
+
 	welcomeProvider WelcomeMessageProvider
 	logger          WSCLogger
 	mutex           sync.RWMutex
@@ -331,6 +341,9 @@ func NewHub(config *wscconfig.WSC) *Hub {
 
 	workerID := osx.GetWorkerIdForSnowflake()
 	idGenerator := idgen.NewShortFlakeGenerator(workerID)
+	// 设置默认值
+	config.MessageBufferSize = mathx.IfEmpty(config.MessageBufferSize, 1024)
+	config.ClientAttributes = mathx.IfEmpty(config.ClientAttributes, wscconfig.DefaultClientAttributes())
 
 	hub := &Hub{
 		nodeID:      nodeID,

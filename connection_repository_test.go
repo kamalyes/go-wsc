@@ -13,986 +13,587 @@ package wsc
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-toolbox/pkg/idgen"
 	"github.com/kamalyes/go-toolbox/pkg/osx"
+	"github.com/kamalyes/go-wsc/models"
+	"github.com/kamalyes/go-wsc/repository"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
+
+// testConnectionRepoContext 测试上下文
+type testConnectionRepoContext struct {
+	t           *testing.T
+	db          *gorm.DB
+	repo        repository.ConnectionRecordRepository
+	ctx         context.Context
+	idGenerator *idgen.ShortFlakeGenerator
+	tableName   string
+}
+
+// newTestConnectionRepoContext 创建测试上下文
+func newTestConnectionRepoContext(t *testing.T) *testConnectionRepoContext {
+	workerID := osx.GetWorkerIdForSnowflake()
+
+	// 使用测试函数名生成唯一的表名（移除特殊字符）
+	testName := strings.ReplaceAll(t.Name(), "/", "_")
+	testName = strings.ReplaceAll(testName, " ", "_")
+	idGenerator := getTestIDGenerator()
+	table := idGenerator.GenerateSpanID()
+	tableName := fmt.Sprintf("wsc_connection_records_%s", table)
+
+	// 获取基础数据库连接并创建表
+	db := getConnectTestDB(t, tableName)
+
+	// 创建 repository 并使用 WithTableName 设置自定义表名
+	baseRepo := repository.NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
+	scopedRepo := baseRepo.WithTableName(tableName)
+
+	tc := &testConnectionRepoContext{
+		t:           t,
+		db:          db,
+		repo:        scopedRepo,
+		ctx:         context.Background(),
+		idGenerator: idgen.NewShortFlakeGenerator(workerID),
+		tableName:   tableName,
+	}
+
+	// 测试结束后清理表
+	t.Cleanup(func() {
+		db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", tableName))
+	})
+
+	return tc
+}
+
+// generateUserID 生成用户ID
+func (c *testConnectionRepoContext) generateUserID() string {
+	return fmt.Sprintf("user-%020d", c.idGenerator.Generate())
+}
+
+// generateConnectionID 生成连接ID
+func (c *testConnectionRepoContext) generateConnectionID() string {
+	return fmt.Sprintf("conn-%020d", c.idGenerator.Generate())
+}
 
 var (
 	testConnectDBInstance *gorm.DB
 	testConnectDBOnce     sync.Once
 )
 
-// cleanTestData 清理测试数据
-func cleanTestData(t *testing.T, db *gorm.DB) {
-	// 使用 TRUNCATE 更快更彻底地清理数据
-	err := db.Exec("TRUNCATE TABLE wsc_connection_records").Error
-	if err != nil {
-		// 如果 TRUNCATE 失败（比如没有权限），回退到 DELETE
-		err = db.Exec("DELETE FROM wsc_connection_records").Error
-		if err != nil {
-			t.Logf("清理测试数据时出现警告: %v", err)
-		}
-	}
-}
-
-// 测试用 MySQL 配置 - 使用统一的测试数据库连接
-func getConnectTestDB(t *testing.T) *gorm.DB {
+// getConnectTestDB 获取测试数据库连接并创建独立表
+func getConnectTestDB(t *testing.T, tableName string) *gorm.DB {
 	testConnectDBOnce.Do(func() {
-		// 使用统一的测试数据库连接
 		db := GetTestDB(t)
-
-		// 只执行一次自动迁移
-		err := db.AutoMigrate(&ConnectionRecord{})
-		require.NoError(t, err, "数据库迁移失败")
-
 		testConnectDBInstance = db
 	})
 
-	// 每次获取测试DB时清理数据
-	if testConnectDBInstance != nil {
-		cleanTestData(t, testConnectDBInstance)
+	db := testConnectDBInstance
+
+	// 先删除表（如果存在）
+	if db.Migrator().HasTable(tableName) {
+		err := db.Migrator().DropTable(tableName)
+		require.NoError(t, err, "删除表失败: %s", tableName)
 	}
-	return testConnectDBInstance
+
+	// 使用 Migrator 创建自定义表名的表
+	err := db.Table(tableName).Migrator().CreateTable(&models.ConnectionRecord{})
+	require.NoError(t, err, "创建表失败: %s", tableName)
+
+	// 验证表已创建（等待一小段时间确保创建完成）
+	time.Sleep(50 * time.Millisecond)
+	require.True(t, db.Migrator().HasTable(tableName), "表创建后验证失败: %s", tableName)
+
+	return db
 }
 
-// createTestRecord 创建测试记录
-func createTestRecord(userID, nodeID string, isActive bool) *ConnectionRecord {
-	now := time.Now()
-	return &ConnectionRecord{
-		ConnectionID:     osx.HashUnixMicroCipherText(),
-		UserID:           userID,
-		NodeID:           nodeID,
-		NodeIP:           "127.0.0.1",
-		NodePort:         8080,
-		ClientIP:         "192.168.1.100",
-		ClientType:       "web",
-		Protocol:         "websocket",
-		ConnectedAt:      now,
-		IsActive:         isActive,
-		MessagesSent:     10,
-		MessagesReceived: 8,
-		BytesSent:        1024,
-		BytesReceived:    768,
-		AveragePingMs:    25.5,
-		MaxPingMs:        50.0,
-		MinPingMs:        10.0,
+// TestUpsert 测试创建或更新连接记录
+func TestUpsert(t *testing.T) {
+	tc := newTestConnectionRepoContext(t)
+	userID := tc.generateUserID()
+	connID1 := tc.generateConnectionID()
+
+	// 首次连接 - 创建记录
+	record := &models.ConnectionRecord{
+		ConnectionID: connID1,
+		UserID:       userID,
+		NodeID:       "node-1",
+		ClientIP:     "192.168.1.1",
+		ConnectedAt:  time.Now(),
+		IsActive:     true,
 	}
-}
 
-// TestCreate 测试创建连接记录
-func TestCreate(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
-
-	ctx := context.Background()
-
-	record := createTestRecord("user1", "node1", true)
-
-	err := repo.Create(ctx, record)
+	err := tc.repo.Upsert(tc.ctx, record)
 	assert.NoError(t, err)
-	assert.NotZero(t, record.ID)
 
 	// 验证记录已创建
-	found, err := repo.GetByConnectionID(ctx, record.ConnectionID)
-	require.NoError(t, err)
-	require.NotNil(t, found, "查询结果不应为空")
-	assert.Equal(t, record.UserID, found.UserID)
-	assert.Equal(t, record.NodeID, found.NodeID)
-}
+	saved, err := tc.repo.GetByConnectionID(tc.ctx, connID1)
+	assert.NoError(t, err)
+	assert.Equal(t, connID1, saved.ConnectionID)
+	assert.Equal(t, 0, saved.ReconnectCount)
 
-// TestUpdate 测试更新连接记录
-func TestUpdate(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
-
-	ctx := context.Background()
-
-	record := createTestRecord("user1", "node1", true)
-	err := repo.Create(ctx, record)
-	require.NoError(t, err)
-
-	// 更新记录
-	record.MessagesSent = 20
-	record.BytesSent = 2048
-	err = repo.Update(ctx, record)
+	// 同一连接重连 - 更新记录
+	time.Sleep(100 * time.Millisecond)
+	err = tc.repo.Upsert(tc.ctx, record)
 	assert.NoError(t, err)
 
-	// 验证更新
-	found, err := repo.GetByConnectionID(ctx, record.ConnectionID)
+	// 验证重连次数增加
+	updated, err := tc.repo.GetByConnectionID(tc.ctx, connID1)
 	assert.NoError(t, err)
-	assert.Equal(t, int64(20), found.MessagesSent)
-	assert.Equal(t, int64(2048), found.BytesSent)
+	assert.Equal(t, 1, updated.ReconnectCount)
+	assert.True(t, updated.IsActive)
 }
 
-// TestUpdateByConnectionID 根据连接ID更新记录
-func TestUpdateByConnectionID(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
+// TestMultiDeviceLogin 测试多设备登录
+func TestMultiDeviceLogin(t *testing.T) {
+	tc := newTestConnectionRepoContext(t)
+	userID := tc.generateUserID()
 
-	ctx := context.Background()
-
-	record := createTestRecord("user1", "node1", true)
-	err := repo.Create(ctx, record)
-	require.NoError(t, err)
-
-	updates := map[string]any{
-		"messages_sent": 100,
-		"is_active":     false,
+	// 设备1连接
+	conn1 := &models.ConnectionRecord{
+		ConnectionID: tc.generateConnectionID(),
+		UserID:       userID,
+		NodeID:       "node-1",
+		ConnectedAt:  time.Now(),
+		IsActive:     true,
 	}
-
-	err = repo.UpdateByConnectionID(ctx, record.ConnectionID, updates)
+	err := tc.repo.Upsert(tc.ctx, conn1)
 	assert.NoError(t, err)
 
-	found, err := repo.GetByConnectionID(ctx, record.ConnectionID)
-	assert.NoError(t, err)
-	assert.Equal(t, int64(100), found.MessagesSent)
-	assert.False(t, found.IsActive)
-}
-
-// TestGetByID 测试通过主键ID查询
-func TestGetByID(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
-
-	ctx := context.Background()
-
-	record := createTestRecord("user1", "node1", true)
-	err := repo.Create(ctx, record)
-	require.NoError(t, err)
-
-	found, err := repo.GetByID(ctx, record.ID)
-	assert.NoError(t, err)
-	assert.Equal(t, record.ConnectionID, found.ConnectionID)
-}
-
-// TestDelete 测试删除记录
-func TestDelete(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
-
-	ctx := context.Background()
-
-	record := createTestRecord("user1", "node1", true)
-	err := repo.Create(ctx, record)
-	require.NoError(t, err)
-
-	err = repo.Delete(ctx, record.ID)
+	// 设备2连接
+	conn2 := &models.ConnectionRecord{
+		ConnectionID: tc.generateConnectionID(),
+		UserID:       userID,
+		NodeID:       "node-1",
+		ConnectedAt:  time.Now(),
+		IsActive:     true,
+	}
+	err = tc.repo.Upsert(tc.ctx, conn2)
 	assert.NoError(t, err)
 
-	// 验证已删除
-	_, err = repo.GetByID(ctx, record.ID)
-	assert.Error(t, err)
+	// 验证用户有2个活跃连接
+	activeConns, err := tc.repo.GetActiveByUserID(tc.ctx, userID)
+	assert.NoError(t, err)
+	assert.Equal(t, 2, len(activeConns))
 }
 
 // TestMarkDisconnected 测试标记断开连接
 func TestMarkDisconnected(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
+	tc := newTestConnectionRepoContext(t)
+	connID := tc.generateConnectionID()
 
-	ctx := context.Background()
-
-	record := createTestRecord("user1", "node1", true)
-	err := repo.Create(ctx, record)
-	require.NoError(t, err)
-
-	// 确保记录已经写入数据库（Windows CI 环境可能需要）
-	var count int64
-	err = db.Model(&ConnectionRecord{}).Where("connection_id = ?", record.ConnectionID).Count(&count).Error
-	require.NoError(t, err, "查询记录数量失败")
-	require.Equal(t, int64(1), count, "记录应该已经创建")
-
-	time.Sleep(1100 * time.Millisecond) // 确保有持续时间（至少1秒）
-	err = repo.MarkDisconnected(ctx, record.ConnectionID, DisconnectReasonTimeout, 1001, "timeout")
+	// 创建连接记录
+	record := &models.ConnectionRecord{
+		ConnectionID: connID,
+		UserID:       tc.generateUserID(),
+		ConnectedAt:  time.Now(),
+		IsActive:     true,
+	}
+	err := tc.repo.Upsert(tc.ctx, record)
 	assert.NoError(t, err)
 
-	found, err := repo.GetByConnectionID(ctx, record.ConnectionID)
-	assert.NoError(t, err)
-	require.NotNil(t, found, "查询结果不应为空")
-	assert.False(t, found.IsActive)
-	assert.NotNil(t, found.DisconnectedAt)
-	assert.Equal(t, string(DisconnectReasonTimeout), found.DisconnectReason)
-	assert.Equal(t, 1001, found.DisconnectCode)
-	assert.True(t, found.IsAbnormal) // timeout是异常断开
-	assert.Greater(t, found.Duration, int64(0))
-}
-
-// TestMarkForcedOffline 测试标记强制下线
-func TestMarkForcedOffline(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
-
-	ctx := context.Background()
-
-	record := createTestRecord("user1", "node1", true)
-	err := repo.Create(ctx, record)
-	require.NoError(t, err)
-
-	err = repo.MarkForcedOffline(ctx, record.ConnectionID, "admin kicked")
+	// 标记断开
+	time.Sleep(100 * time.Millisecond)
+	err = tc.repo.MarkDisconnected(tc.ctx, connID, models.DisconnectReasonTimeout, 1001, "连接超时")
 	assert.NoError(t, err)
 
-	found, err := repo.GetByConnectionID(ctx, record.ConnectionID)
+	// 验证断开信息
+	disconnected, err := tc.repo.GetByConnectionID(tc.ctx, connID)
 	assert.NoError(t, err)
-	assert.False(t, found.IsActive)
-	assert.Equal(t, string(DisconnectReasonForceOffline), found.DisconnectReason)
-	assert.Equal(t, "admin kicked", found.DisconnectMessage)
+	assert.False(t, disconnected.IsActive)
+	assert.NotNil(t, disconnected.DisconnectedAt)
+	assert.Equal(t, string(models.DisconnectReasonTimeout), disconnected.DisconnectReason)
+	assert.Equal(t, 1001, disconnected.DisconnectCode)
+	assert.True(t, disconnected.IsAbnormal)
 }
 
 // TestIncrementMessageStats 测试增加消息统计
 func TestIncrementMessageStats(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
+	tc := newTestConnectionRepoContext(t)
+	connID := tc.generateConnectionID()
 
-	ctx := context.Background()
-
-	record := createTestRecord("user1", "node1", true)
-	record.MessagesSent = 10
-	record.MessagesReceived = 8
-	err := repo.Create(ctx, record)
-	require.NoError(t, err)
-
-	err = repo.IncrementMessageStats(ctx, record.ConnectionID, 5, 3)
+	// 创建连接记录
+	record := &models.ConnectionRecord{
+		ConnectionID: connID,
+		UserID:       tc.generateUserID(),
+		ConnectedAt:  time.Now(),
+		IsActive:     true,
+	}
+	err := tc.repo.Upsert(tc.ctx, record)
 	assert.NoError(t, err)
 
-	found, err := repo.GetByConnectionID(ctx, record.ConnectionID)
-	assert.NoError(t, err)
-	assert.Equal(t, int64(15), found.MessagesSent)
-	assert.Equal(t, int64(11), found.MessagesReceived)
-}
-
-// TestIncrementBytesStats 测试增加字节统计
-func TestIncrementBytesStats(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
-
-	ctx := context.Background()
-
-	record := createTestRecord("user1", "node1", true)
-	record.BytesSent = 1024
-	record.BytesReceived = 512
-	err := repo.Create(ctx, record)
-	require.NoError(t, err)
-
-	err = repo.IncrementBytesStats(ctx, record.ConnectionID, 2048, 1024)
+	// 增加消息统计
+	err = tc.repo.IncrementMessageStats(tc.ctx, connID, 10, 5)
 	assert.NoError(t, err)
 
-	found, err := repo.GetByConnectionID(ctx, record.ConnectionID)
+	// 验证统计
+	updated, err := tc.repo.GetByConnectionID(tc.ctx, connID)
 	assert.NoError(t, err)
-	assert.Equal(t, int64(3072), found.BytesSent)
-	assert.Equal(t, int64(1536), found.BytesReceived)
+	assert.Equal(t, int64(10), updated.MessagesSent)
+	assert.Equal(t, int64(5), updated.MessagesReceived)
 }
 
 // TestUpdatePingStats 测试更新Ping统计
 func TestUpdatePingStats(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
+	tc := newTestConnectionRepoContext(t)
+	connID := tc.generateConnectionID()
 
-	ctx := context.Background()
-
-	record := createTestRecord("user1", "node1", true)
-	record.AveragePingMs = 20.0
-	record.MaxPingMs = 30.0
-	record.MinPingMs = 10.0
-	err := repo.Create(ctx, record)
-	require.NoError(t, err)
-
-	// 更新ping统计
-	err = repo.UpdatePingStats(ctx, record.ConnectionID, 50.0)
+	// 创建连接记录
+	record := &models.ConnectionRecord{
+		ConnectionID: connID,
+		UserID:       tc.generateUserID(),
+		ConnectedAt:  time.Now(),
+		IsActive:     true,
+	}
+	err := tc.repo.Upsert(tc.ctx, record)
 	assert.NoError(t, err)
 
-	found, err := repo.GetByConnectionID(ctx, record.ConnectionID)
+	// 更新Ping统计
+	err = tc.repo.UpdatePingStats(tc.ctx, connID, 50.5)
 	assert.NoError(t, err)
-	assert.Equal(t, 35.0, found.AveragePingMs) // (20 + 50) / 2
-	assert.Equal(t, 50.0, found.MaxPingMs)     // 更新为50
-	assert.Equal(t, 10.0, found.MinPingMs)     // 保持10
+
+	updated, err := tc.repo.GetByConnectionID(tc.ctx, connID)
+	assert.NoError(t, err)
+	assert.Equal(t, 50.5, updated.AveragePingMs)
+	assert.Equal(t, 50.5, updated.MaxPingMs)
+	assert.Equal(t, 50.5, updated.MinPingMs)
+
+	// 再次更新
+	err = tc.repo.UpdatePingStats(tc.ctx, connID, 30.0)
+	assert.NoError(t, err)
+
+	updated, err = tc.repo.GetByConnectionID(tc.ctx, connID)
+	assert.NoError(t, err)
+	assert.Equal(t, 40.25, updated.AveragePingMs)
+	assert.Equal(t, 50.5, updated.MaxPingMs)
+	assert.Equal(t, 30.0, updated.MinPingMs)
 }
 
-// TestIncrementReconnect 测试增加重连次数
-func TestIncrementReconnect(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
-
-	ctx := context.Background()
-
-	record := createTestRecord("user1", "node1", true)
-	record.ReconnectCount = 2
-	err := repo.Create(ctx, record)
-	require.NoError(t, err)
-
-	err = repo.IncrementReconnect(ctx, record.ConnectionID)
-	assert.NoError(t, err)
-
-	found, err := repo.GetByConnectionID(ctx, record.ConnectionID)
-	assert.NoError(t, err)
-	assert.Equal(t, 3, found.ReconnectCount)
-}
-
-// TestAddError 测试添加错误记录
+// TestAddError 测试记录错误
 func TestAddError(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
+	tc := newTestConnectionRepoContext(t)
+	connID := tc.generateConnectionID()
 
-	ctx := context.Background()
+	// 创建连接记录
+	record := &models.ConnectionRecord{
+		ConnectionID: connID,
+		UserID:       tc.generateUserID(),
+		ConnectedAt:  time.Now(),
+		IsActive:     true,
+	}
+	err := tc.repo.Upsert(tc.ctx, record)
+	assert.NoError(t, err)
 
-	record := createTestRecord("user1", "node1", true)
-	err := repo.Create(ctx, record)
+	// 记录错误
+	testErr := errors.New("test error")
+	err = tc.repo.AddError(tc.ctx, connID, testErr)
+	assert.NoError(t, err)
+
+	// 验证错误记录
+	updated, err := tc.repo.GetByConnectionID(tc.ctx, connID)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, updated.ErrorCount)
+	assert.Equal(t, "test error", updated.LastError)
+	assert.NotNil(t, updated.LastErrorAt)
+}
+
+// TestListWithOptions 测试条件查询
+func TestListWithOptions(t *testing.T) {
+	tc := newTestConnectionRepoContext(t)
+
+	// 调试：检查表是否为空
+	initialCount, err := tc.repo.Count(tc.ctx, nil)
 	require.NoError(t, err)
+	t.Logf("表 %s 初始记录数: %d", tc.tableName, initialCount)
 
-	testErr := fmt.Errorf("connection timeout")
-	err = repo.AddError(ctx, record.ConnectionID, testErr)
-	assert.NoError(t, err)
+	total := 5
 
-	found, err := repo.GetByConnectionID(ctx, record.ConnectionID)
-	assert.NoError(t, err)
-	assert.Equal(t, 1, found.ErrorCount)
-	assert.Equal(t, "connection timeout", found.LastError)
-	assert.NotNil(t, found.LastErrorAt)
-}
-
-// TestUpdateHeartbeat 测试更新心跳时间
-func TestUpdateHeartbeat(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
-
-	ctx := context.Background()
-
-	record := createTestRecord("user1", "node1", true)
-	err := repo.Create(ctx, record)
-	require.NoError(t, err)
-
-	pingTime := time.Now()
-	pongTime := time.Now().Add(10 * time.Millisecond)
-
-	err = repo.UpdateHeartbeat(ctx, record.ConnectionID, &pingTime, &pongTime)
-	assert.NoError(t, err)
-
-	found, err := repo.GetByConnectionID(ctx, record.ConnectionID)
-	assert.NoError(t, err)
-	assert.NotNil(t, found.LastPingAt)
-	assert.NotNil(t, found.LastPongAt)
-}
-
-// TestGetActiveByUserID 测试获取用户的活跃连接
-func TestGetActiveByUserID(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
-
-	ctx := context.Background()
-
-	// 创建3个连接，2个活跃，1个非活跃
-	repo.Create(ctx, createTestRecord("user1", "node1", true))
-	repo.Create(ctx, createTestRecord("user1", "node2", true))
-	inactiveRecord := createTestRecord("user1", "node3", false)
-	repo.Create(ctx, inactiveRecord)
-	// 手动更新 IsActive 为 false
-	db.WithContext(ctx).Model(inactiveRecord).Update("is_active", false)
-	repo.Create(ctx, createTestRecord("user2", "node1", true))
-
-	records, err := repo.GetActiveByUserID(ctx, "user1")
-	assert.NoError(t, err)
-	assert.Len(t, records, 2)
-	for _, r := range records {
-		assert.True(t, r.IsActive)
-		assert.Equal(t, "user1", r.UserID)
-	}
-}
-
-// TestGetByUserID 测试获取用户的所有连接记录
-func TestGetByUserID(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
-
-	ctx := context.Background()
-
-	// 创建5个连接
-	for i := range 5 {
-		repo.Create(ctx, createTestRecord("user1", fmt.Sprintf("node%d", i), i%2 == 0))
+	// 创建多个连接记录
+	for i := 1; i <= total; i++ {
+		isActive := i <= 3
+		record := &models.ConnectionRecord{
+			ConnectionID: tc.generateConnectionID(),
+			UserID:       tc.generateUserID(),
+			NodeID:       fmt.Sprintf("node-%d", (i-1)%2+1),
+			ConnectedAt:  time.Now(),
+			IsActive:     isActive,
+		}
+		t.Logf("创建记录 %d: ConnectionID=%s, IsActive=%v", i, record.ConnectionID, record.IsActive)
+		err := tc.repo.Upsert(tc.ctx, record)
+		assert.NoError(t, err)
+		time.Sleep(2 * time.Millisecond)
 	}
 
-	records, err := repo.GetByUserID(ctx, "user1", 3, 0)
+	// 验证插入后的数据
+	allRecords, err := tc.repo.List(tc.ctx, nil)
 	assert.NoError(t, err)
-	assert.Len(t, records, 3) // limit为3
-
-	records, err = repo.GetByUserID(ctx, "user1", 3, 3)
-	assert.NoError(t, err)
-	assert.Len(t, records, 2) // offset为3，剩余2条
-}
-
-// TestGetActiveByNodeID 测试获取节点的活跃连接
-func TestGetActiveByNodeID(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
-
-	ctx := context.Background()
-
-	// 创建3个连接，2个活跃，1个非活跃
-	repo.Create(ctx, createTestRecord("user1", "node1", true))
-	repo.Create(ctx, createTestRecord("user2", "node1", true))
-	inactiveRecord := createTestRecord("user3", "node1", false)
-	repo.Create(ctx, inactiveRecord)
-	// 手动更新 IsActive 为 false
-	db.WithContext(ctx).Model(inactiveRecord).Update("is_active", false)
-	repo.Create(ctx, createTestRecord("user4", "node2", true))
-
-	records, err := repo.GetActiveByNodeID(ctx, "node1")
-	assert.NoError(t, err)
-	assert.Len(t, records, 2)
-	for _, r := range records {
-		assert.True(t, r.IsActive)
-		assert.Equal(t, "node1", r.NodeID)
-	}
-}
-
-// TestGetByNodeID 测试获取节点的所有连接记录
-func TestGetByNodeID(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
-
-	ctx := context.Background()
-
-	// 清理之前的测试数据
-	db.Exec("DELETE FROM connection_records WHERE node_id IN ('node1', 'node2')")
-
-	// 创建5个连接
-	for i := range 5 {
-		repo.Create(ctx, createTestRecord(fmt.Sprintf("user%d", i), "node1", i%2 == 0))
+	t.Logf("总记录数: %d", len(allRecords))
+	for i, r := range allRecords {
+		t.Logf("记录 %d: ConnectionID=%s, IsActive=%v", i+1, r.ConnectionID, r.IsActive)
 	}
 
-	records, err := repo.GetByNodeID(ctx, "node1", 3, 0)
+	// 测试：获取所有活跃连接
+	isActive := true
+	activeConns, err := tc.repo.List(tc.ctx, &repository.ConnectionQueryOptions{
+		IsActive: &isActive,
+	})
 	assert.NoError(t, err)
-	assert.Len(t, records, 3) // limit为3
+	t.Logf("活跃连接数: %d, 期望: 3", len(activeConns))
+	assert.Equal(t, 3, len(activeConns))
 
-	records, err = repo.GetByNodeID(ctx, "node1", 3, 3)
+	// 测试：获取node-1的活跃连接
+	node1ActiveConns, err := tc.repo.List(tc.ctx, &repository.ConnectionQueryOptions{
+		NodeID:   "node-1",
+		IsActive: &isActive,
+	})
 	assert.NoError(t, err)
-	assert.Len(t, records, 2) // offset为3，剩余2条
+	assert.GreaterOrEqual(t, len(node1ActiveConns), 1)
+
+	// 测试：分页查询
+	pagedConns, err := tc.repo.List(tc.ctx, &repository.ConnectionQueryOptions{
+		Limit:  2,
+		Offset: 0,
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, 2, len(pagedConns))
 }
 
-// TestCountActiveConnections 测试统计活跃连接数
-func TestCountActiveConnections(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
+// TestCount 测试统计
+func TestCount(t *testing.T) {
+	tc := newTestConnectionRepoContext(t)
 
-	ctx := context.Background()
+	// 创建连接记录
+	for i := 1; i <= 5; i++ {
+		record := &models.ConnectionRecord{
+			ConnectionID: tc.generateConnectionID(),
+			UserID:       tc.generateUserID(),
+			ConnectedAt:  time.Now(),
+			IsActive:     i <= 3,
+		}
+		err := tc.repo.Upsert(tc.ctx, record)
+		assert.NoError(t, err)
+		time.Sleep(10 * time.Millisecond) // 增加等待时间确保数据写入
+	}
 
-	repo.Create(ctx, createTestRecord("user1", "node1", true))
-	repo.Create(ctx, createTestRecord("user2", "node1", true))
-	inactiveRecord := createTestRecord("user3", "node1", false)
-	repo.Create(ctx, inactiveRecord)
-	// 手动更新 IsActive 为 false
-	db.WithContext(ctx).Model(inactiveRecord).Update("is_active", false)
+	// 等待确保所有记录都已提交到数据库
+	time.Sleep(50 * time.Millisecond)
 
-	count, err := repo.CountActiveConnections(ctx)
+	// 统计活跃连接
+	isActive := true
+	count, err := tc.repo.Count(tc.ctx, &repository.ConnectionQueryOptions{
+		IsActive: &isActive,
+	})
 	assert.NoError(t, err)
-	assert.Equal(t, int64(2), count)
+	assert.Equal(t, int64(3), count)
+
+	// 统计所有连接
+	totalCount, err := tc.repo.Count(tc.ctx, nil)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(5), totalCount)
 }
 
-// TestGetConnectionStats 测试获取连接统计信息
+// TestGetConnectionStats 测试获取连接统计
 func TestGetConnectionStats(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
-
-	ctx := context.Background()
+	tc := newTestConnectionRepoContext(t)
 
 	now := time.Now()
 	startTime := now.Add(-1 * time.Hour)
 	endTime := now.Add(1 * time.Hour)
 
 	// 创建测试数据
-	for i := range 5 {
-		record := createTestRecord(fmt.Sprintf("user%d", i), "node1", i < 3)
-		record.ConnectedAt = now
-		if i >= 3 {
-			// 已断开的连接
-			disconnectTime := now.Add(5 * time.Minute)
-			record.DisconnectedAt = &disconnectTime
-			record.Duration = 300
-			record.IsAbnormal = i == 4
+	for i := 1; i <= 3; i++ {
+		record := &models.ConnectionRecord{
+			ConnectionID:     tc.generateConnectionID(),
+			UserID:           tc.generateUserID(),
+			ConnectedAt:      now,
+			MessagesSent:     int64(i * 10),
+			MessagesReceived: int64(i * 5),
+			IsActive:         i <= 2,
 		}
-		repo.Create(ctx, record)
-		// 对于i>=3的记录，手动更新 IsActive 为 false
-		if i >= 3 {
-			db.WithContext(ctx).Model(record).Update("is_active", false)
+		err := tc.repo.Upsert(tc.ctx, record)
+		assert.NoError(t, err)
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	// 获取统计
+	stats, err := tc.repo.GetConnectionStats(tc.ctx, startTime, endTime)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(3), stats.TotalConnections)
+	assert.Equal(t, int64(2), stats.ActiveConnections)
+	assert.Equal(t, int64(60), stats.TotalMessagesSent)
+	assert.Equal(t, int64(30), stats.TotalMessagesReceived)
+}
+
+// TestGetUserConnectionStats 测试获取用户连接统计
+func TestGetUserConnectionStats(t *testing.T) {
+	tc := newTestConnectionRepoContext(t)
+	userID := tc.generateUserID()
+
+	// 创建用户的多个连接
+	for i := 1; i <= 3; i++ {
+		record := &models.ConnectionRecord{
+			ConnectionID:     tc.generateConnectionID(),
+			UserID:           userID,
+			ConnectedAt:      time.Now(),
+			MessagesSent:     int64(i * 10),
+			MessagesReceived: int64(i * 5),
+			IsActive:         i <= 2,
 		}
+		err := tc.repo.Upsert(tc.ctx, record)
+		assert.NoError(t, err)
+		time.Sleep(2 * time.Millisecond)
 	}
 
-	stats, err := repo.GetConnectionStats(ctx, startTime, endTime)
+	// 获取用户统计
+	stats, err := tc.repo.GetUserConnectionStats(tc.ctx, userID)
 	assert.NoError(t, err)
-	assert.Equal(t, int64(5), stats.TotalConnections)
-	assert.Equal(t, int64(3), stats.ActiveConnections)
-	assert.Greater(t, stats.AveragePingMs, 0.0)
+	assert.Equal(t, userID, stats.UserID)
+	assert.True(t, stats.IsActive) // 有活跃连接
+	assert.Equal(t, int64(60), stats.MessagesSent)
+	assert.Equal(t, int64(30), stats.MessagesReceived)
 }
 
-// TestBatchCreate 测试批量创建
-func TestBatchCreate(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
+// TestGetNodeConnectionStats 测试获取节点连接统计
+func TestGetNodeConnectionStats(t *testing.T) {
+	tc := newTestConnectionRepoContext(t)
+	nodeID := "node-test"
 
-	ctx := context.Background()
-
-	// 创建100条记录（测试分批处理）
-	records := make([]*ConnectionRecord, 100)
-	for i := range 100 {
-		records[i] = createTestRecord(fmt.Sprintf("user%d", i), "node1", true)
+	// 创建节点的多个连接
+	for i := 1; i <= 3; i++ {
+		record := &models.ConnectionRecord{
+			ConnectionID:     tc.generateConnectionID(),
+			UserID:           tc.generateUserID(),
+			NodeID:           nodeID,
+			NodeIP:           "192.168.1.100",
+			NodePort:         8080,
+			ConnectedAt:      time.Now(),
+			MessagesSent:     int64(i * 10),
+			MessagesReceived: int64(i * 5),
+			IsActive:         i <= 2,
+		}
+		err := tc.repo.Upsert(tc.ctx, record)
+		assert.NoError(t, err)
+		time.Sleep(2 * time.Millisecond)
 	}
 
-	err := repo.BatchCreate(ctx, records)
+	// 获取节点统计
+	stats, err := tc.repo.GetNodeConnectionStats(tc.ctx, nodeID)
 	assert.NoError(t, err)
-
-	// 验证数量
-	var count int64
-	db.Model(&ConnectionRecord{}).Count(&count)
-	assert.Equal(t, int64(100), count)
+	assert.Equal(t, nodeID, stats.NodeID)
+	assert.Equal(t, "192.168.1.100", stats.NodeIP)
+	assert.Equal(t, 8080, stats.NodePort)
+	assert.Equal(t, int64(3), stats.TotalConnections)
+	assert.Equal(t, int64(2), stats.ActiveConnections)
+	assert.Equal(t, int64(60), stats.TotalMessagesSent)
+	assert.Equal(t, int64(30), stats.TotalMessagesReceived)
 }
 
-// TestBatchUpdateActive 测试批量更新活跃状态
-func TestBatchUpdateActive(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
+// TestCleanupInactiveRecords 测试清理非活跃记录
+func TestCleanupInactiveRecords(t *testing.T) {
+	tc := newTestConnectionRepoContext(t)
 
-	ctx := context.Background()
-
-	// 创建3个连接
-	connIDs := make([]string, 3)
-	for i := range 3 {
-		record := createTestRecord(fmt.Sprintf("user%d", i), "node1", true)
-		repo.Create(ctx, record)
-		connIDs[i] = record.ConnectionID
+	// 创建旧的断开连接
+	oldTime := time.Now().Add(-48 * time.Hour)
+	oldConnID := tc.generateConnectionID()
+	oldRecord := &models.ConnectionRecord{
+		UserID:       tc.generateUserID(),
+		ConnectionID: oldConnID,
+		ConnectedAt:  oldTime,
+		IsActive:     true,
 	}
-
-	// 批量更新为非活跃
-	err := repo.BatchUpdateActive(ctx, connIDs, false)
+	err := tc.repo.Upsert(tc.ctx, oldRecord)
 	assert.NoError(t, err)
 
-	// 验证
-	for _, connID := range connIDs {
-		record, _ := repo.GetByConnectionID(ctx, connID)
-		assert.False(t, record.IsActive)
-	}
-}
-
-// TestBatchDelete 测试批量删除
-func TestBatchDelete(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
-
-	ctx := context.Background()
-
-	// 创建3个连接
-	ids := make([]uint64, 3)
-	for i := range 3 {
-		record := createTestRecord(fmt.Sprintf("user%d", i), "node1", true)
-		repo.Create(ctx, record)
-		ids[i] = record.ID
-	}
-
-	err := repo.BatchDelete(ctx, ids)
+	// 标记为断开
+	err = tc.repo.MarkDisconnected(tc.ctx, oldConnID, models.DisconnectReasonTimeout, 1000, "timeout")
 	assert.NoError(t, err)
 
-	// 验证已删除
-	for _, id := range ids {
-		_, err := repo.GetByID(ctx, id)
-		assert.Error(t, err)
-	}
-}
-
-// TestCleanupOldRecords 测试清理旧记录
-func TestCleanupOldRecords(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
-
-	ctx := context.Background()
-
-	now := time.Now()
-	oldTime := now.Add(-30 * 24 * time.Hour) // 30天前
-
-	// 创建旧记录（非活跃）
-	oldRecord := createTestRecord("user1", "node1", false)
-	oldRecord.ConnectedAt = oldTime
-	oldRecord.IsActive = false // 显式设置
-	disconnectedTime := oldTime.Add(1 * time.Hour)
-	oldRecord.DisconnectedAt = &disconnectedTime
-	// GORM会跳过bool的false值，使用Session配置强制创建
-	err := db.WithContext(ctx).Session(&gorm.Session{FullSaveAssociations: false}).Create(oldRecord).Error
-	require.NoError(t, err)
-
-	// 手动更新 IsActive 为 false（因为GORM Create会使用数据库默认值true）
-	db.WithContext(ctx).Model(oldRecord).Update("is_active", false)
-	require.NoError(t, err)
-
-	// 验证旧记录已正确保存
-	saved, err := repo.GetByConnectionID(ctx, oldRecord.ConnectionID)
-	require.NoError(t, err)
-	assert.True(t, saved.ConnectedAt.Before(now.Add(-29*24*time.Hour)), "ConnectedAt should be old")
-	assert.False(t, saved.IsActive, "IsActive should be false")
-
-	// 创建新记录
-	newRecord := createTestRecord("user2", "node2", false)
-	newRecord.ConnectedAt = now
-	repo.Create(ctx, newRecord)
-
-	// 清理7天前的记录
-	deletedCount, err := repo.CleanupOldRecords(ctx, now.Add(-7*24*time.Hour))
+	// 手动更新断开时间为旧时间
+	err = tc.db.Table(tc.tableName).
+		Where("connection_id = ?", oldConnID).
+		Update("disconnected_at", oldTime).Error
 	assert.NoError(t, err)
-	assert.Equal(t, int64(1), deletedCount)
+
+	// 创建新的活跃连接
+	newConnID := tc.generateConnectionID()
+	newRecord := &models.ConnectionRecord{
+		ConnectionID: newConnID,
+		UserID:       tc.generateUserID(),
+		ConnectedAt:  time.Now(),
+		IsActive:     true,
+	}
+	err = tc.repo.Upsert(tc.ctx, newRecord)
+	assert.NoError(t, err)
+
+	// 清理24小时前的非活跃记录
+	before := time.Now().Add(-24 * time.Hour)
+	deleted, err := tc.repo.CleanupInactiveRecords(tc.ctx, before)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(1), deleted)
 
 	// 验证旧记录已删除
-	_, err = repo.GetByConnectionID(ctx, oldRecord.ConnectionID)
+	_, err = tc.repo.GetByConnectionID(tc.ctx, oldConnID)
 	assert.Error(t, err)
 
 	// 验证新记录仍存在
-	_, err = repo.GetByConnectionID(ctx, newRecord.ConnectionID)
+	_, err = tc.repo.GetByConnectionID(tc.ctx, newConnID)
 	assert.NoError(t, err)
 }
 
-// TestArchiveOldRecords 测试归档旧记录
-func TestArchiveOldRecords(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
+// TestBatchUpsert 测试批量创建或更新
+func TestBatchUpsert(t *testing.T) {
+	tc := newTestConnectionRepoContext(t)
 
-	ctx := context.Background()
-
-	now := time.Now()
-	oldTime := now.Add(-30 * 24 * time.Hour)
-
-	// 创建50条旧记录（测试分批处理）
-	for i := range 50 {
-		record := createTestRecord(fmt.Sprintf("user%d", i), "node1", false)
-		record.ConnectedAt = oldTime
-		record.IsActive = false
-		disconnectedTime := oldTime.Add(1 * time.Hour)
-		record.DisconnectedAt = &disconnectedTime
-		db.WithContext(ctx).Create(record)
-		// 手动更新 IsActive 为 false
-		db.WithContext(ctx).Model(record).Update("is_active", false)
+	// 批量创建
+	records := []*models.ConnectionRecord{
+		{ConnectionID: tc.generateConnectionID(), UserID: tc.generateUserID(), ConnectedAt: time.Now(), IsActive: true},
+		{ConnectionID: tc.generateConnectionID(), UserID: tc.generateUserID(), ConnectedAt: time.Now(), IsActive: true},
+		{ConnectionID: tc.generateConnectionID(), UserID: tc.generateUserID(), ConnectedAt: time.Now(), IsActive: true},
 	}
 
-	// 创建新记录
-	newRecord := createTestRecord("user-new", "node1", true)
-	newRecord.ConnectedAt = now
-	repo.Create(ctx, newRecord)
-
-	// 归档30天前的记录
-	var archivedRecords []*ConnectionRecord
-	processedCount, err := repo.ArchiveOldRecords(ctx, now.Add(-7*24*time.Hour), func(records []*ConnectionRecord) error {
-		archivedRecords = append(archivedRecords, records...)
-		return nil
-	})
-
+	err := tc.repo.BatchUpsert(tc.ctx, records)
 	assert.NoError(t, err)
-	assert.Equal(t, int64(50), processedCount)
-	assert.Len(t, archivedRecords, 50)
 
-	// 验证所有归档的记录都是旧记录
-	for _, record := range archivedRecords {
-		assert.True(t, record.ConnectedAt.Before(now.Add(-7*24*time.Hour)))
+	// 等待确保批量插入完成
+	time.Sleep(100 * time.Millisecond)
+
+	// 验证记录已创建
+	for _, record := range records {
+		saved, err := tc.repo.GetByConnectionID(tc.ctx, record.ConnectionID)
+		assert.NoError(t, err)
+		if assert.NotNil(t, saved, "Record should not be nil for ConnectionID: %s", record.ConnectionID) {
+			assert.Equal(t, record.ConnectionID, saved.ConnectionID)
+		}
 	}
 }
 
-// TestArchiveOldRecordsNilProcessor 测试归档时传入nil处理函数
-func TestArchiveOldRecordsNilProcessor(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
-
-	ctx := context.Background()
-
-	_, err := repo.ArchiveOldRecords(ctx, time.Now(), nil)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "processor function cannot be nil")
-}
-
-// TestArchiveOldRecordsProcessorError 测试归档时处理函数返回错误
-func TestArchiveOldRecordsProcessorError(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
-
-	ctx := context.Background()
+// TestGetFrequentReconnectConnections 测试获取频繁重连的连接
+func TestGetFrequentReconnectConnections(t *testing.T) {
+	tc := newTestConnectionRepoContext(t)
 
 	// 创建测试数据
-	oldTime := time.Now().Add(-30 * 24 * time.Hour)
-	for i := range 10 {
-		record := createTestRecord(fmt.Sprintf("user%d", i), "node1", false)
-		record.ConnectedAt = oldTime
-		record.IsActive = false
-		disconnectedTime := oldTime.Add(1 * time.Hour)
-		record.DisconnectedAt = &disconnectedTime
-		db.WithContext(ctx).Create(record)
-		// 手动更新 IsActive 为 false
-		db.WithContext(ctx).Model(record).Update("is_active", false)
+	records := []*models.ConnectionRecord{
+		{ConnectionID: tc.generateConnectionID(), UserID: tc.generateUserID(), ConnectedAt: time.Now(), ReconnectCount: 10, IsActive: true},
+		{ConnectionID: tc.generateConnectionID(), UserID: tc.generateUserID(), ConnectedAt: time.Now(), ReconnectCount: 5, IsActive: true},
+		{ConnectionID: tc.generateConnectionID(), UserID: tc.generateUserID(), ConnectedAt: time.Now(), ReconnectCount: 2, IsActive: true},
 	}
 
-	// 处理函数返回错误
-	_, err := repo.ArchiveOldRecords(ctx, time.Now(), func(records []*ConnectionRecord) error {
-		return fmt.Errorf("archive failed")
-	})
-
-	assert.Error(t, err)
-	if err != nil {
-		assert.Contains(t, err.Error(), "processor failed")
-	}
-}
-
-// TestArchiveOldRecordsWithFileExport 测试归档到文件
-func TestArchiveOldRecordsWithFileExport(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
-
-	ctx := context.Background()
-
-	// 创建测试数据
-	oldTime := time.Now().Add(-30 * 24 * time.Hour)
-	for i := range 5 {
-		record := createTestRecord(fmt.Sprintf("user%d", i), "node1", false)
-		record.ConnectedAt = oldTime
-		record.IsActive = false
-		disconnectedTime := oldTime.Add(1 * time.Hour)
-		record.DisconnectedAt = &disconnectedTime
-		db.WithContext(ctx).Create(record)
-		// 手动更新 IsActive 为 false
-		db.WithContext(ctx).Model(record).Update("is_active", false)
+	for _, record := range records {
+		err := tc.repo.Upsert(tc.ctx, record)
+		assert.NoError(t, err)
+		time.Sleep(2 * time.Millisecond)
 	}
 
-	// 归档到JSON文件
-	filename := "archive_test.json"
-	defer os.Remove(filename)
-
-	var allRecords []*ConnectionRecord
-	processedCount, err := repo.ArchiveOldRecords(ctx, time.Now(), func(records []*ConnectionRecord) error {
-		allRecords = append(allRecords, records...)
-		return nil
-	})
-
+	// 获取重连次数>=5的连接
+	frequentConns, err := tc.repo.GetFrequentReconnectConnections(tc.ctx, 5, 10)
 	assert.NoError(t, err)
-	assert.Equal(t, int64(5), processedCount)
-
-	// 写入文件
-	data, err := json.MarshalIndent(allRecords, "", "  ")
-	assert.NoError(t, err)
-	err = os.WriteFile(filename, data, 0644)
-	assert.NoError(t, err)
-
-	// 验证文件存在
-	_, err = os.Stat(filename)
-	assert.NoError(t, err)
-}
-
-// TestGetFrequentReconnectUsers 测试获取频繁重连的用户
-func TestGetFrequentReconnectUsers(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
-
-	ctx := context.Background()
-
-	now := time.Now()
-
-	// 用户1：重连10次
-	for range 2 {
-		record := createTestRecord("user1", "node1", false)
-		record.ReconnectCount = 5
-		record.ConnectedAt = now.Add(-1 * time.Hour)
-		repo.Create(ctx, record)
-		db.WithContext(ctx).Model(record).Update("is_active", false)
-	}
-
-	// 用户2：重连2次
-	record2 := createTestRecord("user2", "node1", false)
-	record2.ReconnectCount = 2
-	record2.ConnectedAt = now.Add(-1 * time.Hour)
-	repo.Create(ctx, record2)
-	db.WithContext(ctx).Model(record2).Update("is_active", false)
-
-	stats, err := repo.GetFrequentReconnectUsers(ctx, 5, 24*time.Hour)
-	assert.NoError(t, err)
-	assert.Len(t, stats, 1)
-	assert.Equal(t, "user1", stats[0].UserID)
-	assert.Equal(t, int64(10), stats[0].ReconnectCount)
-}
-
-// TestGetAbnormalConnections 测试获取异常连接
-func TestGetAbnormalConnections(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
-
-	ctx := context.Background()
-
-	// 创建正常和异常连接
-	normal := createTestRecord("user1", "node1", false)
-	normal.IsAbnormal = false
-	repo.Create(ctx, normal)
-	db.WithContext(ctx).Model(normal).Update("is_active", false)
-
-	abnormal1 := createTestRecord("user2", "node1", false)
-	abnormal1.IsAbnormal = true
-	repo.Create(ctx, abnormal1)
-	db.WithContext(ctx).Model(abnormal1).Update("is_active", false)
-
-	abnormal2 := createTestRecord("user3", "node1", false)
-	abnormal2.IsAbnormal = true
-	repo.Create(ctx, abnormal2)
-	db.WithContext(ctx).Model(abnormal2).Update("is_active", false)
-
-	records, err := repo.GetAbnormalConnections(ctx, 10, 0)
-	assert.NoError(t, err)
-	assert.Len(t, records, 2)
-	for _, r := range records {
-		assert.True(t, r.IsAbnormal)
-	}
-}
-
-// TestGetHighErrorRateConnections 测试获取高错误率连接
-func TestGetHighErrorRateConnections(t *testing.T) {
-	db := getConnectTestDB(t)
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
-
-	ctx := context.Background()
-
-	// 创建低错误率连接
-	low := createTestRecord("user1", "node1", false)
-	low.ErrorCount = 2
-	repo.Create(ctx, low)
-	db.WithContext(ctx).Model(low).Update("is_active", false)
-
-	// 创建高错误率连接
-	high1 := createTestRecord("user2", "node1", false)
-	high1.ErrorCount = 10
-	repo.Create(ctx, high1)
-	db.WithContext(ctx).Model(high1).Update("is_active", false)
-
-	high2 := createTestRecord("user3", "node1", false)
-	high2.ErrorCount = 15
-	repo.Create(ctx, high2)
-	db.WithContext(ctx).Model(high2).Update("is_active", false)
-
-	records, err := repo.GetHighErrorRateConnections(ctx, 5, 10)
-	assert.NoError(t, err)
-	assert.Len(t, records, 2)
-	for _, r := range records {
-		assert.GreaterOrEqual(t, r.ErrorCount, 5)
-	}
-}
-
-// TestCleanupScheduler 测试定时清理任务
-func TestCleanupScheduler(t *testing.T) {
-	db := getConnectTestDB(t)
-
-	// 创建配置，启用自动清理
-	config := &wscconfig.ConnectionRecord{
-		EnableAutoCleanup: true,
-		CleanupDaysAgo:    1, // 清理1天前的数据（测试用）
-	}
-
-	repo := NewConnectionRecordRepository(db, config, NewDefaultWSCLogger())
-	defer repo.Close()
-
-	ctx := context.Background()
-
-	// 创建旧记录（2天前）
-	oldTime := time.Now().Add(-2 * 24 * time.Hour)
-	oldRecord := createTestRecord("user1", "node1", false)
-	oldRecord.ConnectedAt = oldTime
-	oldRecord.IsActive = false
-	disconnectedTime := oldTime.Add(1 * time.Hour)
-	oldRecord.DisconnectedAt = &disconnectedTime
-	db.WithContext(ctx).Create(oldRecord)
-	db.WithContext(ctx).Model(oldRecord).Update("is_active", false)
-
-	// 创建新记录（当前时间）
-	newRecord := createTestRecord("user2", "node2", true)
-	repo.Create(ctx, newRecord)
-
-	// 等待清理任务执行（立即执行一次）
-	time.Sleep(2 * time.Second)
-
-	// 验证旧记录已被清理
-	_, err := repo.GetByConnectionID(ctx, oldRecord.ConnectionID)
-	// 注意：自动清理是异步的，可能还没执行完，所以这里不强制要求错误
-	if err == nil {
-		t.Log("⚠️ 旧记录尚未被清理（异步清理可能还在进行中）")
-	} else {
-		t.Log("✅ 旧记录已被清理")
-	}
-
-	// 验证新记录仍存在
-	_, err = repo.GetByConnectionID(ctx, newRecord.ConnectionID)
-	assert.NoError(t, err, "新记录应该保留")
-}
-
-// TestCleanupSchedulerDisabled 测试禁用自动清理
-func TestCleanupSchedulerDisabled(t *testing.T) {
-	db := getConnectTestDB(t)
-
-	// 不传配置或禁用自动清理
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
-	defer repo.Close()
-
-	ctx := context.Background()
-
-	// 创建旧记录
-	oldTime := time.Now().Add(-30 * 24 * time.Hour)
-	oldRecord := createTestRecord("user1", "node1", false)
-	oldRecord.ConnectedAt = oldTime
-	oldRecord.IsActive = false
-	disconnectedTime := oldTime.Add(1 * time.Hour)
-	oldRecord.DisconnectedAt = &disconnectedTime
-	db.WithContext(ctx).Create(oldRecord)
-	db.WithContext(ctx).Model(oldRecord).Update("is_active", false)
-
-	// 等待一段时间
-	time.Sleep(1 * time.Second)
-
-	// 验证旧记录仍然存在（因为自动清理被禁用）
-	_, err := repo.GetByConnectionID(ctx, oldRecord.ConnectionID)
-	assert.NoError(t, err, "禁用自动清理时，旧记录应该保留")
-}
-
-// TestRepositoryClose 测试仓库关闭
-func TestRepositoryClose(t *testing.T) {
-	db := getConnectTestDB(t)
-
-	config := &wscconfig.ConnectionRecord{
-		EnableAutoCleanup: true,
-		CleanupDaysAgo:    7,
-	}
-
-	repo := NewConnectionRecordRepository(db, config, NewDefaultWSCLogger())
-
-	// 关闭仓库
-	err := repo.Close()
-	assert.NoError(t, err)
-
-	// 再次关闭应该也不会报错
-	err = repo.Close()
-	assert.NoError(t, err)
-}
-
-// BenchmarkArchiveOldRecords 性能测试：归档旧记录
-func BenchmarkArchiveOldRecords(b *testing.B) {
-	db := getConnectTestDB(&testing.T{})
-	repo := NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
-
-	ctx := context.Background()
-
-	// 准备10000条旧记录
-	oldTime := time.Now().Add(-30 * 24 * time.Hour)
-	for range 10000 {
-		record := createTestRecord(fmt.Sprintf("user%d", time.Now().UnixNano()), "node1", false)
-		record.ConnectedAt = oldTime
-		repo.Create(ctx, record)
-	}
-
-	b.ResetTimer()
-	for b.Loop() {
-		repo.ArchiveOldRecords(ctx, time.Now(), func(records []*ConnectionRecord) error {
-			// 模拟处理逻辑
-			return nil
-		})
-	}
+	assert.Equal(t, 2, len(frequentConns))
 }

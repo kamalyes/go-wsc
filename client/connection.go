@@ -17,6 +17,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/jpillora/backoff"
+	"github.com/kamalyes/go-toolbox/pkg/syncx"
 )
 
 // Closed 返回连接状态
@@ -192,16 +193,15 @@ func (wsc *Wsc) handleReconnectOrClean() {
 // processReceivedMessage 处理接收到的消息
 func (wsc *Wsc) processReceivedMessage(messageType int, message []byte) {
 	// 处理消息时加锁
-	wsc.mu.Lock()
-	defer wsc.mu.Unlock()
-
-	// 根据消息类型分发处理
-	switch messageType {
-	case websocket.TextMessage:
-		wsc.handleTextMessage(message)
-	case websocket.BinaryMessage:
-		wsc.handleBinaryMessage(message)
-	}
+	syncx.WithLock(&wsc.mu, func() {
+		// 根据消息类型分发处理
+		switch messageType {
+		case websocket.TextMessage:
+			wsc.handleTextMessage(message)
+		case websocket.BinaryMessage:
+			wsc.handleBinaryMessage(message)
+		}
+	})
 }
 
 // handleTextMessage 处理文本消息
@@ -298,27 +298,26 @@ func (wsc *Wsc) CloseWithMsg(msg string) {
 
 // clean 清理资源
 func (wsc *Wsc) clean() {
-	wsc.mu.Lock()
-	defer wsc.mu.Unlock() // 确保在退出时解锁
+	syncx.WithLock(&wsc.mu, func() {
+		// 先转换状态为Disconnected,确保Closed()立即返回true
+		_ = wsc.stateMachine.TransitionTo(ConnectionStatusDisconnected)
 
-	// 先转换状态为Disconnected,确保Closed()立即返回true
-	_ = wsc.stateMachine.TransitionTo(ConnectionStatusDisconnected)
+		if wsc.WebSocket == nil {
+			return
+		}
 
-	if wsc.WebSocket == nil {
-		return
-	}
-
-	wsc.WebSocket.connMu.Lock()
-	wsc.WebSocket.isConnected = false
-	if wsc.WebSocket.Conn != nil {
-		_ = wsc.WebSocket.Conn.Close()
-	}
-	// 原子关闭 sendChan（写锁保护）
-	wsc.WebSocket.sendChanMu.Lock()
-	wsc.WebSocket.sendChanOnce.Do(func() {
-		atomic.StoreInt32(&wsc.WebSocket.sendChanClosed, 1)
-		close(wsc.WebSocket.sendChan)
+		wsc.WebSocket.connMu.Lock()
+		wsc.WebSocket.isConnected = false
+		if wsc.WebSocket.Conn != nil {
+			_ = wsc.WebSocket.Conn.Close()
+		}
+		// 原子关闭 sendChan（写锁保护）
+		wsc.WebSocket.sendChanMu.Lock()
+		wsc.WebSocket.sendChanOnce.Do(func() {
+			atomic.StoreInt32(&wsc.WebSocket.sendChanClosed, 1)
+			close(wsc.WebSocket.sendChan)
+		})
+		wsc.WebSocket.sendChanMu.Unlock()
+		wsc.WebSocket.connMu.Unlock()
 	})
-	wsc.WebSocket.sendChanMu.Unlock()
-	wsc.WebSocket.connMu.Unlock()
 }

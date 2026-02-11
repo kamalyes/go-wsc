@@ -13,12 +13,10 @@ package hub
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/contextx"
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
-	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/models"
 )
@@ -33,22 +31,10 @@ func (h *Hub) SendToUserWithAck(ctx context.Context, toUserID string, msg *HubMe
 	enableAck := h.config.EnableAck
 
 	if !enableAck {
-		// 如果未启用ACK，直接发送
-		h.logger.InfoKV("ACK未启用，使用重试发送",
-			"message_id", msg.MessageID,
-			"to_user", toUserID,
-		)
 		result := h.SendToUserWithRetry(ctx, toUserID, msg)
 		return nil, result.FinalError
 	}
-
-	// 生成消息ID
-	msg.ID = mathx.IfNotEmpty(msg.ID, fmt.Sprintf("%s-%s", toUserID, h.idGenerator.GenerateRequestID()))
-
-	// 设置消息必要字段
-	msg.RequireAck = true
-
-	// 记录ACK发送开始
+	msg.RequireAck = true // 记录ACK发送开始
 	h.logger.InfoKV("ACK消息发送开始",
 		"message_id", msg.MessageID,
 		"to_user", toUserID,
@@ -57,7 +43,6 @@ func (h *Hub) SendToUserWithAck(ctx context.Context, toUserID string, msg *HubMe
 		"require_ack", true,
 		"enable_ack", enableAck,
 	)
-
 	// 检查用户是否在线并处理离线消息
 	ackMsg, err, isOnline := h.checkUserOnlineForAck(ctx, toUserID, msg)
 	if !isOnline {
@@ -66,7 +51,7 @@ func (h *Hub) SendToUserWithAck(ctx context.Context, toUserID string, msg *HubMe
 
 	// 添加到待确认队列
 	pm := h.ackManager.AddPendingMessage(msg)
-	defer h.ackManager.RemovePendingMessage(msg.ID)
+	defer h.ackManager.RemovePendingMessage(msg.MessageID)
 
 	// 创建重试函数
 	attemptNum := 0

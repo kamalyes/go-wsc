@@ -51,6 +51,9 @@ type WorkloadRepository interface {
 	// RemoveAgentWorkload 移除客服负载记录（客服离线时调用）
 	RemoveAgentWorkload(ctx context.Context, agentID string) error
 
+	// SyncAgentWorkloadToZSet 客服重新加入时，从单个key同步负载到ZSet
+	SyncAgentWorkloadToZSet(ctx context.Context, agentID string) error
+
 	// GetAllAgentWorkloads 获取所有客服的负载信息
 	GetAllAgentWorkloads(ctx context.Context, limit int64) ([]WorkloadInfo, error)
 
@@ -63,9 +66,9 @@ type WorkloadRepository interface {
 
 // RedisWorkloadRepository Redis 实现
 type RedisWorkloadRepository struct {
-	client     *redis.Client
-	keyPrefix  string         // key 前缀
-	logger     logger.ILogger // 日志记录器
+	client    *redis.Client
+	keyPrefix string         // key 前缀
+	logger    logger.ILogger // 日志记录器
 }
 
 // NewRedisWorkloadRepository 创建 Redis 负载管理仓库
@@ -77,9 +80,9 @@ func NewRedisWorkloadRepository(client *redis.Client, config *wscconfig.Workload
 	keyPrefix := mathx.IF(config.KeyPrefix == "", DefaultWorkloadKeyPrefix, config.KeyPrefix)
 
 	repo := &RedisWorkloadRepository{
-		client:     client,
-		keyPrefix:  keyPrefix,
-		logger:     log,
+		client:    client,
+		keyPrefix: keyPrefix,
+		logger:    log,
 	}
 
 	return repo
@@ -231,7 +234,8 @@ func (r *RedisWorkloadRepository) GetLeastLoadedAgent(ctx context.Context, onlin
 		return "", 0, errorx.WrapError("no online agents available")
 	}
 
-	// 使用 Lua 脚本在 Redis 端完成筛选，减少网络传输
+	// 使用 Lua 脚本在 Redis 端完成筛选和随机选择，减少网络传输
+	// 当多个客服负载相同时，在它们之间随机选择，实现真正的负载均衡
 	luaScript := `
 		local zsetKey = KEYS[1]
 		local onlineAgents = {}
@@ -244,14 +248,30 @@ func (r *RedisWorkloadRepository) GetLeastLoadedAgent(ctx context.Context, onlin
 		-- 获取前50个最低负载的客服（平衡性能和命中率）
 		local results = redis.call('ZRANGE', zsetKey, 0, 49, 'WITHSCORES')
 		
-		-- 遍历结果，找到第一个在线的客服
+		-- 找到最小负载值和所有具有该负载的在线客服
+		local minWorkload = nil
+		local candidateAgents = {}
+		
 		for i = 1, #results, 2 do
 			local agentID = results[i]
 			local workload = tonumber(results[i+1])
 			
 			if onlineAgents[agentID] then
-				return {agentID, workload}
+				if minWorkload == nil or workload < minWorkload then
+					-- 发现更小的负载，清空之前的候选
+					minWorkload = workload
+					candidateAgents = {agentID}
+				elseif workload == minWorkload then
+					-- 相同负载，添加到候选列表
+					table.insert(candidateAgents, agentID)
+				end
 			end
+		end
+		
+		-- 如果找到候选客服，从中随机选择一个
+		if #candidateAgents > 0 then
+			local randomIndex = math.random(1, #candidateAgents)
+			return {candidateAgents[randomIndex], minWorkload}
 		end
 		
 		-- 如果ZSet中没有找到，返回空
@@ -286,7 +306,7 @@ func (r *RedisWorkloadRepository) GetLeastLoadedAgent(ctx context.Context, onlin
 			default:
 				r.logger.Warnf("⚠️ 无法解析负载值类型: %T", v)
 			}
-			r.logger.Debugf("🎯 通过Lua脚本快速找到负载最小的在线客服: %s (负载: %d)", agentID, workload)
+			r.logger.Debugf("🎯 从同负载客服中随机选择: %s (负载: %d)", agentID, workload)
 			return agentID, workload, nil
 		}
 	}
@@ -295,7 +315,7 @@ func (r *RedisWorkloadRepository) GetLeastLoadedAgent(ctx context.Context, onlin
 	randomIndex := random.RandInt(0, len(onlineAgents)-1)
 	selectedAgent := onlineAgents[randomIndex]
 	workload, _ := r.GetAgentWorkload(ctx, selectedAgent)
-	r.logger.Debugf("⚠️ ZSet中未找到在线客服，随机选择: %s (负载: %d)", selectedAgent, workload)
+	r.logger.Debugf("⚠️ ZSet中未找到在线客服，降级随机选择: %s (负载: %d)", selectedAgent, workload)
 
 	// 同步到ZSet
 	if err := r.client.ZAdd(ctx, zsetKey, redis.Z{
@@ -308,28 +328,72 @@ func (r *RedisWorkloadRepository) GetLeastLoadedAgent(ctx context.Context, onlin
 	return selectedAgent, workload, nil
 }
 
-// RemoveAgentWorkload 从负载ZSet中移除客服并删除工作负载key(客服离线时调用)
+// RemoveAgentWorkload 从负载ZSet中移除客服（客服离线时调用）
+// 只移除ZSet记录，保留单个key以便重新上线时恢复
 func (r *RedisWorkloadRepository) RemoveAgentWorkload(ctx context.Context, agentID string) error {
+	// 使用 Lua 脚本保证原子性
+	luaScript := `
+		local zsetKey = KEYS[1]
+		local agentID = ARGV[1]
+		
+		-- 只从ZSet中移除,保留单个key
+		redis.call('ZREM', zsetKey, agentID)
+		return 1
+	`
+
+	zsetKey := r.GetZSetKey()
+
+	_, err := r.client.Eval(ctx, luaScript, []string{zsetKey}, agentID).Result()
+	if err != nil {
+		return errorx.WrapError("failed to remove agent from zset", err)
+	}
+
+	r.logger.Debugf("🗑️ 已从负载ZSet移除客服（保留单个key以便恢复）: %s", agentID)
+	return nil
+}
+
+// SyncAgentWorkloadToZSet 客服重新加入时，从单个key同步负载到ZSet
+// 场景：客服离线后删除了单个key和ZSet记录，重新上线时需要恢复
+// 如果单个key不存在，则初始化为0并添加到ZSet
+func (r *RedisWorkloadRepository) SyncAgentWorkloadToZSet(ctx context.Context, agentID string) error {
+	workloadKey := r.GetWorkloadKey(agentID)
+	zsetKey := r.GetZSetKey()
+
 	// 使用 Lua 脚本保证原子性
 	luaScript := `
 		local workloadKey = KEYS[1]
 		local zsetKey = KEYS[2]
 		local agentID = ARGV[1]
 		
-		redis.call('DEL', workloadKey)
-		redis.call('ZREM', zsetKey, agentID)
-		return 1
+		-- 获取单个key中的负载值
+		local workload = redis.call('GET', workloadKey)
+		
+		if workload then
+			-- 如果单个key存在,同步到ZSet
+			redis.call('ZADD', zsetKey, tonumber(workload), agentID)
+			return tonumber(workload)
+		end
+		
+		-- 如果单个key不存在,初始化为0并添加到ZSet
+		redis.call('ZADD', zsetKey, 0, agentID)
+		return 0
 	`
 
-	workloadKey := r.GetWorkloadKey(agentID)
-	zsetKey := r.GetZSetKey()
-
-	_, err := r.client.Eval(ctx, luaScript, []string{workloadKey, zsetKey}, agentID).Result()
+	result, err := r.client.Eval(ctx, luaScript, []string{workloadKey, zsetKey}, agentID).Result()
 	if err != nil {
-		return errorx.WrapError("failed to remove agent workload", err)
+		return errorx.WrapError("failed to sync agent workload to zset", err)
 	}
 
-	r.logger.Debugf("🗑️ 已从负载ZSet移除客服并清理工作负载: %s", agentID)
+	var workload int64
+	switch v := result.(type) {
+	case int64:
+		workload = v
+	case float64:
+		workload = int64(v)
+	}
+
+	r.logger.Debugf("🔄 客服 %s 重新加入,从单个key同步负载到ZSet: %d", agentID, workload)
+
 	return nil
 }
 
@@ -397,8 +461,6 @@ func (r *RedisWorkloadRepository) GetAllAgentWorkloads(ctx context.Context, limi
 
 	return workloads, nil
 }
-
-
 
 // BatchSetAgentWorkload 批量设置客服负载
 func (r *RedisWorkloadRepository) BatchSetAgentWorkload(ctx context.Context, workloads map[string]int64) error {

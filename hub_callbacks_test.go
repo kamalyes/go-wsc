@@ -31,32 +31,9 @@ import (
 // ====================================================================
 
 const (
-	// 测试用户和客户端ID
-	testClientID2    = "multi-client"
-	testClientID3    = "panic-client"
-	testClientID4    = "replace-client"
-	testUserID1      = "test-user-1"
-	testUserID2      = "multi-user"
-	testUserID3      = "panic-user"
-	testUserID4      = "replace-user"
-	testUserOffline  = "offline-user"
-	testUserNonExist = "non-existent-user"
-	timeoutClientID  = "timeout-client"
-	timeoutUserID    = "timeout-user"
-
-	// 测试消息ID
-	msgSuccessID   = "msg-success-1"
-	msgFailID      = "msg-fail-1"
-	msgQueueFullID = "msg-queue-full"
-	msgOfflineID   = "msg-offline"
-	msgMultiID     = "msg-multi"
-	msgPanicID     = "msg-panic"
-	msgReplaceID   = "msg-replace"
-
 	// 测试消息内容
 	msgContentFail      = "测试失败发送"
 	msgContentQueueFull = "测试队列满"
-	msgContentOffline   = "测试用户离线"
 	msgContentMulti     = "测试多回调"
 	msgContentPanic     = "测试panic恢复"
 	msgContentReplace   = "测试回调替换"
@@ -70,8 +47,7 @@ const (
 	heartbeatInterval = 50
 
 	// 测试缓冲区大小
-	testChannelBufferSize = 100
-	testSmallBufferSize   = 1
+	testSmallBufferSize = 1
 
 	// 测试队列类型
 	queueTypeAll = "all_queues"
@@ -351,29 +327,26 @@ func TestMessageSendCallback(t *testing.T) {
 
 	recorder := &CallbackRecorder{}
 	hub.OnMessageSend(recorder.OnMessageSend)
+	idGen := hub.GetIDGenerator()
 
 	t.Run("Success_SendMessage", func(t *testing.T) {
-		// 注册一个在线客户端
-		client := &Client{
-			ID:       "test-client-1",
-			UserID:   testUserID1,
-			UserType: UserTypeCustomer,
-			SendChan: make(chan []byte, 100),
-			Context:  context.WithValue(context.Background(), ContextKeyUserID, testUserID1),
-		}
+		// 使用辅助函数创建客户端
+		client := createTestClientWithIDGen(UserTypeCustomer)
 		hub.Register(client)
 		time.Sleep(50 * time.Millisecond)
 
+		msgID := idGen.GenerateTraceID()
 		msg := &HubMessage{
-			ID:           "msg-success-1",
+			ID:           msgID,
+			MessageID:    idGen.GenerateRequestID(),
 			MessageType:  MessageTypeText,
 			Content:      "测试成功发送",
-			Receiver:     testUserID1,
+			Receiver:     client.UserID,
 			ReceiverType: UserTypeCustomer,
 		}
 
 		// 发送消息
-		hub.SendToUserWithRetry(context.Background(), testUserID1, msg)
+		hub.SendToUserWithRetry(context.Background(), client.UserID, msg)
 
 		// 等待回调执行
 		time.Sleep(200 * time.Millisecond)
@@ -385,7 +358,7 @@ func TestMessageSendCallback(t *testing.T) {
 		lastMsg, lastResult := recorder.GetLastMessageSend()
 		assert.NotNil(t, lastMsg, assertMsgNotNil)
 		assert.NotNil(t, lastResult, assertResultNotNil)
-		assert.Equal(t, msgSuccessID, lastMsg.ID, "消息ID应该匹配")
+		assert.Equal(t, msgID, lastMsg.ID, "消息ID应该匹配")
 		assert.True(t, lastResult.Success, "发送应该成功")
 		assert.Equal(t, 0, lastResult.TotalRetries, "不应该有重试")
 
@@ -404,15 +377,20 @@ func TestMessageSendCallback(t *testing.T) {
 		fullHub.WaitForStart()
 		defer fullHub.Shutdown()
 
+		fullIdGen := fullHub.GetIDGenerator()
+		testUserNonExist := fullIdGen.GenerateCorrelationID()
+		msgID := fullIdGen.GenerateTraceID()
 		msg := &HubMessage{
-			ID:           msgFailID,
+			ID:           msgID,
+			MessageID:    fullIdGen.GenerateRequestID(),
 			MessageType:  MessageTypeText,
 			Content:      msgContentFail,
 			ReceiverType: UserTypeCustomer,
 		}
 
 		// 发送消息会因为队列满而失败并重试
-		result := fullHub.SendToUserWithRetry(context.Background(), testUserNonExist, msg) // 等待回调执行
+		result := fullHub.SendToUserWithRetry(context.Background(), testUserNonExist, msg)
+		// 等待回调执行
 		time.Sleep(waitMediumDuration)
 
 		// 验证回调被调用
@@ -430,7 +408,7 @@ func TestMessageSendCallback(t *testing.T) {
 		lastMsg, lastResult := recorder.GetLastMessageSend()
 		assert.NotNil(t, lastMsg, assertMsgNotNil)
 		assert.NotNil(t, lastResult, assertResultNotNil)
-		assert.Equal(t, msgFailID, lastMsg.ID, "消息ID应该匹配")
+		assert.Equal(t, msgID, lastMsg.ID, "消息ID应该匹配")
 		assert.False(t, lastResult.Success, "发送应该失败")
 
 		fullHub.Shutdown()
@@ -524,42 +502,49 @@ func TestQueueFullCallback(t *testing.T) {
 	// 注意：由于内部通道是私有的，我们通过快速发送大量消息来模拟队列满
 
 	t.Run("QueueFull_Triggered", func(t *testing.T) {
-		msg := &HubMessage{
-			ID:          msgQueueFullID,
-			MessageType: MessageTypeText,
-			Content:     msgContentQueueFull,
-		}
-
-		// 先注册一个客户端但不读取,让队列填满
-		client := &Client{
-			ID:       "test-client-queue",
-			UserID:   testUserID1,
-			SendChan: make(chan []byte, 1), // 小队列容易填满
-		}
+		// 创建一个SendChan容量为1的客户端
+		// 注意：我们需要阻止客户端消费消息，让队列真正满
+		client := createTestClientWithIDGen(UserTypeCustomer, 1)
 		hub.Register(client)
 		time.Sleep(100 * time.Millisecond)
 
-		// 发送多条消息填满队列
-		for i := 0; i < 10; i++ {
-			msg.ID = fmt.Sprintf("msg-%d", i)
-			msg.MessageID = msg.ID
-			hub.SendToUserWithRetry(context.Background(), testUserID1, msg)
+		// 阻塞客户端的SendChan接收端，确保队列会满
+		// 先发送一条消息填充缓冲区（容量为1）
+		firstMsg := createTestHubMessage(MessageTypeText)
+		firstMsg.Content = msgContentQueueFull + "-initial"
+		hub.SendToUserWithRetry(context.Background(), client.UserID, firstMsg)
+		time.Sleep(50 * time.Millisecond) // 确保第一条消息已进入队列
+
+		// 现在SendChan应该满了（容量1，已有1条消息）
+		// 再发送多条消息，应该触发队列满回调
+		for i := 0; i < 20; i++ { // 增加发送数量，确保触发
+			msg := createTestHubMessage(MessageTypeText)
+			msg.Content = fmt.Sprintf("%s-%d", msgContentQueueFull, i)
+			// 使用非重试的发送，避免等待
+			go hub.SendToUserWithRetry(context.Background(), client.UserID, msg)
 		}
 
 		// 等待回调执行
 		time.Sleep(waitLongDuration)
 
+		// 清空队列，避免阻塞
+		go func() {
+			for range client.SendChan {
+				// 消费掉所有消息
+			}
+		}()
+
 		// 验证回调被调用
 		count := atomic.LoadInt64(&recorder.queueFullCount)
 		if count == 0 {
-			t.Skip("队列满回调未触发,可能是发送速度不够快")
+			t.Skip("队列满回调未触发 - 这是一个时序敏感的测试，可能因为消息处理太快而失败")
 			return
 		}
 		assert.Greater(t, count, int64(0), "队列满回调应该被调用")
 
 		lastMsg, recipient, queueType, errBase := recorder.GetLastQueueFull()
 		assert.NotNil(t, lastMsg, assertMsgNotNil)
-		assert.Equal(t, testUserID1, recipient, "接收者应该匹配")
+		assert.Equal(t, client.UserID, recipient, "接收者应该匹配")
 		assert.Equal(t, queueTypeAll, queueType, "队列类型应该是all_queues")
 		assert.NotNil(t, errBase, assertErrorNotNil)
 	})
@@ -582,16 +567,9 @@ func TestHeartbeatTimeoutCallback(t *testing.T) {
 	hub.OnHeartbeatTimeout(recorder.OnHeartbeatTimeout)
 
 	t.Run("HeartbeatTimeout_Triggered", func(t *testing.T) {
-		// 注册一个客户端
-		lastHeartbeat := time.Now()
-		client := &Client{
-			ID:            timeoutClientID,
-			UserID:        timeoutUserID,
-			UserType:      UserTypeCustomer,
-			SendChan:      make(chan []byte, testChannelBufferSize),
-			LastHeartbeat: lastHeartbeat,
-			Context:       context.WithValue(context.Background(), ContextKeyUserID, timeoutUserID),
-		}
+		// 使用辅助函数创建客户端
+		client := createTestClientWithIDGen(UserTypeCustomer)
+		client.LastHeartbeat = time.Now()
 		hub.Register(client)
 
 		// 等待心跳超时
@@ -600,8 +578,9 @@ func TestHeartbeatTimeoutCallback(t *testing.T) {
 		// 验证回调可能被调用（取决于心跳检查是否运行）
 		count := atomic.LoadInt64(&recorder.heartbeatTimeoutCount)
 		if count > 0 {
-			assert.Equal(t, timeoutClientID, recorder.lastHeartbeatClientID, "客户端ID应该匹配")
-			assert.Equal(t, timeoutUserID, recorder.lastHeartbeatUserID, "用户ID应该匹配")
+			lastClientID, lastUserID := recorder.GetLastHeartbeatTimeout()
+			assert.Equal(t, client.ID, lastClientID, "客户端ID应该匹配")
+			assert.Equal(t, client.UserID, lastUserID, "用户ID应该匹配")
 		}
 	})
 }
@@ -621,27 +600,23 @@ func TestMultipleCallbacks(t *testing.T) {
 	recorder := &CallbackRecorder{}
 	hub.OnMessageSend(recorder.OnMessageSend)
 	hub.OnQueueFull(recorder.OnQueueFull)
+	idGen := hub.GetIDGenerator()
 
 	t.Run("Multiple_Callbacks_Work", func(t *testing.T) {
-		// 注册客户端
-		client := &Client{
-			ID:       testClientID2,
-			UserID:   testUserID2,
-			UserType: UserTypeCustomer,
-			SendChan: make(chan []byte, testChannelBufferSize),
-			Context:  context.WithValue(context.Background(), ContextKeyUserID, testUserID2),
-		}
+		// 使用辅助函数创建客户端
+		client := createTestClientWithIDGen(UserTypeCustomer)
 		hub.Register(client)
 		time.Sleep(waitShortDuration)
 
 		msg := &HubMessage{
-			ID:          msgMultiID,
+			ID:          idGen.GenerateTraceID(),
+			MessageID:   idGen.GenerateRequestID(),
 			MessageType: MessageTypeText,
 			Content:     msgContentMulti,
 		}
 
 		// 发送消息
-		hub.SendToUserWithRetry(context.Background(), testUserID2, msg)
+		hub.SendToUserWithRetry(context.Background(), client.UserID, msg)
 		time.Sleep(waitMediumDuration)
 
 		// 验证消息发送回调被调用
@@ -669,25 +644,17 @@ func TestCallbackPanicRecovery(t *testing.T) {
 			panic(testPanicMessage)
 		})
 
-		client := &Client{
-			ID:       testClientID3,
-			UserID:   testUserID3,
-			UserType: UserTypeCustomer,
-			SendChan: make(chan []byte, testChannelBufferSize),
-			Context:  context.WithValue(context.Background(), ContextKeyUserID, testUserID3),
-		}
+		// 使用辅助函数创建客户端
+		client := createTestClientWithIDGen(UserTypeCustomer)
 		hub.Register(client)
 		time.Sleep(waitShortDuration)
 
-		msg := &HubMessage{
-			ID:          msgPanicID,
-			MessageType: MessageTypeText,
-			Content:     msgContentPanic,
-		}
+		msg := createTestHubMessage(MessageTypeText)
+		msg.Content = msgContentPanic
 
 		// 发送消息，不应该因为回调panic而崩溃
 		require.NotPanics(t, func() {
-			hub.SendToUserWithRetry(context.Background(), testUserID3, msg)
+			hub.SendToUserWithRetry(context.Background(), client.UserID, msg)
 			time.Sleep(waitMediumDuration)
 		}, "Hub不应该因为回调panic而崩溃")
 
@@ -730,23 +697,15 @@ func TestCallbackRegistration(t *testing.T) {
 		go hub.Run()
 		hub.WaitForStart()
 
-		client := &Client{
-			ID:       testClientID4,
-			UserID:   testUserID4,
-			UserType: UserTypeCustomer,
-			SendChan: make(chan []byte, testChannelBufferSize),
-			Context:  context.WithValue(context.Background(), ContextKeyUserID, testUserID4),
-		}
+		// 使用辅助函数创建客户端
+		client := createTestClientWithIDGen(UserTypeCustomer)
 		hub.Register(client)
 		time.Sleep(waitShortDuration)
 
-		msg := &HubMessage{
-			ID:          msgReplaceID,
-			MessageType: MessageTypeText,
-			Content:     msgContentReplace,
-		}
+		msg := createTestHubMessage(MessageTypeText)
+		msg.Content = msgContentReplace
 
-		hub.SendToUserWithRetry(context.Background(), testUserID4, msg)
+		hub.SendToUserWithRetry(context.Background(), client.UserID, msg)
 		time.Sleep(waitMediumDuration)
 
 		// 验证只有第二个回调被调用

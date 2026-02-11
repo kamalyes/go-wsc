@@ -13,6 +13,7 @@ package wsc
 
 import (
 	"context"
+	"encoding/json"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -33,16 +34,11 @@ func TestSendToMultipleUsers(t *testing.T) {
 
 	// 注册多个客户端
 	clients := make([]*Client, 3)
-	userIDs := []string{"user-1", "user-2", "user-3"}
+	userIDs := []string{}
 
 	for i := 0; i < 3; i++ {
-		clients[i] = &Client{
-			ID:       "client-" + userIDs[i],
-			UserID:   userIDs[i],
-			UserType: UserTypeCustomer,
-			SendChan: make(chan []byte, 100),
-			Context:  context.WithValue(context.Background(), ContextKeyUserID, userIDs[i]),
-		}
+		clients[i] = createTestClientWithIDGen(UserTypeCustomer)
+		userIDs = append(userIDs, clients[i].UserID)
 		hub.Register(clients[i])
 	}
 	time.Sleep(100 * time.Millisecond)
@@ -76,18 +72,8 @@ func TestBroadcastToGroup(t *testing.T) {
 	hub.WaitForStart()
 
 	// 注册不同类型的客户端
-	customer := &Client{
-		ID:       "customer-1",
-		UserID:   "user-customer",
-		UserType: UserTypeCustomer,
-		SendChan: make(chan []byte, 100),
-	}
-	agent := &Client{
-		ID:       "agent-1",
-		UserID:   "user-agent",
-		UserType: UserTypeAgent,
-		SendChan: make(chan []byte, 100),
-	}
+	customer := createTestClientWithIDGen(UserTypeCustomer)
+	agent := createTestClientWithIDGen(UserTypeAgent)
 
 	hub.Register(customer)
 	hub.Register(agent)
@@ -120,12 +106,7 @@ func TestBroadcast(t *testing.T) {
 	// 注册多个客户端
 	clients := make([]*Client, 2)
 	for i := 0; i < 2; i++ {
-		clients[i] = &Client{
-			ID:       "broadcast-client-" + string(rune('1'+i)),
-			UserID:   "broadcast-user-" + string(rune('1'+i)),
-			UserType: UserTypeCustomer,
-			SendChan: make(chan []byte, 100),
-		}
+		clients[i] = createTestClientWithIDGen(UserTypeCustomer)
 		hub.Register(clients[i])
 	}
 	time.Sleep(50 * time.Millisecond)
@@ -158,12 +139,8 @@ func TestSendConditional(t *testing.T) {
 
 	// 注册多个客户端
 	for i := 1; i <= 3; i++ {
-		client := &Client{
-			ID:       "cond-client-" + string(rune('0'+i)),
-			UserID:   "cond-user-" + string(rune('0'+i)),
-			UserType: UserTypeCustomer,
-			SendChan: make(chan []byte, 100),
-		}
+		client := createTestClientWithIDGen(UserTypeCustomer)
+		client.UserID = "cond-user-" + string(rune('0'+i))
 		hub.Register(client)
 	}
 	time.Sleep(50 * time.Millisecond)
@@ -192,12 +169,7 @@ func TestSendPriority(t *testing.T) {
 	go hub.Run()
 	hub.WaitForStart()
 
-	client := &Client{
-		ID:       "priority-client",
-		UserID:   "priority-user",
-		UserType: UserTypeCustomer,
-		SendChan: make(chan []byte, 100),
-	}
+	client := createTestClientWithIDGen(UserTypeCustomer)
 	hub.Register(client)
 	time.Sleep(50 * time.Millisecond)
 
@@ -208,7 +180,7 @@ func TestSendPriority(t *testing.T) {
 	}
 
 	// 发送高优先级消息
-	hub.SendPriority(context.Background(), "priority-user", msg, PriorityHigh)
+	hub.SendPriority(context.Background(), client.UserID, msg, PriorityHigh)
 	time.Sleep(50 * time.Millisecond)
 
 	assert.Equal(t, PriorityHigh, msg.Priority, "消息优先级应该被设置")
@@ -225,12 +197,7 @@ func TestBroadcastAfterDelay(t *testing.T) {
 	go hub.Run()
 	hub.WaitForStart()
 
-	client := &Client{
-		ID:       "delay-client",
-		UserID:   "delay-user",
-		UserType: UserTypeCustomer,
-		SendChan: make(chan []byte, 100),
-	}
+	client := createTestClientWithIDGen(UserTypeCustomer)
 	hub.Register(client)
 	time.Sleep(50 * time.Millisecond)
 
@@ -290,18 +257,27 @@ func TestSendPongResponse(t *testing.T) {
 	go hub.Run()
 	hub.WaitForStart()
 
-	client := &Client{
-		ID:       "pong-client",
-		UserID:   "pong-user",
-		UserType: UserTypeCustomer,
-		SendChan: make(chan []byte, 100),
-	}
+	client := createTestClientWithIDGen(UserTypeCustomer)
 	hub.Register(client)
 	time.Sleep(50 * time.Millisecond)
 
 	// 发送Pong响应
-	err := hub.SendPongResponse("pong-client")
+	err := hub.SendPongResponse(client)
 	assert.NoError(t, err, "发送Pong应该成功")
+
+	// 验证消息是否被发送到SendChan
+	select {
+	case msg := <-client.SendChan:
+		assert.NotNil(t, msg, "应该收到Pong消息")
+		// 验证消息内容
+		var pongMsg HubMessage
+		err := json.Unmarshal(msg, &pongMsg)
+		assert.NoError(t, err, "消息应该能反序列化")
+		assert.Equal(t, MessageTypePong, pongMsg.MessageType, "消息类型应该是Pong")
+		assert.Equal(t, client.UserID, pongMsg.Receiver, "接收者应该是客户端用户ID")
+	case <-time.After(1 * time.Second):
+		t.Fatal("超时:没有收到Pong消息")
+	}
 
 	hub.Unregister(client)
 }

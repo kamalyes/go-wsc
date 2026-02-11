@@ -41,7 +41,7 @@ func (h *Hub) QueryMessageRecordsBySender(ctx context.Context, sender string, li
 	if h.messageRecordRepo == nil {
 		return nil, ErrRecordRepositoryNotSet
 	}
-	return h.messageRecordRepo.FindBySender(ctx, sender, limit)
+	return h.messageRecordRepo.QueryRecords(ctx, &MessageRecordFilter{Sender: sender, Limit: limit, OrderDesc: true})
 }
 
 // QueryMessageRecordsByReceiver 根据接收者查询消息记录
@@ -53,7 +53,7 @@ func (h *Hub) QueryMessageRecordsByReceiver(ctx context.Context, receiver string
 	if h.messageRecordRepo == nil {
 		return nil, ErrRecordRepositoryNotSet
 	}
-	return h.messageRecordRepo.FindByReceiver(ctx, receiver, limit)
+	return h.messageRecordRepo.QueryRecords(ctx, &MessageRecordFilter{Receiver: receiver, Limit: limit, OrderDesc: true})
 }
 
 // QueryMessageRecordsByNodeIP 根据节点IP查询消息记录
@@ -65,7 +65,7 @@ func (h *Hub) QueryMessageRecordsByNodeIP(ctx context.Context, nodeIP string, li
 	if h.messageRecordRepo == nil {
 		return nil, ErrRecordRepositoryNotSet
 	}
-	return h.messageRecordRepo.FindByNodeIP(ctx, nodeIP, limit)
+	return h.messageRecordRepo.QueryRecords(ctx, &MessageRecordFilter{NodeIP: nodeIP, Limit: limit, OrderDesc: true})
 }
 
 // QueryMessageRecordsByClientIP 根据客户端IP查询消息记录
@@ -77,7 +77,7 @@ func (h *Hub) QueryMessageRecordsByClientIP(ctx context.Context, clientIP string
 	if h.messageRecordRepo == nil {
 		return nil, ErrRecordRepositoryNotSet
 	}
-	return h.messageRecordRepo.FindByClientIP(ctx, clientIP, limit)
+	return h.messageRecordRepo.QueryRecords(ctx, &MessageRecordFilter{ClientIP: clientIP, Limit: limit, OrderDesc: true})
 }
 
 // QueryMessageRecordsByStatus 根据状态查询消息记录
@@ -89,7 +89,7 @@ func (h *Hub) QueryMessageRecordsByStatus(ctx context.Context, status MessageSen
 	if h.messageRecordRepo == nil {
 		return nil, ErrRecordRepositoryNotSet
 	}
-	return h.messageRecordRepo.FindByStatus(ctx, status, limit)
+	return h.messageRecordRepo.QueryRecords(ctx, &MessageRecordFilter{Status: &status, Limit: limit, OrderDesc: true})
 }
 
 // QueryRetryableMessageRecords 查询可重试的消息记录

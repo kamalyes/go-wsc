@@ -25,12 +25,16 @@ import (
 // ============================================================================
 
 // GetObserverClients 获取所有观察者客户端（所有设备）- O(n) n=观察者数量
+// 自动过滤已关闭的客户端，避免并发场景下的 "send on closed channel" panic
 func (h *Hub) GetObserverClients() []*Client {
 	return syncx.WithRLockReturnValue(&h.mutex, func() []*Client {
 		observers := make([]*Client, 0)
 		for _, clientMap := range h.observerClients {
 			for _, client := range clientMap {
-				observers = append(observers, client)
+				// 只返回未关闭的客户端
+				if !client.IsClosed() {
+					observers = append(observers, client)
+				}
 			}
 		}
 		return observers
@@ -151,6 +155,14 @@ func (h *Hub) notifyObservers(msg *HubMessage) {
 						"client_id", client.ID,
 						"message_id", msg.MessageID,
 						"error", err,
+					)
+				}).
+				OnPanic(func(idx int, client *Client, panicVal any) {
+					h.logger.WarnKV("向观察者发送消息时发生 panic(通道可能已关闭)",
+						"observer_id", client.UserID,
+						"client_id", client.ID,
+						"message_id", msg.MessageID,
+						"panic", panicVal,
 					)
 				}).
 				Execute(func(idx int, observer *Client) (error, error) {

@@ -29,9 +29,6 @@ type UserConnectionStats = repository.UserConnectionStats
 // NodeConnectionStats 节点连接统计
 type NodeConnectionStats = repository.NodeConnectionStats
 
-// UserReconnectStats 用户重连统计
-type UserReconnectStats = repository.UserReconnectStats
-
 // NewConnectionRecordRepository 创建连接记录仓储
 var NewConnectionRecordRepository = repository.NewConnectionRecordRepository
 
@@ -77,6 +74,9 @@ type MessageRecordRepository = repository.MessageRecordRepository
 // MessageRecordGormRepository Gorm 消息记录仓储实现
 type MessageRecordGormRepository = repository.MessageRecordGormRepository
 
+// MessageRecordFilter 消息记录查询过滤器
+type MessageRecordFilter = repository.MessageRecordFilter
+
 // NewMessageRecordRepository 创建消息记录仓储
 var NewMessageRecordRepository = repository.NewMessageRecordRepository
 
@@ -84,8 +84,21 @@ var NewMessageRecordRepository = repository.NewMessageRecordRepository
 // Offline Message Repository - 离线消息仓储
 // ============================================
 
+// MessageRole 消息查询角色
+type MessageRole = repository.MessageRole
+
+const (
+	// MessageRoleReceiver 作为接收者查询
+	MessageRoleReceiver = repository.MessageRoleReceiver
+	// MessageRoleSender 作为发送者查询
+	MessageRoleSender = repository.MessageRoleSender
+)
+
 // OfflineMessageRecord 离线消息记录
 type OfflineMessageRecord = repository.OfflineMessageRecord
+
+// OfflineMessageFilter 离线消息查询过滤器
+type OfflineMessageFilter = repository.OfflineMessageFilter
 
 // OfflineMessageDBRepository 离线消息数据库仓储接口
 type OfflineMessageDBRepository = repository.OfflineMessageDBRepository
@@ -188,8 +201,7 @@ var NewRedisWorkloadRepository = repository.NewRedisWorkloadRepository
 // 离线消息管理方法：
 // - Save(ctx context.Context, record *OfflineMessageRecord) error: 保存离线消息
 // - BatchSave(ctx context.Context, records []*OfflineMessageRecord) error: 批量保存离线消息
-// - GetByReceiver(ctx context.Context, receiverID string, limit int, cursor ...string) ([]*OfflineMessageRecord, error): 按接收者获取消息
-// - GetBySender(ctx context.Context, senderID string, limit int) ([]*OfflineMessageRecord, error): 按发送者获取消息
+// - QueryMessages(ctx context.Context, filter *OfflineMessageFilter) ([]*OfflineMessageRecord, error): 查询离线消息（支持按接收者/发送者、分页、状态过滤）
 // - DeleteByMessageIDs(ctx context.Context, receiverID string, messageIDs []string) error: 按消息ID删除
 // - GetCountByReceiver(ctx context.Context, receiverID string) (int64, error): 获取接收者消息数
 // - GetCountBySender(ctx context.Context, senderID string) (int64, error): 获取发送者消息数
@@ -205,16 +217,22 @@ var NewRedisWorkloadRepository = repository.NewRedisWorkloadRepository
 // 例如：repo := wsc.NewMessageRecordRepository(db)
 
 // 消息记录管理方法：
-// - Create(record *MessageSendRecord) error: 创建消息记录
-// - CreateFromMessage(msg *HubMessage, maxRetry int, expiresAt *time.Time) (*MessageSendRecord, error): 从消息创建记录
-// - Update(record *MessageSendRecord) error: 更新消息记录
-// - FindByID(id uint) (*MessageSendRecord, error): 按ID查找
-// - FindByMessageID(messageID string) (*MessageSendRecord, error): 按消息ID查找
-// - FindByStatus(status MessageSendStatus, limit int) ([]*MessageSendRecord, error): 按状态查找
-// - FindBySender(sender string, limit int) ([]*MessageSendRecord, error): 按发送者查找
-// - FindByReceiver(receiver string, limit int) ([]*MessageSendRecord, error): 按接收者查找
-// - FindByNodeIP(nodeIP string, limit int) ([]*MessageSendRecord, error): 按节点IP查找
-// - FindByClientIP(clientIP string, limit int) ([]*MessageSendRecord, error): 按客户端IP查找
+// - Create(ctx, record *MessageSendRecord) error: 创建消息记录
+// - CreateFromMessage(ctx, msg *HubMessage, maxRetry int, expiresAt *time.Time) (*MessageSendRecord, error): 从消息创建记录
+// - Update(ctx, record *MessageSendRecord) error: 更新消息记录
+// - FindByID(ctx, id uint) (*MessageSendRecord, error): 按ID查找
+// - FindByMessageID(ctx, messageID string) (*MessageSendRecord, error): 按消息ID查找
+// - QueryRecords(ctx, filter *MessageRecordFilter) ([]*MessageSendRecord, error): 查询消息记录（支持按状态、发送者、接收者、节点IP、客户端IP等条件过滤）
+// - FindRetryable(ctx, limit int) ([]*MessageSendRecord, error): 查找可重试的记录
+// - DeleteExpired(ctx) (int64, error): 删除过期的记录
+// - Delete(ctx, id uint) error: 删除记录
+// - DeleteByMessageID(ctx, messageID string) error: 根据消息ID删除
+// - UpdateStatus(ctx, messageID string, status MessageSendStatus, reason FailureReason, errorMsg string) error: 更新状态
+// - IncrementRetry(ctx, messageID string, attempt RetryAttempt) error: 增加重试次数
+// - GetStatistics(ctx) (map[string]int64, error): 获取统计信息
+// - CleanupOld(ctx, before time.Time) (int64, error): 清理旧记录
+// - GetDB() *gorm.DB: 获取底层 GORM DB
+// - Close() error: 关闭仓库，停止后台任务
 
 // ============================================
 // ConnectionRecordRepository 接口方法
@@ -242,4 +260,3 @@ var NewRedisWorkloadRepository = repository.NewRedisWorkloadRepository
 // 例如：repo := wsc.NewRedisMessageQueueRepository(client, config, log)
 
 // 消息队列管理方法：定义在接口中，通过实现类调用
-

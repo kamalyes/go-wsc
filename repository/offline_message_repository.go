@@ -17,6 +17,7 @@ import (
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-logger"
+	sqlbuilder "github.com/kamalyes/go-sqlbuilder/repository"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"gorm.io/gorm"
@@ -28,6 +29,16 @@ import (
 //    CREATE INDEX idx_receiver_status_expire ON wsc_offline_messages(receiver, status, expire_at);
 // 2. message_id 已有唯一索引，用于 cursor 子查询优化
 
+// MessageRole 消息查询角色
+type MessageRole string
+
+const (
+	// MessageRoleReceiver 作为接收者查询
+	MessageRoleReceiver MessageRole = "receiver"
+	// MessageRoleSender 作为发送者查询
+	MessageRoleSender MessageRole = "sender"
+)
+
 // OfflineMessageDBRepository 离线消息数据库仓库接口
 type OfflineMessageDBRepository interface {
 	// Save 保存离线消息到数据库
@@ -36,12 +47,8 @@ type OfflineMessageDBRepository interface {
 	// BatchSave 批量保存离线消息到数据库
 	BatchSave(ctx context.Context, records []*OfflineMessageRecord) error
 
-	// GetByReceiver 获取用户作为接收者的离线消息列表
-	// cursor: 可选参数，传入上次返回的最后一条 message_id，空字符串表示从头开始
-	GetByReceiver(ctx context.Context, receiverID string, limit int, cursor ...string) ([]*OfflineMessageRecord, error)
-
-	// GetBySender 获取用户作为发送者的离线消息列表
-	GetBySender(ctx context.Context, senderID string, limit int) ([]*OfflineMessageRecord, error)
+	// QueryMessages 查询离线消息（支持按接收者/发送者、分页、状态过滤）
+	QueryMessages(ctx context.Context, filter *OfflineMessageFilter) ([]*OfflineMessageRecord, error)
 
 	// DeleteByMessageIDs 批量删除离线消息（按接收者）
 	DeleteByMessageIDs(ctx context.Context, receiverID string, messageIDs []string) error
@@ -68,6 +75,20 @@ type OfflineMessageDBRepository interface {
 
 	// Close 关闭仓库，停止后台任务
 	Close() error
+}
+
+// OfflineMessageFilter 离线消息查询过滤器
+type OfflineMessageFilter struct {
+	// UserID 用户ID
+	UserID string
+	// Role 角色
+	Role MessageRole
+	// Limit 数量限制
+	Limit int
+	// Cursor 分页游标（message_id）
+	Cursor string
+	// Statuses 消息状态列表，为空则待处理状态
+	Statuses []MessageSendStatus
 }
 
 // GormOfflineMessageRepository GORM实现
@@ -114,41 +135,61 @@ func (r *GormOfflineMessageRepository) BatchSave(ctx context.Context, records []
 	return r.db.WithContext(ctx).CreateInBatches(records, 1000).Error
 }
 
-// GetByReceiver 获取用户作为接收者的离线消息列表
+// QueryMessages 查询离线消息（支持按接收者/发送者、分页、状态过滤）
 // 按 created_at 升序排列，保证时序一致性
-// cursor: 可选参数，传入上次返回的最后一条 message_id 实现分页
-func (r *GormOfflineMessageRepository) GetByReceiver(ctx context.Context, receiverID string, limit int, cursor ...string) ([]*OfflineMessageRecord, error) {
+func (r *GormOfflineMessageRepository) QueryMessages(ctx context.Context, filter *OfflineMessageFilter) ([]*OfflineMessageRecord, error) {
 	var records []*OfflineMessageRecord
-	query := r.db.WithContext(ctx).
-		Where("receiver = ? AND expire_at > ?", receiverID, time.Now()).
-		Where("status IN ?", PendingOfflineStatuses)
 
-	// 如果提供了 cursor，从 cursor 之后的消息开始读取
-	// 优化：使用子查询一次性获取 cursor 的 created_at，避免额外查询
-	if len(cursor) > 0 && cursor[0] != "" {
-		// 使用子查询直接过滤，避免额外的 SELECT 查询
-		tableName := OfflineMessageRecord{}.TableName()
-		query = query.Where("created_at > (SELECT created_at FROM "+tableName+" WHERE message_id = ? LIMIT 1)", cursor[0])
+	// 使用 go-sqlbuilder 构建查询
+	query := sqlbuilder.NewQuery().
+		AddFilter(sqlbuilder.NewGtFilter("expire_at", time.Now()))
+
+	// 根据角色设置用户过滤条件
+	switch filter.Role {
+	case MessageRoleReceiver:
+		query.AddFilterIfNotEmpty("receiver", filter.UserID)
+	case MessageRoleSender:
+		query.AddFilterIfNotEmpty("sender", filter.UserID)
 	}
 
+	// 状态过滤：如果指定了状态则使用指定状态，否则使用默认的待处理状态
+	if len(filter.Statuses) > 0 {
+		statusesInterface := make([]interface{}, len(filter.Statuses))
+		for i, status := range filter.Statuses {
+			statusesInterface[i] = status
+		}
+		query.AddInFilterIfNotEmpty("status", statusesInterface)
+	} else {
+		statusesInterface := make([]interface{}, len(PendingOfflineStatuses))
+		for i, status := range PendingOfflineStatuses {
+			statusesInterface[i] = status
+		}
+		query.AddInFilterIfNotEmpty("status", statusesInterface)
+	}
+
+	// 排序
+	query.AddOrder("created_at", "ASC")
+
 	// MySQL 查询限制：用户指定 limit 或最多 1 万条
-	limit = mathx.IF(limit <= 0, 10000, min(limit, 10000))
+	limit := mathx.IF(filter.Limit <= 0, 10000, min(filter.Limit, 10000))
+	query.Limit(limit)
 
-	err := query.Order("created_at ASC").
-		Limit(limit).
-		Find(&records).Error
-	return records, err
-}
+	// 应用到 GORM
+	gormDB := r.db.WithContext(ctx)
+	gormDB = sqlbuilder.ApplyFilters(gormDB, query.Filters)
 
-// GetBySender 获取用户作为发送者的离线消息列表
-func (r *GormOfflineMessageRepository) GetBySender(ctx context.Context, senderID string, limit int) ([]*OfflineMessageRecord, error) {
-	var records []*OfflineMessageRecord
-	err := r.db.WithContext(ctx).
-		Where("sender = ? AND expire_at > ?", senderID, time.Now()).
-		Where("status IN ?", PendingOfflineStatuses).
-		Order("created_at ASC").
-		Limit(limit).
-		Find(&records).Error
+	// 分页游标：从 cursor 之后的消息开始读取（使用原生 GORM，因为需要子查询）
+	if filter.Cursor != "" {
+		tableName := OfflineMessageRecord{}.TableName()
+		gormDB = gormDB.Where("created_at > (SELECT created_at FROM "+tableName+" WHERE message_id = ? LIMIT 1)", filter.Cursor)
+	}
+
+	gormDB = sqlbuilder.ApplyOrders(gormDB, query.Orders)
+	if query.LimitValue != nil {
+		gormDB = gormDB.Limit(*query.LimitValue)
+	}
+
+	err := gormDB.Find(&records).Error
 	return records, err
 }
 

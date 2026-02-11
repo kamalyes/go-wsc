@@ -14,7 +14,6 @@ package hub
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"time"
 
 	"github.com/kamalyes/go-logger"
@@ -38,16 +37,26 @@ func (h *Hub) UpdateHeartbeat(clientID string) {
 	}
 }
 
-// SendPongResponse 发送 pong 响应给客户端
-func (h *Hub) SendPongResponse(clientID string) error {
-	client, exists := h.GetClientByIDWithLock(clientID)
+// UpdatePongTime 更新客户端PONG响应时间（发送PONG时调用）
+func (h *Hub) UpdatePongTime(clientID string) {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
 
-	if !exists {
-		return errorx.WrapError(fmt.Sprintf("client not found: %s", clientID))
+	if client, exists := h.clients[clientID]; exists {
+		now := time.Now()
+		client.LastPong = now
+	}
+}
+
+// SendPongResponse 发送 pong 响应给客户端（避免竞态条件）
+// 此方法接收已获取的客户端对象，避免在发送时重新查询导致的竞态条件
+func (h *Hub) SendPongResponse(client *Client) error {
+	if client == nil {
+		return errorx.WrapError("client is nil")
 	}
 
 	pongMsg := &HubMessage{
-		ID:           fmt.Sprintf("pong_%s_%d", client.UserID, time.Now().UnixNano()),
+		ID:           h.idGenerator.GenerateRequestID(),
 		MessageType:  MessageTypePong,
 		Sender:       UserTypeSystem.String(),
 		SenderType:   UserTypeSystem,
@@ -66,6 +75,7 @@ func (h *Hub) SendPongResponse(clientID string) error {
 	// 直接发送
 	select {
 	case client.SendChan <- data:
+		h.UpdatePongTime(client.ID)
 		return nil
 	default:
 		return errorx.WrapError("client send channel is full")
@@ -74,7 +84,7 @@ func (h *Hub) SendPongResponse(clientID string) error {
 
 // handleHeartbeatMessage 处理心跳消息
 func (h *Hub) handleHeartbeatMessage(client *Client) {
-	// 更新心跳时间（内存）
+	// 更新心跳请求时间（内存）- 收到PING时
 	h.UpdateHeartbeat(client.ID)
 
 	// 💓 记录心跳日志
@@ -89,14 +99,17 @@ func (h *Hub) handleHeartbeatMessage(client *Client) {
 		)
 	}
 
-	// 使用内部方法直接发送 pong 响应
-	if err := h.SendPongResponse(client.ID); err != nil {
+	// 直接发送 pong 响应（使用已获取的客户端对象，避免竞态条件）
+	if err := h.SendPongResponse(client); err != nil {
 		h.logger.WarnKV("心跳 pong 响应发送失败",
 			"client_id", client.ID,
 			"user_id", client.UserID,
 			"error", err,
 		)
 	}
+
+	// 异步追踪心跳统计（不阻塞主流程）
+	h.trackHeartbeatStats(client)
 }
 
 // ============================================================================
@@ -131,7 +144,7 @@ func (h *Hub) DisconnectClient(clientID string, reason string) error {
 }
 
 // disconnectKickedClient 断开被踢出的客户端
-func (h *Hub) disconnectKickedClient(ctx context.Context, client *Client, userID, reason string) {
+func (h *Hub) disconnectKickedClient(ctx context.Context, client *Client, reason string) {
 	// 调用断开回调
 	if h.clientDisconnectCallback != nil {
 		syncx.Go().
@@ -156,7 +169,7 @@ func (h *Hub) disconnectKickedClient(ctx context.Context, client *Client, userID
 	// 关闭连接
 	h.logger.InfoKV("关闭被踢用户的连接",
 		"client_id", client.ID,
-		"user_id", userID,
+		"user_id", client.UserID,
 		"reason", reason,
 	)
 	if client.Conn != nil {

@@ -49,10 +49,10 @@ func (h *Hub) Run() {
 			syncx.Go().
 				WithTimeout(2 * time.Second).
 				OnError(func(err error) {
-					h.logger.ErrorKV("设置启动时间到Redis失败", "error", err)
+					h.logger.ErrorKV("注册节点到Redis失败", "error", err)
 				}).
 				ExecWithContext(func(execCtx context.Context) error {
-					return h.statsRepo.SetStartTime(execCtx, h.nodeID, time.Now().Unix())
+					return h.statsRepo.RegisterNode(execCtx, h.nodeID, time.Now().Unix())
 				})
 		}
 
@@ -74,7 +74,7 @@ func (h *Hub) Run() {
 	// 🌐 启动分布式服务（如果启用了 PubSub）
 	if h.pubsub != nil {
 		// 启动节点心跳
-		syncx.Go().
+		syncx.Go(h.ctx).
 			OnPanic(func(r any) {
 				h.logger.ErrorKV("节点心跳 panic", "panic", r, "node_id", h.nodeID)
 			}).
@@ -83,7 +83,7 @@ func (h *Hub) Run() {
 			})
 
 		// 订阅节点间消息
-		syncx.Go().
+		syncx.Go(h.ctx).
 			OnPanic(func(r any) {
 				h.logger.ErrorKV("订阅节点消息 panic", "panic", r, "node_id", h.nodeID)
 			}).
@@ -94,7 +94,7 @@ func (h *Hub) Run() {
 			})
 
 		// 订阅全局广播频道
-		syncx.Go().
+		syncx.Go(h.ctx).
 			OnPanic(func(r any) {
 				h.logger.ErrorKV("订阅广播频道 panic", "panic", r, "node_id", h.nodeID)
 			}).
@@ -105,7 +105,7 @@ func (h *Hub) Run() {
 			})
 
 		// 订阅观察者通知频道
-		syncx.Go().
+		syncx.Go(h.ctx).
 			OnPanic(func(r any) {
 				h.logger.ErrorKV("订阅观察者频道 panic", "panic", r, "node_id", h.nodeID)
 			}).
@@ -271,6 +271,10 @@ func (h *Hub) SafeShutdown() error {
 
 	cg.Info("开始安全关闭 Hub [节点: %s]", h.nodeID)
 
+	// 等待异步统计任务完成（避免统计丢失）
+	cg.Info("→ 等待异步统计任务完成...")
+	time.Sleep(50 * time.Millisecond)
+
 	// 关闭所有客户端连接
 	cg.Info("→ 关闭所有客户端连接...")
 	h.mutex.Lock()
@@ -296,11 +300,12 @@ func (h *Hub) SafeShutdown() error {
 	// 使用原子计数器获取连接数（无需加锁）
 	totalClients := h.activeClientsCount.Load() + h.sseClientsCount.Load()
 
-	// 每个连接增加10ms超时时间
-	calculatedTimeout := baseTimeout + time.Duration(totalClients)*10*time.Millisecond
-	if calculatedTimeout > maxTimeout {
-		calculatedTimeout = maxTimeout
-	}
+	// 每个连接增加10ms超时时间，限制在最大超时范围内
+	calculatedTimeout := mathx.IfClamp(
+		baseTimeout+time.Duration(totalClients)*10*time.Millisecond,
+		0,
+		maxTimeout,
+	)
 
 	// 等待所有goroutine完成，带超时保护
 	cg.Info("→ 等待所有协程完成...")

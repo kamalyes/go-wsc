@@ -18,6 +18,7 @@ import (
 
 	"github.com/kamalyes/go-toolbox/pkg/contextx"
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
+	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/events"
 )
@@ -55,21 +56,24 @@ func (h *Hub) handleRegister(client *Client) {
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
 
+	// 设置客户端所在节点
+	client.NodeID = h.nodeID
+	client.NodeIP = h.config.NodeIP
+	client.NodePort = h.config.NodePort
+
+	// 初始化客户端 SendChan（根据客户端类型使用配置的容量）
+	h.initClientSendChan(client)
+
 	// 初始化客户端时间戳（如果未设置）
 	now := time.Now()
-	if client.ConnectedAt.IsZero() {
-		client.ConnectedAt = now
-	}
-	if client.LastHeartbeat.IsZero() {
-		client.LastHeartbeat = now
-	}
-	if client.LastSeen.IsZero() {
-		client.LastSeen = now
-	}
+	client.ConnectedAt = mathx.IfNotZero(client.ConnectedAt, now)
+	client.LastHeartbeat = mathx.IfNotZero(client.LastHeartbeat, now)
+	client.LastSeen = mathx.IfNotZero(client.LastSeen, now)
 
 	// 统一处理多端登录逻辑
 	h.handleMultiLoginPolicy(client)
-	h.syncClientStats(len(h.clients)) // 在持有锁时直接读取
+	h.syncClientStats()              // 增量更新总连接数（异步读最新值）
+	h.syncActiveConnectionsToRedis() // 设置活跃连接数（异步读最新值）
 	h.logClientConnection(client)
 
 	// 保存连接记录到数据库（异步）
@@ -93,9 +97,6 @@ func (h *Hub) handleRegister(client *Client) {
 			}
 		}
 	}
-
-	// 🌐 分布式：记录用户所在节点（同步执行，确保路由信息及时更新）
-	h.recordUserNode(client)
 
 	// 异步任务
 	go h.syncOnlineStatus(client)
@@ -151,7 +152,7 @@ func (h *Hub) handleMultiLoginPolicy(newClient *Client) {
 			"user_id", userID,
 			"old_connections", len(existingClients))
 
-		h.kickExistingClientsUnsafe(userID, existingClients, DisconnectReasonForceOffline)
+		h.kickExistingClientsUnsafe(existingClients, DisconnectReasonForceOffline)
 		h.addNewClient(newClient)
 		return
 	}
@@ -229,7 +230,7 @@ func (h *Hub) KickUser(userID string, reason string, sendNotification bool, noti
 
 	// 4. 并发断开所有连接
 	syncx.ParallelForEachSlice(clients, func(i int, client *Client) {
-		h.disconnectKickedClient(ctx, client, userID, reason)
+		h.disconnectKickedClient(ctx, client, reason)
 	})
 
 	// 5. 设置成功标志并记录完成
@@ -368,37 +369,56 @@ func (h *Hub) syncClientRemovalToRedis(client *Client) {
 	}
 }
 
-// syncActiveConnectionsToRedis 同步活跃连接数到Redis
+// syncActiveConnectionsToRedis 同步活跃连接数到Redis（使用防抖机制避免竞态条件）
+// 当多个客户端快速注册时，使用防抖延迟50ms执行，避免多个goroutine读取不同的连接数并乱序写入Redis
 func (h *Hub) syncActiveConnectionsToRedis() {
 	if h.statsRepo == nil {
 		return
 	}
-	// 检查Hub是否正在关闭，避免获取锁导致死锁
+
+	// 检查Hub是否正在关闭
 	if h.shutdown.Load() {
-		// Hub正在关闭，异步设置连接数为0，不获取锁
+		// Hub正在关闭，立即同步连接数为0
 		go contextx.WithTimeoutOrBackground(h.ctx, 2*time.Second, func(ctx context.Context) error {
 			return h.statsRepo.SetActiveConnections(ctx, h.nodeID, 0)
 		})
 		return
 	}
 
-	// 在新goroutine中异步同步连接数
-	syncx.Go().
-		WithTimeout(2 * time.Second).
-		OnPanic(func(r interface{}) {
-			h.logger.ErrorKV("同步活跃连接数到Redis崩溃", "panic", r)
-		}).
-		ExecWithContext(func(ctx context.Context) error {
-			// 再次检查shutdown
-			if h.shutdown.Load() {
-				return h.statsRepo.SetActiveConnections(ctx, h.nodeID, 0)
-			}
-			// 读取当前连接数
-			count := syncx.WithRLockReturnValue(&h.mutex, func() int {
-				return len(h.clients)
+	// 使用防抖机制
+	h.syncActiveConnMutex.Lock()
+	defer h.syncActiveConnMutex.Unlock()
+
+	// 取消之前的定时器
+	if h.syncActiveConnTimer != nil {
+		h.syncActiveConnTimer.Stop()
+	}
+
+	// 设置新的定时器，100ms后执行同步（增加延迟确保所有注册操作完成）
+	h.syncActiveConnTimer = time.AfterFunc(100*time.Millisecond, func() {
+		// 标记正在执行同步
+		if !h.syncActiveConnPending.CompareAndSwap(false, true) {
+			return // 已有同步任务在执行
+		}
+		defer h.syncActiveConnPending.Store(false)
+
+		syncx.Go().
+			WithTimeout(2 * time.Second).
+			OnPanic(func(r any) {
+				h.logger.ErrorKV("同步活跃连接数到Redis崩溃", "panic", r)
+			}).
+			ExecWithContext(func(ctx context.Context) error {
+				// 再次检查shutdown
+				if h.shutdown.Load() {
+					return h.statsRepo.SetActiveConnections(ctx, h.nodeID, 0)
+				}
+				// 读取当前连接数（使用读锁）
+				count := syncx.WithRLockReturnValue(&h.mutex, func() int {
+					return len(h.clients)
+				})
+				return h.statsRepo.SetActiveConnections(ctx, h.nodeID, int64(count))
 			})
-			return h.statsRepo.SetActiveConnections(ctx, h.nodeID, int64(count))
-		})
+	})
 }
 
 // removeOnlineStatusFromRedis 从Redis移除在线状态
@@ -479,29 +499,4 @@ func (h *Hub) closeClientConnection(client *Client) {
 	if client.Conn != nil {
 		client.Conn.Close()
 	}
-}
-
-// ============================================================================
-// 分布式相关辅助方法
-// ============================================================================
-
-// recordUserNode 记录用户所在节点 (分布式支持)
-// 改为同步执行，确保路由信息及时更新
-func (h *Hub) recordUserNode(client *Client) {
-	if h.onlineStatusRepo == nil || h.pubsub == nil {
-		return // 单机模式或未启用分布式
-	}
-
-	syncx.Go().
-		WithTimeout(3 * time.Second).
-		OnError(func(err error) {
-			h.logger.ErrorKV("记录用户节点失败",
-				"user_id", client.UserID,
-				"node_id", h.nodeID,
-				"error", err,
-			)
-		}).
-		ExecWithContext(func(ctx context.Context) error {
-			return h.onlineStatusRepo.SetUserNode(ctx, client.UserID, h.nodeID)
-		})
 }

@@ -14,7 +14,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/kamalyes/go-toolbox/pkg/osx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -25,13 +24,12 @@ func TestHubMessageIDVsHubIDDistinction(t *testing.T) {
 	db := getTestDB(t)
 	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 
-	businessMsgID := osx.HashUnixMicroCipherText()
+	// 创建消息，Hub ID 和 MessageID 应该不同
+	msg := createTestHubMessage(MessageTypeText)
+	businessMsgID := msg.MessageID // 使用消息自带的 MessageID
 	defer func() {
 		_ = repo.DeleteByMessageID(ctx, businessMsgID)
 	}()
-
-	// 创建消息，Hub ID 和 MessageID 应该不同
-	msg := createTestHubMessage(businessMsgID, "sender-id-test", "receiver-id-test", MessageTypeText)
 
 	// 🔥 断言：Hub ID 和 MessageID 必须不同
 	assert.NotEqual(t, msg.ID, msg.MessageID, "Hub ID 和 MessageID 不应该相同")
@@ -110,13 +108,14 @@ func TestRetryWithCorrectMessageID(t *testing.T) {
 	db := getTestDB(t)
 	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 
-	businessMsgID := osx.HashUnixMicroCipherText()
 	ctx := context.Background()
+
+	msg := createTestHubMessage(MessageTypeText)
+	businessMsgID := msg.MessageID // 使用消息自带的 MessageID
 	defer func() {
 		_ = repo.DeleteByMessageID(ctx, businessMsgID)
 	}()
 
-	msg := createTestHubMessage(businessMsgID, "sender-retry", "receiver-retry", MessageTypeText)
 	_, err := repo.CreateFromMessage(ctx, msg, 3, nil)
 	require.NoError(t, err)
 
@@ -145,30 +144,4 @@ func TestRetryWithCorrectMessageID(t *testing.T) {
 	final, err := repo.FindByMessageID(ctx, businessMsgID)
 	require.NoError(t, err)
 	assert.Equal(t, 1, final.RetryCount, "重试次数不应该被 Hub ID 操作影响")
-}
-
-// TestBatchUpdateWithMessageIDs 测试批量更新使用正确的 MessageID
-func TestBatchUpdateWithMessageIDs(t *testing.T) {
-	// 这个测试模拟 handleWSOfflineMessagePush 回调的场景
-	businessMsgIDs := []string{
-		"biz_msg_001",
-		"biz_msg_002",
-		"biz_msg_003",
-	}
-
-	hubIDs := []string{
-		"msg_node01_001",
-		"msg_node01_002",
-		"msg_node01_003",
-	}
-
-	// 🔥 验证批量操作应该使用 businessMsgIDs 而不是 hubIDs
-	assert.NotEqual(t, businessMsgIDs, hubIDs, "业务消息ID数组和Hub ID数组应该不同")
-	for i := range businessMsgIDs {
-		assert.NotEqual(t, businessMsgIDs[i], hubIDs[i], "每对ID应该不同")
-	}
-
-	// 在实际代码中，应该使用 businessMsgIDs 进行批量更新
-	// repo.Message.BatchUpdateMessageStatus(ctx, businessMsgIDs, status)  ✅ 正确
-	// repo.Message.BatchUpdateMessageStatus(ctx, hubIDs, status)         ❌ 错误
 }

@@ -120,8 +120,10 @@ func TestMultiClientMessageSend(t *testing.T) {
 		}()
 
 		// 发送消息，不指定 ReceiverClient
+		idGen := hub.GetIDGenerator()
 		msg := &HubMessage{
-			ID:           testMsgID1,
+			ID:           idGen.GenerateTraceID(),
+			MessageID:    idGen.GenerateRequestID(),
 			MessageType:  MessageTypeText,
 			Content:      testContent1,
 			Receiver:     testUserID,
@@ -188,8 +190,10 @@ func TestMultiClientMessageSend(t *testing.T) {
 		}()
 
 		// 发送消息，指定 ReceiverClient 为 client2
+		idGen := hub.GetIDGenerator()
 		msg := &HubMessage{
-			ID:             testMsgID2,
+			ID:             idGen.GenerateTraceID(),
+			MessageID:      idGen.GenerateRequestID(),
 			MessageType:    MessageTypeText,
 			Content:        testContent2,
 			Receiver:       testUserID,
@@ -254,8 +258,10 @@ func TestMultiClientMessageSend(t *testing.T) {
 		}()
 
 		// 发送消息，指定一个不存在的 ReceiverClient
+		idGen := hub.GetIDGenerator()
 		msg := &HubMessage{
-			ID:             "msg-to-nonexist",
+			ID:             idGen.GenerateTraceID(),
+			MessageID:      idGen.GenerateRequestID(),
 			MessageType:    MessageTypeText,
 			Content:        "消息发送给不存在的客户端",
 			Receiver:       testUserID,

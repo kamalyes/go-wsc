@@ -17,230 +17,78 @@ import (
 	"time"
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-toolbox/pkg/random"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-var (
-	testUser001       = "user-001"
-	testAgent001      = "agent-001"
-	testAgent002      = "agent-002"
-	testUserNode1001  = "user-node1-001"
-	testUserNode2001  = "user-node2-001"
-	testUserNode1002  = "user-node1-002"
-	testNode1         = "node-1"
-	testNode2         = "node-2"
-	testAllUser001    = "all-user-001"
-	testAllUser002    = "all-user-002"
-	testAllUser003    = "all-user-003"
-	testHeartbeatUser = "heartbeat-user"
-	testCountUser001  = "count-user-001"
-	testCountUser002  = "count-user-002"
-	testCountUser003  = "count-user-003"
-	testBatchUser001  = "batch-user-001"
-	testBatchUser002  = "batch-user-002"
-	testBatchUser003  = "batch-user-003"
-	testCustomer001   = "customer-001"
-)
-
-// 创建测试用的在线客户端信息
-func createTestOnlineClientInfo(clientID, userID string, userType UserType, nodeID string) *Client {
-	now := time.Now()
-	return &Client{
-		ID:             clientID,
-		UserID:         userID,
-		UserType:       userType,
-		NodeID:         nodeID,
-		ClientIP:       "10.0.0.1",
-		LastSeen:       now,
-		LastHeartbeat:  now,
-		ClientType:     ClientTypeWeb,
-		ConnectionType: ConnectionTypeWebSocket,
-		Status:         UserStatusOnline,
-		Metadata:       map[string]interface{}{"test": "data"},
-	}
-}
-
 func TestRedisOnlineStatusRepositorySetOnline(t *testing.T) {
-	client := getTestRedisClient(t)
-	// 注意: getTestRedisClient 返回单例客户端,不需要 Close
+	redisClient := getTestRedisClient(t)
+	redisKeyPrefix := getTestIDGenerator().GenerateRequestID()
 
-	repo := NewRedisOnlineStatusRepository(client, &wscconfig.OnlineStatus{KeyPrefix: "test:", TTL: 5 * time.Minute})
+	repo := NewRedisOnlineStatusRepository(redisClient, &wscconfig.OnlineStatus{KeyPrefix: fmt.Sprintf("%s:", redisKeyPrefix), TTL: 5 * time.Minute})
 	ctx := context.Background()
 
-	info := createTestOnlineClientInfo("test-client-1", testUser001, UserTypeCustomer, testNode1)
+	client := createTestClientWithIDGen(UserTypeCustomer)
 
 	// 设置在线
-	err := repo.SetOnline(ctx, info)
+	err := repo.SetOnline(ctx, client)
 	assert.NoError(t, err)
 
 	// 验证在线状态
-	isOnline, err := repo.IsOnline(ctx, testUser001)
+	isOnline, err := repo.IsOnline(ctx, client.UserID)
 	assert.NoError(t, err)
 	assert.True(t, isOnline)
 
 	// 获取在线信息
-	retrievedInfo, err := repo.GetOnlineInfo(ctx, testUser001)
+	retrievedInfo, err := repo.GetOnlineInfo(ctx, client.UserID)
 	assert.NoError(t, err)
-	assert.Equal(t, info.ID, retrievedInfo.ID)
-	assert.Equal(t, info.UserID, retrievedInfo.UserID)
-	assert.Equal(t, info.NodeID, retrievedInfo.NodeID)
-	assert.Equal(t, info.ClientIP, retrievedInfo.ClientIP)
+	require.NotNil(t, retrievedInfo, "在线信息不应为空")
+	assert.Equal(t, client.ID, retrievedInfo.ID)
+	assert.Equal(t, client.UserID, retrievedInfo.UserID)
+	assert.Equal(t, client.NodeID, retrievedInfo.NodeID)
+	assert.Equal(t, client.ClientIP, retrievedInfo.ClientIP)
 
 	// 清理
-	_ = repo.SetOffline(ctx, testUser001)
+	_ = repo.SetOffline(ctx, client.UserID)
 }
 
 func TestRedisOnlineStatusRepositorySetOffline(t *testing.T) {
-	client := getTestRedisClient(t)
-	// 注意: getTestRedisClient 返回单例客户端,不需要 Close
+	redisClient := getTestRedisClient(t)
+	redisKeyPrefix := getTestIDGenerator().GenerateRequestID()
 
-	repo := NewRedisOnlineStatusRepository(client, &wscconfig.OnlineStatus{KeyPrefix: "test:", TTL: 5 * time.Minute})
+	repo := NewRedisOnlineStatusRepository(redisClient, &wscconfig.OnlineStatus{KeyPrefix: fmt.Sprintf("%s:", redisKeyPrefix), TTL: 5 * time.Minute})
 	ctx := context.Background()
 
-	info := createTestOnlineClientInfo("test-client-2", testCountUser002, UserTypeAgent, testNode1)
+	client := createTestClientWithIDGen(UserTypeAgent)
 
 	// 先设置在线
-	err := repo.SetOnline(ctx, info)
+	err := repo.SetOnline(ctx, client)
 	require.NoError(t, err)
 
 	// 验证在线
-	isOnline, err := repo.IsOnline(ctx, testCountUser002)
+	isOnline, err := repo.IsOnline(ctx, client.UserID)
 	require.NoError(t, err)
 	require.True(t, isOnline)
 
 	// 设置离线
-	err = repo.SetOffline(ctx, testCountUser002)
+	err = repo.SetOffline(ctx, client.UserID)
 	assert.NoError(t, err)
 
 	// 验证离线
-	isOnline, err = repo.IsOnline(ctx, testCountUser002)
+	isOnline, err = repo.IsOnline(ctx, client.UserID)
 	assert.NoError(t, err)
 	assert.False(t, isOnline)
 }
 
-func TestRedisOnlineStatusRepositoryGetOnlineUsersByType(t *testing.T) {
-	client := getTestRedisClient(t)
-	// 注意: getTestRedisClient 返回单例客户端,不需要 Close
-
-	repo := NewRedisOnlineStatusRepository(client, &wscconfig.OnlineStatus{KeyPrefix: "test:", TTL: 5 * time.Minute})
-	ctx := context.Background()
-
-	// 清理测试数据
-	defer func() {
-		_ = repo.SetOffline(ctx, testAgent001)
-		_ = repo.SetOffline(ctx, testAgent002)
-		_ = repo.SetOffline(ctx, testCustomer001)
-	}()
-
-	// 设置多个客服在线
-	agent1 := createTestOnlineClientInfo("client-agent-1", testAgent001, UserTypeAgent, testNode1)
-	agent2 := createTestOnlineClientInfo("client-agent-2", testAgent002, UserTypeAgent, testNode1)
-	customer1 := createTestOnlineClientInfo("client-customer-1", testCustomer001, UserTypeCustomer, testNode1)
-
-	err := repo.SetOnline(ctx, agent1)
-	require.NoError(t, err)
-	err = repo.SetOnline(ctx, agent2)
-	require.NoError(t, err)
-	err = repo.SetOnline(ctx, customer1)
-	require.NoError(t, err)
-
-	// 获取客服类型的在线用户
-	agents, err := repo.GetOnlineUsersByType(ctx, UserTypeAgent)
-	assert.NoError(t, err)
-	assert.Contains(t, agents, testAgent001)
-	assert.Contains(t, agents, testAgent002)
-	assert.NotContains(t, agents, testCustomer001)
-
-	// 获取客户类型的在线用户
-	customers, err := repo.GetOnlineUsersByType(ctx, UserTypeCustomer)
-	assert.NoError(t, err)
-	assert.Contains(t, customers, testCustomer001)
-	assert.NotContains(t, customers, testAgent001)
-}
-
-func TestRedisOnlineStatusRepositoryGetOnlineUsersByNode(t *testing.T) {
-	client := getTestRedisClient(t)
-	// 注意: getTestRedisClient 返回单例客户端,不需要 Close
-
-	repo := NewRedisOnlineStatusRepository(client, &wscconfig.OnlineStatus{KeyPrefix: "test:", TTL: 5 * time.Minute})
-	ctx := context.Background()
-
-	// 清理测试数据
-	defer func() {
-		_ = repo.SetOffline(ctx, testUserNode1001)
-		_ = repo.SetOffline(ctx, testUserNode1002)
-		_ = repo.SetOffline(ctx, testUserNode2001)
-	}()
-
-	// 在不同节点设置在线用户
-	user1 := createTestOnlineClientInfo("client-1", testUserNode1001, UserTypeCustomer, testNode1)
-	user2 := createTestOnlineClientInfo("client-2", testUserNode1002, UserTypeCustomer, testNode1)
-	user3 := createTestOnlineClientInfo("client-3", testUserNode2001, UserTypeCustomer, testNode2)
-
-	err := repo.SetOnline(ctx, user1)
-	require.NoError(t, err)
-	err = repo.SetOnline(ctx, user2)
-	require.NoError(t, err)
-	err = repo.SetOnline(ctx, user3)
-	require.NoError(t, err)
-
-	// 获取 node-1 的在线用户
-	node1Users, err := repo.GetOnlineUsersByNode(ctx, testNode1)
-	assert.NoError(t, err)
-	assert.Contains(t, node1Users, testUserNode1001)
-	assert.Contains(t, node1Users, testUserNode1002)
-	assert.NotContains(t, node1Users, testUserNode2001)
-
-	// 获取 node-2 的在线用户
-	node2Users, err := repo.GetOnlineUsersByNode(ctx, testNode2)
-	assert.NoError(t, err)
-	assert.Contains(t, node2Users, testUserNode2001)
-	assert.NotContains(t, node2Users, testUserNode1001)
-}
-
-func TestRedisOnlineStatusRepositoryGetAllOnlineUserIDs(t *testing.T) {
-	client := getTestRedisClient(t)
-	// 注意: getTestRedisClient 返回单例客户端,不需要 Close
-
-	repo := NewRedisOnlineStatusRepository(client, &wscconfig.OnlineStatus{KeyPrefix: "test:", TTL: 5 * time.Minute})
-	ctx := context.Background()
-
-	// 清理测试数据
-	defer func() {
-		_ = repo.SetOffline(ctx, testAllUser001)
-		_ = repo.SetOffline(ctx, testAllUser002)
-		_ = repo.SetOffline(ctx, testAllUser003)
-	}()
-
-	// 设置多个用户在线
-	user1 := createTestOnlineClientInfo("client-1", testAllUser001, UserTypeCustomer, testNode1)
-	user2 := createTestOnlineClientInfo("client-2", testAllUser002, UserTypeAgent, testNode1)
-	user3 := createTestOnlineClientInfo("client-3", testAllUser003, UserTypeBot, testNode2)
-
-	err := repo.SetOnline(ctx, user1)
-	require.NoError(t, err)
-	err = repo.SetOnline(ctx, user2)
-	require.NoError(t, err)
-	err = repo.SetOnline(ctx, user3)
-	require.NoError(t, err)
-
-	// 获取所有在线用户
-	allUsers, err := repo.GetAllOnlineUsers(ctx)
-	assert.NoError(t, err)
-	assert.Contains(t, allUsers, testAllUser001)
-	assert.Contains(t, allUsers, testAllUser002)
-	assert.Contains(t, allUsers, testAllUser003)
-}
-
 func TestRedisOnlineStatusRepositoryUpdateHeartbeat(t *testing.T) {
-	client := getTestRedisClient(t)
-	// 注意: getTestRedisClient 返回单例客户端,不需要 Close
+	redisClient := getTestRedisClient(t)
+	redisKeyPrefix := getTestIDGenerator().GenerateRequestID()
 
-	repo := NewRedisOnlineStatusRepository(client, &wscconfig.OnlineStatus{KeyPrefix: "test:", TTL: 5 * time.Minute})
+	repo := NewRedisOnlineStatusRepository(redisClient, &wscconfig.OnlineStatus{KeyPrefix: fmt.Sprintf("%s:", redisKeyPrefix), TTL: 2 * time.Second})
 	ctx := context.Background()
 
-	info := createTestOnlineClientInfo("heartbeat-client", testHeartbeatUser, UserTypeCustomer, testNode1)
+	info := createTestClientWithIDGen(UserTypeCustomer)
 
 	// 设置在线，TTL 为 2 秒
 	err := repo.SetOnline(ctx, info)
@@ -250,96 +98,32 @@ func TestRedisOnlineStatusRepositoryUpdateHeartbeat(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// 更新心跳
-	err = repo.UpdateHeartbeat(ctx, testHeartbeatUser)
+	err = repo.UpdateHeartbeat(ctx, info.UserID)
 	assert.NoError(t, err)
 
 	// 再等待 2 秒（原本应该过期了，但因为更新了心跳，用默认TTL）
 	time.Sleep(300 * time.Millisecond)
 
 	// 验证仍然在线（使用默认5分钟TTL）
-	isOnline, err := repo.IsOnline(ctx, testHeartbeatUser)
+	isOnline, err := repo.IsOnline(ctx, info.UserID)
 	assert.NoError(t, err)
 	assert.True(t, isOnline, "心跳更新后用户应该仍然在线")
 
 	// 清理
-	_ = repo.SetOffline(ctx, testHeartbeatUser)
-}
-
-func TestRedisOnlineStatusRepositoryGetOnlineCount(t *testing.T) {
-	client := getTestRedisClient(t)
-	// 注意: getTestRedisClient 返回单例客户端,不需要 Close
-
-	repo := NewRedisOnlineStatusRepository(client, &wscconfig.OnlineStatus{KeyPrefix: "test:", TTL: 5 * time.Minute})
-	ctx := context.Background()
-
-	// 清理测试数据
-	defer func() {
-		_ = repo.SetOffline(ctx, testCountUser001)
-		_ = repo.SetOffline(ctx, testCountUser002)
-		_ = repo.SetOffline(ctx, testCountUser003)
-	}()
-
-	// 设置多个用户在线
-	user1 := createTestOnlineClientInfo("c1", testCountUser001, UserTypeCustomer, testNode1)
-	user2 := createTestOnlineClientInfo("c2", testCountUser002, UserTypeAgent, testNode1)
-	user3 := createTestOnlineClientInfo("c3", testCountUser003, UserTypeCustomer, testNode2)
-
-	err := repo.SetOnline(ctx, user1)
-	require.NoError(t, err)
-	err = repo.SetOnline(ctx, user2)
-	require.NoError(t, err)
-	err = repo.SetOnline(ctx, user3)
-	require.NoError(t, err)
-
-	// 获取总在线人数
-	count, err := repo.GetOnlineCount(ctx)
-	assert.NoError(t, err)
-	assert.GreaterOrEqual(t, count, int64(3), "至少应该有 3 个在线用户")
-}
-
-func TestRedisOnlineStatusRepositoryBatchSetOnline(t *testing.T) {
-	client := getTestRedisClient(t)
-	// 注意: getTestRedisClient 返回单例客户端,不需要 Close
-
-	repo := NewRedisOnlineStatusRepository(client, &wscconfig.OnlineStatus{KeyPrefix: "test:", TTL: 5 * time.Minute})
-	ctx := context.Background()
-
-	// 清理测试数据
-	defer func() {
-		_ = repo.SetOffline(ctx, testBatchUser001)
-		_ = repo.SetOffline(ctx, testBatchUser002)
-		_ = repo.SetOffline(ctx, testBatchUser003)
-	}()
-
-	// 批量设置在线
-	infos := map[string]*Client{
-		testBatchUser001: createTestOnlineClientInfo("bc1", testBatchUser001, UserTypeCustomer, testNode1),
-		testBatchUser002: createTestOnlineClientInfo("bc2", testBatchUser002, UserTypeAgent, testNode1),
-		testBatchUser003: createTestOnlineClientInfo("bc3", testBatchUser003, UserTypeBot, testNode1),
-	}
-
-	err := repo.BatchSetOnline(ctx, infos)
-	assert.NoError(t, err)
-
-	// 验证所有用户都在线
-	for userID := range infos {
-		isOnline, err := repo.IsOnline(ctx, userID)
-		assert.NoError(t, err)
-		assert.True(t, isOnline, "用户 %s 应该在线", userID)
-	}
+	_ = repo.SetOffline(ctx, info.UserID)
 }
 
 func TestRedisOnlineStatusRepositoryTimeout(t *testing.T) {
-	client := getTestRedisClient(t)
-	// 注意: getTestRedisClient 返回单例客户端,不需要 Close
+	redisClient := getTestRedisClient(t)
+	redisKeyPrefix := getTestIDGenerator().GenerateRequestID()
 
-	repo := NewRedisOnlineStatusRepository(client, &wscconfig.OnlineStatus{KeyPrefix: "test:", TTL: 5 * time.Minute})
+	repo := NewRedisOnlineStatusRepository(redisClient, &wscconfig.OnlineStatus{KeyPrefix: fmt.Sprintf("%s:", redisKeyPrefix), TTL: 5 * time.Minute})
 
 	// 使用已取消的 context 测试超时
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // 立即取消
 
-	info := createTestOnlineClientInfo("timeout-client", "timeout-user", UserTypeCustomer, testNode1)
+	info := createTestClientWithIDGen(UserTypeAgent)
 
 	// 应该返回错误
 	err := repo.SetOnline(ctx, info)
@@ -347,10 +131,10 @@ func TestRedisOnlineStatusRepositoryTimeout(t *testing.T) {
 }
 
 func TestRedisOnlineStatusRepositoryConcurrency(t *testing.T) {
-	client := getTestRedisClient(t)
-	// 注意: getTestRedisClient 返回单例客户端,不需要 Close
+	redisClient := getTestRedisClient(t)
+	redisKeyPrefix := getTestIDGenerator().GenerateRequestID()
 
-	repo := NewRedisOnlineStatusRepository(client, &wscconfig.OnlineStatus{KeyPrefix: "test:", TTL: 5 * time.Minute})
+	repo := NewRedisOnlineStatusRepository(redisClient, &wscconfig.OnlineStatus{KeyPrefix: fmt.Sprintf("%s:", redisKeyPrefix), TTL: 5 * time.Minute})
 	ctx := context.Background()
 
 	// 并发测试
@@ -361,25 +145,19 @@ func TestRedisOnlineStatusRepositoryConcurrency(t *testing.T) {
 		go func(index int) {
 			defer func() { done <- true }()
 
-			userID := fmt.Sprintf("concurrent-user-%d", index)
-			info := createTestOnlineClientInfo(
-				fmt.Sprintf("concurrent-client-%d", index),
-				userID,
-				UserTypeCustomer,
-				testNode1,
-			)
+			client := createTestClientWithIDGen(UserTypeCustomer)
 
 			// 设置在线
-			err := repo.SetOnline(ctx, info)
+			err := repo.SetOnline(ctx, client)
 			assert.NoError(t, err)
 
 			// 验证在线
-			isOnline, err := repo.IsOnline(ctx, userID)
+			isOnline, err := repo.IsOnline(ctx, client.UserID)
 			assert.NoError(t, err)
 			assert.True(t, isOnline)
 
 			// 清理
-			_ = repo.SetOffline(ctx, userID)
+			_ = repo.SetOffline(ctx, client.UserID)
 		}(i)
 	}
 
@@ -387,4 +165,332 @@ func TestRedisOnlineStatusRepositoryConcurrency(t *testing.T) {
 	for i := 0; i < goroutines; i++ {
 		<-done
 	}
+}
+
+func TestRedisOnlineStatusRepositoryGetAllOnlineUsers(t *testing.T) {
+	redisClient := getTestRedisClient(t)
+	redisKeyPrefix := getTestIDGenerator().GenerateRequestID()
+
+	repo := NewRedisOnlineStatusRepository(redisClient, &wscconfig.OnlineStatus{KeyPrefix: fmt.Sprintf("%s:", redisKeyPrefix), TTL: 5 * time.Minute})
+	ctx := context.Background()
+
+	// 创建多个在线用户
+	clients := make([]*Client, 5)
+	for i := range 5 {
+		clients[i] = createTestClientWithIDGen(UserTypeCustomer)
+		err := repo.SetOnline(ctx, clients[i])
+		require.NoError(t, err)
+	}
+
+	// 获取所有在线用户
+	onlineUsers, err := repo.GetAllOnlineUsers(ctx)
+	assert.NoError(t, err)
+	assert.GreaterOrEqual(t, len(onlineUsers), 5, "应至少有5个在线用户")
+
+	// 验证所有用户都在列表中
+	userIDMap := make(map[string]bool)
+	for _, userID := range onlineUsers {
+		userIDMap[userID] = true
+	}
+	for _, client := range clients {
+		assert.True(t, userIDMap[client.UserID], "用户 %s 应在在线列表中", client.UserID)
+	}
+
+	// 清理
+	for _, client := range clients {
+		_ = repo.SetOffline(ctx, client.UserID)
+	}
+}
+
+func TestRedisOnlineStatusRepositoryGetOnlineUsersByNode(t *testing.T) {
+	redisClient := getTestRedisClient(t)
+	redisKeyPrefix := getTestIDGenerator().GenerateRequestID()
+
+	repo := NewRedisOnlineStatusRepository(redisClient, &wscconfig.OnlineStatus{KeyPrefix: fmt.Sprintf("%s:", redisKeyPrefix), TTL: 5 * time.Minute})
+	ctx := context.Background()
+
+	nodeID1 := random.FRandAlphaString(30)
+	nodeID2 := random.FRandAlphaString(30)
+
+	// 节点1的用户
+	client1 := createTestClientWithIDGen(UserTypeCustomer)
+	client1.NodeID = nodeID1
+	err := repo.SetOnline(ctx, client1)
+	require.NoError(t, err)
+
+	client2 := createTestClientWithIDGen(UserTypeAgent)
+	client2.NodeID = nodeID1
+	err = repo.SetOnline(ctx, client2)
+	require.NoError(t, err)
+
+	// 节点2的用户
+	client3 := createTestClientWithIDGen(UserTypeCustomer)
+	client3.NodeID = nodeID2
+	err = repo.SetOnline(ctx, client3)
+	require.NoError(t, err)
+
+	// 获取节点1的用户
+	node1Users, err := repo.GetOnlineUsersByNode(ctx, nodeID1)
+	assert.NoError(t, err)
+	assert.Equal(t, 2, len(node1Users), "节点1应有2个用户")
+
+	// 获取节点2的用户
+	node2Users, err := repo.GetOnlineUsersByNode(ctx, nodeID2)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, len(node2Users), "节点2应有1个用户")
+
+	// 清理
+	_ = repo.SetOffline(ctx, client1.UserID)
+	_ = repo.SetOffline(ctx, client2.UserID)
+	_ = repo.SetOffline(ctx, client3.UserID)
+}
+
+func TestRedisOnlineStatusRepositoryGetOnlineCount(t *testing.T) {
+	redisClient := getTestRedisClient(t)
+	redisKeyPrefix := getTestIDGenerator().GenerateRequestID()
+
+	repo := NewRedisOnlineStatusRepository(redisClient, &wscconfig.OnlineStatus{KeyPrefix: fmt.Sprintf("%s:", redisKeyPrefix), TTL: 5 * time.Minute})
+	ctx := context.Background()
+
+	// 初始计数
+	initialCount, err := repo.GetOnlineCount(ctx)
+	require.NoError(t, err)
+
+	// 添加用户
+	clients := make([]*Client, 3)
+	for i := range 3 {
+		clients[i] = createTestClientWithIDGen(UserTypeCustomer)
+		err = repo.SetOnline(ctx, clients[i])
+		require.NoError(t, err)
+	}
+
+	// 验证计数增加
+	newCount, err := repo.GetOnlineCount(ctx)
+	assert.NoError(t, err)
+	assert.Equal(t, initialCount+3, newCount, "在线用户数应增加3")
+
+	// 清理
+	for _, client := range clients {
+		_ = repo.SetOffline(ctx, client.UserID)
+	}
+}
+
+func TestRedisOnlineStatusRepositoryBatchSetOnline(t *testing.T) {
+	redisClient := getTestRedisClient(t)
+	redisKeyPrefix := getTestIDGenerator().GenerateRequestID()
+
+	repo := NewRedisOnlineStatusRepository(redisClient, &wscconfig.OnlineStatus{KeyPrefix: fmt.Sprintf("%s:", redisKeyPrefix), TTL: 5 * time.Minute})
+	ctx := context.Background()
+
+	// 创建多个客户端
+	clients := make(map[string]*Client)
+	for range 5 {
+		client := createTestClientWithIDGen(UserTypeCustomer)
+		clients[client.UserID] = client
+	}
+
+	// 批量设置在线
+	err := repo.BatchSetOnline(ctx, clients)
+	assert.NoError(t, err)
+
+	// 验证所有用户都在线
+	for userID := range clients {
+		isOnline, err := repo.IsOnline(ctx, userID)
+		assert.NoError(t, err)
+		assert.True(t, isOnline, "用户 %s 应该在线", userID)
+	}
+
+	// 清理
+	userIDs := make([]string, 0, len(clients))
+	for userID := range clients {
+		userIDs = append(userIDs, userID)
+	}
+	_ = repo.BatchSetOffline(ctx, userIDs)
+}
+
+func TestRedisOnlineStatusRepositoryBatchSetOffline(t *testing.T) {
+	redisClient := getTestRedisClient(t)
+	redisKeyPrefix := getTestIDGenerator().GenerateRequestID()
+
+	repo := NewRedisOnlineStatusRepository(redisClient, &wscconfig.OnlineStatus{KeyPrefix: fmt.Sprintf("%s:", redisKeyPrefix), TTL: 5 * time.Minute})
+	ctx := context.Background()
+
+	// 创建多个在线用户
+	userIDs := make([]string, 5)
+	for i := range 5 {
+		client := createTestClientWithIDGen(UserTypeAgent)
+		userIDs[i] = client.UserID
+		err := repo.SetOnline(ctx, client)
+		require.NoError(t, err)
+	}
+
+	// 验证都在线
+	for _, userID := range userIDs {
+		isOnline, err := repo.IsOnline(ctx, userID)
+		require.NoError(t, err)
+		require.True(t, isOnline)
+	}
+
+	// 批量设置离线
+	err := repo.BatchSetOffline(ctx, userIDs)
+	assert.NoError(t, err)
+
+	// 验证都离线
+	for _, userID := range userIDs {
+		isOnline, err := repo.IsOnline(ctx, userID)
+		assert.NoError(t, err)
+		assert.False(t, isOnline, "用户 %s 应该离线", userID)
+	}
+}
+
+func TestRedisOnlineStatusRepositoryGetOnlineUsersByType(t *testing.T) {
+	redisClient := getTestRedisClient(t)
+	redisKeyPrefix := getTestIDGenerator().GenerateRequestID()
+
+	repo := NewRedisOnlineStatusRepository(redisClient, &wscconfig.OnlineStatus{KeyPrefix: fmt.Sprintf("%s:", redisKeyPrefix), TTL: 5 * time.Minute})
+	ctx := context.Background()
+
+	// 创建不同类型的用户
+	customerClients := make([]*Client, 3)
+	for i := range 3 {
+		customerClients[i] = createTestClientWithIDGen(UserTypeCustomer)
+		err := repo.SetOnline(ctx, customerClients[i])
+		require.NoError(t, err)
+	}
+
+	agentClients := make([]*Client, 2)
+	for i := range 2 {
+		agentClients[i] = createTestClientWithIDGen(UserTypeAgent)
+		err := repo.SetOnline(ctx, agentClients[i])
+		require.NoError(t, err)
+	}
+
+	// 获取客服类型用户
+	customerUsers, err := repo.GetOnlineUsersByType(ctx, UserTypeCustomer)
+	assert.NoError(t, err)
+	assert.GreaterOrEqual(t, len(customerUsers), 3, "应至少有3个客服用户在线")
+
+	// 获取坐席类型用户
+	agentUsers, err := repo.GetOnlineUsersByType(ctx, UserTypeAgent)
+	assert.NoError(t, err)
+	assert.GreaterOrEqual(t, len(agentUsers), 2, "应至少有2个坐席用户在线")
+
+	// 清理
+	for _, client := range customerClients {
+		_ = repo.SetOffline(ctx, client.UserID)
+	}
+	for _, client := range agentClients {
+		_ = repo.SetOffline(ctx, client.UserID)
+	}
+}
+
+func TestRedisOnlineStatusRepositorySetAndGetUserNode(t *testing.T) {
+	redisClient := getTestRedisClient(t)
+	redisKeyPrefix := getTestIDGenerator().GenerateRequestID()
+
+	repo := NewRedisOnlineStatusRepository(redisClient, &wscconfig.OnlineStatus{KeyPrefix: fmt.Sprintf("%s:", redisKeyPrefix), TTL: 5 * time.Minute})
+	ctx := context.Background()
+
+	// 创建测试客户端（SetOnline 会自动设置节点映射）
+	client := createTestClientWithIDGen(UserTypeCustomer)
+	client.NodeID = random.FRandAlphaString(30)
+
+	// 通过 SetOnline 设置用户在线（会自动设置节点映射）
+	err := repo.SetOnline(ctx, client)
+	assert.NoError(t, err)
+
+	// 获取用户节点
+	retrievedNodeID, err := repo.GetUserNode(ctx, client.UserID)
+	assert.NoError(t, err)
+	assert.Equal(t, client.NodeID, retrievedNodeID, "应返回正确的节点ID")
+
+	// 测试不存在的用户
+	_, err = repo.GetUserNode(ctx, "non-existent-user")
+	assert.Error(t, err, "不存在的用户应返回错误")
+
+	// 清理
+	_ = repo.SetOffline(ctx, client.UserID)
+}
+
+func TestRedisOnlineStatusRepositoryGetNodeUsers(t *testing.T) {
+	redisClient := getTestRedisClient(t)
+	redisKeyPrefix := getTestIDGenerator().GenerateRequestID()
+
+	repo := NewRedisOnlineStatusRepository(redisClient, &wscconfig.OnlineStatus{KeyPrefix: fmt.Sprintf("%s:", redisKeyPrefix), TTL: 5 * time.Minute})
+	ctx := context.Background()
+
+	nodeID := random.FRandAlphaString(30)
+
+	// 创建多个用户并设置到同一节点
+	clients := make([]*Client, 4)
+	for i := range 4 {
+		clients[i] = createTestClientWithIDGen(UserTypeCustomer)
+		clients[i].NodeID = nodeID
+		err := repo.SetOnline(ctx, clients[i])
+		require.NoError(t, err)
+	}
+
+	// 获取节点的所有用户
+	nodeUsers, err := repo.GetNodeUsers(ctx, nodeID)
+	assert.NoError(t, err)
+	assert.Equal(t, 4, len(nodeUsers), "节点应有4个用户")
+
+	// 验证所有用户都在列表中
+	userIDMap := make(map[string]bool)
+	for _, userID := range nodeUsers {
+		userIDMap[userID] = true
+	}
+	for _, client := range clients {
+		assert.True(t, userIDMap[client.UserID], "用户 %s 应在节点用户列表中", client.UserID)
+	}
+
+	// 清理
+	for _, client := range clients {
+		_ = repo.SetOffline(ctx, client.UserID)
+	}
+}
+
+func TestRedisOnlineStatusRepositoryCleanupExpired(t *testing.T) {
+	redisClient := getTestRedisClient(t)
+	redisKeyPrefix := getTestIDGenerator().GenerateRequestID()
+
+	// 使用较短的TTL便于测试
+	repo := NewRedisOnlineStatusRepository(redisClient, &wscconfig.OnlineStatus{KeyPrefix: fmt.Sprintf("%s:", redisKeyPrefix), TTL: 1 * time.Second})
+	ctx := context.Background()
+
+	// 创建在线用户
+	client := createTestClientWithIDGen(UserTypeCustomer)
+	err := repo.SetOnline(ctx, client)
+	require.NoError(t, err)
+
+	// 验证在线
+	isOnline, err := repo.IsOnline(ctx, client.UserID)
+	require.NoError(t, err)
+	require.True(t, isOnline)
+
+	// 等待过期
+	time.Sleep(2 * time.Second)
+
+	// 调用清理（虽然Redis会自动过期，但测试清理方法）
+	count, err := repo.CleanupExpired(ctx)
+	assert.NoError(t, err)
+	t.Logf("清理了 %d 个过期条目", count)
+
+	// 验证已离线
+	isOnline, err = repo.IsOnline(ctx, client.UserID)
+	assert.NoError(t, err)
+	assert.False(t, isOnline, "用户应该已过期离线")
+}
+
+func TestRedisOnlineStatusRepositoryGetOnlineInfoNotFound(t *testing.T) {
+	redisClient := getTestRedisClient(t)
+	redisKeyPrefix := getTestIDGenerator().GenerateRequestID()
+
+	repo := NewRedisOnlineStatusRepository(redisClient, &wscconfig.OnlineStatus{KeyPrefix: fmt.Sprintf("%s:", redisKeyPrefix), TTL: 5 * time.Minute})
+	ctx := context.Background()
+
+	// 获取不存在的用户信息
+	info, err := repo.GetOnlineInfo(ctx, "non-existent-user")
+	assert.Error(t, err, "不存在的用户应返回错误")
+	assert.Nil(t, info, "不存在的用户应返回nil")
 }

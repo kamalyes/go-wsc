@@ -14,7 +14,6 @@ package wsc
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"testing"
 	"time"
 
@@ -30,13 +29,22 @@ func TestMultiDeviceMessageSync(t *testing.T) {
 	go hub.Run()
 	defer hub.SafeShutdown()
 
+	// 使用ID生成器生成所有ID
+	idGen := hub.GetIDGenerator()
+	userAID := idGen.GenerateCorrelationID()
+	deviceBID := idGen.GenerateSpanID()
+	deviceCID := idGen.GenerateSpanID()
+	deviceDID := idGen.GenerateSpanID()
+	userFID := idGen.GenerateCorrelationID()
+	deviceFID := idGen.GenerateSpanID()
+
 	// 用户A的三个设备：B、C、D
-	deviceB := createTestClientWithDevice("userA", "device-B")
-	deviceC := createTestClientWithDevice("userA", "device-C")
-	deviceD := createTestClientWithDevice("userA", "device-D")
+	deviceB := createTestClientWithDeviceIDs(userAID, deviceBID)
+	deviceC := createTestClientWithDeviceIDs(userAID, deviceCID)
+	deviceD := createTestClientWithDeviceIDs(userAID, deviceDID)
 
 	// 用户F的一个设备
-	userF := createTestClientWithDevice("userF", "device-F")
+	userF := createTestClientWithDeviceIDs(userFID, deviceFID)
 
 	// 启动消息消费者
 	receivedByC := make(chan *HubMessage, 10)
@@ -98,11 +106,11 @@ func TestMultiDeviceMessageSync(t *testing.T) {
 
 	// B设备发送消息给F（需要模拟完整的消息处理流程）
 	testMsg := &HubMessage{
-		ID:           "msg-001",
+		ID:           idGen.GenerateTraceID(),
 		MessageType:  MessageTypeText,
-		Receiver:     "userF",
+		Receiver:     userFID,
 		Content:      "Hello from device B",
-		MessageID:    "biz-msg-001",
+		MessageID:    idGen.GenerateRequestID(),
 		Sender:       deviceB.UserID,
 		SenderClient: deviceB.ID,
 	}
@@ -115,7 +123,7 @@ func TestMultiDeviceMessageSync(t *testing.T) {
 	select {
 	case msg := <-receivedByF:
 		assert.Equal(t, "Hello from device B", msg.Content)
-		assert.Equal(t, "userA", msg.Sender)
+		assert.Equal(t, userAID, msg.Sender)
 		assert.Equal(t, deviceB.ID, msg.SenderClient)
 		t.Log("✅ 用户F收到消息")
 	case <-time.After(2 * time.Second):
@@ -126,7 +134,7 @@ func TestMultiDeviceMessageSync(t *testing.T) {
 	select {
 	case msg := <-receivedByC:
 		assert.Equal(t, "Hello from device B", msg.Content)
-		assert.Equal(t, "userA", msg.Sender)
+		assert.Equal(t, userAID, msg.Sender)
 		assert.Equal(t, deviceB.ID, msg.SenderClient)
 		t.Log("✅ 设备C收到同步消息")
 	case <-time.After(2 * time.Second):
@@ -137,7 +145,7 @@ func TestMultiDeviceMessageSync(t *testing.T) {
 	select {
 	case msg := <-receivedByD:
 		assert.Equal(t, "Hello from device B", msg.Content)
-		assert.Equal(t, "userA", msg.Sender)
+		assert.Equal(t, userAID, msg.Sender)
 		assert.Equal(t, deviceB.ID, msg.SenderClient)
 		t.Log("✅ 设备D收到同步消息")
 	case <-time.After(2 * time.Second):
@@ -153,12 +161,20 @@ func TestMultiDeviceSyncExcludeSender(t *testing.T) {
 	go hub.Run()
 	defer hub.SafeShutdown()
 
+	// 使用ID生成器生成所有ID
+	idGen := hub.GetIDGenerator()
+	userAID := idGen.GenerateCorrelationID()
+	deviceBID := idGen.GenerateSpanID()
+	deviceCID := idGen.GenerateSpanID()
+	userFID := idGen.GenerateCorrelationID()
+	deviceFID := idGen.GenerateSpanID()
+
 	// 用户A的两个设备
-	deviceB := createTestClientWithDevice("userA", "device-B")
-	deviceC := createTestClientWithDevice("userA", "device-C")
+	deviceB := createTestClientWithDeviceIDs(userAID, deviceBID)
+	deviceC := createTestClientWithDeviceIDs(userAID, deviceCID)
 
 	// 用户F
-	userF := createTestClientWithDevice("userF", "device-F")
+	userF := createTestClientWithDeviceIDs(userFID, deviceFID)
 
 	// 统计设备B收到的消息数（应该只有欢迎消息，不应该收到自己发的消息）
 	receivedByB := 0
@@ -208,7 +224,7 @@ func TestMultiDeviceSyncExcludeSender(t *testing.T) {
 	// B设备发送消息
 	testMsg := &HubMessage{
 		MessageType: MessageTypeText,
-		Receiver:    "userF",
+		Receiver:    userFID,
 		Content:     "Test message",
 	}
 	err := hub.InvokeMessageReceivedCallback(context.Background(), deviceB, testMsg)
@@ -245,9 +261,15 @@ func TestMultiDeviceSelfMessage(t *testing.T) {
 	defer hub.SafeShutdown()
 	time.Sleep(50 * time.Millisecond)
 
+	// 使用ID生成器生成所有ID
+	idGen := hub.GetIDGenerator()
+	userAID := idGen.GenerateCorrelationID()
+	deviceBID := idGen.GenerateSpanID()
+	deviceCID := idGen.GenerateSpanID()
+
 	// 用户A的两个设备
-	deviceB := createTestClientWithDevice("userA", "device-B")
-	deviceC := createTestClientWithDevice("userA", "device-C")
+	deviceB := createTestClientWithDeviceIDs(userAID, deviceBID)
+	deviceC := createTestClientWithDeviceIDs(userAID, deviceCID)
 
 	receivedByB := make(chan *HubMessage, 10)
 	receivedByC := make(chan *HubMessage, 10)
@@ -289,7 +311,7 @@ func TestMultiDeviceSelfMessage(t *testing.T) {
 	// B设备给自己（userA）发消息
 	testMsg := &HubMessage{
 		MessageType: MessageTypeText,
-		Receiver:    "userA",
+		Receiver:    userAID,
 		Content:     "Note to self",
 	}
 	err := hub.InvokeMessageReceivedCallback(context.Background(), deviceB, testMsg)
@@ -322,10 +344,10 @@ func TestMultiDeviceSelfMessage(t *testing.T) {
 	assert.GreaterOrEqual(t, receivedCount, 1, "至少一个设备应该收到消息")
 }
 
-// 辅助函数：创建测试客户端
-func createTestClientWithDevice(userID, deviceID string) *Client {
+// 辅助函数：创建测试客户端（使用生成的ID）
+func createTestClientWithDeviceIDs(userID, deviceID string) *Client {
 	return &Client{
-		ID:       fmt.Sprintf("conn-%s-%s", userID, deviceID),
+		ID:       deviceID,
 		UserID:   userID,
 		SendChan: make(chan []byte, 256),
 	}

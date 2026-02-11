@@ -12,6 +12,7 @@
 package wsc
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -19,6 +20,8 @@ import (
 
 	"github.com/kamalyes/go-cachex"
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-toolbox/pkg/idgen"
+	"github.com/kamalyes/go-toolbox/pkg/osx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -45,6 +48,13 @@ func newEventRecorder() *eventRecorder {
 		userOfflineEvents: make([]UserStatusEvent, 0),
 		ticketEvents:      make([]TicketQueueEvent, 0),
 	}
+}
+
+// getUniqueNamespace 生成唯一的测试命名空间，避免并发测试间干扰
+func getUniqueNamespace() string {
+	workerID := osx.GetWorkerIdForSnowflake()
+	generator := idgen.NewShortFlakeGenerator(workerID)
+	return fmt.Sprintf("wsc_test_%d", generator.Generate())
 }
 
 func (r *eventRecorder) recordOnline(event *UserStatusEvent) {
@@ -122,14 +132,14 @@ func (r *eventRecorder) reset() {
 // TestUserOnlineEvent 测试用户上线事件发布和订阅
 func TestUserOnlineEvent(t *testing.T) {
 	redisClient := GetTestRedisClient(t)
-	defer CleanupRedisKeys(t, redisClient, "wsc:pubsub:", "test:")
+	defer cleanupRedisKeys(t, redisClient, "wsc:pubsub:", "test:")
 
 	config := wscconfig.Default()
 	hub := CreateTestHub(t, config)
 	defer hub.Shutdown()
 
-	// 设置 PubSub
-	pubsub := cachex.NewPubSub(redisClient, cachex.PubSubConfig{Namespace: "wsc"})
+	// 使用唯一的命名空间避免测试间干扰
+	pubsub := cachex.NewPubSub(redisClient, cachex.PubSubConfig{Namespace: getUniqueNamespace()})
 	hub.SetPubSub(pubsub)
 
 	StartTestHub(t, hub)
@@ -152,7 +162,7 @@ func TestUserOnlineEvent(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// 模拟客户端上线
-	client := CreateTestClient("client-001", "user-001", UserTypeCustomer)
+	client := createTestClientWithIDGen(UserTypeCustomer)
 	hub.Register(client)
 
 	// 等待事件处理
@@ -163,7 +173,7 @@ func TestUserOnlineEvent(t *testing.T) {
 
 	events := recorder.getOnlineEvents()
 	require.Len(t, events, 1)
-	assert.Equal(t, "user-001", events[0].UserID)
+	assert.Equal(t, client.UserID, events[0].UserID)
 	assert.Equal(t, UserTypeCustomer, events[0].UserType)
 	assert.Equal(t, EventTypeOnline, events[0].EventType)
 	assert.Equal(t, hub.GetNodeID(), events[0].NodeID)
@@ -174,7 +184,7 @@ func TestUserOnlineEvent(t *testing.T) {
 // TestUserOfflineEvent 测试用户下线事件发布和订阅
 func TestUserOfflineEvent(t *testing.T) {
 	redisClient := GetTestRedisClient(t)
-	defer CleanupRedisKeys(t, redisClient, "wsc:pubsub:", "test:")
+	defer cleanupRedisKeys(t, redisClient, "wsc:pubsub:", "test:")
 
 	config := wscconfig.Default()
 	hub := CreateTestHub(t, config)
@@ -182,7 +192,7 @@ func TestUserOfflineEvent(t *testing.T) {
 
 	// 设置 PubSub
 	pubsub := cachex.NewPubSub(redisClient, cachex.PubSubConfig{
-		Namespace: "wsc",
+		Namespace: getUniqueNamespace(),
 	})
 	hub.SetPubSub(pubsub)
 
@@ -205,10 +215,10 @@ func TestUserOfflineEvent(t *testing.T) {
 	// 等待订阅就绪
 	time.Sleep(100 * time.Millisecond)
 
-	// 模拟客户端上线再下线
-	client := CreateTestClient("client-002", "user-002", UserTypeAgent)
+	// 模拟客户端上线并下线
+	client := createTestClientWithIDGen(UserTypeAgent)
 	hub.Register(client)
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond)
 
 	hub.Unregister(client)
 	time.Sleep(300 * time.Millisecond)
@@ -218,7 +228,7 @@ func TestUserOfflineEvent(t *testing.T) {
 
 	events := recorder.getOfflineEvents()
 	require.Len(t, events, 1)
-	assert.Equal(t, "user-002", events[0].UserID)
+	assert.Equal(t, client.UserID, events[0].UserID)
 	assert.Equal(t, UserTypeAgent, events[0].UserType)
 	assert.Equal(t, EventTypeOffline, events[0].EventType)
 	assert.Equal(t, hub.GetNodeID(), events[0].NodeID)
@@ -227,15 +237,16 @@ func TestUserOfflineEvent(t *testing.T) {
 // TestMultipleSubscribers 测试多个订阅者
 func TestMultipleSubscribers(t *testing.T) {
 	redisClient := GetTestRedisClient(t)
-	defer CleanupRedisKeys(t, redisClient, "wsc:pubsub:", "test:")
+	defer cleanupRedisKeys(t, redisClient, "wsc:pubsub:", "test:")
 
 	config := wscconfig.Default()
 	hub := CreateTestHub(t, config)
 	defer hub.Shutdown()
 
-	// 设置 PubSub
+	// 使用唯一的命名空间避免测试间干扰
+	namespace := fmt.Sprintf("wsc_test_%d", time.Now().UnixNano())
 	pubsub := cachex.NewPubSub(redisClient, cachex.PubSubConfig{
-		Namespace: "wsc",
+		Namespace: namespace,
 	})
 	hub.SetPubSub(pubsub)
 
@@ -272,7 +283,7 @@ func TestMultipleSubscribers(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// 触发事件
-	client := CreateTestClient("client-003", "user-003", UserTypeCustomer)
+	client := createTestClientWithIDGen(UserTypeCustomer)
 	hub.Register(client)
 
 	// 等待事件处理
@@ -292,7 +303,7 @@ func TestMultipleSubscribers(t *testing.T) {
 // TestTicketQueuePushedEvent 测试工单入队事件
 func TestTicketQueuePushedEvent(t *testing.T) {
 	redisClient := GetTestRedisClient(t)
-	defer CleanupRedisKeys(t, redisClient, "wsc:pubsub:", "test:")
+	defer cleanupRedisKeys(t, redisClient, "wsc:pubsub:", "test:")
 
 	config := wscconfig.Default()
 	hub := CreateTestHub(t, config)
@@ -300,7 +311,7 @@ func TestTicketQueuePushedEvent(t *testing.T) {
 
 	// 设置 PubSub
 	pubsub := cachex.NewPubSub(redisClient, cachex.PubSubConfig{
-		Namespace: "wsc",
+		Namespace: getUniqueNamespace(),
 	})
 	hub.SetPubSub(pubsub)
 
@@ -348,7 +359,7 @@ func TestTicketQueuePushedEvent(t *testing.T) {
 // TestUnsubscribe 测试取消订阅
 func TestUnsubscribe(t *testing.T) {
 	redisClient := GetTestRedisClient(t)
-	defer CleanupRedisKeys(t, redisClient, "wsc:pubsub:", "test:")
+	defer cleanupRedisKeys(t, redisClient, "wsc:pubsub:", "test:")
 
 	config := wscconfig.Default()
 	hub := CreateTestHub(t, config)
@@ -356,7 +367,7 @@ func TestUnsubscribe(t *testing.T) {
 
 	// 设置 PubSub
 	pubsub := cachex.NewPubSub(redisClient, cachex.PubSubConfig{
-		Namespace: "wsc",
+		Namespace: getUniqueNamespace(),
 	})
 	hub.SetPubSub(pubsub)
 
@@ -374,7 +385,7 @@ func TestUnsubscribe(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// 触发第一个事件
-	client1 := CreateTestClient("client-004", "user-004", UserTypeCustomer)
+	client1 := createTestClientWithIDGen(UserTypeCustomer)
 	hub.Register(client1)
 	time.Sleep(300 * time.Millisecond)
 
@@ -387,7 +398,7 @@ func TestUnsubscribe(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// 再次触发事件
-	client2 := CreateTestClient("client-005", "user-005", UserTypeCustomer)
+	client2 := createTestClientWithIDGen(UserTypeCustomer)
 	hub.Register(client2)
 	time.Sleep(300 * time.Millisecond)
 
@@ -418,7 +429,7 @@ func TestEventsWithoutPubSub(t *testing.T) {
 	assert.Equal(t, ErrPubSubNotSet, err)
 
 	// 发布事件不应该panic（应该静默处理）
-	client := CreateTestClient("client-006", "user-006", UserTypeCustomer)
+	client := createTestClientWithIDGen(UserTypeCustomer)
 	assert.NotPanics(t, func() {
 		hub.Register(client)
 		time.Sleep(100 * time.Millisecond)
@@ -433,7 +444,7 @@ func TestEventsWithoutPubSub(t *testing.T) {
 // TestCrossNodeEvents 测试跨节点事件通信
 func TestCrossNodeEvents(t *testing.T) {
 	redisClient := GetTestRedisClient(t)
-	defer CleanupRedisKeys(t, redisClient, "wsc:pubsub:", "test:")
+	defer cleanupRedisKeys(t, redisClient, "wsc:pubsub:", "test:")
 
 	// 创建两个 Hub 实例模拟不同节点
 	config1 := wscconfig.Default()
@@ -446,7 +457,7 @@ func TestCrossNodeEvents(t *testing.T) {
 
 	// 为两个 Hub 设置相同的 PubSub（模拟共享 Redis）
 	pubsubConfig := cachex.PubSubConfig{
-		Namespace: "wsc",
+		Namespace: getUniqueNamespace(),
 	}
 	pubsub1 := cachex.NewPubSub(redisClient, pubsubConfig)
 	pubsub2 := cachex.NewPubSub(redisClient, pubsubConfig)
@@ -474,7 +485,7 @@ func TestCrossNodeEvents(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Hub1 发布事件（客户端上线）
-	client := CreateTestClient("client-007", "user-007", UserTypeAgent)
+	client := createTestClientWithIDGen(UserTypeAgent)
 	hub1.Register(client)
 
 	time.Sleep(300 * time.Millisecond)
@@ -484,7 +495,7 @@ func TestCrossNodeEvents(t *testing.T) {
 
 	events := recorder.getOnlineEvents()
 	require.Len(t, events, 1)
-	assert.Equal(t, "user-007", events[0].UserID)
+	assert.Equal(t, client.UserID, events[0].UserID)
 	assert.Equal(t, hub1.GetNodeID(), events[0].NodeID, "事件应该来自 Hub1")
 
 	hub1.Unregister(client)
@@ -497,14 +508,14 @@ func TestCrossNodeEvents(t *testing.T) {
 // TestEventsConcurrency 测试事件并发处理
 func TestEventsConcurrency(t *testing.T) {
 	redisClient := GetTestRedisClient(t)
-	defer CleanupRedisKeys(t, redisClient, "wsc:pubsub:", "test:")
+	defer cleanupRedisKeys(t, redisClient, "wsc:pubsub:", "test:")
 
 	config := wscconfig.Default()
 	hub := CreateTestHub(t, config)
 	defer hub.Shutdown()
 
 	pubsub := cachex.NewPubSub(redisClient, cachex.PubSubConfig{
-		Namespace: "wsc",
+		Namespace: getUniqueNamespace(),
 	})
 	hub.SetPubSub(pubsub)
 
@@ -534,9 +545,7 @@ func TestEventsConcurrency(t *testing.T) {
 	for i := 0; i < clientCount; i++ {
 		go func(index int) {
 			defer wg.Done()
-			clientID := "client-" + string(rune('A'+index))
-			userID := "user-" + string(rune('A'+index))
-			client := CreateTestClient(clientID, userID, UserTypeCustomer)
+			client := createTestClientWithIDGen(UserTypeAgent)
 			hub.Register(client)
 			time.Sleep(50 * time.Millisecond)
 			hub.Unregister(client)
@@ -558,14 +567,14 @@ func TestEventsConcurrency(t *testing.T) {
 // TestEventHandlerError 测试事件处理器返回错误
 func TestEventHandlerError(t *testing.T) {
 	redisClient := GetTestRedisClient(t)
-	defer CleanupRedisKeys(t, redisClient, "wsc:pubsub:", "test:")
+	defer cleanupRedisKeys(t, redisClient, "wsc:pubsub:", "test:")
 
 	config := wscconfig.Default()
 	hub := CreateTestHub(t, config)
 	defer hub.Shutdown()
 
 	pubsub := cachex.NewPubSub(redisClient, cachex.PubSubConfig{
-		Namespace: "wsc",
+		Namespace: getUniqueNamespace(),
 	})
 	hub.SetPubSub(pubsub)
 
@@ -588,7 +597,7 @@ func TestEventHandlerError(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// 触发事件
-	client := CreateTestClient("client-008", "user-008", UserTypeCustomer)
+	client := createTestClientWithIDGen(UserTypeCustomer)
 	hub.Register(client)
 
 	time.Sleep(300 * time.Millisecond)
@@ -606,14 +615,14 @@ func TestEventHandlerError(t *testing.T) {
 // TestEventContent 测试事件内容完整性
 func TestEventContent(t *testing.T) {
 	redisClient := GetTestRedisClient(t)
-	defer CleanupRedisKeys(t, redisClient, "wsc:pubsub:", "test:")
+	defer cleanupRedisKeys(t, redisClient, "wsc:pubsub:", "test:")
 
 	config := wscconfig.Default()
 	hub := CreateTestHub(t, config)
 	defer hub.Shutdown()
 
 	pubsub := cachex.NewPubSub(redisClient, cachex.PubSubConfig{
-		Namespace: "wsc",
+		Namespace: getUniqueNamespace(),
 	})
 	hub.SetPubSub(pubsub)
 
@@ -656,10 +665,7 @@ func TestEventContent(t *testing.T) {
 	}
 
 	for i, tc := range testCases {
-		clientID := "client-" + tc.name
-		userID := "user-" + tc.name
-
-		client := CreateTestClient(clientID, userID, tc.userType)
+		client := createTestClientWithIDGen(tc.userType)
 		hub.Register(client)
 		time.Sleep(200 * time.Millisecond)
 		hub.Unregister(client)
@@ -669,7 +675,7 @@ func TestEventContent(t *testing.T) {
 		onlineEvents := recorder.getOnlineEvents()
 		require.Greater(t, len(onlineEvents), i, "应该收到上线事件")
 		event := onlineEvents[i]
-		assert.Equal(t, userID, event.UserID)
+		assert.Equal(t, client.UserID, event.UserID)
 		assert.Equal(t, tc.userType, event.UserType)
 		assert.Equal(t, EventTypeOnline, event.EventType)
 		assert.NotEmpty(t, event.NodeID)
@@ -679,7 +685,7 @@ func TestEventContent(t *testing.T) {
 		offlineEvents := recorder.getOfflineEvents()
 		require.Greater(t, len(offlineEvents), i, "应该收到下线事件")
 		event = offlineEvents[i]
-		assert.Equal(t, userID, event.UserID)
+		assert.Equal(t, client.UserID, event.UserID)
 		assert.Equal(t, tc.userType, event.UserType)
 		assert.Equal(t, EventTypeOffline, event.EventType)
 	}

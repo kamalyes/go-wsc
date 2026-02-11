@@ -34,11 +34,14 @@ type Client struct {
 	ConnectedAt    time.Time              `json:"connected_at"`    // 连接时间
 	LastSeen       time.Time              `json:"last_seen"`       // 最后活跃时间
 	LastHeartbeat  time.Time              `json:"last_heartbeat"`  // 最后心跳时间
+	LastPong       time.Time              `json:"last_pong"`       // 最后心跳响应时间
 	Status         UserStatus             `json:"status"`          // 用户状态
 	Department     Department             `json:"department"`      // 部门
 	Skills         []Skill                `json:"skills"`          // 技能列表
 	MaxTickets     int                    `json:"max_tickets"`     // 最大工单数
 	NodeID         string                 `json:"node_id"`         // 所在节点ID
+	NodeIP         string                 `json:"node_ip"`         // 所在节点IP
+	NodePort       int                    `json:"node_port"`       // 所在节点端口
 	ClientType     ClientType             `json:"client_type"`     // 客户端类型（web/mobile/desktop）
 	ConnectionType ConnectionType         `json:"connection_type"` // 连接类型（websocket/sse）
 	Metadata       map[string]interface{} `json:"metadata"`        // 元数据

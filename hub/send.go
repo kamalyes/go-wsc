@@ -40,53 +40,53 @@ const (
 // sendToUser 发送消息给指定用户（内部方法）
 // 自动支持分布式：如果用户在其他节点，会自动路由过去
 func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) error {
-	msg.ReceiverNode = mathx.IfEmpty(msg.ReceiverNode, h.nodeID)
-	msg.CreateAt = mathx.IfNotZero(msg.CreateAt, time.Now())
+	// 克隆消息以避免并发修改原始消息（特别是在重试场景中）
+	msgCopy := msg.Clone()
+	msgCopy.ReceiverNode = mathx.IfEmpty(msgCopy.ReceiverNode, h.nodeID)
+	msgCopy.CreateAt = mathx.IfNotZero(msgCopy.CreateAt, time.Now())
 
 	// 🌐 分布式路由：检查用户是否在其他节点
-	routed, err := h.checkAndRouteToNode(ctx, toUserID, msg)
+	routed, err := h.checkAndRouteToNode(ctx, toUserID, msgCopy)
 	if err != nil {
 		// 路由失败，记录错误但继续尝试本地发送
 		h.logger.WarnKV("跨节点路由失败，尝试本地发送",
 			"user_id", toUserID,
-			"message_id", msg.MessageID,
+			"message_id", msgCopy.MessageID,
 			"error", err,
 		)
 	}
 	if routed {
 		// 消息已路由到其他节点，本地不需要处理
 		h.logger.DebugContextKV(ctx, "消息已路由到其他节点",
-			"message_id", msg.MessageID,
+			"message_id", msgCopy.MessageID,
 			"user_id", toUserID,
 		)
-		go h.recordMessageToDatabase(msg, nil)
+		go h.recordMessageToDatabase(msgCopy, nil)
 		return nil
-	}
-
-	// 用户在本节点或单机模式，正常发送
+	} // 用户在本节点或单机模式，正常发送
 	// 尝试发送到broadcast队列
 	select {
-	case h.broadcast <- msg:
-		h.logger.DebugContextKV(ctx, "消息已广播", "message_id", msg.MessageID, "from", msg.Sender, "to", msg.Receiver, "type", msg.MessageType)
+	case h.broadcast <- msgCopy:
+		h.logger.DebugContextKV(ctx, "消息已广播", "message_id", msgCopy.MessageID, "from", msgCopy.Sender, "to", msgCopy.Receiver, "type", msgCopy.MessageType)
 		// 记录消息到数据库 - 创建时已标记为Sending状态
-		go h.recordMessageToDatabase(msg, nil)
+		go h.recordMessageToDatabase(msgCopy, nil)
 		return nil
 	default:
 		// broadcast队列满，尝试放入待发送队列
 		select {
-		case h.pendingMessages <- msg:
-			h.logger.DebugContextKV(ctx, "消息已放入待发送队列", "message_id", msg.MessageID, "from", msg.Sender, "to", msg.Receiver, "type", msg.MessageType)
+		case h.pendingMessages <- msgCopy:
+			h.logger.DebugContextKV(ctx, "消息已放入待发送队列", "message_id", msgCopy.MessageID, "from", msgCopy.Sender, "to", msgCopy.Receiver, "type", msgCopy.MessageType)
 			// 记录消息到数据库 - 创建时已标记为Sending状态
-			go h.recordMessageToDatabase(msg, nil)
+			go h.recordMessageToDatabase(msgCopy, nil)
 			return nil
 		default:
 			err := ErrQueueAndPendingFull
 			// 记录消息发送失败日志
-			h.logger.DebugContextKV(ctx, "消息发送失败", "message_id", msg.MessageID, "from", msg.Sender, "to", msg.Receiver, "type", msg.MessageType, "error", err)
+			h.logger.DebugContextKV(ctx, "消息发送失败", "message_id", msgCopy.MessageID, "from", msgCopy.Sender, "to", msgCopy.Receiver, "type", msgCopy.MessageType, "error", err)
 			// 记录失败消息到数据库
-			go h.recordMessageToDatabase(msg, err)
+			go h.recordMessageToDatabase(msgCopy, err)
 			// 通知队列满处理器
-			h.notifyQueueFull(msg, toUserID, QueueTypeAllQueues, err)
+			h.notifyQueueFull(msgCopy, toUserID, QueueTypeAllQueues, err)
 			return err
 		}
 	}
@@ -504,13 +504,14 @@ func (h *Hub) SendPriority(ctx context.Context, userID string, msg *HubMessage, 
 
 	// 高优先级消息直接发送，不使用队列
 	if priority >= PriorityHigh {
-		syncx.Go().Exec(func() {
+		syncx.Go(ctx).Exec(func() {
 			h.SendToUserWithRetry(ctx, userID, msg)
 		})
-	} else {
-		// 普通优先级使用标准流程
-		h.SendToUserWithRetry(ctx, userID, msg)
+		return
 	}
+
+	// 普通优先级使用标准流程
+	h.SendToUserWithRetry(ctx, userID, msg)
 }
 
 // SendConditional 根据条件发送消息给符合条件的客户端

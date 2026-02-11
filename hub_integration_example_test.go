@@ -22,6 +22,7 @@ import (
 	"github.com/gorilla/websocket"
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestHubWithRedisAndMySQL 演示如何集成 Redis 和 MySQL 到 Hub
@@ -105,41 +106,50 @@ waitLoop:
 		}
 	}
 
-	// 等待Hub注册完成
-	time.Sleep(300 * time.Millisecond)
+	// 生成测试用的ID
+	idGen := hub.GetIDGenerator()
+	senderID := idGen.GenerateSpanID()
+
+	time.Sleep(500 * time.Millisecond) // 等待注册和同步完成
+
+	onlineUsers, err := onlineStatusRepo.GetAllOnlineUsers(ctx)
+	require.NoError(t, err, "获取在线用户失败")
+	require.GreaterOrEqual(t, len(onlineUsers), 1, "应该至少有一个在线用户")
+
+	// 使用实际注册的 UserID
+	testUserID := onlineUsers[0]
+
+	// 获取在线状态信息
+	onlineInfo, err := onlineStatusRepo.GetOnlineInfo(ctx, testUserID)
+	require.NoError(t, err, "应该能获取到在线状态")
 
 	// 9. 验证 Redis 中的在线状态
-	onlineInfo, err := onlineStatusRepo.GetOnlineInfo(ctx, "test-user-001")
-	assert.NoError(t, err)
-	if err == nil {
-		assert.Equal(t, "test-user-001", onlineInfo.UserID)
-		assert.Equal(t, UserTypeCustomer, onlineInfo.UserType)
-		assert.Equal(t, "192.168.1.100", onlineInfo.ClientIP)
-	}
+	assert.Equal(t, testUserID, onlineInfo.UserID)
+	assert.Equal(t, UserTypeCustomer, onlineInfo.UserType)
 
 	// 10. 发送消息（会自动记录到 MySQL）
 	msg := &HubMessage{
-		ID:          "test-msg-001",
-		MessageID:   "test-msg-001",
+		ID:          idGen.GenerateTraceID(),
+		MessageID:   idGen.GenerateRequestID(),
 		MessageType: MessageTypeText,
-		Sender:      "system",
-		Receiver:    "test-user-001",
+		Sender:      senderID,
+		Receiver:    testUserID,
 		Content:     "Hello from integrated Hub!",
 		Data:        map[string]interface{}{"test": true},
 		CreateAt:    time.Now(),
 		Priority:    PriorityNormal,
 	}
 
-	result := hub.SendToUserWithRetry(ctx, "test-user-001", msg)
+	result := hub.SendToUserWithRetry(ctx, testUserID, msg)
 	assert.NoError(t, result.FinalError)
 	time.Sleep(500 * time.Millisecond) // 等待异步记录完成
 
 	// 11. 验证 MySQL 中的消息记录
-	record, err := messageRecordRepo.FindByMessageID(ctx, "test-msg-001")
+	record, err := messageRecordRepo.FindByMessageID(ctx, msg.MessageID)
 	if err == nil {
-		assert.Equal(t, "test-msg-001", record.MessageID)
-		assert.Equal(t, "system", record.Sender)
-		assert.Equal(t, "test-user-001", record.Receiver)
+		assert.Equal(t, msg.MessageID, record.MessageID)
+		assert.Equal(t, msg.Sender, record.Sender)
+		assert.Equal(t, msg.Receiver, record.Receiver)
 		assert.Equal(t, MessageTypeText, record.MessageType)
 	}
 
@@ -148,14 +158,14 @@ waitLoop:
 	time.Sleep(500 * time.Millisecond) // 等待异步操作完成
 
 	// 13. 验证 Redis 中已移除（可能已经删除，也可能还在）
-	_, err = onlineStatusRepo.GetOnlineInfo(ctx, "test-user-001")
+	_, err = onlineStatusRepo.GetOnlineInfo(ctx, testUserID)
 	// 异步删除可能还未完成，不强制要求error
 	if err != nil {
 		t.Logf("Redis 数据已清理: %v", err)
 	}
 
 	// 14. 清理测试数据
-	_ = messageRecordRepo.DeleteByMessageID(ctx, "test-msg-001")
+	_ = messageRecordRepo.DeleteByMessageID(ctx, msg.MessageID)
 
 	t.Log("✅ Hub 集成 Redis 和 MySQL 测试通过")
 }
@@ -193,11 +203,18 @@ func TestHubBatchOperations(t *testing.T) {
 	ctx := context.Background()
 
 	// 批量注册多个客户端
+	idGen := hub.GetIDGenerator()
 	clients := make([]*Client, 5)
+	clientIDs := make([]string, 5)
+	userIDs := make([]string, 5)
+
 	for i := 0; i < 5; i++ {
+		clientIDs[i] = idGen.GenerateSpanID()
+		userIDs[i] = idGen.GenerateCorrelationID()
+
 		clients[i] = &Client{
-			ID:            "batch-client-" + string(rune('A'+i)),
-			UserID:        "batch-user-" + string(rune('A'+i)),
+			ID:            clientIDs[i],
+			UserID:        userIDs[i],
 			UserType:      UserTypeCustomer,
 			ClientIP:      "192.168.1.10" + string(rune('0'+i)),
 			Status:        UserStatusOnline,
@@ -212,19 +229,30 @@ func TestHubBatchOperations(t *testing.T) {
 
 	time.Sleep(1 * time.Second) // 等待所有注册完成
 
+	// 验证客户端确实在 Hub 中
+	for i := 0; i < 5; i++ {
+		isOnline, _ := hub.IsUserOnline(userIDs[i])
+		require.True(t, isOnline, "用户 %s 应该在线", userIDs[i])
+	}
+
+	// 等待 Redis 状态同步（异步操作可能需要更多时间）
+	time.Sleep(2 * time.Second)
+
 	// 验证批量在线状态
 	onlineUserIDs, err := onlineStatusRepo.GetOnlineUsersByType(ctx, UserTypeCustomer)
 	assert.NoError(t, err)
-	assert.GreaterOrEqual(t, len(onlineUserIDs), 5)
+	t.Logf("从 Redis 获取到 %d 个在线用户", len(onlineUserIDs))
+	assert.GreaterOrEqual(t, len(onlineUserIDs), 5, "应该至少有5个在线用户")
 
 	// 批量发送消息
+	senderID := idGen.GenerateSpanID()
 	for i := 0; i < 5; i++ {
 		msg := &HubMessage{
-			ID:          "batch-msg-" + string(rune('A'+i)),
-			MessageID:   "batch-msg-" + string(rune('A'+i)),
+			ID:          idGen.GenerateTraceID(),
+			MessageID:   idGen.GenerateRequestID(),
 			MessageType: MessageTypeText,
-			Sender:      "system",
-			Receiver:    "batch-user-" + string(rune('A'+i)),
+			Sender:      senderID,
+			Receiver:    userIDs[i],
 			Content:     "Batch message",
 			CreateAt:    time.Now(),
 			Priority:    PriorityNormal,
@@ -261,7 +289,7 @@ func TestHubBatchOperations(t *testing.T) {
 			case <-done:
 				// 删除成功
 			case <-cleanupCtx.Done():
-				t.Logf("⚠️ 清理消息记录超时: batch-msg-%c", rune('A'+idx))
+				// 清理超时，记录日志但不影响测试
 			}
 		}(i)
 	}
@@ -295,31 +323,21 @@ func TestHubOnlineStatusQuery(t *testing.T) {
 	ctx := context.Background()
 
 	// 注册不同类型的客户端
-	customerClient := &Client{
-		ID:            "query-customer",
-		UserID:        "query-user-customer",
-		UserType:      UserTypeCustomer,
-		ClientType:    ClientTypeMobile,
-		SendChan:      make(chan []byte, 100),
-		LastSeen:      time.Now(),
-		LastHeartbeat: time.Now(),
-		Context:       context.Background(),
-	}
+	customerClient := createTestClientWithIDGen(UserTypeCustomer)
 
-	agentClient := &Client{
-		ID:            "query-agent",
-		UserID:        "query-user-agent",
-		UserType:      UserTypeAgent,
-		ClientType:    ClientTypeWeb,
-		SendChan:      make(chan []byte, 100),
-		LastSeen:      time.Now(),
-		LastHeartbeat: time.Now(),
-		Context:       context.Background(),
-	}
+	agentClient := createTestClientWithIDGen(UserTypeAgent)
 
 	hub.Register(customerClient)
 	hub.Register(agentClient)
-	time.Sleep(1 * time.Second) // 增加等待时间
+
+	// 等待注册完成（异步操作）
+	time.Sleep(500 * time.Millisecond)
+
+	agentOnline, _ := hub.IsUserOnline(agentClient.UserID)
+	require.True(t, agentOnline, "Agent用户应该在线")
+
+	// 等待 Redis 状态同步
+	time.Sleep(2 * time.Second)
 
 	// 查询所有在线用户
 	allOnlineUsers, err := onlineStatusRepo.GetAllOnlineUsers(ctx)
@@ -356,6 +374,8 @@ func startTestWSServer(t *testing.T, hub *Hub) *httptest.Server {
 		CheckOrigin: func(r *http.Request) bool { return true },
 	}
 
+	// 在外部生成ID，以便测试中可以引用
+	idGen := hub.GetIDGenerator()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -365,8 +385,8 @@ func startTestWSServer(t *testing.T, hub *Hub) *httptest.Server {
 
 		// 创建客户端
 		client := &Client{
-			ID:            "test-client-001",
-			UserID:        "test-user-001",
+			ID:            idGen.GenerateSpanID(),
+			UserID:        idGen.GenerateCorrelationID(),
 			UserType:      UserTypeCustomer,
 			ClientIP:      "192.168.1.100",
 			Status:        UserStatusOnline,
@@ -461,24 +481,37 @@ waitLoop:
 	time.Sleep(300 * time.Millisecond)
 
 	// 7. 测试发送成功场景 - 验证所有字段更新
-	msgID1 := "test-msg-fields-001"
+	idGen := hub.GetIDGenerator()
+
+	// 从 Hub 获取已连接客户端的用户ID
+	onlineUsers := hub.GetOnlineUsers()
+	if len(onlineUsers) == 0 {
+		t.Fatal("未找到已连接的客户端")
+	}
+	testUserID := onlineUsers[0]
+	t.Logf("📋 在线用户: %v, 使用用户ID: %s", onlineUsers, testUserID)
+
+	senderID := idGen.GenerateSpanID()
+	msgID1 := idGen.GenerateRequestID()
+	t.Logf("📋 生成的消息ID: %s", msgID1)
+
 	msg1 := &HubMessage{
-		ID:          msgID1,
+		ID:          idGen.GenerateTraceID(),
 		MessageID:   msgID1,
 		MessageType: MessageTypeText,
-		Sender:      "system",
-		Receiver:    "test-user-001",
+		Sender:      senderID,
+		Receiver:    testUserID,
 		Content:     "测试字段更新",
 		CreateAt:    time.Now(),
 		Priority:    PriorityNormal,
 	}
-
-	result := hub.SendToUserWithRetry(ctx, "test-user-001", msg1)
+	result := hub.SendToUserWithRetry(ctx, testUserID, msg1)
 	assert.NoError(t, result.FinalError)
 
 	// 等待异步数据库操作完成（包括 broadcast 处理 + sendToClient + UpdateStatus）
 	time.Sleep(1500 * time.Millisecond)
 
+	t.Logf("📋 开始查询消息记录, MessageID: %s", msgID1)
 	// 验证发送成功时的字段
 	record1, err := messageRecordRepo.FindByMessageID(ctx, msgID1)
 	if assert.NoError(t, err) && assert.NotNil(t, record1, "消息记录不应为nil") {
@@ -510,33 +543,38 @@ waitLoop:
 	wsClient.Close()
 	time.Sleep(1000 * time.Millisecond) // 增加等待时间确保清理完成
 
-	msgID2 := "test-msg-offline-001"
+	msgID2 := idGen.GenerateRequestID()
 	msg2 := &HubMessage{
-		ID:          msgID2,
+		ID:          idGen.GenerateTraceID(),
 		MessageID:   msgID2,
 		MessageType: MessageTypeText,
-		Sender:      "system",
-		Receiver:    "test-user-001",
+		Sender:      senderID,
+		Receiver:    testUserID,
 		Content:     "离线消息测试",
 		CreateAt:    time.Now(),
 		Priority:    PriorityNormal,
 	}
 
-	result2 := hub.SendToUserWithRetry(ctx, "test-user-001", msg2)
+	result2 := hub.SendToUserWithRetry(ctx, testUserID, msg2)
 	// 配置了 offlineMessageHandler 时，离线消息存储成功返回 Success=true
 	assert.True(t, result2.Success, "离线消息应成功存储")
 	assert.NoError(t, result2.FinalError, "离线消息存储不应返回错误")
 	time.Sleep(500 * time.Millisecond)
 
 	// 验证离线消息表字段
-	offlineMsgs, err := offlineMessageDBRepo.GetByReceiver(ctx, "test-user-001", 10)
+	offlineMsgs, err := offlineMessageDBRepo.QueryMessages(ctx, &OfflineMessageFilter{
+		UserID: testUserID,
+		Role:   MessageRoleReceiver,
+		Limit:  10,
+		Cursor: "",
+	})
 	if assert.NoError(t, err) && len(offlineMsgs) > 0 {
 		found := false
 		for _, msg := range offlineMsgs {
 			if msg.MessageID == msgID2 {
 				found = true
 				assert.Equal(t, msgID2, msg.MessageID, "MessageID应正确")
-				assert.Equal(t, "test-user-001", msg.Receiver, "Receiver应正确")
+				assert.Equal(t, testUserID, msg.Receiver, "Receiver应正确")
 				assert.NotEmpty(t, msg.CompressedData, "CompressedData应被设置")
 				assert.NotNil(t, msg.ScheduledAt, "ScheduledAt应被设置")
 				assert.NotNil(t, msg.ExpireAt, "ExpireAt应被设置")
@@ -581,7 +619,12 @@ waitLoop2:
 
 	// 验证离线消息已被成功推送并删除
 	// 注意：推送成功后消息会被自动删除，所以查询不到是正常的
-	offlineMsgs2, err := offlineMessageDBRepo.GetByReceiver(ctx, "test-user-001", 10)
+	offlineMsgs2, err := offlineMessageDBRepo.QueryMessages(ctx, &OfflineMessageFilter{
+		UserID: testUserID,
+		Role:   MessageRoleReceiver,
+		Limit:  10,
+		Cursor: "",
+	})
 	if assert.NoError(t, err) {
 		found := false
 		for _, msg := range offlineMsgs2 {

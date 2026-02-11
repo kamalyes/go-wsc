@@ -19,9 +19,9 @@ jobs:
       matrix:
         go-version: [1.21.x, 1.22.x, 1.23.x, 1.24.x, 1.25.x]
         platform: [ubuntu-latest, windows-latest, macos-latest, macos-14]
-      fail-fast: false  # 允许其他矩阵作业继续运行，即使有些失败
+      fail-fast: false # 允许其他矩阵作业继续运行，即使有些失败
     runs-on: ${{ matrix.platform }}
-    timeout-minutes: 30  # 设置作业超时
+    timeout-minutes: 60 # 设置作业超时
 
     # 🔥 全局环境变量
     env:
@@ -35,13 +35,6 @@ jobs:
       MYSQL_USER: ${{ vars.TEST_MYSQL_USER || 'root' }}
       MYSQL_PASSWORD: ${{ vars.MYSQL_ROOT_PASSWORD || '1235678' }}
       MYSQL_DATABASE: ${{ vars.TEST_MYSQL_DATABASE || 'go_wsc_test' }}
-      # Windows 路径
-      WINDOWS_REDIS_PATH: ${{ vars.WINDOWS_REDIS_PATH || 'C:\Program Files\Redis' }}
-      WINDOWS_MYSQL_PATH: ${{ vars.WINDOWS_MYSQL_PATH || 'C:\tools\mysql\current\bin' }}
-      # macOS 路径 (Intel)
-      MACOS_REDIS_CONF_INTEL: ${{ vars.MACOS_REDIS_CONF_INTEL || '/usr/local/etc/redis.conf' }}
-      # macOS 路径 (Apple Silicon)
-      MACOS_REDIS_CONF_ARM: ${{ vars.MACOS_REDIS_CONF_ARM || '/opt/homebrew/etc/redis.conf' }}
     steps:
       - name: Fetch Repository
         uses: actions/checkout@v5
@@ -53,28 +46,38 @@ jobs:
 
       - name: Install gotestsum
         run: go install gotest.tools/gotestsum@latest
-        continue-on-error: true  # 如果安装失败，继续执行
+        continue-on-error: true # 如果安装失败，继续执行
 
       - name: Download dependencies
         run: go mod download
         continue-on-error: true
 
-      - name: Test (without coverage)
-        run: gotestsum -f testname -- ./... -race -count=1 -timeout=30m -shuffle=on
-        timeout-minutes: 15
-        continue-on-error: true  # 即使测试失败也继续
-
       - name: Test (with coverage)
         run: gotestsum -f testname -- ./... -race -count=1 -timeout=30m -coverprofile=coverage.txt -covermode=atomic -shuffle=on
-        timeout-minutes: 15
-        continue-on-error: true  # 即使测试失败也继续
+        timeout-minutes: 60
+        continue-on-error: true # 即使测试失败也继续
+
+      - name: Check coverage file exists
+        id: check_coverage
+        if: matrix.platform == 'ubuntu-latest' && matrix.go-version == '1.22.x'
+        run: |
+          if [ -f coverage.txt ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "✅ Coverage file exists"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "⚠️ Coverage file not found"
+          fi
+        shell: bash
+        continue-on-error: true
 
       - name: Upload coverage reports to Codecov
-        if: always() && matrix.platform == 'ubuntu-latest' && matrix.go-version == '1.22.x'
+        if: always() && steps.check_coverage.outputs.exists == 'true'
         uses: codecov/codecov-action@v4.5.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           file: ./coverage.txt
           flags: unittests
           slug: kamalyes/go-wsc
-        continue-on-error: true  # 上传失败也不影响整个流程
+          fail_ci_if_error: false # 上传失败不影响 CI
+        continue-on-error: true # 上传失败也不影响整个流程

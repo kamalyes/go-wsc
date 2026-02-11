@@ -65,6 +65,12 @@ type (
 
 	// OfflineMessageRecord 离线消息记录
 	OfflineMessageRecord = repository.OfflineMessageRecord
+
+	// OfflineMessageFilter 离线消息查询过滤器
+	OfflineMessageFilter = repository.OfflineMessageFilter
+
+	// MessageRole 消息查询角色
+	MessageRole = repository.MessageRole
 )
 
 // 仓储构造函数别名
@@ -74,6 +80,14 @@ var (
 
 	// NewGormOfflineMessageRepository 创建 Gorm 离线消息仓储
 	NewGormOfflineMessageRepository = repository.NewGormOfflineMessageRepository
+)
+
+// 消息查询角色常量
+const (
+	// MessageRoleReceiver 作为接收者查询
+	MessageRoleReceiver = repository.MessageRoleReceiver
+	// MessageRoleSender 作为发送者查询
+	MessageRoleSender = repository.MessageRoleSender
 )
 
 // 消息发送状态别名

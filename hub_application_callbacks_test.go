@@ -26,37 +26,6 @@ import (
 // ====================================================================
 
 const (
-	// 测试用户ID
-	testReplaceUserID    = "replace-user"
-	testConnectUserID    = "connect-test-user"
-	testConnectErrorUser = "connect-error-user"
-	testDisconnectUserID = "disconnect-test-user"
-	testMsgRecvUserID    = "msg-recv-user"
-	testMsgRecvErrorUser = "msg-recv-error-user"
-	testLifecycleUserID  = "lifecycle-user"
-	testErrorUserID      = "error-test-user"
-
-	// 测试客户端ID
-	testConnectClientID      = "connect-test-client"
-	testConnectErrorClientID = "connect-error-client"
-	testDisconnectClientID   = "disconnect-test-client"
-	testReplaceClient1ID     = "replace-client-1"
-	testReplaceClient2ID     = "replace-client-2"
-	testMsgRecvClientID      = "msg-recv-client"
-	testMsgRecvErrorClientID = "msg-recv-error-client"
-	testLifecycleClientID    = "lifecycle-client"
-	testErrorClientID        = "error-test-client"
-
-	// 测试消息ID
-	testRecvMsgID      = "recv-msg-1"
-	testRecvErrorMsgID = "recv-msg-error"
-	testLifecycleMsgID = "lifecycle-msg"
-
-	// 测试消息内容
-	testMsgRecvContent      = "测试消息接收回调"
-	testMsgErrorContent     = "测试错误场景"
-	testLifecycleMsgContent = "生命周期测试消息"
-
 	// 断言消息
 	assertClientNotNil         = "客户端不应该为空"
 	assertCallbackNoError      = "回调不应该返回错误"
@@ -90,13 +59,7 @@ func TestClientConnectCallback(t *testing.T) {
 	hub.OnClientConnect(recorder.OnClientConnect)
 
 	t.Run("ClientConnect_Success", func(t *testing.T) {
-		client := &Client{
-			ID:       testConnectClientID,
-			UserID:   testConnectUserID,
-			UserType: UserTypeCustomer,
-			SendChan: make(chan []byte, 100),
-			Context:  context.WithValue(context.Background(), ContextKeyUserID, testConnectUserID),
-		}
+		client := createTestClientWithIDGen(UserTypeCustomer, 100)
 
 		// 注册客户端，应该触发连接回调
 		hub.Register(client)
@@ -107,8 +70,8 @@ func TestClientConnectCallback(t *testing.T) {
 		assert.Equal(t, int64(1), count, assertClientConnectOnce)
 		lastConnectClient := recorder.GetLastConnectClient()
 		assert.NotNil(t, lastConnectClient, assertClientNotNil)
-		assert.Equal(t, testConnectClientID, lastConnectClient.ID, assertClientIDMatch)
-		assert.Equal(t, testConnectUserID, lastConnectClient.UserID, assertUserIDMatch)
+		assert.Equal(t, client.ID, lastConnectClient.ID, assertClientIDMatch)
+		assert.Equal(t, client.UserID, lastConnectClient.UserID, assertUserIDMatch)
 
 		hub.Unregister(client)
 	})
@@ -117,21 +80,16 @@ func TestClientConnectCallback(t *testing.T) {
 		recorder.Reset()
 		recorder.lastConnectError = assert.AnError // 模拟连接回调返回错误
 
-		client := &Client{
-			ID:       testConnectErrorClientID,
-			UserID:   testConnectErrorUser,
-			UserType: UserTypeCustomer,
-			SendChan: make(chan []byte, 100),
-			Context:  context.WithValue(context.Background(), ContextKeyUserID, testConnectErrorUser),
-		}
+		client := createTestClientWithIDGen(UserTypeCustomer, 100)
 
+		// 注册客户端，应该触发连接回调
 		hub.Register(client)
 		time.Sleep(waitMediumDuration)
 
 		// 即使回调返回错误，客户端仍然应该被注册
 		count := atomic.LoadInt64(&recorder.clientConnectCount)
-		assert.Equal(t, int64(1), count, "回调应该被调用")
-		assert.True(t, hub.HasClient(testConnectErrorClientID), "客户端应该仍然被注册")
+		assert.Equal(t, int64(1), count, assertClientConnectOnce)
+		assert.True(t, hub.HasClient(client.ID), "客户端应该仍然被注册")
 
 		hub.Unregister(client)
 	})
@@ -156,13 +114,7 @@ func TestClientDisconnectCallback(t *testing.T) {
 	hub.OnClientDisconnect(recorder.OnClientDisconnect)
 
 	t.Run("ClientDisconnect_Normal", func(t *testing.T) {
-		client := &Client{
-			ID:       testDisconnectClientID,
-			UserID:   testDisconnectUserID,
-			UserType: UserTypeCustomer,
-			SendChan: make(chan []byte, 100),
-			Context:  context.WithValue(context.Background(), ContextKeyUserID, testDisconnectUserID),
-		}
+		client := createTestClientWithIDGen(UserTypeCustomer, 200)
 
 		hub.Register(client)
 		time.Sleep(waitShortDuration)
@@ -176,33 +128,22 @@ func TestClientDisconnectCallback(t *testing.T) {
 		assert.Equal(t, int64(1), count, assertClientDisconnectOnce)
 		lastDisconnectClient, lastDisconnectReason := recorder.GetLastDisconnectClient()
 		assert.NotNil(t, lastDisconnectClient, assertClientNotNil)
-		assert.Equal(t, testDisconnectClientID, lastDisconnectClient.ID, assertClientIDMatch)
+		assert.Equal(t, client.ID, lastDisconnectClient.ID, assertClientIDMatch)
 		assert.Equal(t, DisconnectReasonClientRequest, lastDisconnectReason, assertReasonNormal)
 	})
 
 	t.Run("ClientDisconnect_Replaced", func(t *testing.T) {
 		recorder.Reset()
 
-		client1 := &Client{
-			ID:       testReplaceClient1ID,
-			UserID:   testReplaceUserID,
-			UserType: UserTypeCustomer,
-			SendChan: make(chan []byte, 100),
-			Context:  context.WithValue(context.Background(), ContextKeyUserID, testReplaceUserID),
-		}
+		client1 := createTestClientWithIDGen(UserTypeCustomer, 300)
 
 		// 注册第一个客户端
 		hub.Register(client1)
 		time.Sleep(waitShortDuration)
 
 		// 同一用户的新连接，会触发旧连接的断开回调
-		client2 := &Client{
-			ID:       testReplaceClient2ID,
-			UserID:   testReplaceUserID,
-			UserType: UserTypeCustomer,
-			SendChan: make(chan []byte, 100),
-			Context:  context.WithValue(context.Background(), ContextKeyUserID, testReplaceUserID),
-		}
+		client2 := createTestClientWithIDGen(UserTypeCustomer, 301)
+		client2.UserID = client1.UserID // 使用相同的 UserID 模拟多端登录
 
 		hub.Register(client2)
 		time.Sleep(300 * time.Millisecond) // 增加等待时间，让异步回调有足够时间执行
@@ -234,19 +175,9 @@ func TestMessageReceivedCallback(t *testing.T) {
 	hub.OnMessageReceived(recorder.OnMessageReceived)
 
 	t.Run("MessageReceived_Success", func(t *testing.T) {
-		client := &Client{
-			ID:       testMsgRecvClientID,
-			UserID:   testMsgRecvUserID,
-			UserType: UserTypeCustomer,
-			SendChan: make(chan []byte, 100),
-			Context:  context.WithValue(context.Background(), ContextKeyUserID, testMsgRecvUserID),
-		}
+		client := createTestClientWithIDGen(UserTypeCustomer, 100)
 
-		msg := &HubMessage{
-			ID:          testRecvMsgID,
-			MessageType: MessageTypeText,
-			Content:     testMsgRecvContent,
-		}
+		msg := createTestHubMessage(MessageTypeText)
 
 		// 调用回调方法
 		err := hub.InvokeMessageReceivedCallback(context.Background(), client, msg)
@@ -257,24 +188,16 @@ func TestMessageReceivedCallback(t *testing.T) {
 		assert.Equal(t, int64(1), count, assertMessageReceivedOnce)
 		assert.NotNil(t, recorder.lastReceivedClient, assertClientNotNil)
 		assert.NotNil(t, recorder.lastReceivedMessage, "消息不应该为空")
-		assert.Equal(t, testRecvMsgID, recorder.lastReceivedMessage.ID, assertMessageIDMatch)
+		assert.Equal(t, msg.ID, recorder.lastReceivedMessage.ID, assertMessageIDMatch)
 	})
 
 	t.Run("MessageReceived_WithError", func(t *testing.T) {
 		recorder.Reset()
 		recorder.lastReceivedError = assert.AnError
 
-		client := &Client{
-			ID:       testMsgRecvErrorClientID,
-			UserID:   testMsgRecvErrorUser,
-			UserType: UserTypeCustomer,
-		}
+		client := createTestClientWithIDGen(UserTypeCustomer, 101)
 
-		msg := &HubMessage{
-			ID:          testRecvErrorMsgID,
-			MessageType: MessageTypeText,
-			Content:     testMsgErrorContent,
-		}
+		msg := createTestHubMessage(MessageTypeText)
 
 		err := hub.InvokeMessageReceivedCallback(context.Background(), client, msg)
 
@@ -361,24 +284,14 @@ func TestApplicationLayerCallbacksIntegration(t *testing.T) {
 
 	t.Run("FullLifecycle", func(t *testing.T) {
 		// 1. 连接
-		client := &Client{
-			ID:       testLifecycleClientID,
-			UserID:   testLifecycleUserID,
-			UserType: UserTypeCustomer,
-			SendChan: make(chan []byte, 100),
-			Context:  context.WithValue(context.Background(), ContextKeyUserID, testLifecycleUserID),
-		}
+		client := createTestClientWithIDGen(UserTypeCustomer, 100)
 
 		hub.Register(client)
 		time.Sleep(waitMediumDuration)
 		assert.Equal(t, int64(1), atomic.LoadInt64(&recorder.clientConnectCount), "连接回调应该被调用")
 
 		// 2. 接收消息
-		msg := &HubMessage{
-			ID:          testLifecycleMsgID,
-			MessageType: MessageTypeText,
-			Content:     testLifecycleMsgContent,
-		}
+		msg := createTestHubMessage(MessageTypeText)
 		_ = hub.InvokeMessageReceivedCallback(context.Background(), client, msg)
 		assert.Equal(t, int64(1), atomic.LoadInt64(&recorder.messageReceivedCount), "消息接收回调应该被调用")
 
@@ -389,11 +302,11 @@ func TestApplicationLayerCallbacksIntegration(t *testing.T) {
 
 		// 验证所有回调都被正确调用
 		lastConnectClient := recorder.GetLastConnectClient()
-		assert.Equal(t, testLifecycleClientID, lastConnectClient.ID, "连接的客户端ID应该匹配")
+		assert.Equal(t, client.ID, lastConnectClient.ID, "连接的客户端ID应该匹配")
 		_, lastReceivedMessage := recorder.GetLastReceivedMessage()
-		assert.Equal(t, testLifecycleMsgID, lastReceivedMessage.ID, "接收的消息ID应该匹配")
+		assert.Equal(t, msg.ID, lastReceivedMessage.ID, "接收的消息ID应该匹配")
 		lastDisconnectClient, _ := recorder.GetLastDisconnectClient()
-		assert.Equal(t, testLifecycleClientID, lastDisconnectClient.ID, "断开的客户端ID应该匹配")
+		assert.Equal(t, client.ID, lastDisconnectClient.ID, "断开的客户端ID应该匹配")
 	})
 }
 
@@ -414,13 +327,7 @@ func TestApplicationCallbacksWithErrors(t *testing.T) {
 		// 设置连接回调返回错误
 		recorder.lastConnectError = assert.AnError
 
-		client := &Client{
-			ID:       testErrorClientID,
-			UserID:   testErrorUserID,
-			UserType: UserTypeCustomer,
-			SendChan: make(chan []byte, 100),
-			Context:  context.WithValue(context.Background(), ContextKeyUserID, testErrorUserID),
-		}
+		client := createTestClientWithIDGen(UserTypeCustomer, 100)
 
 		hub.Register(client)
 		time.Sleep(waitLongDuration)

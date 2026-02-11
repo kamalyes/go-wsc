@@ -18,7 +18,6 @@ import (
 	"time"
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
-	"github.com/kamalyes/go-toolbox/pkg/osx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -35,29 +34,27 @@ func TestHubUpdateMessageSendStatusSuccess(t *testing.T) {
 	hub.WaitForStart()
 	defer hub.SafeShutdown()
 
-	msgID := osx.HashUnixMicroCipherText()
+	msg := createTestHubMessage(MessageTypeText)
 	defer func() {
-		_ = repo.DeleteByMessageID(ctx, msgID)
+		_ = repo.DeleteByMessageID(ctx, msg.MessageID)
 	}()
-
-	msg := createTestHubMessage(msgID, "sender-001", "receiver-001", MessageTypeText)
 	created, err := repo.CreateFromMessage(ctx, msg, 3, nil)
 	require.NoError(t, err)
 
 	// 🔥 校验创建的记录有正确的ID
-	assert.Equal(t, msgID, created.MessageID, "创建的记录应该使用业务消息ID")
+	assert.Equal(t, msg.MessageID, created.MessageID, "创建的记录应该使用业务消息ID")
 	assert.Equal(t, msg.ID, created.HubID, "创建的记录应该保存Hub内部ID")
 
 	// 🔥 Hub 内部通过 MessageID 更新状态
-	err = repo.UpdateStatus(ctx, msgID, MessageSendStatusSuccess, "", "")
+	err = repo.UpdateStatus(ctx, msg.MessageID, MessageSendStatusSuccess, "", "")
 	require.NoError(t, err)
 
 	// 🔥 使用业务消息ID查询
-	record, err := repo.FindByMessageID(ctx, msgID)
+	record, err := repo.FindByMessageID(ctx, msg.MessageID)
 	require.NoError(t, err)
 	assert.Equal(t, MessageSendStatusSuccess, record.Status)
 	assert.NotNil(t, record.SuccessTime)
-	assert.Equal(t, msgID, record.MessageID, "状态更新后 MessageID 应该保持不变")
+	assert.Equal(t, msg.MessageID, record.MessageID, "状态更新后 MessageID 应该保持不变")
 }
 
 // TestHubUpdateMessageSendStatusFailed 测试消息状态更新为失败
@@ -72,31 +69,30 @@ func TestHubUpdateMessageSendStatusFailed(t *testing.T) {
 	hub.WaitForStart()
 	defer hub.SafeShutdown()
 
-	msgID := osx.HashUnixMicroCipherText()
+	msg := createTestHubMessage(MessageTypeText)
 	defer func() {
-		_ = repo.DeleteByMessageID(ctx, msgID)
+		_ = repo.DeleteByMessageID(ctx, msg.MessageID)
 	}()
 
-	msg := createTestHubMessage(msgID, "sender-002", "receiver-002", MessageTypeText)
 	created, err := repo.CreateFromMessage(ctx, msg, 3, nil)
 	require.NoError(t, err)
 
 	// 🔥 校验 ID 正确性
-	assert.Equal(t, msgID, created.MessageID, "业务消息ID")
+	assert.Equal(t, msg.MessageID, created.MessageID, "业务消息ID")
 	assert.Equal(t, msg.ID, created.HubID, "Hub内部ID")
 
 	errorMsg := "network timeout"
 	// 🔥 使用 MessageID 更新状态
-	err = repo.UpdateStatus(ctx, msgID, MessageSendStatusFailed, FailureReasonNetworkError, errorMsg)
+	err = repo.UpdateStatus(ctx, msg.MessageID, MessageSendStatusFailed, FailureReasonNetworkError, errorMsg)
 	require.NoError(t, err)
 
 	// 🔥 使用业务消息ID查询
-	record, err := repo.FindByMessageID(ctx, msgID)
+	record, err := repo.FindByMessageID(ctx, msg.MessageID)
 	require.NoError(t, err)
 	assert.Equal(t, MessageSendStatusFailed, record.Status)
 	assert.Equal(t, FailureReasonNetworkError, record.FailureReason)
 	assert.Equal(t, errorMsg, record.ErrorMessage)
-	assert.Equal(t, msgID, record.MessageID, "失败状态下 MessageID 应该不变")
+	assert.Equal(t, msg.MessageID, record.MessageID, "失败状态下 MessageID 应该不变")
 }
 
 // TestHubUpdateMessageSendStatusRecordNotExist 测试记录不存在时的处理
@@ -111,15 +107,14 @@ func TestHubUpdateMessageSendStatusRecordNotExist(t *testing.T) {
 	hub.WaitForStart()
 	defer hub.SafeShutdown()
 
-	msgID := osx.HashUnixMicroCipherText()
-	msg := createTestHubMessage(msgID, "sender-003", "receiver-003", MessageTypeText)
+	msg := createTestHubMessage(MessageTypeText)
 	_, err := json.Marshal(msg)
 	require.NoError(t, err)
 
-	err = repo.UpdateStatus(ctx, msgID, MessageSendStatusSuccess, "", "")
+	err = repo.UpdateStatus(ctx, msg.MessageID, MessageSendStatusSuccess, "", "")
 	require.NoError(t, err) // 记录不存在时静默返回
 
-	_, err = repo.FindByMessageID(ctx, msgID)
+	_, err = repo.FindByMessageID(ctx, msg.MessageID)
 	assert.Error(t, err)
 }
 
@@ -135,23 +130,22 @@ func TestHubUpdateMessageSendStatusRetryMechanism(t *testing.T) {
 	hub.WaitForStart()
 	defer hub.SafeShutdown()
 
-	msgID := osx.HashUnixMicroCipherText()
+	msg := createTestHubMessage(MessageTypeText)
 	defer func() {
-		_ = repo.DeleteByMessageID(ctx, msgID)
+		_ = repo.DeleteByMessageID(ctx, msg.MessageID)
 	}()
 
-	msg := createTestHubMessage(msgID, "sender-004", "receiver-004", MessageTypeText)
 	_, err := json.Marshal(msg)
 	require.NoError(t, err)
 
-	err = repo.UpdateStatus(ctx, msgID, MessageSendStatusPending, "", "")
+	err = repo.UpdateStatus(ctx, msg.MessageID, MessageSendStatusPending, "", "")
 	time.Sleep(50 * time.Millisecond)
 
 	_, err = repo.CreateFromMessage(ctx, msg, 3, nil)
 	require.NoError(t, err)
 	time.Sleep(200 * time.Millisecond)
 
-	record, err := repo.FindByMessageID(ctx, msgID)
+	record, err := repo.FindByMessageID(ctx, msg.MessageID)
 	require.NoError(t, err)
 	assert.Equal(t, MessageSendStatusPending, record.Status)
 }
@@ -168,12 +162,11 @@ func TestHubUpdateMessageSendStatusConcurrent(t *testing.T) {
 	hub.WaitForStart()
 	defer hub.SafeShutdown()
 
-	msgID := osx.HashUnixMicroCipherText()
+	msg := createTestHubMessage(MessageTypeText)
 	defer func() {
-		_ = repo.DeleteByMessageID(ctx, msgID)
+		_ = repo.DeleteByMessageID(ctx, msg.MessageID)
 	}()
 
-	msg := createTestHubMessage(msgID, "sender-005", "receiver-005", MessageTypeText)
 	_, err := repo.CreateFromMessage(ctx, msg, 3, nil)
 	require.NoError(t, err)
 
@@ -185,9 +178,9 @@ func TestHubUpdateMessageSendStatusConcurrent(t *testing.T) {
 		go func(index int) {
 			defer wg.Done()
 			if index%2 == 0 {
-				_ = repo.UpdateStatus(ctx, msgID, MessageSendStatusSuccess, "", "")
+				_ = repo.UpdateStatus(ctx, msg.MessageID, MessageSendStatusSuccess, "", "")
 			} else {
-				_ = repo.UpdateStatus(ctx, msgID, MessageSendStatusFailed, FailureReasonNetworkError, "test error")
+				_ = repo.UpdateStatus(ctx, msg.MessageID, MessageSendStatusFailed, FailureReasonNetworkError, "test error")
 			}
 		}(i)
 	}
@@ -195,7 +188,7 @@ func TestHubUpdateMessageSendStatusConcurrent(t *testing.T) {
 	wg.Wait()
 	time.Sleep(300 * time.Millisecond)
 
-	record, err := repo.FindByMessageID(ctx, msgID)
+	record, err := repo.FindByMessageID(ctx, msg.MessageID)
 	require.NoError(t, err)
 	assert.NotNil(t, record)
 	assert.Contains(t, []MessageSendStatus{MessageSendStatusSuccess, MessageSendStatusFailed}, record.Status)
@@ -223,14 +216,12 @@ func TestHubUpdateMessageSendStatusMultipleMessages(t *testing.T) {
 	}()
 
 	for i := 0; i < messageCount; i++ {
-		msgID := osx.HashUnixMicroCipherText()
-		messageIDs[i] = msgID
-
-		msg := createTestHubMessage(msgID, "sender-bulk", "receiver-bulk", MessageTypeText)
+		msg := createTestHubMessage(MessageTypeText)
+		messageIDs[i] = msg.MessageID
 		_, err := repo.CreateFromMessage(ctx, msg, 3, nil)
 		require.NoError(t, err)
 
-		err = repo.UpdateStatus(ctx, msgID, MessageSendStatusSuccess, "", "")
+		err = repo.UpdateStatus(ctx, msg.MessageID, MessageSendStatusSuccess, "", "")
 		require.NoError(t, err)
 	}
 

@@ -517,6 +517,14 @@ func (h *Hub) handleDistributedObserverNotify(ctx context.Context, distMsg *Dist
 				"error", err,
 			)
 		}).
+		OnPanic(func(idx int, client *Client, panicVal any) {
+			h.logger.WarnKV("跨节点通知观察者时发生 panic(通道可能已关闭)",
+				"observer_id", client.UserID,
+				"client_id", client.ID,
+				"message_id", distMsg.Message.MessageID,
+				"panic", panicVal,
+			)
+		}).
 		Execute(func(idx int, observer *Client) (error, error) {
 			return h.sendToObserver(observer, distMsg.Message), nil
 		})

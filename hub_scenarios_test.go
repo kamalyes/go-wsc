@@ -54,15 +54,7 @@ func testBasicScenarios(t *testing.T, hub *Hub) {
 		t.Run(fmt.Sprintf("场景%d", i), func(t *testing.T) {
 			switch {
 			case i <= 10: // 场景1-10: 客户端注册
-				client := &Client{
-					ID:       fmt.Sprintf("basic-client-%d", i),
-					UserID:   fmt.Sprintf("basic-user-%d", i),
-					UserType: UserTypeCustomer,
-					Role:     UserRoleCustomer,
-					Status:   UserStatusOnline,
-					SendChan: make(chan []byte, 256),
-					Context:  context.Background(),
-				}
+				client := createTestClientWithIDGen(UserTypeCustomer, 200)
 				hub.Register(client)
 				time.Sleep(10 * time.Millisecond)
 
@@ -78,15 +70,7 @@ func testBasicScenarios(t *testing.T, hub *Hub) {
 					UserTypeCustomer, UserTypeAgent, UserTypeBot,
 					UserTypeAdmin, UserTypeVIP,
 				}
-				client := &Client{
-					ID:       fmt.Sprintf("type-client-%d", i),
-					UserID:   fmt.Sprintf("type-user-%d", i),
-					UserType: userTypes[(i-11)%5],
-					Role:     UserRoleCustomer,
-					Status:   UserStatusOnline,
-					SendChan: make(chan []byte, 256),
-					Context:  context.Background(),
-				}
+				client := createTestClientWithIDGen(userTypes[(i-11)%5], 200)
 				hub.Register(client)
 				time.Sleep(10 * time.Millisecond)
 
@@ -101,15 +85,8 @@ func testBasicScenarios(t *testing.T, hub *Hub) {
 					UserStatusOnline, UserStatusAway, UserStatusBusy,
 					UserStatusOffline, UserStatusInvisible,
 				}
-				client := &Client{
-					ID:       fmt.Sprintf("status-client-%d", i),
-					UserID:   fmt.Sprintf("status-user-%d", i),
-					UserType: UserTypeCustomer,
-					Role:     UserRoleCustomer,
-					Status:   statuses[(i-21)%5],
-					SendChan: make(chan []byte, 256),
-					Context:  context.Background(),
-				}
+				client := createTestClientWithIDGen(UserTypeCustomer, 200)
+				client.Status = statuses[(i-21)%5]
 				hub.Register(client)
 				time.Sleep(10 * time.Millisecond)
 
@@ -120,16 +97,7 @@ func testBasicScenarios(t *testing.T, hub *Hub) {
 
 			case i <= 40: // 场景31-40: Hub统计信息测试
 				initialStats := hub.GetStats()
-
-				client := &Client{
-					ID:       fmt.Sprintf("stats-client-%d", i),
-					UserID:   fmt.Sprintf("stats-user-%d", i),
-					UserType: UserTypeCustomer,
-					Role:     UserRoleCustomer,
-					Status:   UserStatusOnline,
-					SendChan: make(chan []byte, 256),
-					Context:  context.Background(),
-				}
+				client := createTestClientWithIDGen(UserTypeCustomer, 200)
 				hub.Register(client)
 				time.Sleep(10 * time.Millisecond)
 
@@ -143,15 +111,7 @@ func testBasicScenarios(t *testing.T, hub *Hub) {
 			default: // 场景41-50: 获取在线用户
 				clients := make([]*Client, 5)
 				for j := 0; j < 5; j++ {
-					clients[j] = &Client{
-						ID:       fmt.Sprintf("online-client-%d-%d", i, j),
-						UserID:   fmt.Sprintf("online-user-%d-%d", i, j),
-						UserType: UserTypeCustomer,
-						Role:     UserRoleCustomer,
-						Status:   UserStatusOnline,
-						SendChan: make(chan []byte, 256),
-						Context:  context.Background(),
-					}
+					clients[j] = createTestClientWithIDGen(UserTypeCustomer, 200)
 					hub.Register(clients[j])
 				}
 				time.Sleep(50 * time.Millisecond)
@@ -181,15 +141,7 @@ func testConcurrentScenarios(t *testing.T, hub *Hub) {
 				for j := 0; j < clientCount; j++ {
 					go func(index int) {
 						defer wg.Done()
-						client := &Client{
-							ID:       fmt.Sprintf("concurrent-client-%d-%d", i, index),
-							UserID:   fmt.Sprintf("concurrent-user-%d-%d", i, index),
-							UserType: UserTypeCustomer,
-							Role:     UserRoleCustomer,
-							Status:   UserStatusOnline,
-							SendChan: make(chan []byte, 256),
-							Context:  context.Background(),
-						}
+						client := createTestClientWithIDGen(UserTypeCustomer, 200)
 						hub.Register(client)
 					}(j)
 				}
@@ -203,15 +155,7 @@ func testConcurrentScenarios(t *testing.T, hub *Hub) {
 			case i <= 70: // 场景61-70: 并发注销
 				clients := make([]*Client, 10)
 				for j := 0; j < 10; j++ {
-					clients[j] = &Client{
-						ID:       fmt.Sprintf("unreg-client-%d-%d", i, j),
-						UserID:   fmt.Sprintf("unreg-user-%d-%d", i, j),
-						UserType: UserTypeCustomer,
-						Role:     UserRoleCustomer,
-						Status:   UserStatusOnline,
-						SendChan: make(chan []byte, 256),
-						Context:  context.Background(),
-					}
+					clients[j] = createTestClientWithIDGen(UserTypeCustomer, 200)
 					hub.Register(clients[j])
 				}
 				time.Sleep(50 * time.Millisecond)
@@ -230,16 +174,8 @@ func testConcurrentScenarios(t *testing.T, hub *Hub) {
 				assert.True(t, true, "场景%d: 并发注销应成功", i)
 
 			case i <= 80: // 场景71-80: 并发消息发送
-				receiver := &Client{
-					ID:       fmt.Sprintf("msg-receiver-%d", i),
-					UserID:   fmt.Sprintf("msg-receiver-%d", i),
-					UserType: UserTypeCustomer,
-					Role:     UserRoleCustomer,
-					Status:   UserStatusOnline,
-					SendChan: make(chan []byte, 1000),
-					Context:  context.Background(),
-				}
-				hub.Register(receiver)
+				client := createTestClientWithIDGen(UserTypeCustomer, 200)
+				hub.Register(client)
 				time.Sleep(50 * time.Millisecond)
 
 				var wg sync.WaitGroup
@@ -249,18 +185,14 @@ func testConcurrentScenarios(t *testing.T, hub *Hub) {
 				for j := 0; j < msgCount; j++ {
 					go func(index int) {
 						defer wg.Done()
-						msg := &HubMessage{
-							MessageType: MessageTypeText,
-							Content:     fmt.Sprintf("并发消息-%d", index),
-							CreateAt:    time.Now(),
-						}
-						hub.SendToUserWithRetry(context.Background(), receiver.UserID, msg)
+						msg := createTestHubMessage(MessageTypeBinary)
+						hub.SendToUserWithRetry(context.Background(), client.UserID, msg)
 					}(j)
 				}
 				wg.Wait()
 				time.Sleep(100 * time.Millisecond)
 
-				hub.Unregister(receiver)
+				hub.Unregister(client)
 				assert.True(t, true, "场景%d: 并发消息发送应成功", i)
 
 			default: // 场景81-100: 混合并发操作
@@ -271,15 +203,7 @@ func testConcurrentScenarios(t *testing.T, hub *Hub) {
 				for j := 0; j < 10; j++ {
 					go func(index int) {
 						defer wg.Done()
-						client := &Client{
-							ID:       fmt.Sprintf("mix-client-%d-%d", i, index),
-							UserID:   fmt.Sprintf("mix-user-%d-%d", i, index),
-							UserType: UserTypeCustomer,
-							Role:     UserRoleCustomer,
-							Status:   UserStatusOnline,
-							SendChan: make(chan []byte, 256),
-							Context:  context.Background(),
-						}
+						client := createTestClientWithIDGen(UserTypeCustomer, 200)
 						hub.Register(client)
 					}(j)
 				}
@@ -313,34 +237,15 @@ func testRoutingScenarios(t *testing.T, hub *Hub) {
 		t.Run(fmt.Sprintf("场景%d", i), func(t *testing.T) {
 			switch {
 			case i <= 120: // 场景101-120: 点对点消息
-				sender := &Client{
-					ID:       fmt.Sprintf("p2p-sender-%d", i),
-					UserID:   fmt.Sprintf("p2p-sender-%d", i),
-					UserType: UserTypeCustomer,
-					Role:     UserRoleCustomer,
-					Status:   UserStatusOnline,
-					SendChan: make(chan []byte, 256),
-					Context:  context.Background(),
-				}
-				receiver := &Client{
-					ID:       fmt.Sprintf("p2p-receiver-%d", i),
-					UserID:   fmt.Sprintf("p2p-receiver-%d", i),
-					UserType: UserTypeAgent,
-					Role:     UserRoleAgent,
-					Status:   UserStatusOnline,
-					SendChan: make(chan []byte, 256),
-					Context:  context.Background(),
-				}
+				sender := createTestClientWithIDGen(UserTypeCustomer, 200)
+
+				receiver := createTestClientWithIDGen(UserTypeAgent, 200)
 
 				hub.Register(sender)
 				hub.Register(receiver)
 				time.Sleep(50 * time.Millisecond)
 
-				msg := &HubMessage{
-					MessageType: MessageTypeText,
-					Content:     fmt.Sprintf("点对点消息-%d", i),
-					CreateAt:    time.Now(),
-				}
+				msg := createTestHubMessage(MessageTypeText)
 
 				result := hub.SendToUserWithRetry(context.Background(), receiver.UserID, msg)
 				assert.NoError(t, result.FinalError, "场景%d: 发送消息应成功", i)
@@ -350,24 +255,11 @@ func testRoutingScenarios(t *testing.T, hub *Hub) {
 			default: // 场景136-150: 广播消息
 				clients := make([]*Client, 5)
 				for j := 0; j < 5; j++ {
-					clients[j] = &Client{
-						ID:       fmt.Sprintf("broadcast-client-%d-%d", i, j),
-						UserID:   fmt.Sprintf("broadcast-user-%d-%d", i, j),
-						UserType: UserTypeCustomer,
-						Role:     UserRoleCustomer,
-						Status:   UserStatusOnline,
-						SendChan: make(chan []byte, 1000),
-						Context:  context.Background(),
-					}
+					clients[j] = createTestClientWithIDGen(UserTypeCustomer, 200)
 					hub.Register(clients[j])
 				}
 				time.Sleep(100 * time.Millisecond)
-
-				msg := &HubMessage{
-					MessageType: MessageTypeText,
-					Content:     fmt.Sprintf("广播消息-%d", i),
-					CreateAt:    time.Now(),
-				}
+				msg := createTestHubMessage(MessageTypeText)
 
 				hub.Broadcast(context.Background(), msg)
 				time.Sleep(100 * time.Millisecond)
@@ -387,15 +279,7 @@ func testEdgeCaseScenarios(t *testing.T, hub *Hub) {
 		t.Run(fmt.Sprintf("场景%d", i), func(t *testing.T) {
 			switch {
 			case i <= 160: // 场景151-160: 空消息处理
-				receiver := &Client{
-					ID:       fmt.Sprintf("empty-receiver-%d", i),
-					UserID:   fmt.Sprintf("empty-receiver-%d", i),
-					UserType: UserTypeCustomer,
-					Role:     UserRoleCustomer,
-					Status:   UserStatusOnline,
-					SendChan: make(chan []byte, 256),
-					Context:  context.Background(),
-				}
+				receiver := createTestClientWithIDGen(UserTypeCustomer)
 				hub.Register(receiver)
 				time.Sleep(50 * time.Millisecond)
 
@@ -410,45 +294,24 @@ func testEdgeCaseScenarios(t *testing.T, hub *Hub) {
 				hub.Unregister(receiver)
 
 			case i <= 170: // 场景161-170: 不存在的用户
-				msg := &HubMessage{
-					MessageType: MessageTypeText,
-					Content:     "测试消息",
-					CreateAt:    time.Now(),
-				}
+				msg := createTestHubMessage(MessageTypeText)
 
 				result := hub.SendToUserWithRetry(context.Background(), fmt.Sprintf("nonexistent-%d", i), msg)
 				assert.Error(t, result.FinalError, "场景%d: 向不存在用户发送应返回错误", i)
 			case i <= 180: // 场景171-180: 重复注册相同用户
-				userID := fmt.Sprintf("duplicate-user-%d", i)
-
-				client1 := &Client{
-					ID:       fmt.Sprintf("duplicate-client1-%d", i),
-					UserID:   userID,
-					UserType: UserTypeCustomer,
-					Role:     UserRoleCustomer,
-					Status:   UserStatusOnline,
-					SendChan: make(chan []byte, 256),
-					Context:  context.Background(),
-				}
+				client1 := createTestClientWithIDGen(UserTypeCustomer)
 				hub.Register(client1)
 				time.Sleep(50 * time.Millisecond)
 
-				client2 := &Client{
-					ID:       fmt.Sprintf("duplicate-client2-%d", i),
-					UserID:   userID,
-					UserType: UserTypeCustomer,
-					Role:     UserRoleCustomer,
-					Status:   UserStatusOnline,
-					SendChan: make(chan []byte, 256),
-					Context:  context.Background(),
-				}
+				client2 := createTestClientWithIDGen(UserTypeCustomer)
+				client2.UserID = client1.UserID
 				hub.Register(client2)
 				time.Sleep(50 * time.Millisecond)
 
 				onlineUsers := hub.GetOnlineUsers()
 				userCount := 0
 				for _, u := range onlineUsers {
-					if u == userID {
+					if u == client1.UserID {
 						userCount++
 					}
 				}
@@ -457,15 +320,8 @@ func testEdgeCaseScenarios(t *testing.T, hub *Hub) {
 				hub.Unregister(client2)
 
 			case i <= 190: // 场景181-190: 大消息内容
-				receiver := &Client{
-					ID:       fmt.Sprintf("large-receiver-%d", i),
-					UserID:   fmt.Sprintf("large-receiver-%d", i),
-					UserType: UserTypeCustomer,
-					Role:     UserRoleCustomer,
-					Status:   UserStatusOnline,
-					SendChan: make(chan []byte, 10000),
-					Context:  context.Background(),
-				}
+				receiver := createTestClientWithIDGen(UserTypeCustomer, 10000)
+
 				hub.Register(receiver)
 				time.Sleep(50 * time.Millisecond)
 
@@ -487,15 +343,7 @@ func testEdgeCaseScenarios(t *testing.T, hub *Hub) {
 				hub.Unregister(receiver)
 
 			default: // 场景191-200: Hub停止和清理
-				client := &Client{
-					ID:       fmt.Sprintf("cleanup-client-%d", i),
-					UserID:   fmt.Sprintf("cleanup-user-%d", i),
-					UserType: UserTypeCustomer,
-					Role:     UserRoleCustomer,
-					Status:   UserStatusOnline,
-					SendChan: make(chan []byte, 256),
-					Context:  context.Background(),
-				}
+				client := createTestClientWithIDGen(UserTypeCustomer, 10000)
 				hub.Register(client)
 				time.Sleep(50 * time.Millisecond)
 

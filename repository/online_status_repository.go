@@ -13,7 +13,6 @@ package repository
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
@@ -62,15 +61,12 @@ type OnlineStatusRepository interface {
 	// CleanupExpired 清理过期的在线状态（可选，Redis 会自动过期）
 	CleanupExpired(ctx context.Context) (int64, error)
 
-	// ========== 分布式节点相关方法 ==========
+	// ========== 分布式节点查询方法 ==========
 
-	// SetUserNode 设置用户所在节点
-	SetUserNode(ctx context.Context, userID string, nodeID string) error
-
-	// GetUserNode 获取用户所在节点
+	// GetUserNode 获取用户所在节点（用于分布式路由）
 	GetUserNode(ctx context.Context, userID string) (string, error)
 
-	// GetNodeUsers 获取节点的所有在线用户
+	// GetNodeUsers 获取节点的所有在线用户（用于节点管理、监控）
 	GetNodeUsers(ctx context.Context, nodeID string) ([]string, error)
 }
 
@@ -114,6 +110,14 @@ func (r *RedisOnlineStatusRepository) GetAllUsersSetKey() string {
 }
 
 // SetOnline 设置用户在线
+// 在分布式环境下，统一设置用户的完整在线状态，包括：
+//   - 用户在线信息（基本信息、连接时间等）
+//   - 节点映射（user_node: userID -> nodeID）
+//   - 全局在线用户集合
+//   - 节点在线用户集合（node:nodeID -> [userIDs]）
+//   - 用户类型集合（按用户类型分组）
+//
+// 注意：client.NodeID 必须存在（由 Hub 在创建 Client 时设置）
 func (r *RedisOnlineStatusRepository) SetOnline(ctx context.Context, client *Client) error {
 	// 序列化客户端信息
 	data, err := json.Marshal(client)
@@ -121,21 +125,22 @@ func (r *RedisOnlineStatusRepository) SetOnline(ctx context.Context, client *Cli
 		return errorx.WrapError("failed to marshal client info", err)
 	}
 
-	// 使用 pipeline 批量执行
+	// 使用 pipeline 批量执行（分布式环境下，统一设置所有信息）
 	pipe := r.client.Pipeline()
 
 	// 1. 设置用户在线信息
 	pipe.Set(ctx, r.GetUserKey(client.UserID), data, r.ttl)
 
-	// 2. 添加到全局在线用户集合
+	// 2. 设置用户节点映射（分布式架构必需）
+	pipe.Set(ctx, fmt.Sprintf("%suser_node:%s", r.keyPrefix, client.UserID), client.NodeID, r.ttl)
+
+	// 3. 添加到全局在线用户集合
 	pipe.SAdd(ctx, r.GetAllUsersSetKey(), client.UserID)
 
-	// 3. 添加到节点在线用户集合
-	if client.NodeID != "" {
-		pipe.SAdd(ctx, r.GetNodeSetKey(client.NodeID), client.UserID)
-	}
+	// 4. 添加到节点在线用户集合
+	pipe.SAdd(ctx, r.GetNodeSetKey(client.NodeID), client.UserID)
 
-	// 4. 添加到用户类型集合
+	// 5. 添加到用户类型集合
 	pipe.SAdd(ctx, r.GetUserTypeSetKey(client.UserType), client.UserID)
 
 	_, err = pipe.Exec(ctx)
@@ -155,15 +160,18 @@ func (r *RedisOnlineStatusRepository) SetOffline(ctx context.Context, userID str
 	// 1. 删除用户在线信息
 	pipe.Del(ctx, r.GetUserKey(userID))
 
-	// 2. 从全局在线用户集合中移除
+	// 2. 删除用户节点映射
+	pipe.Del(ctx, fmt.Sprintf("%suser_node:%s", r.keyPrefix, userID))
+
+	// 3. 从全局在线用户集合中移除
 	pipe.SRem(ctx, r.GetAllUsersSetKey(), userID)
 
-	// 3. 从节点集合中移除
+	// 4. 从节点集合中移除
 	if info != nil && info.NodeID != "" {
 		pipe.SRem(ctx, r.GetNodeSetKey(info.NodeID), userID)
 	}
 
-	// 4. 从用户类型集合中移除
+	// 5. 从用户类型集合中移除
 	if info != nil {
 		pipe.SRem(ctx, r.GetUserTypeSetKey(info.UserType), userID)
 	}
@@ -238,12 +246,9 @@ func (r *RedisOnlineStatusRepository) BatchSetOnline(ctx context.Context, client
 		}
 
 		pipe.Set(ctx, r.GetUserKey(userID), data, r.ttl)
+		pipe.Set(ctx, fmt.Sprintf("%suser_node:%s", r.keyPrefix, userID), client.NodeID, r.ttl)
 		pipe.SAdd(ctx, r.GetAllUsersSetKey(), userID)
-
-		if client.NodeID != "" {
-			pipe.SAdd(ctx, r.GetNodeSetKey(client.NodeID), userID)
-		}
-
+		pipe.SAdd(ctx, r.GetNodeSetKey(client.NodeID), userID)
 		pipe.SAdd(ctx, r.GetUserTypeSetKey(client.UserType), userID)
 	}
 
@@ -262,6 +267,7 @@ func (r *RedisOnlineStatusRepository) BatchSetOffline(ctx context.Context, userI
 		info, _ := r.GetOnlineInfo(ctx, userID)
 
 		pipe.Del(ctx, r.GetUserKey(userID))
+		pipe.Del(ctx, fmt.Sprintf("%suser_node:%s", r.keyPrefix, userID))
 		pipe.SRem(ctx, r.GetAllUsersSetKey(), userID)
 
 		if info != nil {
@@ -347,51 +353,22 @@ func (r *RedisOnlineStatusRepository) CleanupExpired(ctx context.Context) (int64
 }
 
 // ============================================================================
-// 分布式节点相关方法实现
+// 分布式节点查询方法实现
 // ============================================================================
 
-// SetUserNode 设置用户所在节点
-func (r *RedisOnlineStatusRepository) SetUserNode(ctx context.Context, userID string, nodeID string) error {
-	key := fmt.Sprintf("%suser_node:%s", r.keyPrefix, userID)
-	return r.client.Set(ctx, key, nodeID, r.ttl).Err()
-}
-
-// GetUserNode 获取用户所在节点
+// GetUserNode 获取用户所在节点（用于分布式路由）
 func (r *RedisOnlineStatusRepository) GetUserNode(ctx context.Context, userID string) (string, error) {
 	key := fmt.Sprintf("%suser_node:%s", r.keyPrefix, userID)
 	result, err := r.client.Get(ctx, key).Result()
 	if err == redis.Nil {
-		return "", nil // 用户不在线或未记录节点
+		return "", fmt.Errorf("user node not found: %s", userID)
 	}
 	return result, err
 }
 
-// GetNodeUsers 获取节点的所有在线用户
+// GetNodeUsers 获取节点的所有在线用户（用于节点管理、监控）
 func (r *RedisOnlineStatusRepository) GetNodeUsers(ctx context.Context, nodeID string) ([]string, error) {
-	pattern := fmt.Sprintf("%suser_node:*", r.keyPrefix)
-
-	var users []string
-	iter := r.client.Scan(ctx, 0, pattern, 0).Iterator()
-
-	for iter.Next(ctx) {
-		key := iter.Val()
-		node, err := r.client.Get(ctx, key).Result()
-		if err != nil || node != nodeID {
-			continue
-		}
-
-		// 从 key 中提取 userID
-		// key 格式: wsc:online:user_node:user123
-		parts := strings.Split(key, ":")
-		if len(parts) >= 3 {
-			userID := parts[len(parts)-1]
-			users = append(users, userID)
-		}
-	}
-
-	if err := iter.Err(); err != nil {
-		return nil, err
-	}
-
-	return users, nil
+	// 直接从节点的用户集合中获取
+	key := r.GetNodeSetKey(nodeID)
+	return r.client.SMembers(ctx, key).Result()
 }

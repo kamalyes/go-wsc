@@ -109,6 +109,7 @@ const (
 	MessageTypeHealthCheck          MessageType = "health_check"           // 健康检查消息
 	MessageTypeHealthResponse       MessageType = "health_response"        // 健康检查响应
 	MessageTypeConnected            MessageType = "connected"              // 连接成功消息（发给刚连接的客户端）
+	MessageTypeClientRegistered     MessageType = "client_registered"      // 客户端注册成功消息（连接建立并注册完成）
 	MessageTypeDisconnected         MessageType = "disconnected"           // 用户断线通知（广播给会话其他成员）
 	MessageTypeReconnected          MessageType = "reconnected"            // 重连成功消息（发给重连的客户端）
 	MessageTypeConnectionError      MessageType = "connection_error"       // 连接错误消息（发给连接失败的客户端）
@@ -147,7 +148,7 @@ func (t MessageType) IsValid() bool {
 		MessageTypeGetUserInfo, MessageTypeUserInfoResponse, MessageTypeSystemQuery, MessageTypeSystemResponse,
 		MessageTypeUserJoined, MessageTypeUserLeft, MessageTypeUserStatusChanged, MessageTypeServerStatus,
 		MessageTypeServerStats, MessageTypeClientConfig, MessageTypeConfigUpdate, MessageTypeHealthCheck,
-		MessageTypeHealthResponse, MessageTypeConnected, MessageTypeDisconnected, MessageTypeReconnected,
+		MessageTypeHealthResponse, MessageTypeConnected, MessageTypeClientRegistered, MessageTypeDisconnected, MessageTypeReconnected,
 		MessageTypeConnectionError, MessageTypeConnectionTimeout, MessageTypeKickOut, MessageTypeForceOffline,
 		MessageTypeCloseWindow, MessageTypeOpenWindow:
 		return true
@@ -243,7 +244,7 @@ func (t MessageType) IsSessionType() bool {
 // IsConnectionType 检查是否为连接相关类型消息
 func (t MessageType) IsConnectionType() bool {
 	switch t {
-	case MessageTypeConnected, MessageTypeDisconnected, MessageTypeReconnected,
+	case MessageTypeConnected, MessageTypeClientRegistered, MessageTypeDisconnected, MessageTypeReconnected,
 		MessageTypeConnectionError, MessageTypeConnectionTimeout, MessageTypeKickOut,
 		MessageTypeForceOffline:
 		return true
@@ -514,7 +515,7 @@ func GetAllMessageTypes() []MessageType {
 		MessageTypeGetUserInfo, MessageTypeUserInfoResponse, MessageTypeSystemQuery, MessageTypeSystemResponse,
 		MessageTypeUserJoined, MessageTypeUserLeft, MessageTypeUserStatusChanged, MessageTypeServerStatus,
 		MessageTypeServerStats, MessageTypeClientConfig, MessageTypeConfigUpdate, MessageTypeHealthCheck,
-		MessageTypeHealthResponse, MessageTypeConnected, MessageTypeDisconnected, MessageTypeReconnected, MessageTypeConnectionError,
+		MessageTypeHealthResponse, MessageTypeConnected, MessageTypeClientRegistered, MessageTypeDisconnected, MessageTypeReconnected, MessageTypeConnectionError,
 		MessageTypeConnectionTimeout, MessageTypeKickOut, MessageTypeForceOffline, MessageTypeCloseWindow, MessageTypeOpenWindow,
 	}
 }

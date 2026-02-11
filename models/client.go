@@ -57,6 +57,133 @@ type Client struct {
 	SSECloseCh   chan struct{}       `json:"-"` // SSE 关闭通道（不序列化）
 }
 
+// NewClient 创建新的客户端实例
+func NewClient(id, userID string, userType UserType) *Client {
+	now := time.Now()
+	return &Client{
+		ID:            id,
+		UserID:        userID,
+		UserType:      userType,
+		ConnectedAt:   now,
+		LastSeen:      now,
+		LastHeartbeat: now,
+		LastPong:      now,
+		Status:        UserStatusOnline,
+		Metadata:      make(map[string]interface{}),
+		Context:       context.Background(),
+	}
+}
+
+// WithVIPLevel 设置VIP等级
+func (c *Client) WithVIPLevel(level VIPLevel) *Client {
+	c.VIPLevel = level
+	return c
+}
+
+// WithRole 设置用户角色
+func (c *Client) WithRole(role UserRole) *Client {
+	c.Role = role
+	return c
+}
+
+// WithClientIP 设置客户端IP
+func (c *Client) WithClientIP(ip string) *Client {
+	c.ClientIP = ip
+	return c
+}
+
+// WithWebSocketConn 设置WebSocket连接
+func (c *Client) WithWebSocketConn(conn *websocket.Conn) *Client {
+	c.Conn = conn
+	c.ConnectionType = ConnectionTypeWebSocket
+	return c
+}
+
+// WithSSEWriter 设置SSE Writer
+func (c *Client) WithSSEWriter(w http.ResponseWriter, flusher http.Flusher) *Client {
+	c.SSEWriter = w
+	c.SSEFlusher = flusher
+	c.ConnectionType = ConnectionTypeSSE
+	return c
+}
+
+// WithStatus 设置用户状态
+func (c *Client) WithStatus(status UserStatus) *Client {
+	c.Status = status
+	return c
+}
+
+// WithDepartment 设置部门
+func (c *Client) WithDepartment(dept Department) *Client {
+	c.Department = dept
+	return c
+}
+
+// WithSkills 设置技能列表
+func (c *Client) WithSkills(skills []Skill) *Client {
+	c.Skills = skills
+	return c
+}
+
+// WithMaxTickets 设置最大工单数
+func (c *Client) WithMaxTickets(max int) *Client {
+	c.MaxTickets = max
+	return c
+}
+
+// WithNodeInfo 设置节点信息
+func (c *Client) WithNodeInfo(nodeID, nodeIP string, nodePort int) *Client {
+	c.NodeID = nodeID
+	c.NodeIP = nodeIP
+	c.NodePort = nodePort
+	return c
+}
+
+// WithClientType 设置客户端类型
+func (c *Client) WithClientType(clientType ClientType) *Client {
+	c.ClientType = clientType
+	return c
+}
+
+// WithMetadata 设置元数据
+func (c *Client) WithMetadata(key string, value interface{}) *Client {
+	if c.Metadata == nil {
+		c.Metadata = make(map[string]interface{})
+	}
+	c.Metadata[key] = value
+	return c
+}
+
+// WithMetadataMap 批量设置元数据
+func (c *Client) WithMetadataMap(metadata map[string]interface{}) *Client {
+	if c.Metadata == nil {
+		c.Metadata = make(map[string]interface{})
+	}
+	for k, v := range metadata {
+		c.Metadata[k] = v
+	}
+	return c
+}
+
+// WithSendChan 设置发送通道
+func (c *Client) WithSendChan(ch chan []byte) *Client {
+	c.SendChan = ch
+	return c
+}
+
+// WithSSEChannels 设置SSE通道
+func (c *Client) WithSSEChannels(messageCh chan *HubMessage, closeCh chan struct{}) *Client {
+	c.SSEMessageCh = messageCh
+	c.SSECloseCh = closeCh
+	return c
+}
+
+// WithContext 设置上下文
+func (c *Client) WithContext(ctx context.Context) *Client {
+	c.Context = ctx
+	return c
+}
+
 // GetClientIP 获取客户端IP地址
 func (c *Client) GetClientIP() string {
 	// 1. 优先从ClientIP字段获取

@@ -407,6 +407,7 @@ const (
 // ==================== 消息工具函数 ====================
 var (
 	NewHubMessage = models.NewHubMessage
+	NewClient     = models.NewClient
 )
 
 // ==================== 消息记录相关常量 ====================

@@ -23,51 +23,188 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// luaBatchSetClientsOnline Lua 脚本：批量设置客户端在线
+//
+// KEYS[1] = keyPrefix (用于构建其他 key)
+//
+// ARGV[1] = ttl (秒)
+// ARGV[2] = clientCount (客户端数量)
+// ARGV[3..] = 每个客户端的数据，格式：clientID|userID|nodeID|userType|clientData
+//
+// 返回值: 成功处理的客户端数量
+const luaBatchSetClientsOnline = `
+local keyPrefix = KEYS[1]
+local ttl = tonumber(ARGV[1])
+local clientCount = tonumber(ARGV[2])
+local successCount = 0
+
+for i = 1, clientCount do
+    local idx = 2 + i
+    local data = ARGV[idx]
+    
+    -- 解析数据: clientID|userID|nodeID|userType|clientData
+    local sep = string.byte("|")
+    local parts = {}
+    local lastPos = 1
+    
+    -- 手动分割字符串（只分割前4个字段）
+    for j = 1, 4 do
+        local pos = string.find(data, "|", lastPos, true)
+        if pos then
+            table.insert(parts, string.sub(data, lastPos, pos - 1))
+            lastPos = pos + 1
+        end
+    end
+    -- 剩余部分是 clientData
+    table.insert(parts, string.sub(data, lastPos))
+    
+    if #parts == 5 then
+        local clientID = parts[1]
+        local userID = parts[2]
+        local nodeID = parts[3]
+        local userType = parts[4]
+        local clientData = parts[5]
+        
+        -- 构建 keys
+        local clientKey = keyPrefix .. "client:" .. clientID
+        local userClientsKey = keyPrefix .. "user_clients:" .. userID
+        local nodeClientsKey = keyPrefix .. "node_clients:" .. nodeID
+        local allUsersKey = keyPrefix .. "all_users"
+        local typeKey = keyPrefix .. "type:" .. userType
+        
+        -- 存储客户端信息
+        redis.call('SETEX', clientKey, ttl, clientData)
+        
+        -- 添加到集合
+        redis.call('SADD', userClientsKey, clientID)
+        redis.call('EXPIRE', userClientsKey, ttl)
+        redis.call('SADD', nodeClientsKey, clientID)
+        redis.call('SADD', allUsersKey, userID)
+        redis.call('SADD', typeKey, userID)
+        
+        successCount = successCount + 1
+    end
+end
+
+return successCount
+`
+
+// luaBatchSetClientsOffline Lua 脚本：批量设置客户端离线
+//
+// KEYS[1] = keyPrefix (用于构建其他 key)
+//
+// ARGV[1] = clientCount (客户端数量)
+// ARGV[2..] = 每个客户端的数据，格式：clientID|userID|nodeID|userType
+//
+// 返回值: 成功处理的客户端数量
+const luaBatchSetClientsOffline = `
+local keyPrefix = KEYS[1]
+local clientCount = tonumber(ARGV[1])
+local successCount = 0
+
+for i = 1, clientCount do
+    local idx = 1 + i
+    local data = ARGV[idx]
+    
+    -- 解析数据: clientID|userID|nodeID|userType
+    local parts = {}
+    for part in string.gmatch(data, "([^|]+)") do
+        table.insert(parts, part)
+    end
+    
+    if #parts == 4 then
+        local clientID = parts[1]
+        local userID = parts[2]
+        local nodeID = parts[3]
+        local userType = parts[4]
+        
+        -- 构建 keys
+        local clientKey = keyPrefix .. "client:" .. clientID
+        local userClientsKey = keyPrefix .. "user_clients:" .. userID
+        local nodeClientsKey = keyPrefix .. "node_clients:" .. nodeID
+        local allUsersKey = keyPrefix .. "all_users"
+        local typeKey = keyPrefix .. "type:" .. userType
+        
+        -- 删除客户端信息
+        redis.call('DEL', clientKey)
+        
+        -- 从集合中移除
+        redis.call('SREM', userClientsKey, clientID)
+        redis.call('SREM', nodeClientsKey, clientID)
+        
+        -- 检查用户是否还有其他客户端
+        local remainingCount = redis.call('SCARD', userClientsKey)
+        if remainingCount == 0 then
+            redis.call('SREM', allUsersKey, userID)
+            redis.call('SREM', typeKey, userID)
+        end
+        
+        successCount = successCount + 1
+    end
+end
+
+return successCount
+`
+
 // OnlineStatusRepository 在线状态仓库接口
 type OnlineStatusRepository interface {
-	// SetOnline 设置用户在线（直接传入 Client 指针）
-	SetOnline(ctx context.Context, client *Client) error
+	// ========== 客户端连接管理 ==========
 
-	// SetOffline 设置用户离线
+	// SetClientOnline 设置客户端在线（支持多设备）
+	SetClientOnline(ctx context.Context, client *Client) error
+
+	// SetClientOffline 设置指定客户端离线
+	SetClientOffline(ctx context.Context, clientID string) error
+
+	// SetOffline 设置用户所有客户端离线
 	SetOffline(ctx context.Context, userID string) error
 
-	// IsOnline 检查用户是否在线
-	IsOnline(ctx context.Context, userID string) (bool, error)
+	// GetClient 获取客户端信息
+	GetClient(ctx context.Context, clientID string) (*Client, error)
 
-	// GetOnlineInfo 获取在线客户端信息
-	GetOnlineInfo(ctx context.Context, userID string) (*Client, error)
+	// GetUserClients 获取用户的所有在线客户端
+	GetUserClients(ctx context.Context, userID string) ([]*Client, error)
+
+	// UpdateClientHeartbeat 更新客户端心跳
+	UpdateClientHeartbeat(ctx context.Context, clientID string) error
+
+	// ========== 用户在线状态查询 ==========
+
+	// IsUserOnline 检查用户是否在线（任意设备）
+	IsUserOnline(ctx context.Context, userID string) (bool, error)
 
 	// GetAllOnlineUsers 获取所有在线用户ID列表
 	GetAllOnlineUsers(ctx context.Context) ([]string, error)
 
-	// GetOnlineUsersByNode 获取指定节点的在线用户
-	GetOnlineUsersByNode(ctx context.Context, nodeID string) ([]string, error)
-
 	// GetOnlineCount 获取在线用户总数
 	GetOnlineCount(ctx context.Context) (int64, error)
-
-	// UpdateHeartbeat 更新心跳时间
-	UpdateHeartbeat(ctx context.Context, userID string) error
-
-	// BatchSetOnline 批量设置用户在线
-	BatchSetOnline(ctx context.Context, clients map[string]*Client) error
-
-	// BatchSetOffline 批量设置用户离线
-	BatchSetOffline(ctx context.Context, userIDs []string) error
 
 	// GetOnlineUsersByType 根据用户类型获取在线用户
 	GetOnlineUsersByType(ctx context.Context, userType models.UserType) ([]string, error)
 
-	// CleanupExpired 清理过期的在线状态（可选，Redis 会自动过期）
-	CleanupExpired(ctx context.Context) (int64, error)
+	// ========== 分布式节点查询 ==========
 
-	// ========== 分布式节点查询方法 ==========
+	// GetUserNodes 获取用户所在的所有节点（支持多设备）
+	GetUserNodes(ctx context.Context, userID string) ([]string, error)
 
-	// GetUserNode 获取用户所在节点（用于分布式路由）
-	GetUserNode(ctx context.Context, userID string) (string, error)
+	// GetNodeClients 获取节点的所有在线客户端
+	GetNodeClients(ctx context.Context, nodeID string) ([]*Client, error)
 
-	// GetNodeUsers 获取节点的所有在线用户（用于节点管理、监控）
+	// GetNodeUsers 获取节点的所有在线用户ID
 	GetNodeUsers(ctx context.Context, nodeID string) ([]string, error)
+
+	// ========== 批量操作 ==========
+
+	// BatchSetClientsOnline 批量设置客户端在线
+	BatchSetClientsOnline(ctx context.Context, clients []*Client) error
+
+	// BatchSetClientsOffline 批量设置客户端离线
+	BatchSetClientsOffline(ctx context.Context, clientIDs []string) error
+
+	// ========== 维护清理 ==========
+
+	// CleanupExpired 清理过期的在线状态
+	CleanupExpired(ctx context.Context) (int64, error)
 }
 
 // RedisOnlineStatusRepository Redis 实现
@@ -78,9 +215,6 @@ type RedisOnlineStatusRepository struct {
 }
 
 // NewRedisOnlineStatusRepository 创建 Redis 在线状态仓库
-// 参数:
-//   - client: Redis 客户端 (github.com/redis/go-redis/v9)
-//   - config: 在线状态配置对象
 func NewRedisOnlineStatusRepository(client *redis.Client, config *wscconfig.OnlineStatus) OnlineStatusRepository {
 	return &RedisOnlineStatusRepository{
 		client:    client,
@@ -89,109 +223,72 @@ func NewRedisOnlineStatusRepository(client *redis.Client, config *wscconfig.Onli
 	}
 }
 
-// GetUserKey 获取用户在线状态的 key
-func (r *RedisOnlineStatusRepository) GetUserKey(userID string) string {
-	return fmt.Sprintf("%suser:%s", r.keyPrefix, userID)
+// ============================================================================
+// Redis Key 生成方法
+// ============================================================================
+
+// GetClientKey 获取客户端详细信息的 key
+func (r *RedisOnlineStatusRepository) GetClientKey(clientID string) string {
+	return fmt.Sprintf("%sclient:%s", r.keyPrefix, clientID)
 }
 
-// GetNodeSetKey 获取节点在线用户集合的 key
-func (r *RedisOnlineStatusRepository) GetNodeSetKey(nodeID string) string {
-	return fmt.Sprintf("%snode:%s", r.keyPrefix, nodeID)
+// GetUserClientsKey 获取用户客户端集合的 key
+func (r *RedisOnlineStatusRepository) GetUserClientsKey(userID string) string {
+	return fmt.Sprintf("%suser_clients:%s", r.keyPrefix, userID)
 }
 
-// GetUserTypeSetKey 获取用户类型在线用户集合的 key
+// GetNodeClientsKey 获取节点客户端集合的 key
+func (r *RedisOnlineStatusRepository) GetNodeClientsKey(nodeID string) string {
+	return fmt.Sprintf("%snode_clients:%s", r.keyPrefix, nodeID)
+}
+
+// GetUserTypeSetKey 获取用户类型集合的 key
 func (r *RedisOnlineStatusRepository) GetUserTypeSetKey(userType models.UserType) string {
-	return fmt.Sprintf("%s%s", r.keyPrefix, userType)
+	return fmt.Sprintf("%stype:%s", r.keyPrefix, userType)
 }
 
 // GetAllUsersSetKey 获取所有在线用户集合的 key
 func (r *RedisOnlineStatusRepository) GetAllUsersSetKey() string {
-	return fmt.Sprintf("%sall", r.keyPrefix)
+	return fmt.Sprintf("%sall_users", r.keyPrefix)
 }
 
-// SetOnline 设置用户在线
-// 在分布式环境下，统一设置用户的完整在线状态，包括：
-//   - 用户在线信息（基本信息、连接时间等）
-//   - 节点映射（user_node: userID -> nodeID）
-//   - 全局在线用户集合
-//   - 节点在线用户集合（node:nodeID -> [userIDs]）
-//   - 用户类型集合（按用户类型分组）
-//
-// 注意：client.NodeID 必须存在（由 Hub 在创建 Client 时设置）
-func (r *RedisOnlineStatusRepository) SetOnline(ctx context.Context, client *Client) error {
-	// 序列化客户端信息
-	data, err := json.Marshal(client)
-	if err != nil {
-		return errorx.WrapError("failed to marshal client info", err)
-	}
+// ============================================================================
+// 客户端连接管理
+// ============================================================================
 
-	// 使用 pipeline 批量执行（分布式环境下，统一设置所有信息）
-	pipe := r.client.Pipeline()
-
-	// 1. 设置用户在线信息
-	pipe.Set(ctx, r.GetUserKey(client.UserID), data, r.ttl)
-
-	// 2. 设置用户节点映射（分布式架构必需）
-	pipe.Set(ctx, fmt.Sprintf("%suser_node:%s", r.keyPrefix, client.UserID), client.NodeID, r.ttl)
-
-	// 3. 添加到全局在线用户集合
-	pipe.SAdd(ctx, r.GetAllUsersSetKey(), client.UserID)
-
-	// 4. 添加到节点在线用户集合
-	pipe.SAdd(ctx, r.GetNodeSetKey(client.NodeID), client.UserID)
-
-	// 5. 添加到用户类型集合
-	pipe.SAdd(ctx, r.GetUserTypeSetKey(client.UserType), client.UserID)
-
-	_, err = pipe.Exec(ctx)
-	return err
+// SetClientOnline 设置客户端在线（调用批量方法）
+func (r *RedisOnlineStatusRepository) SetClientOnline(ctx context.Context, client *Client) error {
+	return r.BatchSetClientsOnline(ctx, []*Client{client})
 }
 
-// SetOffline 设置用户离线
+// SetClientOffline 设置指定客户端离线（调用批量方法）
+func (r *RedisOnlineStatusRepository) SetClientOffline(ctx context.Context, clientID string) error {
+	return r.BatchSetClientsOffline(ctx, []string{clientID})
+}
+
+// SetOffline 设置用户所有客户端离线
 func (r *RedisOnlineStatusRepository) SetOffline(ctx context.Context, userID string) error {
-	// 先获取用户信息，以便从相关集合中移除
-	info, err := r.GetOnlineInfo(ctx, userID)
-	if err != nil && err != redis.Nil {
-		// 如果获取失败但不是 key 不存在，继续删除
+	if userID == "" {
+		return errorx.WrapError("userID cannot be empty")
 	}
 
-	pipe := r.client.Pipeline()
-
-	// 1. 删除用户在线信息
-	pipe.Del(ctx, r.GetUserKey(userID))
-
-	// 2. 删除用户节点映射
-	pipe.Del(ctx, fmt.Sprintf("%suser_node:%s", r.keyPrefix, userID))
-
-	// 3. 从全局在线用户集合中移除
-	pipe.SRem(ctx, r.GetAllUsersSetKey(), userID)
-
-	// 4. 从节点集合中移除
-	if info != nil && info.NodeID != "" {
-		pipe.SRem(ctx, r.GetNodeSetKey(info.NodeID), userID)
-	}
-
-	// 5. 从用户类型集合中移除
-	if info != nil {
-		pipe.SRem(ctx, r.GetUserTypeSetKey(info.UserType), userID)
-	}
-
-	_, err = pipe.Exec(ctx)
-	return err
-}
-
-// IsOnline 检查用户是否在线
-func (r *RedisOnlineStatusRepository) IsOnline(ctx context.Context, userID string) (bool, error) {
-	exists, err := r.client.Exists(ctx, r.GetUserKey(userID)).Result()
+	// 获取用户所有客户端ID
+	clientIDs, err := r.client.SMembers(ctx, r.GetUserClientsKey(userID)).Result()
 	if err != nil {
-		return false, err
+		return err
 	}
-	return exists > 0, nil
+
+	if len(clientIDs) == 0 {
+		return nil
+	}
+
+	// 批量下线
+	return r.BatchSetClientsOffline(ctx, clientIDs)
 }
 
-// GetOnlineInfo 获取在线客户端信息
-func (r *RedisOnlineStatusRepository) GetOnlineInfo(ctx context.Context, userID string) (*Client, error) {
-	data, err := r.client.Get(ctx, r.GetUserKey(userID)).Result()
+// GetClient 获取客户端信息
+func (r *RedisOnlineStatusRepository) GetClient(ctx context.Context, clientID string) (*Client, error) {
+	data, err := r.client.Get(ctx, r.GetClientKey(clientID)).Result()
 	if err != nil {
 		return nil, err
 	}
@@ -204,14 +301,77 @@ func (r *RedisOnlineStatusRepository) GetOnlineInfo(ctx context.Context, userID 
 	return &client, nil
 }
 
+// GetUserClients 获取用户的所有在线客户端
+func (r *RedisOnlineStatusRepository) GetUserClients(ctx context.Context, userID string) ([]*Client, error) {
+	clientIDs, err := r.client.SMembers(ctx, r.GetUserClientsKey(userID)).Result()
+	if err != nil {
+		return nil, err
+	}
+
+	if len(clientIDs) == 0 {
+		return []*Client{}, nil
+	}
+
+	// 批量获取客户端信息
+	pipe := r.client.Pipeline()
+	cmds := make([]*redis.StringCmd, len(clientIDs))
+	for i, clientID := range clientIDs {
+		cmds[i] = pipe.Get(ctx, r.GetClientKey(clientID))
+	}
+
+	_, err = pipe.Exec(ctx)
+	if err != nil && err != redis.Nil {
+		return nil, err
+	}
+
+	// 解析客户端信息
+	clients := make([]*Client, 0, len(clientIDs))
+	for _, cmd := range cmds {
+		data, err := cmd.Result()
+		if err != nil {
+			continue
+		}
+
+		var client Client
+		if err := json.Unmarshal([]byte(data), &client); err != nil {
+			continue
+		}
+		clients = append(clients, &client)
+	}
+
+	return clients, nil
+}
+
+// UpdateClientHeartbeat 更新客户端心跳
+func (r *RedisOnlineStatusRepository) UpdateClientHeartbeat(ctx context.Context, clientID string) error {
+	client, err := r.GetClient(ctx, clientID)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now()
+	client.LastHeartbeat = now
+	client.LastSeen = now
+
+	return r.SetClientOnline(ctx, client)
+}
+
+// ============================================================================
+// 用户在线状态查询
+// ============================================================================
+
+// IsUserOnline 检查用户是否在线（任意设备）
+func (r *RedisOnlineStatusRepository) IsUserOnline(ctx context.Context, userID string) (bool, error) {
+	count, err := r.client.SCard(ctx, r.GetUserClientsKey(userID)).Result()
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // GetAllOnlineUsers 获取所有在线用户ID列表
 func (r *RedisOnlineStatusRepository) GetAllOnlineUsers(ctx context.Context) ([]string, error) {
 	return r.client.SMembers(ctx, r.GetAllUsersSetKey()).Result()
-}
-
-// GetOnlineUsersByNode 获取指定节点的在线用户
-func (r *RedisOnlineStatusRepository) GetOnlineUsersByNode(ctx context.Context, nodeID string) ([]string, error) {
-	return r.client.SMembers(ctx, r.GetNodeSetKey(nodeID)).Result()
 }
 
 // GetOnlineCount 获取在线用户总数
@@ -219,156 +379,254 @@ func (r *RedisOnlineStatusRepository) GetOnlineCount(ctx context.Context) (int64
 	return r.client.SCard(ctx, r.GetAllUsersSetKey()).Result()
 }
 
-// UpdateHeartbeat 更新心跳时间
-func (r *RedisOnlineStatusRepository) UpdateHeartbeat(ctx context.Context, userID string) error {
-	// 获取当前信息
-	client, err := r.GetOnlineInfo(ctx, userID)
-	if err != nil {
-		return err
-	}
-
-	// 更新心跳时间
-	client.LastHeartbeat = time.Now()
-	client.LastSeen = time.Now()
-
-	// 重新设置（会刷新 TTL）
-	return r.SetOnline(ctx, client)
-}
-
-// BatchSetOnline 批量设置用户在线
-func (r *RedisOnlineStatusRepository) BatchSetOnline(ctx context.Context, clients map[string]*Client) error {
-	pipe := r.client.Pipeline()
-
-	for userID, client := range clients {
-		data, err := json.Marshal(client)
-		if err != nil {
-			return errorx.WrapError(fmt.Sprintf("failed to marshal client info for user %s", userID), err)
-		}
-
-		pipe.Set(ctx, r.GetUserKey(userID), data, r.ttl)
-		pipe.Set(ctx, fmt.Sprintf("%suser_node:%s", r.keyPrefix, userID), client.NodeID, r.ttl)
-		pipe.SAdd(ctx, r.GetAllUsersSetKey(), userID)
-		pipe.SAdd(ctx, r.GetNodeSetKey(client.NodeID), userID)
-		pipe.SAdd(ctx, r.GetUserTypeSetKey(client.UserType), userID)
-	}
-
-	// 注意：不对共享集合设置过期时间，集合成员通过定期清理维护
-
-	_, err := pipe.Exec(ctx)
-	return err
-}
-
-// BatchSetOffline 批量设置用户离线
-func (r *RedisOnlineStatusRepository) BatchSetOffline(ctx context.Context, userIDs []string) error {
-	pipe := r.client.Pipeline()
-
-	for _, userID := range userIDs {
-		// 获取用户信息以便从集合中移除
-		info, _ := r.GetOnlineInfo(ctx, userID)
-
-		pipe.Del(ctx, r.GetUserKey(userID))
-		pipe.Del(ctx, fmt.Sprintf("%suser_node:%s", r.keyPrefix, userID))
-		pipe.SRem(ctx, r.GetAllUsersSetKey(), userID)
-
-		if info != nil {
-			if info.NodeID != "" {
-				pipe.SRem(ctx, r.GetNodeSetKey(info.NodeID), userID)
-			}
-			pipe.SRem(ctx, r.GetUserTypeSetKey(info.UserType), userID)
-		}
-	}
-
-	_, err := pipe.Exec(ctx)
-	return err
-}
-
 // GetOnlineUsersByType 根据用户类型获取在线用户
 func (r *RedisOnlineStatusRepository) GetOnlineUsersByType(ctx context.Context, userType models.UserType) ([]string, error) {
 	return r.client.SMembers(ctx, r.GetUserTypeSetKey(userType)).Result()
 }
 
+// ============================================================================
+// 分布式节点查询
+// ============================================================================
+
+// GetUserNodes 获取用户所在的所有节点（支持多设备）
+func (r *RedisOnlineStatusRepository) GetUserNodes(ctx context.Context, userID string) ([]string, error) {
+	clients, err := r.GetUserClients(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	// 去重节点ID
+	nodeSet := make(map[string]struct{})
+	for _, client := range clients {
+		if client.NodeID != "" {
+			nodeSet[client.NodeID] = struct{}{}
+		}
+	}
+
+	nodes := make([]string, 0, len(nodeSet))
+	for nodeID := range nodeSet {
+		nodes = append(nodes, nodeID)
+	}
+
+	return nodes, nil
+}
+
+// GetNodeClients 获取节点的所有在线客户端
+func (r *RedisOnlineStatusRepository) GetNodeClients(ctx context.Context, nodeID string) ([]*Client, error) {
+	clientIDs, err := r.client.SMembers(ctx, r.GetNodeClientsKey(nodeID)).Result()
+	if err != nil {
+		return nil, err
+	}
+
+	if len(clientIDs) == 0 {
+		return []*Client{}, nil
+	}
+
+	// 批量获取客户端信息
+	pipe := r.client.Pipeline()
+	cmds := make([]*redis.StringCmd, len(clientIDs))
+	for i, clientID := range clientIDs {
+		cmds[i] = pipe.Get(ctx, r.GetClientKey(clientID))
+	}
+
+	_, err = pipe.Exec(ctx)
+	if err != nil && err != redis.Nil {
+		return nil, err
+	}
+
+	// 解析客户端信息
+	clients := make([]*Client, 0, len(clientIDs))
+	for _, cmd := range cmds {
+		data, err := cmd.Result()
+		if err != nil {
+			continue
+		}
+
+		var client Client
+		if err := json.Unmarshal([]byte(data), &client); err != nil {
+			continue
+		}
+		clients = append(clients, &client)
+	}
+
+	return clients, nil
+}
+
+// GetNodeUsers 获取节点的所有在线用户ID
+func (r *RedisOnlineStatusRepository) GetNodeUsers(ctx context.Context, nodeID string) ([]string, error) {
+	clients, err := r.GetNodeClients(ctx, nodeID)
+	if err != nil {
+		return nil, err
+	}
+
+	// 去重用户ID
+	userSet := make(map[string]struct{})
+	for _, client := range clients {
+		userSet[client.UserID] = struct{}{}
+	}
+
+	users := make([]string, 0, len(userSet))
+	for userID := range userSet {
+		users = append(users, userID)
+	}
+
+	return users, nil
+}
+
+// ============================================================================
+// 批量操作（使用 Lua 脚本）
+// ============================================================================
+
+// BatchSetClientsOnline 批量设置客户端在线（使用 Lua 脚本）
+func (r *RedisOnlineStatusRepository) BatchSetClientsOnline(ctx context.Context, clients []*Client) error {
+	if len(clients) == 0 {
+		return nil
+	}
+
+	// 准备批量数据
+	args := []any{
+		int(r.ttl.Seconds()),
+		len(clients),
+	}
+
+	for _, client := range clients {
+		if client.ID == "" || client.UserID == "" || client.NodeID == "" {
+			continue
+		}
+
+		data, err := json.Marshal(client)
+		if err != nil {
+			continue
+		}
+
+		// 格式：clientID|userID|nodeID|userType|clientData
+		batchData := fmt.Sprintf("%s|%s|%s|%s|%s",
+			client.ID,
+			client.UserID,
+			client.NodeID,
+			string(client.UserType),
+			string(data),
+		)
+		args = append(args, batchData)
+	}
+
+	// 使用 Lua 脚本批量设置
+	keys := []string{r.keyPrefix}
+	_, err := r.client.Eval(ctx, luaBatchSetClientsOnline, keys, args...).Result()
+	if err != nil {
+		return errorx.WrapError("failed to execute batch lua script", err)
+	}
+
+	return nil
+}
+
+// BatchSetClientsOffline 批量设置客户端离线（使用 Lua 脚本）
+func (r *RedisOnlineStatusRepository) BatchSetClientsOffline(ctx context.Context, clientIDs []string) error {
+	if len(clientIDs) == 0 {
+		return nil
+	}
+
+	// 先批量获取客户端信息
+	pipe := r.client.Pipeline()
+	cmds := make([]*redis.StringCmd, len(clientIDs))
+	for i, clientID := range clientIDs {
+		cmds[i] = pipe.Get(ctx, r.GetClientKey(clientID))
+	}
+
+	_, err := pipe.Exec(ctx)
+	if err != nil && err != redis.Nil {
+		return err
+	}
+
+	// 准备批量数据
+	args := []any{0} // 先占位，后面更新数量
+
+	validCount := 0
+	for i, cmd := range cmds {
+		data, err := cmd.Result()
+		if err != nil {
+			continue
+		}
+
+		var client Client
+		if err := json.Unmarshal([]byte(data), &client); err != nil {
+			continue
+		}
+
+		// 格式：clientID|userID|nodeID|userType
+		batchData := fmt.Sprintf("%s|%s|%s|%s",
+			clientIDs[i],
+			client.UserID,
+			client.NodeID,
+			string(client.UserType),
+		)
+		args = append(args, batchData)
+		validCount++
+	}
+
+	if validCount == 0 {
+		return nil
+	}
+
+	// 更新客户端数量
+	args[0] = validCount
+
+	// 使用 Lua 脚本批量删除
+	keys := []string{r.keyPrefix}
+	_, err = r.client.Eval(ctx, luaBatchSetClientsOffline, keys, args...).Result()
+	if err != nil {
+		return errorx.WrapError("failed to execute batch lua script", err)
+	}
+
+	return nil
+}
+
+// ============================================================================
+// 维护清理
+// ============================================================================
+
 // CleanupExpired 清理过期的在线状态
-// 注意：Redis 会自动清理过期的 key，此方法主要用于清理集合中的无效成员
 func (r *RedisOnlineStatusRepository) CleanupExpired(ctx context.Context) (int64, error) {
 	var cleaned int64
 
-	// 获取所有在线用户
 	allUsers, err := r.GetAllOnlineUsers(ctx)
 	if err != nil {
 		return 0, err
 	}
 
-	pipe := r.client.Pipeline()
-	var toRemove []string
-	userTypeMap := make(map[models.UserType][]string) // 记录需要从各类型集合中移除的用户
-	nodeMap := make(map[string][]string)              // 记录需要从各节点集合中移除的用户
-
-	// 检查每个用户是否真的在线
 	for _, userID := range allUsers {
-		exists, err := r.client.Exists(ctx, r.GetUserKey(userID)).Result()
+		clientIDs, err := r.client.SMembers(ctx, r.GetUserClientsKey(userID)).Result()
 		if err != nil {
 			continue
 		}
-		if exists == 0 {
-			// 用户信息已过期，但还在集合中
-			// 先获取用户信息，确定需要从哪些集合中移除
-			info, _ := r.GetOnlineInfo(ctx, userID)
 
-			toRemove = append(toRemove, userID)
-			pipe.SRem(ctx, r.GetAllUsersSetKey(), userID)
+		// 检查每个客户端是否存在
+		pipe := r.client.Pipeline()
+		existsCmds := make([]*redis.IntCmd, len(clientIDs))
+		for i, clientID := range clientIDs {
+			existsCmds[i] = pipe.Exists(ctx, r.GetClientKey(clientID))
+		}
 
-			// 如果能获取到用户信息，从对应的类型和节点集合中移除
-			if info != nil {
-				userTypeMap[info.UserType] = append(userTypeMap[info.UserType], userID)
-				if info.NodeID != "" {
-					nodeMap[info.NodeID] = append(nodeMap[info.NodeID], userID)
-				}
+		_, err = pipe.Exec(ctx)
+		if err != nil && err != redis.Nil {
+			continue
+		}
+
+		// 收集已过期的客户端
+		expiredClientIDs := make([]string, 0)
+		for i, cmd := range existsCmds {
+			exists, _ := cmd.Result()
+			if exists == 0 {
+				expiredClientIDs = append(expiredClientIDs, clientIDs[i])
 			}
 		}
-	}
 
-	// 从用户类型集合中移除过期用户
-	for userType, users := range userTypeMap {
-		for _, userID := range users {
-			pipe.SRem(ctx, r.GetUserTypeSetKey(userType), userID)
+		// 清理过期客户端
+		if len(expiredClientIDs) > 0 {
+			_ = r.BatchSetClientsOffline(ctx, expiredClientIDs)
+			cleaned += int64(len(expiredClientIDs))
 		}
-	}
-
-	// 从节点集合中移除过期用户
-	for nodeID, users := range nodeMap {
-		for _, userID := range users {
-			pipe.SRem(ctx, r.GetNodeSetKey(nodeID), userID)
-		}
-	}
-
-	if len(toRemove) > 0 {
-		_, err = pipe.Exec(ctx)
-		if err != nil {
-			return 0, err
-		}
-		cleaned = int64(len(toRemove))
 	}
 
 	return cleaned, nil
-}
-
-// ============================================================================
-// 分布式节点查询方法实现
-// ============================================================================
-
-// GetUserNode 获取用户所在节点（用于分布式路由）
-func (r *RedisOnlineStatusRepository) GetUserNode(ctx context.Context, userID string) (string, error) {
-	key := fmt.Sprintf("%suser_node:%s", r.keyPrefix, userID)
-	result, err := r.client.Get(ctx, key).Result()
-	if err == redis.Nil {
-		return "", fmt.Errorf("user node not found: %s", userID)
-	}
-	return result, err
-}
-
-// GetNodeUsers 获取节点的所有在线用户（用于节点管理、监控）
-func (r *RedisOnlineStatusRepository) GetNodeUsers(ctx context.Context, nodeID string) ([]string, error) {
-	// 直接从节点的用户集合中获取
-	key := r.GetNodeSetKey(nodeID)
-	return r.client.SMembers(ctx, key).Result()
 }

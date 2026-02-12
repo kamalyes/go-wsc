@@ -118,7 +118,7 @@ func (h *Hub) syncOnlineStatus(client *Client) {
 		"client_id", client.ID,
 	)
 
-	if err := h.onlineStatusRepo.SetOnline(ctx, client); err != nil {
+	if err := h.onlineStatusRepo.SetClientOnline(ctx, client); err != nil {
 		h.logger.ErrorKV("同步在线状态到Redis失败",
 			"user_id", client.UserID,
 			"error", err,
@@ -1119,8 +1119,8 @@ func (h *Hub) checkUserOnline(userID string) bool {
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		defer cancel()
 
-		nodeID, err := h.onlineStatusRepo.GetUserNode(ctx, userID)
-		if err == nil && nodeID != "" {
+		nodes, err := h.onlineStatusRepo.GetUserNodes(ctx, userID)
+		if err == nil && len(nodes) > 0 {
 			// 用户在其他节点在线
 			return true
 		}
@@ -1147,14 +1147,14 @@ func (h *Hub) CloseAllClientsInMap(clientMap map[string]*Client) {
 	})
 }
 
-// UpdateUserHeartbeat 更新用户心跳时间
-func (h *Hub) UpdateUserHeartbeat(userID string) error {
+// UpdateClientHeartbeat 更新客户端心跳时间
+func (h *Hub) UpdateClientHeartbeat(clientID string) error {
 	if h.onlineStatusRepo == nil {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	return h.onlineStatusRepo.UpdateHeartbeat(ctx, userID)
+	return h.onlineStatusRepo.UpdateClientHeartbeat(ctx, clientID)
 }
 
 // ============================================================================

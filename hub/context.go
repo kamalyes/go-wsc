@@ -12,9 +12,6 @@
 package hub
 
 import (
-	"context"
-	"time"
-
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 )
 
@@ -78,36 +75,4 @@ func (h *Hub) HasAgentClient(userID string) bool {
 		clientMap, exists := h.agentClients[userID]
 		return exists && len(clientMap) > 0
 	})
-}
-
-// ============================================================================
-// 用户在线信息查询
-// ============================================================================
-
-// GetUserOnlineInfo 获取用户在线信息（统一返回 Client 结构体）
-// 先查本地连接（包括 WebSocket 和 SSE），再查 Redis
-func (h *Hub) GetUserOnlineInfo(userID string) (*Client, error) {
-	// 优先检查本地所有客户端连接（WebSocket 和 SSE 统一存储在 clients map）
-	client := syncx.WithRLockReturnValue(&h.mutex, func() *Client {
-		// 遍历所有客户端，找到匹配的用户ID
-		for _, client := range h.clients {
-			if client.UserID == userID {
-				return client
-			}
-		}
-		return nil
-	})
-
-	if client != nil {
-		return client, nil
-	}
-
-	// 如果本地没有，查询 Redis 中其他节点的在线信息
-	if h.onlineStatusRepo != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		return h.onlineStatusRepo.GetOnlineInfo(ctx, userID)
-	}
-
-	return nil, nil
 }

@@ -63,7 +63,8 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 		)
 		go h.recordMessageToDatabase(msgCopy, nil)
 		return nil
-	} // 用户在本节点或单机模式，正常发送
+	}
+	// 用户在本节点或单机模式，正常发送
 	// 尝试发送到broadcast队列
 	select {
 	case h.broadcast <- msgCopy:

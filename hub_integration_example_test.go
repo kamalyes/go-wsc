@@ -34,7 +34,7 @@ func TestHubWithRedisAndMySQL(t *testing.T) {
 	ctx := context.Background()
 
 	// 2. 创建 MySQL 数据库连接
-	db := GetTestDB(t)
+	db := GetTestDBWithMigration(t, &MessageSendRecord{}, &OfflineMessageRecord{})
 
 	// 3. 创建仓库实例
 	onlineStatusRepo := NewRedisOnlineStatusRepository(redisClient, &wscconfig.OnlineStatus{
@@ -119,13 +119,14 @@ waitLoop:
 	// 使用实际注册的 UserID
 	testUserID := onlineUsers[0]
 
-	// 获取在线状态信息
-	onlineInfo, err := onlineStatusRepo.GetOnlineInfo(ctx, testUserID)
-	require.NoError(t, err, "应该能获取到在线状态")
+	// 获取在线客户端列表
+	clients, err := onlineStatusRepo.GetUserClients(ctx, testUserID)
+	require.NoError(t, err, "应该能获取到在线客户端")
+	require.NotEmpty(t, clients, "应该至少有一个在线客户端")
 
 	// 9. 验证 Redis 中的在线状态
-	assert.Equal(t, testUserID, onlineInfo.UserID)
-	assert.Equal(t, UserTypeCustomer, onlineInfo.UserType)
+	assert.Equal(t, testUserID, clients[0].UserID)
+	assert.Equal(t, UserTypeCustomer, clients[0].UserType)
 
 	// 10. 发送消息（会自动记录到 MySQL）
 	msg := &HubMessage{
@@ -158,10 +159,9 @@ waitLoop:
 	time.Sleep(500 * time.Millisecond) // 等待异步操作完成
 
 	// 13. 验证 Redis 中已移除（可能已经删除，也可能还在）
-	_, err = onlineStatusRepo.GetOnlineInfo(ctx, testUserID)
-	// 异步删除可能还未完成，不强制要求error
-	if err != nil {
-		t.Logf("Redis 数据已清理: %v", err)
+	IsUserOnline, err := onlineStatusRepo.IsUserOnline(ctx, testUserID)
+	if err == nil && !IsUserOnline {
+		t.Logf("Redis 数据已清理")
 	}
 
 	// 14. 清理测试数据
@@ -176,7 +176,7 @@ func TestHubBatchOperations(t *testing.T) {
 	redisClient := GetTestRedisClient(t)
 
 	// MySQL 连接
-	db := getTestDB(t)
+	db := GetTestDBWithMigration(t, &MessageSendRecord{}, &OfflineMessageRecord{})
 
 	// 创建仓库
 	onlineStatusRepo := NewRedisOnlineStatusRepository(redisClient, &wscconfig.OnlineStatus{
@@ -231,8 +231,8 @@ func TestHubBatchOperations(t *testing.T) {
 
 	// 验证客户端确实在 Hub 中
 	for i := 0; i < 5; i++ {
-		isOnline, _ := hub.IsUserOnline(userIDs[i])
-		require.True(t, isOnline, "用户 %s 应该在线", userIDs[i])
+		IsUserOnline, _ := hub.IsUserOnline(userIDs[i])
+		require.True(t, IsUserOnline, "用户 %s 应该在线", userIDs[i])
 	}
 
 	// 等待 Redis 状态同步（异步操作可能需要更多时间）
@@ -414,7 +414,7 @@ func TestMessageSendFieldsUpdate(t *testing.T) {
 	ctx := context.Background()
 
 	// 2. 创建 MySQL 数据库连接
-	db := GetTestDB(t)
+	db := GetTestDBWithMigration(t, &MessageSendRecord{}, &OfflineMessageRecord{})
 
 	// 3. 创建各种Repository
 	messageRecordRepo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())

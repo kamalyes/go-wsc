@@ -37,6 +37,9 @@ type (
 
 	// OfflineMessageRecord 离线消息记录
 	OfflineMessageRecord = models.OfflineMessageRecord
+
+	// AgentWorkloadModel 客服负载模型
+	AgentWorkloadModel = models.AgentWorkloadModel
 )
 
 // 变量别名 - 待推送的离线消息状态列表

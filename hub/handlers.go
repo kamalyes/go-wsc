@@ -91,12 +91,16 @@ func (h *Hub) handleHeartbeatMessage(client *Client) {
 	h.logWithClient(logger.DEBUG, "💓 收到心跳消息", client)
 
 	// 同步更新 Redis 中的在线状态和心跳时间
-	if err := h.UpdateUserHeartbeat(client.UserID); err != nil {
-		h.logger.DebugKV("更新 Redis 心跳失败",
-			"client_id", client.ID,
-			"user_id", client.UserID,
-			"error", err,
-		)
+	if h.onlineStatusRepo != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := h.onlineStatusRepo.UpdateClientHeartbeat(ctx, client.ID); err != nil {
+			h.logger.DebugKV("更新 Redis 心跳失败",
+				"client_id", client.ID,
+				"user_id", client.UserID,
+				"error", err,
+			)
+		}
 	}
 
 	// 直接发送 pong 响应（使用已获取的客户端对象，避免竞态条件）

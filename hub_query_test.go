@@ -42,11 +42,11 @@ func TestGetStats(t *testing.T) {
 
 	// 获取统计信息
 	stats := hub.GetStats()
-	
+
 	assert.NotNil(t, stats, "统计信息不应为空")
 	assert.GreaterOrEqual(t, stats.TotalClients, 1, "应该至少有1个连接")
 	assert.NotEmpty(t, hub.GetNodeID(), "NodeID不应为空")
-	
+
 	hub.Unregister(client)
 }
 
@@ -224,8 +224,8 @@ func TestGetNodeID(t *testing.T) {
 
 	nodeID := hub.GetNodeID()
 	assert.NotEmpty(t, nodeID, "NodeID不应为空")
-	assert.Contains(t, nodeID, "192.168.1.100", "NodeID应该包含IP")
-	assert.Contains(t, nodeID, "8080", "NodeID应该包含端口")
+	// 节点 ID 经过 ShortHash 处理，不再包含原始 IP 和端口
+	assert.NotEmpty(t, nodeID, "NodeID应该是有效的短哈希")
 }
 
 // TestGetWorkerID 测试获取WorkerID

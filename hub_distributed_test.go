@@ -45,10 +45,22 @@ func createTestHubWithDistributed(t *testing.T, nodeID string) *Hub {
 	redisClient := NewTestRedisClient(t)
 	pubsub := cachex.NewPubSub(redisClient)
 
-	// 使用 os.Setenv 设置环境变量（必须在 NewHub 之前）
+	// 清除所有可能影响节点 ID 生成的环境变量
+	oldPodName := os.Getenv("POD_NAME")
+	oldHostname := os.Getenv("HOSTNAME")
 	oldNodeID := os.Getenv("NODE_ID")
+
+	os.Unsetenv("POD_NAME")
+	os.Unsetenv("HOSTNAME")
 	os.Setenv("NODE_ID", nodeID)
+
 	t.Cleanup(func() {
+		if oldPodName != "" {
+			os.Setenv("POD_NAME", oldPodName)
+		}
+		if oldHostname != "" {
+			os.Setenv("HOSTNAME", oldHostname)
+		}
 		if oldNodeID != "" {
 			os.Setenv("NODE_ID", oldNodeID)
 		} else {
@@ -104,7 +116,8 @@ func TestRegisterNode(t *testing.T) {
 	var nodeInfo NodeInfo
 	err = json.Unmarshal([]byte(data), &nodeInfo)
 	assert.NoError(t, err)
-	assert.Equal(t, "node-1", nodeInfo.ID)
+	// 验证节点 ID 是经过 ShortHash 处理后的值
+	assert.Equal(t, hub.GetNodeID(), nodeInfo.ID, "节点 ID 应该匹配")
 	assert.Equal(t, models.NodeStatusActive, nodeInfo.Status)
 }
 
@@ -144,7 +157,8 @@ func TestDiscoverNodes(t *testing.T) {
 	t.Logf("node-1 发现的节点: %+v, err: %v", nodes, err)
 	assert.NoError(t, err)
 	if assert.Len(t, nodes, 1, "node-1 应该发现 1 个其他节点") {
-		assert.Equal(t, "node-2", nodes[0].ID)
+		// 验证发现的节点是 hub2（通过节点 ID 匹配）
+		assert.Equal(t, hub2.GetNodeID(), nodes[0].ID, "应该发现 hub2 的节点")
 	}
 
 	// 从 node-2 发现其他节点
@@ -152,7 +166,8 @@ func TestDiscoverNodes(t *testing.T) {
 	t.Logf("node-2 发现的节点: %+v, err: %v", nodes, err)
 	assert.NoError(t, err)
 	if assert.Len(t, nodes, 1, "node-2 应该发现 1 个其他节点") {
-		assert.Equal(t, "node-1", nodes[0].ID)
+		// 验证发现的节点是 hub1（通过节点 ID 匹配）
+		assert.Equal(t, hub1.GetNodeID(), nodes[0].ID, "应该发现 hub1 的节点")
 	}
 }
 
@@ -182,9 +197,10 @@ func TestCheckAndRouteToNode(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// 验证用户节点映射
-	nodeID, err := hub2.GetOnlineStatusRepo().GetUserNode(ctx, client.UserID)
+	nodes, err := hub2.GetOnlineStatusRepo().GetUserNodes(ctx, client.UserID)
 	require.NoError(t, err)
-	assert.Equal(t, hub2.GetNodeID(), nodeID, "用户应该在 node-2 上")
+	require.NotEmpty(t, nodes, "用户应该在至少一个节点上")
+	assert.Contains(t, nodes, hub2.GetNodeID(), "用户应该在 node-2 上")
 
 	// 从 hub1 向该用户发送消息
 	sentMsg := createTestHubMessage(MessageTypeText)
@@ -594,13 +610,13 @@ func TestMultiNodeScenario(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Len(t, nodes, 2)
 
-	// 验证发现的节点
+	// 验证发现的节点（使用实际的节点 ID）
 	nodeIDs := make(map[string]bool)
 	for _, node := range nodes {
 		nodeIDs[node.ID] = true
 	}
-	assert.True(t, nodeIDs["node-2"])
-	assert.True(t, nodeIDs["node-3"])
+	assert.True(t, nodeIDs[hub2.GetNodeID()], "应该发现 hub2")
+	assert.True(t, nodeIDs[hub3.GetNodeID()], "应该发现 hub3")
 }
 
 // TestLockExpiration 测试锁过期

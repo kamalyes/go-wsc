@@ -175,8 +175,8 @@ var (
 	migrationDoneOnce sync.Once
 )
 
-// GetTestDB 获取测试用 MySQL 数据库连接（单例模式）
-// 优先使用环境变量 TEST_MYSQL_DSN，否则使用默认配置
+// GetTestDB 获取测试用数据库连接（单例模式）
+// 从环境变量读取 DSN，支持 CI/CD 环境
 func GetTestDB(t *testing.T) *gorm.DB {
 	testDBOnce.Do(func() {
 		// 从环境变量读取 DSN，支持 CI/CD 环境
@@ -193,22 +193,23 @@ func GetTestDB(t *testing.T) *gorm.DB {
 			SkipDefaultTransaction: true,                                  // 跳过默认事务，提升性能
 			PrepareStmt:            true,                                  // 预编译语句，提升性能
 		})
-		require.NoError(t, err, "MySQL 数据库连接失败，请检查配置")
+		require.NoError(t, err, "MySQL 连接失败，请检查配置和网络")
 
 		// 配置连接池 - 增加连接数以支持并发测试
 		sqlDB, err := db.DB()
-		require.NoError(t, err, "获取底层 DB 失败")
+		require.NoError(t, err, "获取 SQL DB 失败")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		err = sqlDB.PingContext(ctx)
+		require.NoError(t, err, "MySQL Ping 失败")
+
 		sqlDB.SetMaxIdleConns(20)                  // 增加空闲连接数
 		sqlDB.SetMaxOpenConns(50)                  // 增加最大连接数
 		sqlDB.SetConnMaxLifetime(30 * time.Minute) // 减少连接生命周期，避免长时间测试中连接失效
 		sqlDB.SetConnMaxIdleTime(5 * time.Minute)  // 减少空闲连接超时时间
 
-		// 验证数据库连接
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		err = sqlDB.PingContext(ctx)
-		require.NoError(t, err, "数据库连接验证失败,请检查MySQL服务和网络状态")
-
+		t.Logf("✅ MySQL 连接成功")
 		testDBInstance = db
 	})
 	return testDBInstance
@@ -269,36 +270,6 @@ func GetTestDBWithMigration(t *testing.T, models ...interface{}) *gorm.DB {
 			close(migrationDone)
 		})
 	}
-
-	return db
-}
-
-// NewTestDB 创建新的 MySQL 数据库连接（每次返回新实例）
-// 适用于需要独立连接或特定配置的测试
-func NewTestDB(t *testing.T, skipTransaction bool) *gorm.DB {
-	// 从环境变量读取 DSN，支持 CI/CD 环境
-	dsn := os.Getenv("TEST_MYSQL_DSN")
-	if dsn == "" {
-		// 本地开发环境默认配置
-		dsn = defaultMySQLDSN
-		t.Logf("📌 使用默认 MySQL 配置: %s", maskPassword(dsn))
-	} else {
-		t.Logf("📌 使用环境变量 MySQL 配置: %s", maskPassword(dsn))
-	}
-	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{
-		Logger:                 logger.Default.LogMode(logger.Silent),
-		SkipDefaultTransaction: skipTransaction,
-		PrepareStmt:            true,
-	})
-	require.NoError(t, err, "MySQL 数据库连接失败")
-
-	// 配置连接池 - 与单例保持一致
-	sqlDB, err := db.DB()
-	require.NoError(t, err, "获取底层 DB 失败")
-	sqlDB.SetMaxIdleConns(20)
-	sqlDB.SetMaxOpenConns(50)
-	sqlDB.SetConnMaxLifetime(time.Hour)
-	sqlDB.SetConnMaxIdleTime(10 * time.Minute)
 
 	return db
 }

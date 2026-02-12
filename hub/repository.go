@@ -74,6 +74,7 @@ func (h *Hub) InitializeRepositories(redisClient *redis.Client, db *gorm.DB) err
 	// 3. 负载管理仓库
 	workloadRepo := repository.NewRedisWorkloadRepository(
 		redisClient,
+		db,
 		h.config.RedisRepository.Workload,
 		hubLogger,
 	)

@@ -50,7 +50,7 @@ func TestMultiLoginWithOnlineStatusSync(t *testing.T) {
 
 	// 验证初始状态 - 用户不在线
 	client1 := createTestClientWithIDGen(UserTypeCustomer)
-	isOnline, err := onlineStatusRepo.IsOnline(ctx, client1.UserID)
+	isOnline, err := onlineStatusRepo.IsUserOnline(ctx, client1.UserID)
 	require.NoError(t, err)
 	assert.False(t, isOnline, "用户初始应该离线")
 
@@ -59,16 +59,16 @@ func TestMultiLoginWithOnlineStatusSync(t *testing.T) {
 	time.Sleep(200 * time.Millisecond) // 等待异步同步完成
 
 	// 验证用户已在线
-	isOnline, err = onlineStatusRepo.IsOnline(ctx, client1.UserID)
+	isOnline, err = onlineStatusRepo.IsUserOnline(ctx, client1.UserID)
 	require.NoError(t, err)
 	assert.True(t, isOnline, "用户应该在线")
 
-	// 获取在线信息
-	clientInfo, err := onlineStatusRepo.GetOnlineInfo(ctx, client1.UserID)
+	// 获取在线客户端列表
+	clients, err := onlineStatusRepo.GetUserClients(ctx, client1.UserID)
 	require.NoError(t, err)
-	require.NotNil(t, clientInfo)
-	assert.Equal(t, client1.UserID, clientInfo.UserID)
-	assert.Equal(t, UserTypeCustomer, clientInfo.UserType)
+	require.NotEmpty(t, clients)
+	assert.Equal(t, client1.UserID, clients[0].UserID)
+	assert.Equal(t, UserTypeCustomer, clients[0].UserType)
 
 	// 注册第二个客户端（多端登录）
 	client2 := createTestClientWithIDGen(UserTypeCustomer)
@@ -86,7 +86,7 @@ func TestMultiLoginWithOnlineStatusSync(t *testing.T) {
 	time.Sleep(500 * time.Millisecond) // 等待状态更新
 
 	// 用户仍然在线（因为还有第二个客户端）
-	isOnline, err = onlineStatusRepo.IsOnline(ctx, client2.UserID)
+	isOnline, err = onlineStatusRepo.IsUserOnline(ctx, client2.UserID)
 	require.NoError(t, err)
 	assert.True(t, isOnline, "用户应该仍然在线")
 
@@ -98,7 +98,7 @@ func TestMultiLoginWithOnlineStatusSync(t *testing.T) {
 	maxRetries := 20
 	var isOnlineAfterUnregister bool
 	for retry := 0; retry < maxRetries; retry++ {
-		isOnlineAfterUnregister, err = onlineStatusRepo.IsOnline(ctx, client2.UserID)
+		isOnlineAfterUnregister, err = onlineStatusRepo.IsUserOnline(ctx, client2.UserID)
 		require.NoError(t, err)
 		if !isOnlineAfterUnregister {
 			break
@@ -118,8 +118,10 @@ func TestMultiLoginWithWorkloadSync(t *testing.T) {
 	redisClient := NewTestRedisClient(t)
 	defer redisClient.Close()
 
+	db := GetTestDBWithMigration(t, &MessageSendRecord{}, &OfflineMessageRecord{}, &AgentWorkloadModel{})
+
 	// 创建负载管理仓库
-	workloadRepo := NewRedisWorkloadRepository(redisClient, &wscconfig.Workload{
+	workloadRepo := NewRedisWorkloadRepository(redisClient, db, &wscconfig.Workload{
 		KeyPrefix: "wsc:test:multilogin:workload:",
 	}, NewDefaultWSCLogger())
 
@@ -166,10 +168,17 @@ func TestMultiLoginWithWorkloadSync(t *testing.T) {
 	time.Sleep(300 * time.Millisecond) // 等待异步移除负载完成
 	assert.False(t, hub.HasClient(agent.ID), "客服应该已注销")
 
-	// 验证负载已移除
+	// 验证负载仍然保留（设计上保留 string key 以便重新上线时恢复）
 	workload, err = workloadRepo.GetAgentWorkload(ctx, agent.UserID)
 	require.NoError(t, err)
-	assert.Equal(t, int64(0), workload, "客服离线后负载应该被移除")
+	assert.Equal(t, int64(6), workload, "客服离线后负载应该保留以便重新上线时恢复")
+
+	// 验证从 ZSet 中已移除（不在在线客服列表中）
+	leastAgent, leastWorkload, err := workloadRepo.GetLeastLoadedAgent(ctx, []string{agent.UserID})
+	require.NoError(t, err)
+	// 如果 ZSet 为空，会降级到 string key 查询，所以仍能查到
+	assert.Equal(t, agent.UserID, leastAgent)
+	assert.Equal(t, int64(6), leastWorkload)
 }
 
 // TestMultiLoginMixedWithFullIntegration 测试混合类型多端登录的完整集成
@@ -214,7 +223,7 @@ func TestMultiLoginMixedWithFullIntegration(t *testing.T) {
 	time.Sleep(200 * time.Millisecond) // 增加等待时间
 
 	// 验证在线状态
-	isOnline, err := onlineStatusRepo.IsOnline(ctx, wsClient.UserID)
+	isOnline, err := onlineStatusRepo.IsUserOnline(ctx, wsClient.UserID)
 	require.NoError(t, err)
 	assert.True(t, isOnline, "用户应该在线")
 
@@ -264,7 +273,7 @@ func TestMultiLoginMixedWithFullIntegration(t *testing.T) {
 	maxRetries := 20
 	var isOnlineAfterUnregister bool
 	for retry := 0; retry < maxRetries; retry++ {
-		isOnlineAfterUnregister, err = onlineStatusRepo.IsOnline(ctx, wsClient.UserID)
+		isOnlineAfterUnregister, err = onlineStatusRepo.IsUserOnline(ctx, wsClient.UserID)
 		require.NoError(t, err)
 		t.Logf("第%d次检查离线状态: %v", retry+1, isOnlineAfterUnregister)
 		if !isOnlineAfterUnregister {
@@ -311,7 +320,7 @@ func TestMultiLoginDisabledWithOnlineStatus(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// 验证在线
-	isOnline, err := onlineStatusRepo.IsOnline(ctx, client1.UserID)
+	isOnline, err := onlineStatusRepo.IsUserOnline(ctx, client1.UserID)
 	require.NoError(t, err)
 	assert.True(t, isOnline, "用户应该在线")
 
@@ -328,7 +337,7 @@ func TestMultiLoginDisabledWithOnlineStatus(t *testing.T) {
 	assert.Contains(t, clientMap, client2.ID, "应该是第二个客户端")
 
 	// 用户仍然在线
-	isOnline, err = onlineStatusRepo.IsOnline(ctx, client1.UserID)
+	isOnline, err = onlineStatusRepo.IsUserOnline(ctx, client1.UserID)
 	require.NoError(t, err)
 	assert.True(t, isOnline, "用户应该在线")
 
@@ -340,7 +349,7 @@ func TestMultiLoginDisabledWithOnlineStatus(t *testing.T) {
 	maxRetries := 20
 	var isOnlineAfterUnregister bool
 	for retry := 0; retry < maxRetries; retry++ {
-		isOnlineAfterUnregister, err = onlineStatusRepo.IsOnline(ctx, client2.UserID)
+		isOnlineAfterUnregister, err = onlineStatusRepo.IsUserOnline(ctx, client2.UserID)
 		require.NoError(t, err)
 		if !isOnlineAfterUnregister {
 			break
@@ -409,7 +418,7 @@ func TestMultiLoginWithConnectionLimit(t *testing.T) {
 	}
 
 	// 用户在线
-	isOnline, err := onlineStatusRepo.IsOnline(ctx, userID)
+	isOnline, err := onlineStatusRepo.IsUserOnline(ctx, userID)
 	require.NoError(t, err)
 	assert.True(t, isOnline, "用户应该在线")
 
@@ -423,7 +432,7 @@ func TestMultiLoginWithConnectionLimit(t *testing.T) {
 	maxRetries := 20
 	var isOnlineAfterUnregister bool
 	for retry := 0; retry < maxRetries; retry++ {
-		isOnlineAfterUnregister, err = onlineStatusRepo.IsOnline(ctx, userID)
+		isOnlineAfterUnregister, err = onlineStatusRepo.IsUserOnline(ctx, userID)
 		require.NoError(t, err)
 		t.Logf("第%d次检查离线状态: %v", retry+1, isOnlineAfterUnregister)
 		if !isOnlineAfterUnregister {

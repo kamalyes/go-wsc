@@ -52,7 +52,7 @@ func TestHubRedisStatistics(t *testing.T) {
 		KeyPrefix: "wsc:test:hubstats:online:",
 		TTL:       5 * time.Minute,
 	}))
-	hub.SetMessageRecordRepository(NewMessageRecordRepository(GetTestDB(t), nil, NewDefaultWSCLogger()))
+	hub.SetMessageRecordRepository(NewMessageRecordRepository(GetTestDBWithMigration(t, &MessageSendRecord{}), nil, NewDefaultWSCLogger()))
 
 	// 4. 启动 Hub
 	go hub.Run()
@@ -211,7 +211,7 @@ func TestHubClusterStatistics(t *testing.T) {
 		KeyPrefix: "wsc:test:cluster:online:",
 		TTL:       5 * time.Minute,
 	}))
-	hub1.SetMessageRecordRepository(NewMessageRecordRepository(GetTestDB(t), nil, NewDefaultWSCLogger()))
+	hub1.SetMessageRecordRepository(NewMessageRecordRepository(GetTestDBWithMigration(t, &MessageSendRecord{}), nil, NewDefaultWSCLogger()))
 
 	node2Config := wscconfig.Default().
 		WithNodeInfo("192.168.1.11", 8081).
@@ -223,7 +223,7 @@ func TestHubClusterStatistics(t *testing.T) {
 		KeyPrefix: "wsc:test:cluster:online:",
 		TTL:       5 * time.Minute,
 	}))
-	hub2.SetMessageRecordRepository(NewMessageRecordRepository(GetTestDB(t), nil, NewDefaultWSCLogger()))
+	hub2.SetMessageRecordRepository(NewMessageRecordRepository(GetTestDBWithMigration(t, &MessageSendRecord{}), nil, NewDefaultWSCLogger()))
 
 	// 3. 启动两个节点
 	go hub1.Run()

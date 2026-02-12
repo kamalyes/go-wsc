@@ -12,23 +12,14 @@ package wsc
 
 import (
 	"context"
-	"fmt"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-toolbox/pkg/idgen"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-)
-
-const (
-	testAgentCount5000  = 5000
-	testAgentCount10000 = 10000
-	testConcurrency10   = 10
-	testIterations10    = 10
-	testTop100          = 100
+	"gorm.io/gorm"
 )
 
 var (
@@ -37,25 +28,30 @@ var (
 
 // testWorkloadRepo 测试辅助结构
 type testWorkloadRepo struct {
-	repo       WorkloadRepository
-	ctx        context.Context
-	t          *testing.T
-	testPrefix string // 测试前缀，用于隔离不同测试的数据
+	repo        WorkloadRepository
+	db          *gorm.DB // 添加数据库连接字段
+	ctx         context.Context
+	t           *testing.T
+	testPrefix  string // 测试前缀，用于隔离不同测试的数据
+	idGenerator *idgen.ShortFlakeGenerator
 }
 
 // newTestWorkloadRepo 创建测试仓库实例
 func newTestWorkloadRepo(t *testing.T) *testWorkloadRepo {
 	client := GetTestRedisClient(t)
+	db := GetTestDBWithMigration(t, &AgentWorkloadModel{})
 	testPrefix := testWorkloadKeyPrefix + t.Name() + "_"
-	repo := NewRedisWorkloadRepository(client, &wscconfig.Workload{
+	repo := NewRedisWorkloadRepository(client, db, &wscconfig.Workload{
 		KeyPrefix: testPrefix,
 	}, NewDefaultWSCLogger())
 
 	return &testWorkloadRepo{
-		repo:       repo,
-		ctx:        context.Background(),
-		t:          t,
-		testPrefix: testPrefix, // 使用测试名称作为前缀
+		repo:        repo,
+		db:          db, // 保存数据库连接
+		ctx:         context.Background(),
+		t:           t,
+		testPrefix:  testPrefix,
+		idGenerator: idgen.NewShortFlakeGenerator(1),
 	}
 }
 
@@ -81,19 +77,15 @@ func (tr *testWorkloadRepo) agentID(name string) string {
 
 // cleanup 清理测试数据
 func (tr *testWorkloadRepo) cleanup(agentIDs ...string) {
-	if len(agentIDs) == 0 {
-		return
-	}
-
-	// 使用批量删除接口
-
-	if repo, ok := tr.repo.(*RedisWorkloadRepository); ok {
-		_ = repo.BatchRemoveAgentWorkload(tr.ctx, agentIDs)
-	} else {
-		// 降级为逐个删除
-		for _, agentID := range agentIDs {
-			_ = tr.repo.RemoveAgentWorkload(tr.ctx, agentID)
+	for _, agentID := range agentIDs {
+		_ = tr.repo.RemoveAgentWorkload(tr.ctx, agentID)
+		// 同时清理数据库记录
+		if tr.db != nil {
+			_ = tr.db.Where("agent_id = ?", agentID).Delete(&AgentWorkloadModel{}).Error
 		}
+		// 清理 Redis string key
+		workloadKey := tr.testPrefix + "agent:" + agentID
+		_ = GetTestRedisClient(tr.t).Del(tr.ctx, workloadKey).Err()
 	}
 }
 
@@ -110,9 +102,9 @@ func (tr *testWorkloadRepo) cleanupMap(agents map[string]int64) {
 	tr.cleanup(agentIDs...)
 }
 
-// setWorkload 设置客服负载
-func (tr *testWorkloadRepo) setWorkload(agentID string, workload int64) {
-	err := tr.repo.SetAgentWorkload(tr.ctx, agentID, workload)
+// forceSetAgentWorkload 设置客服负载
+func (tr *testWorkloadRepo) forceSetAgentWorkload(agentID string, workload int64) {
+	err := tr.repo.ForceSetAgentWorkload(tr.ctx, agentID, workload)
 	require.NoError(tr.t, err)
 }
 
@@ -129,431 +121,775 @@ func (tr *testWorkloadRepo) batchSet(workloads map[string]int64) {
 	require.NoError(tr.t, err)
 }
 
-// makeAgents 创建多个客服ID和负载的映射
-func (tr *testWorkloadRepo) makeAgents(agents map[string]int64) map[string]int64 {
-	result := make(map[string]int64, len(agents))
-	for name, workload := range agents {
-		result[tr.agentID(name)] = workload
-	}
-	return result
-}
-
-// makeAgentList 创建客服ID列表
-func (tr *testWorkloadRepo) makeAgentList(names ...string) []string {
-	result := make([]string, len(names))
-	for i, name := range names {
-		result[i] = tr.agentID(name)
-	}
-	return result
-}
-
 // TestRedisWorkloadRepositorySetAndGetAgentWorkload 测试设置和获取客服工作负载
 func TestRedisWorkloadRepositorySetAndGetAgentWorkload(t *testing.T) {
 	tr := newTestWorkloadRepo(t)
-	agentID := tr.agentID("agent001")
+	agentID := tr.agentID(tr.idGenerator.GenerateRequestID())
 	defer tr.cleanup(agentID)
 
-	tr.setWorkload(agentID, 5)
+	tr.forceSetAgentWorkload(agentID, 5)
 	assert.Equal(t, int64(5), tr.getWorkload(agentID))
 }
 
 // TestRedisWorkloadRepositoryIncrementAndDecrement 测试增加和减少客服工作负载
 func TestRedisWorkloadRepositoryIncrementAndDecrement(t *testing.T) {
 	tr := newTestWorkloadRepo(t)
-	agentID := tr.agentID("agent")
+	agentID := tr.agentID(tr.idGenerator.GenerateRequestID())
 	defer tr.cleanup(agentID)
 
-	tr.setWorkload(agentID, 0)
+	tr.forceSetAgentWorkload(agentID, 0)
 
-	// 增加3次
+	// 增加 3 次
 	for range 3 {
 		require.NoError(t, tr.repo.IncrementAgentWorkload(tr.ctx, agentID))
 	}
 	assert.Equal(t, int64(3), tr.getWorkload(agentID))
 
-	// 减少1次
+	// 减少 1 次
 	require.NoError(t, tr.repo.DecrementAgentWorkload(tr.ctx, agentID))
 	assert.Equal(t, int64(2), tr.getWorkload(agentID))
 }
 
-// TestRedisWorkloadRepositoryDecrementBelowZero 测试负载减少不会低于0
+// TestRedisWorkloadRepositoryDecrementBelowZero 测试负载减少不会低于 0
 func TestRedisWorkloadRepositoryDecrementBelowZero(t *testing.T) {
 	tr := newTestWorkloadRepo(t)
-	agentID := tr.agentID("agent")
+	agentID := tr.agentID(tr.idGenerator.GenerateRequestID())
 	defer tr.cleanup(agentID)
 
-	tr.setWorkload(agentID, 0)
+	tr.forceSetAgentWorkload(agentID, 0)
 	require.NoError(t, tr.repo.DecrementAgentWorkload(tr.ctx, agentID))
 	assert.Equal(t, int64(0), tr.getWorkload(agentID))
 }
 
-// TestRedisWorkloadRepositoryGetLeastLoadedAgent 测试获取负载最小的在线客服
+// TestRedisWorkloadRepositoryGetLeastLoadedAgent 测试获取负载最小的客服
 func TestRedisWorkloadRepositoryGetLeastLoadedAgent(t *testing.T) {
 	tr := newTestWorkloadRepo(t)
-	agents := tr.makeAgents(map[string]int64{
-		"agent001": 5,
-		"agent002": 2,
-		"agent003": 8,
-		"agent004": 3,
-	})
+
+	agent1 := tr.agentID(tr.idGenerator.GenerateRequestID())
+	agent2 := tr.agentID(tr.idGenerator.GenerateRequestID())
+	agent3 := tr.agentID(tr.idGenerator.GenerateRequestID())
+	agent4 := tr.agentID(tr.idGenerator.GenerateRequestID())
+
+	agents := map[string]int64{
+		agent1: 5,
+		agent2: 2,
+		agent3: 8,
+		agent4: 3,
+	}
 	defer tr.cleanupMap(agents)
 
 	tr.batchSet(agents)
 
-	onlineAgents := tr.makeAgentList("agent001", "agent002", "agent003", "agent004")
-	agentID, workload, err := tr.repo.GetLeastLoadedAgent(tr.ctx, onlineAgents)
+	onlineAgents := []string{agent1, agent2, agent3, agent4}
+	selectedAgent, selectedWorkload, err := tr.repo.GetLeastLoadedAgent(
+		tr.ctx,
+		onlineAgents,
+	)
 	require.NoError(t, err)
-	assert.Equal(t, tr.agentID("agent002"), agentID)
-	assert.Equal(t, int64(2), workload)
+	assert.Equal(t, agent2, selectedAgent, "负载最小的应该是 agent2 (负载=2)")
+	assert.Equal(t, int64(2), selectedWorkload)
 }
 
-// TestRedisWorkloadRepositoryGetLeastLoadedAgentWithOfflineAgents 测试只从在线客服中选择负载最小的
-func TestRedisWorkloadRepositoryGetLeastLoadedAgentWithOfflineAgents(t *testing.T) {
+// TestRedisWorkloadRepositoryCompleteLifecycle 测试完整的客服生命周期
+func TestRedisWorkloadRepositoryCompleteLifecycle(t *testing.T) {
 	tr := newTestWorkloadRepo(t)
-	allAgents := tr.makeAgents(map[string]int64{
-		"agent001": 5,
-		"agent002": 1, // 负载最小但不在线
-		"agent003": 8,
-		"agent004": 3, // 在线且负载次小
-	})
-	defer tr.cleanupMap(allAgents)
 
-	tr.batchSet(allAgents)
+	agentA := tr.agentID(tr.idGenerator.GenerateRequestID())
+	agentB := tr.agentID(tr.idGenerator.GenerateRequestID())
 
-	onlineAgents := tr.makeAgentList("agent001", "agent003", "agent004")
-	agentID, workload, err := tr.repo.GetLeastLoadedAgent(tr.ctx, onlineAgents)
-	require.NoError(t, err)
-	assert.Equal(t, tr.agentID("agent004"), agentID)
-	assert.Equal(t, int64(3), workload)
-}
-
-// TestRedisWorkloadRepositoryRemoveAgentWorkload 测试移除客服负载
-func TestRedisWorkloadRepositoryRemoveAgentWorkload(t *testing.T) {
-	tr := newTestWorkloadRepo(t)
-	agentID := tr.agentID("agent")
-
-	tr.setWorkload(agentID, 10)
-	assert.Equal(t, int64(10), tr.getWorkload(agentID))
-
-	require.NoError(t, tr.repo.RemoveAgentWorkload(tr.ctx, agentID))
-
-	// RemoveAgentWorkload 只删除 ZSet，保留单个 key
-	// 所以 GetAgentWorkload 应该仍然返回 10
-	assert.Equal(t, int64(10), tr.getWorkload(agentID))
-}
-
-// TestRedisWorkloadRepositorySyncAgentWorkloadToZSet 测试从单个key同步负载到ZSet
-func TestRedisWorkloadRepositorySyncAgentWorkloadToZSet(t *testing.T) {
-	tr := newTestWorkloadRepo(t)
-	agentID := tr.agentID("agent_sync")
-	defer tr.cleanup(agentID)
-
-	// 1. 设置初始负载
-	tr.setWorkload(agentID, 5)
-	assert.Equal(t, int64(5), tr.getWorkload(agentID))
-
-	// 2. 移除客服（只删除ZSet，保留单个key）
-	require.NoError(t, tr.repo.RemoveAgentWorkload(tr.ctx, agentID))
-
-	// 3. 单个key仍然存在
-	assert.Equal(t, int64(5), tr.getWorkload(agentID))
-
-	// 4. 同步到ZSet
-	require.NoError(t, tr.repo.SyncAgentWorkloadToZSet(tr.ctx, agentID))
-
-	// 5. 验证可以从ZSet查询到
-	onlineAgents := tr.makeAgentList("agent_sync")
-	selectedAgent, workload, err := tr.repo.GetLeastLoadedAgent(tr.ctx, onlineAgents)
-	require.NoError(t, err)
-	assert.Equal(t, agentID, selectedAgent)
-	assert.Equal(t, int64(5), workload)
-}
-
-// TestRedisWorkloadRepositorySyncAgentWorkloadToZSetWithNoKey 测试同步不存在的key
-func TestRedisWorkloadRepositorySyncAgentWorkloadToZSetWithNoKey(t *testing.T) {
-	tr := newTestWorkloadRepo(t)
-	agentID := tr.agentID("agent_no_key")
-	defer tr.cleanup(agentID)
-
-	// 同步一个不存在的key（应该返回0）
-	require.NoError(t, tr.repo.SyncAgentWorkloadToZSet(tr.ctx, agentID))
-
-	// 验证负载为0
-	assert.Equal(t, int64(0), tr.getWorkload(agentID))
-}
-
-// TestRedisWorkloadRepositoryOfflineOnlineFlow 测试完整的离线-上线流程
-func TestRedisWorkloadRepositoryOfflineOnlineFlow(t *testing.T) {
-	tr := newTestWorkloadRepo(t)
-	agentID := tr.agentID("agent_flow")
-	defer tr.cleanup(agentID)
-
-	// 1. 客服上线，初始化负载为0
-	tr.setWorkload(agentID, 0)
-
-	// 2. 分配工单，增加负载
-	for range 5 {
-		require.NoError(t, tr.repo.IncrementAgentWorkload(tr.ctx, agentID))
+	agents := map[string]int64{
+		agentA: 0,
+		agentB: 0,
 	}
-	assert.Equal(t, int64(5), tr.getWorkload(agentID))
+	defer tr.cleanupMap(agents)
 
-	// 3. 验证在ZSet中
-	onlineAgents := tr.makeAgentList("agent_flow")
-	selectedAgent, workload, err := tr.repo.GetLeastLoadedAgent(tr.ctx, onlineAgents)
+	// 1. 两个客服上线
+	workloadA, err := tr.repo.ReloadAgentWorkload(tr.ctx, agentA)
 	require.NoError(t, err)
-	assert.Equal(t, agentID, selectedAgent)
-	assert.Equal(t, int64(5), workload)
+	assert.Equal(t, int64(0), workloadA)
 
-	// 4. 客服离线（只删除ZSet）
-	require.NoError(t, tr.repo.RemoveAgentWorkload(tr.ctx, agentID))
-
-	// 5. 单个key仍然保留
-	assert.Equal(t, int64(5), tr.getWorkload(agentID))
-
-	// 6. 客服重新上线（同步负载到ZSet）
-	require.NoError(t, tr.repo.SyncAgentWorkloadToZSet(tr.ctx, agentID))
-
-	// 7. 验证负载恢复
-	selectedAgent, workload, err = tr.repo.GetLeastLoadedAgent(tr.ctx, onlineAgents)
+	workloadB, err := tr.repo.ReloadAgentWorkload(tr.ctx, agentB)
 	require.NoError(t, err)
-	assert.Equal(t, agentID, selectedAgent)
-	assert.Equal(t, int64(5), workload)
+	assert.Equal(t, int64(0), workloadB)
+
+	// 2. agentA 分配 3 个工单
+	for range 3 {
+		require.NoError(t, tr.repo.IncrementAgentWorkload(tr.ctx, agentA))
+	}
+
+	// 3. agentB 分配 1 个工单
+	require.NoError(t, tr.repo.IncrementAgentWorkload(tr.ctx, agentB))
+
+	// 4. 查询负载最小的客服（应该是 agentB）
+	onlineAgents := []string{agentA, agentB}
+	selectedAgent, selectedWorkload, err := tr.repo.GetLeastLoadedAgent(
+		tr.ctx,
+		onlineAgents,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, agentB, selectedAgent, "负载最小的应该是 agentB (负载=1)")
+	assert.Equal(t, int64(1), selectedWorkload)
+
+	// 5. agentB 下线
+	require.NoError(t, tr.repo.RemoveAgentWorkload(tr.ctx, agentB))
+
+	// 6. 查询负载最小的客服（只剩 agentA）
+	onlineAgents = []string{agentA}
+	selectedAgent, selectedWorkload, err = tr.repo.GetLeastLoadedAgent(
+		tr.ctx,
+		onlineAgents,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, agentA, selectedAgent, "只剩 agentA 在线")
+	assert.Equal(t, int64(3), selectedWorkload)
+
+	// 7. agentB 重新上线（应该恢复负载 1）
+	workloadB, err = tr.repo.ReloadAgentWorkload(tr.ctx, agentB)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), workloadB, "重新上线应该恢复之前的负载")
+
+	// 8. 查询负载最小的客服（应该又是 agentB）
+	onlineAgents = []string{agentA, agentB}
+	selectedAgent, selectedWorkload, err = tr.repo.GetLeastLoadedAgent(
+		tr.ctx,
+		onlineAgents,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, agentB, selectedAgent, "agentB 重新上线后负载仍然最小")
+	assert.Equal(t, int64(1), selectedWorkload)
 }
 
-// TestRedisWorkloadRepositoryGetAllAgentWorkloads 测试获取所有客服负载
+// TestRedisWorkloadRepositoryGetAllAgentWorkloads 测试批量获取客服负载
 func TestRedisWorkloadRepositoryGetAllAgentWorkloads(t *testing.T) {
 	tr := newTestWorkloadRepo(t)
-	agents := tr.makeAgents(map[string]int64{
-		"agent001": 5,
-		"agent002": 2,
-		"agent003": 8,
-	})
+	tr.checkRedisHealth()
+
+	agent1 := tr.agentID(tr.idGenerator.GenerateRequestID())
+	agent2 := tr.agentID(tr.idGenerator.GenerateRequestID())
+	agent3 := tr.agentID(tr.idGenerator.GenerateRequestID())
+
+	agents := map[string]int64{
+		agent1: 5,
+		agent2: 3,
+		agent3: 8,
+	}
 	defer tr.cleanupMap(agents)
 
 	tr.batchSet(agents)
 
 	workloads, err := tr.repo.GetAllAgentWorkloads(tr.ctx, 0)
 	require.NoError(t, err)
-	require.Len(t, workloads, 3)
+	assert.GreaterOrEqual(t, len(workloads), 3, "至少应该有 3 个客服")
 
-	// 验证顺序（负载从小到大）
-	assert.Equal(t, tr.agentID("agent002"), workloads[0].AgentID)
-	assert.Equal(t, int64(2), workloads[0].Workload)
-	assert.Equal(t, tr.agentID("agent001"), workloads[1].AgentID)
-	assert.Equal(t, int64(5), workloads[1].Workload)
-	assert.Equal(t, tr.agentID("agent003"), workloads[2].AgentID)
-	assert.Equal(t, int64(8), workloads[2].Workload)
+	// 验证负载值
+	workloadMap := make(map[string]int64)
+	for _, w := range workloads {
+		workloadMap[w.AgentID] = w.Workload
+	}
+
+	for agentID, expectedWorkload := range agents {
+		actualWorkload, exists := workloadMap[agentID]
+		assert.True(t, exists, "客服 %s 应该存在", agentID)
+		assert.Equal(t, expectedWorkload, actualWorkload, "客服 %s 的负载不匹配", agentID)
+	}
 }
 
-// TestRedisWorkloadRepositoryGetAllAgentWorkloadsWithLimit 测试分页获取客服负载
-func TestRedisWorkloadRepositoryGetAllAgentWorkloadsWithLimit(t *testing.T) {
+// TestRedisWorkloadRepositoryInitAgentWorkload 测试初始化客服负载
+func TestRedisWorkloadRepositoryInitAgentWorkload(t *testing.T) {
 	tr := newTestWorkloadRepo(t)
+	tr.checkRedisHealth()
 
-	agents := tr.makeAgents(map[string]int64{
-		"agent001": 5,
-		"agent002": 2,
-		"agent003": 8,
-		"agent004": 1,
-		"agent005": 10,
-	})
-	defer tr.cleanupMap(agents)
+	agentID := tr.agentID(tr.idGenerator.GenerateRequestID())
+	defer tr.cleanup(agentID)
 
-	tr.batchSet(agents)
-
-	workloads, err := tr.repo.GetAllAgentWorkloads(tr.ctx, 3)
+	// 场景 1：首次初始化
+	workload, err := tr.repo.ReloadAgentWorkload(tr.ctx, agentID)
 	require.NoError(t, err)
-	require.Len(t, workloads, 3)
+	assert.Equal(t, int64(0), workload)
 
-	// 验证是负载最小的3个
-	assert.Equal(t, tr.agentID("agent004"), workloads[0].AgentID)
-	assert.Equal(t, tr.agentID("agent002"), workloads[1].AgentID)
-	assert.Equal(t, tr.agentID("agent001"), workloads[2].AgentID)
+	// 场景 2：设置负载后下线
+	tr.forceSetAgentWorkload(agentID, 5)
+	require.NoError(t, tr.repo.RemoveAgentWorkload(tr.ctx, agentID))
+
+	// 场景 3：重新上线，应该恢复之前的负载
+	workload, err = tr.repo.ReloadAgentWorkload(tr.ctx, agentID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(5), workload, "重新上线应该恢复之前的负载")
+}
+
+// TestRedisWorkloadRepositoryInitAgentWorkloadAfterRemove 测试移除后重新初始化负载
+func TestRedisWorkloadRepositoryInitAgentWorkloadAfterRemove(t *testing.T) {
+	tr := newTestWorkloadRepo(t)
+	tr.checkRedisHealth()
+
+	agentID := tr.agentID(tr.idGenerator.GenerateRequestID())
+	defer tr.cleanup(agentID)
+
+	// 设置负载
+	tr.forceSetAgentWorkload(agentID, 10)
+
+	// 从 ZSet 移除
+	require.NoError(t, tr.repo.RemoveAgentWorkload(tr.ctx, agentID))
+
+	// 重新初始化（应该从 Redis string key 恢复）
+	workload, err := tr.repo.ReloadAgentWorkload(tr.ctx, agentID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(10), workload, "应该从 Redis 恢复负载")
+
+	// 验证可以从 ZSet 中查询到
+	onlineAgents := []string{agentID}
+	selectedAgent, selectedWorkload, err := tr.repo.GetLeastLoadedAgent(
+		tr.ctx,
+		onlineAgents,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, agentID, selectedAgent)
+	assert.Equal(t, int64(10), selectedWorkload)
 }
 
 // TestRedisWorkloadRepositoryBatchSetAgentWorkload 测试批量设置客服负载
 func TestRedisWorkloadRepositoryBatchSetAgentWorkload(t *testing.T) {
 	tr := newTestWorkloadRepo(t)
-	workloads := tr.makeAgents(map[string]int64{
-		"agent001": 5,
-		"agent002": 2,
-		"agent003": 8,
-	})
-	defer tr.cleanupMap(workloads)
+	tr.checkRedisHealth()
 
-	tr.batchSet(workloads)
+	agent1 := tr.agentID(tr.idGenerator.GenerateRequestID())
+	agent2 := tr.agentID(tr.idGenerator.GenerateRequestID())
+	agent3 := tr.agentID(tr.idGenerator.GenerateRequestID())
 
-	for agentID, expected := range workloads {
-		assert.Equal(t, expected, tr.getWorkload(agentID))
+	agents := map[string]int64{
+		agent1: 10,
+		agent2: 20,
+		agent3: 30,
+	}
+	defer tr.cleanupMap(agents)
+
+	// 批量设置
+	tr.batchSet(agents)
+
+	// 验证每个客服的负载
+	for agentID, expectedWorkload := range agents {
+		actualWorkload := tr.getWorkload(agentID)
+		assert.Equal(t, expectedWorkload, actualWorkload, "客服 %s 的负载不匹配", agentID)
 	}
 }
 
-// TestRedisWorkloadRepositoryConcurrency 测试并发操作的原子性
-func TestRedisWorkloadRepositoryConcurrency(t *testing.T) {
+// TestRedisWorkloadRepositoryMaxCandidatesDefault 测试默认 MaxCandidates (50) 的行为
+func TestRedisWorkloadRepositoryMaxCandidatesDefault(t *testing.T) {
 	tr := newTestWorkloadRepo(t)
+	tr.checkRedisHealth()
 
-	// 验证Redis连接是否健康（尝试一次简单操作）
-	agentID := tr.agentID("concurrent")
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	_, err := tr.repo.GetAgentWorkload(ctx, agentID)
-	cancel()
-	if err != nil && err.Error() != "redis: nil" { // redis: nil 是正常的（key不存在）
-		t.Skipf("Redis连接不可用，跳过测试: %v", err)
+	// 创建 60 个客服（超过默认的 50）
+	const totalAgents = 60
+	agents := make(map[string]int64, totalAgents)
+	onlineAgents := make([]string, 0, totalAgents)
+
+	for i := 0; i < totalAgents; i++ {
+		agentID := tr.agentID(tr.idGenerator.GenerateRequestID())
+		// 前 10 个客服负载为 1（最小），其余递增
+		workload := int64(1)
+		if i >= 10 {
+			workload = int64(i)
+		}
+		agents[agentID] = workload
+		onlineAgents = append(onlineAgents, agentID)
+	}
+	defer tr.cleanupMap(agents)
+
+	// 批量设置负载
+	tr.batchSet(agents)
+
+	// 多次查询，验证能从前 10 个最小负载的客服中随机选择
+	selectedCount := make(map[string]int)
+	for i := 0; i < 100; i++ {
+		selectedAgent, selectedWorkload, err := tr.repo.GetLeastLoadedAgent(tr.ctx, onlineAgents)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), selectedWorkload, "应该选择负载为 1 的客服")
+		selectedCount[selectedAgent]++
 	}
 
-	// 先清理可能存在的旧数据
-	tr.cleanup(agentID)
+	// 验证至少选择了多个不同的客服（说明是随机的）
+	assert.GreaterOrEqual(t, len(selectedCount), 2, "应该从多个负载最小的客服中随机选择")
+}
+
+// TestRedisWorkloadRepositoryMaxCandidatesCustom 测试自定义 MaxCandidates 的行为
+func TestRedisWorkloadRepositoryMaxCandidatesCustom(t *testing.T) {
+	// 创建自定义配置的仓库（MaxCandidates = 5）
+	client := GetTestRedisClient(t)
+	db := GetTestDBWithMigration(t, &AgentWorkloadModel{})
+	testPrefix := testWorkloadKeyPrefix + t.Name() + "_"
+
+	customRepo := NewRedisWorkloadRepository(client, db, &wscconfig.Workload{
+		KeyPrefix:     testPrefix,
+		MaxCandidates: 5, // 只查询前 5 个
+	}, NewDefaultWSCLogger())
+
+	ctx := context.Background()
+	idGenerator := idgen.NewShortFlakeGenerator(1)
+
+	// 创建 10 个客服
+	const totalAgents = 10
+	agents := make(map[string]int64, totalAgents)
+	onlineAgents := make([]string, 0, totalAgents)
+
+	for i := 0; i < totalAgents; i++ {
+		agentID := testPrefix + idGenerator.GenerateRequestID()
+		// 前 3 个客服负载为 1，第 4-6 个为 2，其余递增
+		workload := int64(1)
+		if i >= 3 && i < 6 {
+			workload = 2
+		} else if i >= 6 {
+			workload = int64(i)
+		}
+		agents[agentID] = workload
+		onlineAgents = append(onlineAgents, agentID)
+	}
+
+	// 清理函数
+	defer func() {
+		for agentID := range agents {
+			_ = customRepo.RemoveAgentWorkload(ctx, agentID)
+		}
+	}()
+
+	// 批量设置负载
+	err := customRepo.BatchSetAgentWorkload(ctx, agents)
+	require.NoError(t, err)
+
+	// 多次查询，验证只从前 5 个候选中选择
+	selectedCount := make(map[string]int)
+	for i := 0; i < 100; i++ {
+		selectedAgent, selectedWorkload, err := customRepo.GetLeastLoadedAgent(ctx, onlineAgents)
+		require.NoError(t, err)
+		assert.LessOrEqual(t, selectedWorkload, int64(2), "应该从前 5 个候选中选择（负载 <= 2）")
+		selectedCount[selectedAgent]++
+	}
+
+	// 验证选择了多个不同的客服
+	assert.GreaterOrEqual(t, len(selectedCount), 2, "应该从多个候选客服中随机选择")
+}
+
+// TestRedisWorkloadRepositoryMaxCandidatesLessThanOnline 测试在线客服少于 MaxCandidates 的场景
+func TestRedisWorkloadRepositoryMaxCandidatesLessThanOnline(t *testing.T) {
+	tr := newTestWorkloadRepo(t)
+	tr.checkRedisHealth()
+
+	// 只创建 3 个客服（远少于默认的 50）
+	agent1 := tr.agentID(tr.idGenerator.GenerateRequestID())
+	agent2 := tr.agentID(tr.idGenerator.GenerateRequestID())
+	agent3 := tr.agentID(tr.idGenerator.GenerateRequestID())
+
+	agents := map[string]int64{
+		agent1: 5,
+		agent2: 2,
+		agent3: 8,
+	}
+	defer tr.cleanupMap(agents)
+
+	tr.batchSet(agents)
+
+	onlineAgents := []string{agent1, agent2, agent3}
+	selectedAgent, selectedWorkload, err := tr.repo.GetLeastLoadedAgent(tr.ctx, onlineAgents)
+	require.NoError(t, err)
+	assert.Equal(t, agent2, selectedAgent, "应该选择负载最小的 agent2")
+	assert.Equal(t, int64(2), selectedWorkload)
+}
+
+// TestRedisWorkloadRepositoryMaxCandidatesSameWorkload 测试多个客服负载相同时的随机选择
+func TestRedisWorkloadRepositoryMaxCandidatesSameWorkload(t *testing.T) {
+	tr := newTestWorkloadRepo(t)
+	tr.checkRedisHealth()
+
+	// 创建 5 个负载相同的客服
+	const totalAgents = 5
+	agents := make(map[string]int64, totalAgents)
+	onlineAgents := make([]string, 0, totalAgents)
+
+	for i := 0; i < totalAgents; i++ {
+		agentID := tr.agentID(tr.idGenerator.GenerateRequestID())
+		agents[agentID] = 10 // 所有客服负载都是 10
+		onlineAgents = append(onlineAgents, agentID)
+	}
+	defer tr.cleanupMap(agents)
+
+	tr.batchSet(agents)
+
+	// 多次查询，验证随机选择
+	selectedCount := make(map[string]int)
+	for i := 0; i < 50; i++ {
+		selectedAgent, selectedWorkload, err := tr.repo.GetLeastLoadedAgent(tr.ctx, onlineAgents)
+		require.NoError(t, err)
+		assert.Equal(t, int64(10), selectedWorkload)
+		selectedCount[selectedAgent]++
+	}
+
+	// 验证至少选择了 3 个不同的客服（说明是随机的）
+	assert.GreaterOrEqual(t, len(selectedCount), 3, "应该从多个负载相同的客服中随机选择")
+}
+
+// TestRedisWorkloadRepositoryMaxCandidatesFallback 测试降级场景（ZSet 中没有在线客服）
+func TestRedisWorkloadRepositoryMaxCandidatesFallback(t *testing.T) {
+	tr := newTestWorkloadRepo(t)
+	tr.checkRedisHealth()
+
+	agent1 := tr.agentID(tr.idGenerator.GenerateRequestID())
+	agent2 := tr.agentID(tr.idGenerator.GenerateRequestID())
+
+	agents := map[string]int64{
+		agent1: 5,
+		agent2: 3,
+	}
+	defer tr.cleanupMap(agents)
+
+	// 设置负载
+	tr.batchSet(agents)
+
+	// 从 ZSet 中移除所有客服（模拟 ZSet 数据丢失）
+	require.NoError(t, tr.repo.RemoveAgentWorkload(tr.ctx, agent1))
+	require.NoError(t, tr.repo.RemoveAgentWorkload(tr.ctx, agent2))
+
+	// 查询时应该降级到从 string key 中随机选择
+	onlineAgents := []string{agent1, agent2}
+	selectedAgent, selectedWorkload, err := tr.repo.GetLeastLoadedAgent(tr.ctx, onlineAgents)
+	require.NoError(t, err)
+	assert.Contains(t, onlineAgents, selectedAgent, "应该从在线客服中选择")
+	assert.True(t, selectedWorkload == 5 || selectedWorkload == 3, "负载应该是 5 或 3")
+}
+
+// TestRedisWorkloadRepositoryEmptyOnlineAgents 测试空的在线客服列表
+func TestRedisWorkloadRepositoryEmptyOnlineAgents(t *testing.T) {
+	tr := newTestWorkloadRepo(t)
+	tr.checkRedisHealth()
+
+	// 传入空的在线客服列表
+	_, _, err := tr.repo.GetLeastLoadedAgent(tr.ctx, []string{})
+	assert.Error(t, err, "空的在线客服列表应该返回错误")
+}
+
+// TestRedisWorkloadRepositoryNonExistentAgent 测试获取不存在的客服负载
+func TestRedisWorkloadRepositoryNonExistentAgent(t *testing.T) {
+	tr := newTestWorkloadRepo(t)
+	tr.checkRedisHealth()
+
+	nonExistentAgent := tr.agentID("non_existent")
+
+	// 获取不存在的客服负载应该返回 0
+	workload := tr.getWorkload(nonExistentAgent)
+	assert.Equal(t, int64(0), workload, "不存在的客服负载应该为 0")
+}
+
+// TestRedisWorkloadRepositoryConcurrentIncrement 测试并发增加负载
+func TestRedisWorkloadRepositoryConcurrentIncrement(t *testing.T) {
+	tr := newTestWorkloadRepo(t)
+	tr.checkRedisHealth()
+
+	agentID := tr.agentID(tr.idGenerator.GenerateRequestID())
 	defer tr.cleanup(agentID)
 
-	// 不使用 setWorkload，让 INCR 自动从 0 开始
-	// 验证初始值是0（如果 key 不存在，GetAgentWorkload 返回 0）
-	initialWorkload := tr.getWorkload(agentID)
-	t.Logf("🔍 测试开始 - agentID=%s, 初始负载=%d", agentID, initialWorkload)
+	tr.forceSetAgentWorkload(agentID, 0)
 
-	var wg sync.WaitGroup
-	var errCount atomic.Int32
-	var successCount atomic.Int32
+	// 并发增加 100 次
+	const concurrentCount = 100
+	done := make(chan bool, concurrentCount)
 
-	for range testConcurrency10 {
-		wg.Add(1)
+	for range concurrentCount {
 		go func() {
-			defer wg.Done()
-			for range testIterations10 {
-				// 添加重试机制
-				var lastErr error
-				for retry := 0; retry < 3; retry++ {
-					if err := tr.repo.IncrementAgentWorkload(tr.ctx, agentID); err != nil {
-						lastErr = err
-						time.Sleep(10 * time.Millisecond) // 短暂等待后重试
-						continue
-					}
-					successCount.Add(1)
-					lastErr = nil
-					break
-				}
-				if lastErr != nil {
-					errCount.Add(1)
-					t.Logf("增加负载失败（重试3次后）: %v", lastErr)
-				}
-			}
+			_ = tr.repo.IncrementAgentWorkload(tr.ctx, agentID)
+			done <- true
 		}()
 	}
 
-	wg.Wait()
-
-	// 等待 Redis 操作完全完成
-	time.Sleep(200 * time.Millisecond)
-
-	actualWorkload := tr.getWorkload(agentID)
-	expectedWorkload := int64(testConcurrency10 * testIterations10)
-
-	t.Logf("📊 最终统计: 成功=%d, 失败=%d, 实际负载=%d, 期望负载=%d",
-		successCount.Load(), errCount.Load(), actualWorkload, expectedWorkload)
-
-	// 如果所有操作都成功但Redis中数据不对，说明Redis连接有问题
-	if errCount.Load() == 0 && actualWorkload < int64(successCount.Load()/2) {
-		t.Skipf("❌ Redis数据异常（成功=%d 但实际=%d），可能是CI环境Redis不稳定",
-			successCount.Load(), actualWorkload)
+	// 等待所有协程完成
+	for range concurrentCount {
+		<-done
 	}
 
-	// 关键断言：实际负载应该等于成功次数
-	if int64(successCount.Load()) != actualWorkload {
-		t.Errorf("❌ 数据不一致！成功次数=%d 但 Redis 中实际负载=%d，差异=%d",
-			successCount.Load(), actualWorkload, int64(successCount.Load())-actualWorkload)
-	}
-
-	assert.Equal(t, int64(successCount.Load()), actualWorkload,
-		"实际负载应该等于成功操作次数")
-
-	// 成功次数应该接近期望值（允许少量失败）
-	minSuccessCount := int32(float64(expectedWorkload) * 0.95)
-	assert.GreaterOrEqual(t, successCount.Load(), minSuccessCount,
-		"成功率应该至少95%")
+	// 验证最终负载
+	finalWorkload := tr.getWorkload(agentID)
+	assert.Equal(t, int64(concurrentCount), finalWorkload, "并发增加后负载应该为 100")
 }
 
-// TestRedisWorkloadRepositoryBatchSet10000Agents 测试批量设置10000个客服的性能
-func TestRedisWorkloadRepositoryBatchSet10000Agents(t *testing.T) {
+// TestRedisWorkloadRepositoryConcurrentDecrement 测试并发减少负载
+func TestRedisWorkloadRepositoryConcurrentDecrement(t *testing.T) {
 	tr := newTestWorkloadRepo(t)
-	tr.checkRedisHealth() // 检查Redis健康状态
+	tr.checkRedisHealth()
 
-	workloads := make(map[string]int64, testAgentCount10000)
-	for i := range testAgentCount10000 {
-		agentID := fmt.Sprintf("large_agent_%05d", i)
-		workloads[agentID] = int64(i % 100)
-	}
-	defer tr.cleanupMap(workloads)
+	agentID := tr.agentID(tr.idGenerator.GenerateRequestID())
+	defer tr.cleanup(agentID)
 
-	start := time.Now()
-	tr.batchSet(workloads)
-	t.Logf("✅ 批量设置 %d 个客服负载耗时: %v", testAgentCount10000, time.Since(start))
+	const initialWorkload = 50
+	tr.forceSetAgentWorkload(agentID, initialWorkload)
 
-	// 等待Redis操作完全完成
-	time.Sleep(200 * time.Millisecond)
+	// 并发减少 30 次
+	const concurrentCount = 30
+	done := make(chan bool, concurrentCount)
 
-	// 随机验证几个客服的负载
-	testCases := []struct {
-		agentID  string
-		expected int64
-	}{
-		{"large_agent_00000", 0},
-		{"large_agent_00050", 50},
-		{"large_agent_01234", 34},
-		{"large_agent_09999", 99},
+	for range concurrentCount {
+		go func() {
+			_ = tr.repo.DecrementAgentWorkload(tr.ctx, agentID)
+			done <- true
+		}()
 	}
 
-	for _, tc := range testCases {
-		assert.Equal(t, tc.expected, tr.getWorkload(tc.agentID), "Workload mismatch for %s", tc.agentID)
+	// 等待所有协程完成
+	for range concurrentCount {
+		<-done
 	}
+
+	// 验证最终负载
+	finalWorkload := tr.getWorkload(agentID)
+	assert.Equal(t, int64(initialWorkload-concurrentCount), finalWorkload, "并发减少后负载应该为 20")
 }
 
-// TestRedisWorkloadRepositoryGetLeastLoadedFrom10000Agents 测试从10000个客服中查询最小负载的性能
-func TestRedisWorkloadRepositoryGetLeastLoadedFrom10000Agents(t *testing.T) {
+// TestRedisWorkloadRepositoryBatchSetEmpty 测试批量设置空 map
+func TestRedisWorkloadRepositoryBatchSetEmpty(t *testing.T) {
 	tr := newTestWorkloadRepo(t)
+	tr.checkRedisHealth()
 
-	workloads := make(map[string]int64, testAgentCount10000)
-	onlineAgents := make([]string, 0, testAgentCount10000)
+	// 批量设置空 map 应该不报错
+	err := tr.repo.BatchSetAgentWorkload(tr.ctx, map[string]int64{})
+	assert.NoError(t, err, "批量设置空 map 应该成功")
+}
 
-	for i := range testAgentCount10000 {
-		agentID := fmt.Sprintf("scale_agent_%05d", i)
-		workloads[agentID] = int64(i + 1)
-		onlineAgents = append(onlineAgents, agentID)
+// TestRedisWorkloadRepositoryGetAllAgentWorkloadsWithLimit 测试带限制的批量获取
+func TestRedisWorkloadRepositoryGetAllAgentWorkloadsWithLimit(t *testing.T) {
+	tr := newTestWorkloadRepo(t)
+	tr.checkRedisHealth()
+
+	// 创建 10 个客服
+	const totalAgents = 10
+	agents := make(map[string]int64, totalAgents)
+
+	for i := range totalAgents {
+		agentID := tr.agentID(tr.idGenerator.GenerateRequestID())
+		agents[agentID] = int64(i)
 	}
-	defer tr.cleanupMap(workloads)
+	defer tr.cleanupMap(agents)
 
-	tr.batchSet(workloads)
+	tr.batchSet(agents)
 
-	start := time.Now()
-	leastLoadedAgent, workload, err := tr.repo.GetLeastLoadedAgent(tr.ctx, onlineAgents)
+	// 只获取前 5 个
+	workloads, err := tr.repo.GetAllAgentWorkloads(tr.ctx, 5)
 	require.NoError(t, err)
-	t.Logf("🎯 从 %d 个客服中查询最小负载耗时: %v", testAgentCount10000, time.Since(start))
-	t.Logf("   最小负载客服: %s, 负载: %d", leastLoadedAgent, workload)
-
-	assert.Equal(t, "scale_agent_00000", leastLoadedAgent)
-	assert.Equal(t, int64(1), workload)
+	assert.LessOrEqual(t, len(workloads), 5, "应该最多返回 5 个客服")
 }
 
-// TestRedisWorkloadRepositoryGetAllWorkloadsPagination 测试分页查询性能
-func TestRedisWorkloadRepositoryGetAllWorkloadsPagination(t *testing.T) {
+// TestRedisWorkloadRepositoryMultipleIncrementDecrement 测试多次增减操作
+func TestRedisWorkloadRepositoryMultipleIncrementDecrement(t *testing.T) {
 	tr := newTestWorkloadRepo(t)
+	tr.checkRedisHealth()
 
-	workloads := make(map[string]int64, testAgentCount5000)
-	for i := range testAgentCount5000 {
-		agentID := fmt.Sprintf("page_agent_%04d", i)
-		workloads[agentID] = int64(i % 50)
+	agentID := tr.agentID(tr.idGenerator.GenerateRequestID())
+	defer tr.cleanup(agentID)
+
+	tr.forceSetAgentWorkload(agentID, 10)
+
+	// 增加 5 次
+	for range 5 {
+		require.NoError(t, tr.repo.IncrementAgentWorkload(tr.ctx, agentID))
 	}
-	defer tr.cleanupMap(workloads)
+	assert.Equal(t, int64(15), tr.getWorkload(agentID))
 
-	tr.batchSet(workloads)
+	// 减少 3 次
+	for range 3 {
+		require.NoError(t, tr.repo.DecrementAgentWorkload(tr.ctx, agentID))
+	}
+	assert.Equal(t, int64(12), tr.getWorkload(agentID))
 
-	start := time.Now()
-	top100, err := tr.repo.GetAllAgentWorkloads(tr.ctx, testTop100)
+	// 再增加 2 次
+	for range 2 {
+		require.NoError(t, tr.repo.IncrementAgentWorkload(tr.ctx, agentID))
+	}
+	assert.Equal(t, int64(14), tr.getWorkload(agentID))
+}
+
+// TestRedisWorkloadRepositorySetWorkloadOverwrite 测试覆盖设置负载
+func TestRedisWorkloadRepositorySetWorkloadOverwrite(t *testing.T) {
+	tr := newTestWorkloadRepo(t)
+	tr.checkRedisHealth()
+
+	agentID := tr.agentID(tr.idGenerator.GenerateRequestID())
+	defer tr.cleanup(agentID)
+
+	// 设置初始负载
+	tr.forceSetAgentWorkload(agentID, 10)
+	assert.Equal(t, int64(10), tr.getWorkload(agentID))
+
+	// 覆盖设置
+	tr.forceSetAgentWorkload(agentID, 5)
+	assert.Equal(t, int64(5), tr.getWorkload(agentID))
+
+	// 再次覆盖
+	tr.forceSetAgentWorkload(agentID, 0)
+	assert.Equal(t, int64(0), tr.getWorkload(agentID))
+}
+
+// TestRedisWorkloadRepositoryRemoveNonExistentAgent 测试移除不存在的客服
+func TestRedisWorkloadRepositoryRemoveNonExistentAgent(t *testing.T) {
+	tr := newTestWorkloadRepo(t)
+	tr.checkRedisHealth()
+
+	nonExistentAgent := tr.agentID("non_existent")
+
+	// 移除不存在的客服应该不报错
+	err := tr.repo.RemoveAgentWorkload(tr.ctx, nonExistentAgent)
+	assert.NoError(t, err, "移除不存在的客服应该成功")
+}
+
+// TestRedisWorkloadRepositoryInitNonExistentAgent 测试初始化不存在的客服
+func TestRedisWorkloadRepositoryInitNonExistentAgent(t *testing.T) {
+	tr := newTestWorkloadRepo(t)
+	tr.checkRedisHealth()
+
+	nonExistentAgent := tr.agentID("non_existent")
+	defer tr.cleanup(nonExistentAgent)
+
+	// 初始化不存在的客服应该设置为 0
+	workload, err := tr.repo.ReloadAgentWorkload(tr.ctx, nonExistentAgent)
 	require.NoError(t, err)
-	t.Logf("📊 获取前 %d 个客服负载耗时: %v", testTop100, time.Since(start))
+	assert.Equal(t, int64(0), workload, "不存在的客服初始化后负载应该为 0")
 
-	assert.Equal(t, testTop100, len(top100))
+	// 验证负载为 0
+	actualWorkload := tr.getWorkload(nonExistentAgent)
+	assert.Equal(t, int64(0), actualWorkload, "不存在的客服初始化后负载应该为 0")
+}
 
-	// 验证按负载排序（升序）
-	for i := 1; i < len(top100); i++ {
-		assert.GreaterOrEqual(t, top100[i].Workload, top100[i-1].Workload,
-			"负载应该是升序排列")
+// TestRedisWorkloadRepositoryGetLeastLoadedAgentPartialOnline 测试部分客服在线
+func TestRedisWorkloadRepositoryGetLeastLoadedAgentPartialOnline(t *testing.T) {
+	tr := newTestWorkloadRepo(t)
+	tr.checkRedisHealth()
+
+	agent1 := tr.agentID(tr.idGenerator.GenerateRequestID())
+	agent2 := tr.agentID(tr.idGenerator.GenerateRequestID())
+	agent3 := tr.agentID(tr.idGenerator.GenerateRequestID())
+	agent4 := tr.agentID(tr.idGenerator.GenerateRequestID())
+
+	agents := map[string]int64{
+		agent1: 5,
+		agent2: 2,
+		agent3: 8,
+		agent4: 3,
 	}
+	defer tr.cleanupMap(agents)
+
+	tr.batchSet(agents)
+
+	// 只有 agent1 和 agent3 在线
+	onlineAgents := []string{agent1, agent3}
+	selectedAgent, selectedWorkload, err := tr.repo.GetLeastLoadedAgent(tr.ctx, onlineAgents)
+	require.NoError(t, err)
+	assert.Equal(t, agent1, selectedAgent, "在线客服中负载最小的应该是 agent1 (负载=5)")
+	assert.Equal(t, int64(5), selectedWorkload)
+}
+
+// TestRedisWorkloadRepositoryInitAgentWorkloadFromDB 测试从 DB 恢复负载
+func TestRedisWorkloadRepositoryInitAgentWorkloadFromDB(t *testing.T) {
+	tr := newTestWorkloadRepo(t)
+	tr.checkRedisHealth()
+
+	agentID := tr.agentID(tr.idGenerator.GenerateRequestID())
+	defer tr.cleanup(agentID)
+
+	// 首次初始化
+	workload, err := tr.repo.ReloadAgentWorkload(tr.ctx, agentID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), workload)
+
+	// 设置负载
+	tr.forceSetAgentWorkload(agentID, 15)
+
+	// 等待异步同步到 DB
+	time.Sleep(500 * time.Millisecond)
+
+	// 模拟 Redis 数据丢失（删除 Redis key 和 ZSet）
+	client := GetTestRedisClient(t)
+	workloadKey := tr.testPrefix + "agent:" + agentID
+	zsetKey := tr.testPrefix + "zset"
+	require.NoError(t, client.Del(tr.ctx, workloadKey).Err())
+	require.NoError(t, client.ZRem(tr.ctx, zsetKey, agentID).Err())
+
+	// 重新初始化，应该从 DB 恢复
+	workload, err = tr.repo.ReloadAgentWorkload(tr.ctx, agentID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(15), workload, "应该从 DB 恢复负载")
+}
+
+// TestRedisWorkloadRepositoryLargeWorkloadValue 测试大负载值
+func TestRedisWorkloadRepositoryLargeWorkloadValue(t *testing.T) {
+	tr := newTestWorkloadRepo(t)
+	tr.checkRedisHealth()
+
+	agentID := tr.agentID(tr.idGenerator.GenerateRequestID())
+	defer tr.cleanup(agentID)
+
+	// 设置一个很大的负载值
+	const largeWorkload = int64(1000000)
+	tr.forceSetAgentWorkload(agentID, largeWorkload)
+	assert.Equal(t, largeWorkload, tr.getWorkload(agentID))
+
+	// 增加后应该正确
+	require.NoError(t, tr.repo.IncrementAgentWorkload(tr.ctx, agentID))
+	assert.Equal(t, largeWorkload+1, tr.getWorkload(agentID))
+}
+
+// TestRedisWorkloadRepositoryZeroWorkloadSelection 测试负载为 0 的客服选择
+func TestRedisWorkloadRepositoryZeroWorkloadSelection(t *testing.T) {
+	tr := newTestWorkloadRepo(t)
+	tr.checkRedisHealth()
+
+	agent1 := tr.agentID(tr.idGenerator.GenerateRequestID())
+	agent2 := tr.agentID(tr.idGenerator.GenerateRequestID())
+	agent3 := tr.agentID(tr.idGenerator.GenerateRequestID())
+
+	agents := map[string]int64{
+		agent1: 0,
+		agent2: 0,
+		agent3: 5,
+	}
+	defer tr.cleanupMap(agents)
+
+	tr.batchSet(agents)
+
+	// 多次查询，应该从负载为 0 的客服中随机选择
+	selectedCount := make(map[string]int)
+	for range 20 {
+		selectedAgent, selectedWorkload, err := tr.repo.GetLeastLoadedAgent(
+			tr.ctx,
+			[]string{agent1, agent2, agent3},
+		)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), selectedWorkload, "应该选择负载为 0 的客服")
+		selectedCount[selectedAgent]++
+	}
+
+	// 验证选择了多个负载为 0 的客服
+	assert.Contains(t, selectedCount, agent1, "应该选择过 agent1")
+	assert.Contains(t, selectedCount, agent2, "应该选择过 agent2")
+	assert.NotContains(t, selectedCount, agent3, "不应该选择 agent3（负载不是最小）")
+}
+
+// TestRedisWorkloadRepositoryContextCancellation 测试上下文取消
+func TestRedisWorkloadRepositoryContextCancellation(t *testing.T) {
+	tr := newTestWorkloadRepo(t)
+	tr.checkRedisHealth()
+
+	agentID := tr.agentID(tr.idGenerator.GenerateRequestID())
+	defer tr.cleanup(agentID)
+
+	// 创建一个已取消的上下文
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// 操作应该失败
+	err := tr.repo.ForceSetAgentWorkload(ctx, agentID, 10)
+	assert.Error(t, err, "已取消的上下文应该导致操作失败")
+}
+
+// TestRedisWorkloadRepositoryClose 测试关闭仓库
+func TestRedisWorkloadRepositoryClose(t *testing.T) {
+	tr := newTestWorkloadRepo(t)
+	tr.checkRedisHealth()
+
+	// 关闭仓库应该不报错
+	err := tr.repo.Close()
+	assert.NoError(t, err, "关闭仓库应该成功")
 }

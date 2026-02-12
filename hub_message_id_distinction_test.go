@@ -21,7 +21,7 @@ import (
 // TestHubMessageIDVsHubIDDistinction 验证 Hub ID 和 MessageID 不会混淆
 func TestHubMessageIDVsHubIDDistinction(t *testing.T) {
 	ctx := context.Background()
-	db := getTestDB(t)
+	db := GetTestDBWithMigration(t, &MessageSendRecord{})
 	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 
 	// 创建消息，Hub ID 和 MessageID 应该不同
@@ -105,7 +105,7 @@ func TestMessageRecordIDFields(t *testing.T) {
 
 // TestRetryWithCorrectMessageID 测试重试时使用正确的 MessageID
 func TestRetryWithCorrectMessageID(t *testing.T) {
-	db := getTestDB(t)
+	db := GetTestDBWithMigration(t, &MessageSendRecord{})
 	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 
 	ctx := context.Background()

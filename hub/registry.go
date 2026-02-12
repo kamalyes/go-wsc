@@ -437,7 +437,7 @@ func (h *Hub) removeOnlineStatusFromRedis(client *Client) {
 			)
 		}).
 		ExecWithContext(func(ctx context.Context) error {
-			return h.onlineStatusRepo.SetOffline(ctx, client.UserID)
+			return h.onlineStatusRepo.SetClientOffline(ctx, client.ID)
 		})
 }
 

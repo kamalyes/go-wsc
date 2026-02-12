@@ -37,11 +37,29 @@ type (
 
 	// OfflineMessageRecord 离线消息记录
 	OfflineMessageRecord = models.OfflineMessageRecord
+
+	// AgentWorkloadModel 客服负载模型
+	AgentWorkloadModel = models.AgentWorkloadModel
+
+	// WorkloadDimension 客服负载统计维度
+	WorkloadDimension = models.WorkloadDimension
 )
 
 // 变量别名 - 待推送的离线消息状态列表
 var (
 	PendingOfflineStatuses = models.PendingOfflineStatuses
+
+	// AllWorkloadDimensions 所有负载统计维度
+	AllWorkloadDimensions = models.AllWorkloadDimensions
+)
+
+// 常量别名 - 负载统计维度
+const (
+	WorkloadDimensionRealtime = models.WorkloadDimensionRealtime
+	WorkloadDimensionHourly   = models.WorkloadDimensionHourly
+	WorkloadDimensionDaily    = models.WorkloadDimensionDaily
+	WorkloadDimensionMonthly  = models.WorkloadDimensionMonthly
+	WorkloadDimensionYearly   = models.WorkloadDimensionYearly
 )
 
 // 常量别名 - 消息发送状态

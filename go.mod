@@ -5,11 +5,11 @@ go 1.24.0
 require (
 	github.com/gorilla/websocket v1.4.2
 	github.com/jpillora/backoff v1.0.0
-	github.com/kamalyes/go-cachex v0.1.9-0.20260210130507-3ff696cddf33
-	github.com/kamalyes/go-config v0.12.14-0.20260211151031-7d53e56682af
-	github.com/kamalyes/go-logger v0.4.6-0.20260210115439-15e24847425f
-	github.com/kamalyes/go-sqlbuilder v0.3.6-0.20260210130159-ae4228ccc5d4
-	github.com/kamalyes/go-toolbox v0.11.87-0.20260211054056-e72651989762
+	github.com/kamalyes/go-cachex v0.1.9-0.20260212101036-b4b9137da8a1
+	github.com/kamalyes/go-config v0.12.14-0.20260225023836-7a5fe2b758ca
+	github.com/kamalyes/go-logger v0.4.6-0.20260225023232-4e3265b5f0ad
+	github.com/kamalyes/go-sqlbuilder v0.3.6-0.20260213075017-71dcc9ba964e
+	github.com/kamalyes/go-toolbox v0.11.87-0.20260225023120-3d068cdb1fd5
 	github.com/redis/go-redis/v9 v9.17.3
 	github.com/stretchr/testify v1.11.1
 	gorm.io/driver/mysql v1.6.0
@@ -49,7 +49,7 @@ require (
 	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
-	google.golang.org/grpc v1.78.0 // indirect
+	google.golang.org/grpc v1.79.1 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

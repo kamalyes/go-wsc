@@ -37,7 +37,7 @@ type testMessageRecordContext struct {
 func newTestMessageRecordContext(t *testing.T) *testMessageRecordContext {
 	return &testMessageRecordContext{
 		t:          t,
-		repo:       NewMessageRecordRepository(getTestDB(t), nil, NewDefaultWSCLogger()),
+		repo:       NewMessageRecordRepository(GetTestDBWithMigration(t, &MessageSendRecord{}), nil, NewDefaultWSCLogger()),
 		cleanupIDs: make([]string, 0),
 	}
 }
@@ -297,9 +297,8 @@ func TestMessageRecordRepositoryIncrementRetry(t *testing.T) {
 }
 
 func TestMessageRecordRepositoryFindByStatus(t *testing.T) {
-	db := getTestDB(t)
-	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
-
+	tc := newTestMessageRecordContext(t)
+	defer tc.cleanup()
 	ctx := context.Background()
 
 	// 生成唯一ID
@@ -308,13 +307,7 @@ func TestMessageRecordRepositoryFindByStatus(t *testing.T) {
 		osx.HashUnixMicroCipherText(),
 		osx.HashUnixMicroCipherText(),
 	}
-
-	// 清理测试数据
-	defer func() {
-		for _, msgID := range msgIDs {
-			_ = repo.DeleteByMessageID(ctx, msgID)
-		}
-	}()
+	tc.cleanupIDs = append(tc.cleanupIDs, msgIDs...)
 
 	// 创建不同状态的记录
 	statuses := []MessageSendStatus{
@@ -326,18 +319,18 @@ func TestMessageRecordRepositoryFindByStatus(t *testing.T) {
 	for i, status := range statuses {
 		msg := createTestHubMessage(MessageTypeText)
 		msg.MessageID = msgIDs[i] // 设置业务消息ID
-		record, err := repo.CreateFromMessage(ctx, msg, 3, nil)
+		record, err := tc.repo.CreateFromMessage(ctx, msg, 3, nil)
 		require.NoError(t, err)
 
 		if status != MessageSendStatusPending {
-			err = repo.UpdateStatus(ctx, record.MessageID, status, "", "")
+			err = tc.repo.UpdateStatus(ctx, record.MessageID, status, "", "")
 			require.NoError(t, err)
 		}
 	}
 
 	// 查找待发送的记录
 	pendState := MessageSendStatusPending
-	pending, err := repo.QueryRecords(ctx, &MessageRecordFilter{
+	pending, err := tc.repo.QueryRecords(ctx, &MessageRecordFilter{
 		Status:    &pendState,
 		Limit:     10,
 		OrderDesc: true,
@@ -347,7 +340,7 @@ func TestMessageRecordRepositoryFindByStatus(t *testing.T) {
 
 	// 查找成功的记录
 	successState := MessageSendStatusSuccess
-	success, err := repo.QueryRecords(ctx, &MessageRecordFilter{
+	success, err := tc.repo.QueryRecords(ctx, &MessageRecordFilter{
 		Status:    &successState,
 		Limit:     10,
 		OrderDesc: true,
@@ -357,7 +350,7 @@ func TestMessageRecordRepositoryFindByStatus(t *testing.T) {
 
 	// 查找失败的记录
 	failedState := MessageSendStatusFailed
-	failed, err := repo.QueryRecords(ctx, &MessageRecordFilter{
+	failed, err := tc.repo.QueryRecords(ctx, &MessageRecordFilter{
 		Status:    &failedState,
 		Limit:     10,
 		OrderDesc: true,
@@ -367,22 +360,18 @@ func TestMessageRecordRepositoryFindByStatus(t *testing.T) {
 }
 
 func TestMessageRecordRepositoryFindBySenderAndReceiver(t *testing.T) {
-	db := getTestDB(t)
-	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
-
+	tc := newTestMessageRecordContext(t)
+	defer tc.cleanup()
 	ctx := context.Background()
 
 	msg := createTestHubMessage(MessageTypeText)
-	// 清理测试数据
-	defer func() {
-		_ = repo.DeleteByMessageID(ctx, msg.MessageID)
-	}()
+	tc.cleanupIDs = append(tc.cleanupIDs, msg.MessageID)
 
-	_, err := repo.CreateFromMessage(ctx, msg, 3, nil)
+	_, err := tc.repo.CreateFromMessage(ctx, msg, 3, nil)
 	require.NoError(t, err)
 
 	// 按发送者查找
-	senderRecords, err := repo.QueryRecords(ctx, &MessageRecordFilter{
+	senderRecords, err := tc.repo.QueryRecords(ctx, &MessageRecordFilter{
 		Sender:    msg.Sender,
 		Limit:     10,
 		OrderDesc: true,
@@ -399,7 +388,7 @@ func TestMessageRecordRepositoryFindBySenderAndReceiver(t *testing.T) {
 	assert.True(t, found)
 
 	// 按接收者查找
-	receiverRecords, err := repo.QueryRecords(ctx, &MessageRecordFilter{
+	receiverRecords, err := tc.repo.QueryRecords(ctx, &MessageRecordFilter{
 		Receiver:  msg.Receiver,
 		Limit:     10,
 		OrderDesc: true,
@@ -417,16 +406,12 @@ func TestMessageRecordRepositoryFindBySenderAndReceiver(t *testing.T) {
 }
 
 func TestMessageRecordRepositoryFindByNodeIPAndClientIP(t *testing.T) {
-	db := getTestDB(t)
-	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
-
+	tc := newTestMessageRecordContext(t)
+	defer tc.cleanup()
 	ctx := context.Background()
 
 	msg := createTestHubMessage(MessageTypeText)
-	// 清理测试数据
-	defer func() {
-		_ = repo.DeleteByMessageID(ctx, msg.MessageID)
-	}()
+	tc.cleanupIDs = append(tc.cleanupIDs, msg.MessageID)
 
 	record := &MessageSendRecord{
 		Status:     MessageSendStatusPending,
@@ -437,11 +422,11 @@ func TestMessageRecordRepositoryFindByNodeIPAndClientIP(t *testing.T) {
 	}
 	err := record.SetMessage(msg)
 	require.NoError(t, err)
-	err = repo.Create(ctx, record)
+	err = tc.repo.Create(ctx, record)
 	require.NoError(t, err)
 
 	// 按节点IP查找
-	nodeRecords, err := repo.QueryRecords(ctx, &MessageRecordFilter{
+	nodeRecords, err := tc.repo.QueryRecords(ctx, &MessageRecordFilter{
 		NodeIP:    "192.168.100.50",
 		Limit:     10,
 		OrderDesc: true,
@@ -459,7 +444,7 @@ func TestMessageRecordRepositoryFindByNodeIPAndClientIP(t *testing.T) {
 	assert.True(t, found)
 
 	// 按客户端IP查找
-	clientRecords, err := repo.QueryRecords(ctx, &MessageRecordFilter{
+	clientRecords, err := tc.repo.QueryRecords(ctx, &MessageRecordFilter{
 		ClientIP:  "10.20.30.40",
 		Limit:     10,
 		OrderDesc: true,
@@ -478,29 +463,24 @@ func TestMessageRecordRepositoryFindByNodeIPAndClientIP(t *testing.T) {
 }
 
 func TestMessageRecordRepositoryFindRetryable(t *testing.T) {
-	db := getTestDB(t)
-	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
-
-	ctx := context.Background()
-
-	// 使用testContext创建唯一的测试消息
 	tc := newTestMessageRecordContext(t)
 	defer tc.cleanup()
+	ctx := context.Background()
 
 	// 创建可重试的失败记录
 	_, msg1 := tc.createTestHubMessage()
-	record1, err := repo.CreateFromMessage(ctx, msg1, 3, nil)
+	record1, err := tc.repo.CreateFromMessage(ctx, msg1, 3, nil)
 	require.NoError(t, err)
 
 	// 创建超过最大重试次数的记录
 	_, msg2 := tc.createTestHubMessage()
-	record2, err := repo.CreateFromMessage(ctx, msg2, 1, nil)
+	record2, err := tc.repo.CreateFromMessage(ctx, msg2, 1, nil)
 	require.NoError(t, err)
 
-	err = repo.UpdateStatus(ctx, record1.MessageID, MessageSendStatusFailed, FailureReasonNetworkError, "timeout")
+	err = tc.repo.UpdateStatus(ctx, record1.MessageID, MessageSendStatusFailed, FailureReasonNetworkError, "timeout")
 	require.NoError(t, err)
 
-	err = repo.IncrementRetry(ctx, record2.MessageID, RetryAttempt{
+	err = tc.repo.IncrementRetry(ctx, record2.MessageID, RetryAttempt{
 		AttemptNumber: 1,
 		Timestamp:     time.Now(),
 		Success:       false,
@@ -508,7 +488,7 @@ func TestMessageRecordRepositoryFindRetryable(t *testing.T) {
 	require.NoError(t, err)
 
 	// 查找可重试的记录(使用大limit以包含所有测试数据)
-	retryable, err := repo.FindRetryable(ctx, 100)
+	retryable, err := tc.repo.FindRetryable(ctx, 100)
 	assert.NoError(t, err)
 
 	// 验证第一条记录在可重试列表中
@@ -524,41 +504,36 @@ func TestMessageRecordRepositoryFindRetryable(t *testing.T) {
 }
 
 func TestMessageRecordRepositoryDeleteExpired(t *testing.T) {
-	db := getTestDB(t)
-	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
-
+	tc := newTestMessageRecordContext(t)
+	defer tc.cleanup()
 	ctx := context.Background()
 
 	// 创建过期的记录
 	msg := createTestHubMessage(MessageTypeText)
-
-	// 清理测试数据
-	defer func() {
-		_ = repo.DeleteByMessageID(ctx, msg.MessageID)
-	}()
+	tc.cleanupIDs = append(tc.cleanupIDs, msg.MessageID)
 
 	pastTime := time.Now().Add(-1 * time.Hour) // 1小时前过期
-	record, err := repo.CreateFromMessage(ctx, msg, 3, &pastTime)
+	record, err := tc.repo.CreateFromMessage(ctx, msg, 3, &pastTime)
 	require.NoError(t, err)
 
 	// 删除过期的记录
-	deletedCount, err := repo.DeleteExpired(ctx)
+	deletedCount, err := tc.repo.DeleteExpired(ctx)
 	assert.NoError(t, err)
 	assert.GreaterOrEqual(t, deletedCount, int64(1), "应该至少删除1条过期记录")
 
 	// 验证记录已被删除
-	_, err = repo.FindByMessageID(ctx, msg.MessageID)
+	_, err = tc.repo.FindByMessageID(ctx, msg.MessageID)
 	assert.Error(t, err, "过期记录应该已被删除")
 
 	_ = record
 }
 
 func TestMessageRecordRepositoryGetStatistics(t *testing.T) {
-	db := getTestDB(t)
-	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
-
+	tc := newTestMessageRecordContext(t)
+	defer tc.cleanup()
 	ctx := context.Background()
-	stats, err := repo.GetStatistics(ctx)
+
+	stats, err := tc.repo.GetStatistics(ctx)
 	assert.NoError(t, err)
 	assert.NotNil(t, stats)
 	assert.Contains(t, stats, "total")
@@ -568,48 +543,45 @@ func TestMessageRecordRepositoryGetStatistics(t *testing.T) {
 }
 
 func TestMessageRecordRepositoryCleanupOld(t *testing.T) {
-	db := getTestDB(t)
-	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
-
+	tc := newTestMessageRecordContext(t)
+	defer tc.cleanup()
 	ctx := context.Background()
+
 	// 创建旧记录
 	msg := createTestHubMessage(MessageTypeText)
-	record, err := repo.CreateFromMessage(ctx, msg, 3, nil)
+	tc.cleanupIDs = append(tc.cleanupIDs, msg.MessageID)
+	record, err := tc.repo.CreateFromMessage(ctx, msg, 3, nil)
 	require.NoError(t, err)
 
 	// 更新为成功状态
-	err = repo.UpdateStatus(ctx, record.MessageID, MessageSendStatusSuccess, "", "")
+	err = tc.repo.UpdateStatus(ctx, record.MessageID, MessageSendStatusSuccess, "", "")
 	require.NoError(t, err)
 
 	// 手动设置创建时间为很久以前
 	oldTime := time.Now().Add(-365 * 24 * time.Hour) // 1年前
-	err = repo.GetDB().Model(&MessageSendRecord{}).
+	err = tc.repo.GetDB().Model(&MessageSendRecord{}).
 		Where("message_id = ?", record.MessageID).
 		Update("create_time", oldTime).Error
 	require.NoError(t, err)
 
 	// 清理30天前的记录
 	cutoff := time.Now().Add(-30 * 24 * time.Hour)
-	deleted, err := repo.CleanupOld(ctx, cutoff)
+	deleted, err := tc.repo.CleanupOld(ctx, cutoff)
 	assert.NoError(t, err)
 	assert.GreaterOrEqual(t, deleted, int64(1))
 
 	// 验证记录已删除
-	_, err = repo.FindByMessageID(ctx, msg.MessageID)
+	_, err = tc.repo.FindByMessageID(ctx, msg.MessageID)
 	assert.Error(t, err) // 应该找不到
 }
 
 func TestMessageSendRecordJSONFields(t *testing.T) {
-	db := getTestDB(t)
-	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
-
+	tc := newTestMessageRecordContext(t)
+	defer tc.cleanup()
 	ctx := context.Background()
 
 	msg := createTestHubMessage(MessageTypeText)
-	// 清理测试数据
-	defer func() {
-		_ = repo.DeleteByMessageID(ctx, msg.MessageID)
-	}()
+	tc.cleanupIDs = append(tc.cleanupIDs, msg.MessageID)
 
 	record := &MessageSendRecord{
 		Status:     MessageSendStatusPending,
@@ -629,11 +601,11 @@ func TestMessageSendRecordJSONFields(t *testing.T) {
 	err := record.SetMessage(msg)
 	require.NoError(t, err)
 
-	err = repo.Create(ctx, record)
+	err = tc.repo.Create(ctx, record)
 	require.NoError(t, err)
 
 	// 重新查询验证JSON字段
-	found, err := repo.FindByMessageID(ctx, msg.MessageID)
+	found, err := tc.repo.FindByMessageID(ctx, msg.MessageID)
 	assert.NoError(t, err)
 	assert.NotNil(t, found.Metadata)
 	assert.Equal(t, "high", found.Metadata["priority"])
@@ -645,15 +617,14 @@ func TestMessageSendRecordJSONFields(t *testing.T) {
 }
 
 func TestMessageRecordRepositoryConcurrency(t *testing.T) {
-	db := getTestDB(t)
-	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
+	tc := newTestMessageRecordContext(t)
+	defer tc.cleanup()
 
 	// 并发创建记录
 	const goroutines = 10
 	done := make(chan bool, goroutines)
 
 	// 用于收集需要清理的消息ID
-	var cleanupIDs []string
 	var cleanupMu sync.Mutex
 
 	for i := 0; i < goroutines; i++ {
@@ -665,10 +636,10 @@ func TestMessageRecordRepositoryConcurrency(t *testing.T) {
 
 			// 收集消息ID用于清理
 			cleanupMu.Lock()
-			cleanupIDs = append(cleanupIDs, msg.MessageID)
+			tc.cleanupIDs = append(tc.cleanupIDs, msg.MessageID)
 			cleanupMu.Unlock()
 
-			_, err := repo.CreateFromMessage(ctx, msg, 3, nil)
+			_, err := tc.repo.CreateFromMessage(ctx, msg, 3, nil)
 			assert.NoError(t, err, "goroutine %d: 创建消息记录失败", index)
 		}(i)
 	}
@@ -677,25 +648,17 @@ func TestMessageRecordRepositoryConcurrency(t *testing.T) {
 	for i := 0; i < goroutines; i++ {
 		<-done
 	}
-
-	// 清理所有创建的记录
-	for _, msgID := range cleanupIDs {
-		_ = repo.DeleteByMessageID(context.Background(), msgID)
-	}
 }
 
 // TestMessageRecordStatusUpdateFields 测试消息状态更新时字段是否正确更新
 func TestMessageRecordStatusUpdateFields(t *testing.T) {
-	db := getTestDB(t)
-	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
-
+	tc := newTestMessageRecordContext(t)
+	defer tc.cleanup()
 	ctx := context.Background()
 
 	// 1. 创建Pending状态的记录
 	msg := createTestHubMessage(MessageTypeText)
-	defer func() {
-		_ = repo.DeleteByMessageID(ctx, msg.MessageID)
-	}()
+	tc.cleanupIDs = append(tc.cleanupIDs, msg.MessageID)
 
 	record := &MessageSendRecord{
 		Status:     MessageSendStatusPending,
@@ -705,14 +668,14 @@ func TestMessageRecordStatusUpdateFields(t *testing.T) {
 	}
 	err := record.SetMessage(msg)
 	require.NoError(t, err)
-	err = repo.Create(ctx, record)
+	err = tc.repo.Create(ctx, record)
 	require.NoError(t, err)
 
 	// 2. 更新为Sending状态，验证first_send_time被设置
-	err = repo.UpdateStatus(ctx, msg.MessageID, MessageSendStatusSending, "", "")
+	err = tc.repo.UpdateStatus(ctx, msg.MessageID, MessageSendStatusSending, "", "")
 	assert.NoError(t, err)
 
-	record1, err := repo.FindByMessageID(ctx, msg.MessageID)
+	record1, err := tc.repo.FindByMessageID(ctx, msg.MessageID)
 	require.NoError(t, err)
 	assert.Equal(t, MessageSendStatusSending, record1.Status)
 	assert.NotNil(t, record1.FirstSendTime, "更新为Sending状态时应设置FirstSendTime")
@@ -723,10 +686,10 @@ func TestMessageRecordStatusUpdateFields(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// 3. 更新为Success状态，验证success_time被设置
-	err = repo.UpdateStatus(ctx, msg.MessageID, MessageSendStatusSuccess, "", "")
+	err = tc.repo.UpdateStatus(ctx, msg.MessageID, MessageSendStatusSuccess, "", "")
 	assert.NoError(t, err)
 
-	record2, err := repo.FindByMessageID(ctx, msg.MessageID)
+	record2, err := tc.repo.FindByMessageID(ctx, msg.MessageID)
 	require.NoError(t, err)
 	assert.Equal(t, MessageSendStatusSuccess, record2.Status)
 	assert.NotNil(t, record2.SuccessTime, "更新为Success状态时应设置SuccessTime")
@@ -739,14 +702,12 @@ func TestMessageRecordStatusUpdateFields(t *testing.T) {
 
 // TestMessageRecordFailureFields 测试消息发送失败时字段是否正确更新
 func TestMessageRecordFailureFields(t *testing.T) {
-	db := getTestDB(t)
-	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
+	tc := newTestMessageRecordContext(t)
+	defer tc.cleanup()
+	ctx := context.Background()
 
 	msgID := osx.HashUnixMicroCipherText()
-	ctx := context.Background()
-	defer func() {
-		_ = repo.DeleteByMessageID(ctx, msgID)
-	}()
+	tc.cleanupIDs = append(tc.cleanupIDs, msgID)
 
 	// 1. 创建记录
 	msg := &HubMessage{
@@ -759,7 +720,7 @@ func TestMessageRecordFailureFields(t *testing.T) {
 		ReceiverType:        UserTypeAgent,
 		SessionID:           "session_" + msgID,
 		Content:             "test message",
-		Data:                map[string]interface{}{"test": "data"},
+		Data:                map[string]any{"test": "data"},
 		CreateAt:            time.Now(),
 		SeqNo:               time.Now().UnixMicro(),
 		Priority:            PriorityNormal,
@@ -776,11 +737,11 @@ func TestMessageRecordFailureFields(t *testing.T) {
 	}
 	err := record.SetMessage(msg)
 	require.NoError(t, err)
-	err = repo.Create(ctx, record)
+	err = tc.repo.Create(ctx, record)
 	require.NoError(t, err)
 
 	// 2. 更新为Sending状态
-	err = repo.UpdateStatus(ctx, msgID, MessageSendStatusSending, "", "")
+	err = tc.repo.UpdateStatus(ctx, msgID, MessageSendStatusSending, "", "")
 	require.NoError(t, err)
 
 	time.Sleep(100 * time.Millisecond)
@@ -788,10 +749,10 @@ func TestMessageRecordFailureFields(t *testing.T) {
 	// 3. 更新为Failed状态，验证failure_reason和error_message被设置
 	testReason := FailureReasonConnError
 	testError := "connection timeout"
-	err = repo.UpdateStatus(ctx, msgID, MessageSendStatusFailed, testReason, testError)
+	err = tc.repo.UpdateStatus(ctx, msgID, MessageSendStatusFailed, testReason, testError)
 	assert.NoError(t, err)
 
-	record1, err := repo.FindByMessageID(ctx, msgID)
+	record1, err := tc.repo.FindByMessageID(ctx, msgID)
 	require.NoError(t, err)
 	assert.Equal(t, MessageSendStatusFailed, record1.Status)
 	assert.Equal(t, testReason, record1.FailureReason, "失败时应设置FailureReason")
@@ -803,16 +764,13 @@ func TestMessageRecordFailureFields(t *testing.T) {
 
 // TestMessageRecordRetryFields 测试消息重试时字段是否正确更新
 func TestMessageRecordRetryFields(t *testing.T) {
-	db := getTestDB(t)
-	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
-
+	tc := newTestMessageRecordContext(t)
+	defer tc.cleanup()
 	ctx := context.Background()
 
 	// 1. 创建记录
 	msg := createTestHubMessage(MessageTypeText)
-	defer func() {
-		_ = repo.DeleteByMessageID(ctx, msg.MessageID)
-	}()
+	tc.cleanupIDs = append(tc.cleanupIDs, msg.MessageID)
 
 	record := &MessageSendRecord{
 		Status:     MessageSendStatusPending,
@@ -822,7 +780,7 @@ func TestMessageRecordRetryFields(t *testing.T) {
 	}
 	err := record.SetMessage(msg)
 	require.NoError(t, err)
-	err = repo.Create(ctx, record)
+	err = tc.repo.Create(ctx, record)
 	require.NoError(t, err)
 
 	// 2. 第一次重试（失败）
@@ -833,10 +791,10 @@ func TestMessageRecordRetryFields(t *testing.T) {
 		Error:         "first retry error",
 		Success:       false,
 	}
-	err = repo.IncrementRetry(ctx, msg.MessageID, attempt1)
+	err = tc.repo.IncrementRetry(ctx, msg.MessageID, attempt1)
 	assert.NoError(t, err)
 
-	record1, err := repo.FindByMessageID(ctx, msg.MessageID)
+	record1, err := tc.repo.FindByMessageID(ctx, msg.MessageID)
 	require.NoError(t, err)
 	assert.Equal(t, 1, record1.RetryCount, "重试次数应为1")
 	assert.Equal(t, MessageSendStatusRetrying, record1.Status, "状态应为Retrying")
@@ -855,10 +813,10 @@ func TestMessageRecordRetryFields(t *testing.T) {
 		Error:         "",
 		Success:       true,
 	}
-	err = repo.IncrementRetry(ctx, msg.MessageID, attempt2)
+	err = tc.repo.IncrementRetry(ctx, msg.MessageID, attempt2)
 	assert.NoError(t, err)
 
-	record2, err := repo.FindByMessageID(ctx, msg.MessageID)
+	record2, err := tc.repo.FindByMessageID(ctx, msg.MessageID)
 	require.NoError(t, err)
 	assert.Equal(t, 2, record2.RetryCount, "重试次数应为2")
 	assert.Equal(t, MessageSendStatusSuccess, record2.Status, "重试成功状态应为Success")

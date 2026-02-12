@@ -59,11 +59,16 @@ func TestObserverMultiDevice(t *testing.T) {
 	defer hub.Shutdown()
 	time.Sleep(50 * time.Millisecond)
 
-	// 同一观察者从3个设备登录
+	// 同一观察者从3个设备登录（共享同一个 UserID）
+	sharedUserID := getTestIDGenerator().GenerateRequestID()
 	observers := []*Client{
 		createTestClientWithIDGen(UserTypeObserver),
 		createTestClientWithIDGen(UserTypeObserver),
 		createTestClientWithIDGen(UserTypeObserver),
+	}
+	// 设置相同的 UserID
+	for _, obs := range observers {
+		obs.UserID = sharedUserID
 	}
 
 	registerClients(hub, observers)
@@ -135,25 +140,30 @@ func TestObserverWithNormalUsers(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	assert.Equal(t, 1, hub.GetObserverCount())
-	assert.Equal(t, 3, len(hub.GetClientsCopy()), "总共3个客户端")
+
+	// GetClientsCopy 返回所有客户端（包括观察者）
+	allClients := hub.GetClientsCopy()
+	assert.Equal(t, 4, len(allClients), "总共4个客户端（包括观察者）")
 
 	// 验证观察者不影响其他用户类型的统计
-	allClients := hub.GetClientsCopy()
-	var customerCount, agentCount, observerCount int
+	var customerCount, agentCount, adminCount, observerCount int
 	for _, client := range allClients {
 		switch client.UserType {
 		case UserTypeCustomer:
 			customerCount++
 		case UserTypeAgent:
 			agentCount++
+		case UserTypeAdmin:
+			adminCount++
 		case UserTypeObserver:
 			observerCount++
 		}
 	}
 
-	assert.Equal(t, 1, customerCount)
-	assert.Equal(t, 1, agentCount)
-	assert.Equal(t, 1, observerCount)
+	assert.Equal(t, 1, customerCount, "应该有1个客户")
+	assert.Equal(t, 1, agentCount, "应该有1个客服")
+	assert.Equal(t, 1, adminCount, "应该有1个管理员")
+	assert.Equal(t, 1, observerCount, "应该有1个观察者")
 }
 
 // TestObserverReceiveMessages 测试观察者接收消息

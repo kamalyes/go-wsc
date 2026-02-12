@@ -11,7 +11,10 @@
 
 package wsc
 
-import "github.com/kamalyes/go-wsc/repository"
+import (
+	"github.com/kamalyes/go-wsc/models"
+	"github.com/kamalyes/go-wsc/repository"
+)
 
 // ============================================
 // Connection Repository - 连接记录仓储
@@ -128,6 +131,21 @@ var NewRedisOnlineStatusRepository = repository.NewRedisOnlineStatusRepository
 
 // WorkloadInfo 工作负载信息
 type WorkloadInfo = repository.WorkloadInfo
+
+// AgentWorkloadModel 客服当前负载模型
+type AgentWorkloadModel = models.AgentWorkloadModel
+
+// WorkloadDimension 负载统计维度
+type WorkloadDimension = models.WorkloadDimension
+
+// 导出所有维度常量
+const (
+	WorkloadDimensionRealtime = models.WorkloadDimensionRealtime
+	WorkloadDimensionHourly   = models.WorkloadDimensionHourly
+	WorkloadDimensionDaily    = models.WorkloadDimensionDaily
+	WorkloadDimensionMonthly  = models.WorkloadDimensionMonthly
+	WorkloadDimensionYearly   = models.WorkloadDimensionYearly
+)
 
 // WorkloadRepository 工作负载仓储接口
 type WorkloadRepository = repository.WorkloadRepository

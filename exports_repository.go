@@ -11,7 +11,9 @@
 
 package wsc
 
-import "github.com/kamalyes/go-wsc/repository"
+import (
+	"github.com/kamalyes/go-wsc/repository"
+)
 
 // ============================================
 // Connection Repository - 连接记录仓储
@@ -154,15 +156,13 @@ var NewRedisWorkloadRepository = repository.NewRedisWorkloadRepository
 // - GetAgentWorkload(ctx context.Context, agentID string) (int64, error): 获取客服工作负载
 // - IncrementAgentWorkload(ctx context.Context, agentID string) error: 增加客服工作负载
 // - DecrementAgentWorkload(ctx context.Context, agentID string) error: 减少客服工作负载
-// - GetLeastLoadedAgent(ctx context.Context, onlineAgents []string) (string, int64, error): 获取负载最低的客服
+// - GetLeastLoadedAgent(ctx context.Context, onlineAgents []string, dimension WorkloadDimension) (string, int64, error): 获取负载最低的客服
 // - RemoveAgentWorkload(ctx context.Context, agentID string) error: 移除客服工作负载
 // - GetAllAgentWorkloads(ctx context.Context, limit int64) ([]WorkloadInfo, error): 获取所有客服工作负载
-// - BatchSetAgentWorkload(ctx context.Context, workloads map[string]int64) error: 批量设置客服工作负载
 
 // RedisWorkloadRepository 特有方法：
-// - GetTodayKey() string: 获取今日键
-// - GetWorkloadKey(agentID string) string: 获取工作负载键
-// - GetZSetKey() string: 获取有序集合键
+// - GetDimensionKey(dimension WorkloadDimension, agentID string, t time.Time) string: 获取指定维度的客服负载键
+// - GetDimensionZSetKey(dimension WorkloadDimension, t time.Time) string: 获取指定维度的有序集合键
 
 // ============================================
 // OnlineStatusRepository 接口方法

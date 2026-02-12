@@ -77,10 +77,18 @@ func (wsc *Wsc) createBackoff() *backoff.Backoff {
 // attemptConnection 尝试建立连接
 func (wsc *Wsc) attemptConnection() error {
 	// 使用 Dialer 建立 WebSocket 连接
-	var err error
-	wsc.WebSocket.Conn, wsc.WebSocket.HttpResponse, err =
-		wsc.WebSocket.Dialer.Dial(wsc.WebSocket.Url, wsc.WebSocket.RequestHeader)
-	return err
+	conn, httpResp, err := wsc.WebSocket.Dialer.Dial(wsc.WebSocket.Url, wsc.WebSocket.RequestHeader)
+	if err != nil {
+		return err
+	}
+
+	// 使用写锁保护 Conn 和 HttpResponse 的写入
+	wsc.WebSocket.connMu.Lock()
+	wsc.WebSocket.Conn = conn
+	wsc.WebSocket.HttpResponse = httpResp
+	wsc.WebSocket.connMu.Unlock()
+
+	return nil
 }
 
 // handleConnectError 处理连接错误

@@ -360,13 +360,7 @@ func (h *Hub) removeClientFromMaps(client *Client) {
 // syncClientRemovalToRedis 同步客户端移除到Redis
 func (h *Hub) syncClientRemovalToRedis(client *Client) {
 	h.syncActiveConnectionsToRedis()
-
-	// 🔥 只有当用户的所有客户端都断开后才设置为离线并移除负载
-	clientMap, exists := h.userToClients[client.UserID]
-	if !exists || len(clientMap) == 0 {
-		h.removeOnlineStatusFromRedis(client)
-		h.removeAgentWorkloadIfNeeded(client)
-	}
+	h.removeOnlineStatusFromRedis(client)
 }
 
 // syncActiveConnectionsToRedis 同步活跃连接数到Redis（使用防抖机制避免竞态条件）
@@ -433,37 +427,13 @@ func (h *Hub) removeOnlineStatusFromRedis(client *Client) {
 		OnError(func(err error) {
 			h.logger.ErrorKV("从Redis移除在线状态失败",
 				"user_id", client.UserID,
+				"client_id", client.ID,
 				"error", err,
 			)
 		}).
 		ExecWithContext(func(ctx context.Context) error {
-			return h.onlineStatusRepo.SetOffline(ctx, client.UserID)
+			return h.onlineStatusRepo.SetClientOffline(ctx, client)
 		})
-}
-
-// removeAgentWorkloadIfNeeded 如果是客服则从负载管理中移除
-func (h *Hub) removeAgentWorkloadIfNeeded(client *Client) {
-	if !h.isAgentClient(client) || h.workloadRepo == nil {
-		return
-	}
-
-	syncx.Go().
-		WithTimeout(2 * time.Second).
-		OnPanic(func(r interface{}) {
-			h.logger.ErrorKV("移除客服负载崩溃", "panic", r, "user_id", client.UserID)
-		}).
-		ExecWithContext(func(ctx context.Context) error {
-			err := h.workloadRepo.RemoveAgentWorkload(ctx, client.UserID)
-			if err == nil {
-				h.logger.InfoKV("已从负载管理移除客服", "user_id", client.UserID)
-			}
-			return err
-		})
-}
-
-// isAgentClient 检查是否是客服客户端
-func (h *Hub) isAgentClient(client *Client) bool {
-	return client.UserType == UserTypeAgent || client.UserType == UserTypeBot
 }
 
 // closeClientChannel 关闭客户端发送通道

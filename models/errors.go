@@ -264,6 +264,7 @@ var (
 	ErrOnlineStatusRepositoryNotSet = errorx.NewError(ErrTypeOnlineStatusRepositoryNotSet)
 	ErrStatsRepositoryNotSet        = errorx.NewError(ErrTypeStatsRepositoryNotSet)
 	ErrSendChannelFull              = errorx.NewError(ErrTypeSendChannelFull)
+	ErrUserNotFound                 = errorx.NewError(ErrTypeUserNotFound)
 	ErrClientNotFound               = errorx.NewError(ErrTypeClientNotFound)
 	ErrClientDisconnected           = errorx.NewError(ErrTypeClientDisconnected)
 )

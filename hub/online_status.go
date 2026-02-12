@@ -69,7 +69,7 @@ func (h *Hub) GetOnlineUsersByNode(nodeID string) ([]string, error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	return h.onlineStatusRepo.GetOnlineUsersByNode(ctx, nodeID)
+	return h.onlineStatusRepo.GetNodeUsers(ctx, nodeID)
 }
 
 // GetOnlineUserCount 获取在线用户总数
@@ -96,9 +96,9 @@ func (h *Hub) SyncOnlineStatusToRedis() error {
 	}
 
 	h.mutex.RLock()
-	clientsCopy := make(map[string]*Client, len(h.clients))
-	for id, client := range h.clients {
-		clientsCopy[id] = client
+	clientsArray := make([]*Client, 0, len(h.clients))
+	for _, client := range h.clients {
+		clientsArray = append(clientsArray, client)
 	}
 	h.mutex.RUnlock()
 
@@ -106,17 +106,17 @@ func (h *Hub) SyncOnlineStatusToRedis() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if err := h.onlineStatusRepo.BatchSetOnline(ctx, clientsCopy); err != nil {
+	if err := h.onlineStatusRepo.BatchSetClientsOnline(ctx, clientsArray); err != nil {
 		h.logger.ErrorKV("批量同步在线状态到Redis失败",
 			"error", err,
-			"count", len(clientsCopy),
+			"count", len(clientsArray),
 			"node_id", h.nodeID,
 		)
 		return err
 	}
 
 	h.logger.InfoKV("批量同步在线状态到Redis成功",
-		"count", len(clientsCopy),
+		"count", len(clientsArray),
 		"node_id", h.nodeID,
 	)
 

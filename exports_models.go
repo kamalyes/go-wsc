@@ -442,6 +442,26 @@ type (
 	ConnectionRecord = models.ConnectionRecord
 )
 
+// ==================== 负载统计相关 ====================
+
+// AgentWorkloadModel 客服负载模型
+type AgentWorkloadModel = models.AgentWorkloadModel
+
+// WorkloadDimension 负载统计维度
+type WorkloadDimension = models.WorkloadDimension
+
+// 导出所有维度常量
+const (
+	WorkloadDimensionRealtime = models.WorkloadDimensionRealtime // 实时（无过期）
+	WorkloadDimensionHourly   = models.WorkloadDimensionHourly   // 小时（保留7天）
+	WorkloadDimensionDaily    = models.WorkloadDimensionDaily    // 日（保留90天）
+	WorkloadDimensionMonthly  = models.WorkloadDimensionMonthly  // 月（保留13个月）
+	WorkloadDimensionYearly   = models.WorkloadDimensionYearly   // 年（保留5年）
+)
+
+// AllWorkloadDimensions 所有负载统计维度
+var AllWorkloadDimensions = models.AllWorkloadDimensions
+
 // ==================== 错误类型 ====================
 type (
 	ErrorType = models.ErrorType

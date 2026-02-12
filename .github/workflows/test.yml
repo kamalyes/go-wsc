@@ -18,23 +18,42 @@ jobs:
     strategy:
       matrix:
         go-version: [1.21.x, 1.22.x, 1.23.x, 1.24.x, 1.25.x]
-        platform: [ubuntu-latest, windows-latest, macos-latest, macos-14]
-      fail-fast: false # 允许其他矩阵作业继续运行，即使有些失败
-    runs-on: ${{ matrix.platform }}
-    timeout-minutes: 60 # 设置作业超时
+      fail-fast: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
 
-    # 🔥 全局环境变量
+    # 🔥 全局环境变量（可通过 GitHub Variables 覆盖）
     env:
-      # Redis 配置
-      REDIS_HOST: ${{ vars.TEST_REDIS_HOST || 'localhost' }}
-      REDIS_PORT: ${{ vars.TEST_REDIS_PORT || '6379' }}
-      REDIS_PASSWORD: ${{ vars.TEST_REDIS_PASSWORD || '' }}
-      # MySQL 配置
-      MYSQL_HOST: ${{ vars.TEST_MYSQL_HOST || 'localhost' }}
-      MYSQL_PORT: ${{ vars.TEST_MYSQL_PORT || '3306' }}
-      MYSQL_USER: ${{ vars.TEST_MYSQL_USER || 'root' }}
-      MYSQL_PASSWORD: ${{ vars.MYSQL_ROOT_PASSWORD || '1235678' }}
-      MYSQL_DATABASE: ${{ vars.TEST_MYSQL_DATABASE || 'go_wsc_test' }}
+      MYSQL_ROOT_PASSWORD: ${{ vars.MYSQL_ROOT_PASSWORD || 'test_password_123' }}
+      MYSQL_DATABASE: ${{ vars.MYSQL_DATABASE || 'go_wsc_test' }}
+      TEST_REDIS_ADDR: ${{ vars.TEST_REDIS_ADDR || 'localhost:6379' }}
+      TEST_REDIS_PASSWORD: ${{ vars.TEST_REDIS_PASSWORD || '' }}
+
+    # 🐳 服务容器
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: ${{ env.MYSQL_ROOT_PASSWORD }}
+          MYSQL_DATABASE: ${{ env.MYSQL_DATABASE }}
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
     steps:
       - name: Fetch Repository
         uses: actions/checkout@v5
@@ -43,23 +62,37 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go-version }}
+          cache: true
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-${{ matrix.go-version }}-
+            ${{ runner.os }}-go-
 
       - name: Install gotestsum
         run: go install gotest.tools/gotestsum@latest
-        continue-on-error: true # 如果安装失败，继续执行
+        continue-on-error: true
 
       - name: Download dependencies
         run: go mod download
         continue-on-error: true
 
       - name: Test (with coverage)
+        env:
+          TEST_MYSQL_DSN: root:${{ env.MYSQL_ROOT_PASSWORD }}@tcp(localhost:3306)/${{ env.MYSQL_DATABASE }}?charset=utf8mb4&parseTime=True&loc=Local&timeout=60s&readTimeout=60s&writeTimeout=60s
         run: gotestsum -f testname -- ./... -race -count=1 -timeout=30m -coverprofile=coverage.txt -covermode=atomic -shuffle=on
         timeout-minutes: 60
         continue-on-error: true # 即使测试失败也继续
 
       - name: Check coverage file exists
         id: check_coverage
-        if: matrix.platform == 'ubuntu-latest' && matrix.go-version == '1.22.x'
+        if: matrix.go-version == '1.22.x'
         run: |
           if [ -f coverage.txt ]; then
             echo "exists=true" >> $GITHUB_OUTPUT

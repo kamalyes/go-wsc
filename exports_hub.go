@@ -113,7 +113,7 @@ var (
 // - RemoveAgentWorkload(agentID string) error: 移除客服工作负载
 // - IncrementAgentWorkload(agentID string) error: 增加客服工作负载
 // - DecrementAgentWorkload(agentID string) error: 减少客服工作负载
-// - GetLeastLoadedAgent() (string, int64, error): 获取负载最低的客服
+// - GetLeastLoadedAgent(dimension WorkloadDimension) (string, int64, error): 获取负载最低的客服
 
 // SSE 相关方法：
 // - RegisterSSE(userID string, w http.ResponseWriter, userType UserType) (*Client, error): 注册SSE客户端

@@ -19,6 +19,7 @@ import (
 	"github.com/kamalyes/go-config/pkg/wsc"
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestClientCapacityByUserType 测试根据用户类型获取正确的容量
@@ -89,9 +90,8 @@ func TestRegisterClientWithCapacity(t *testing.T) {
 	hub := NewHub(config)
 	defer hub.SafeShutdown()
 
-	// 启动 Hub
 	go hub.Run()
-	time.Sleep(100 * time.Millisecond)
+	hub.WaitForStart()
 
 	// 创建不同类型的客户端
 	testCases := []struct {
@@ -116,16 +116,27 @@ func TestRegisterClientWithCapacity(t *testing.T) {
 				Metadata:       make(map[string]interface{}),
 			}
 
-			// 注册客户端
 			hub.Register(client)
-			time.Sleep(50 * time.Millisecond)
+
+			// 等待客户端注册完成
+			require.Eventually(t, func() bool {
+				return hub.HasClient(client.ID)
+			}, time.Second, 10*time.Millisecond, "客户端应该在 1 秒内注册成功")
+
+			// 从 Hub 获取已注册的客户端（线程安全）
+			registeredClient := hub.GetClientByID(client.ID)
+			require.NotNil(t, registeredClient, "应该能获取到已注册的客户端")
 
 			// 验证 SendChan 已初始化且容量正确
-			assert.NotNil(t, client.SendChan, "SendChan 应该已初始化")
-			assert.Equal(t, tc.expected, cap(client.SendChan), "容量应该匹配配置值")
+			assert.NotNil(t, registeredClient.SendChan, "SendChan 应该已初始化")
+			assert.Equal(t, tc.expected, cap(registeredClient.SendChan), "容量应该匹配配置值")
 
-			// 清理
 			hub.Unregister(client)
+
+			// 使用公开方法检查客户端是否已注销
+			require.Eventually(t, func() bool {
+				return !hub.HasClient(client.ID)
+			}, time.Second, 10*time.Millisecond, "客户端应该在 1 秒内注销")
 		})
 	}
 }

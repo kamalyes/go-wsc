@@ -135,6 +135,11 @@ func (h *Hub) Run() {
 		// ACK清理定时器：定期清理过期的ACK记录
 		// 使用配置中的 AckCleanupInterval (默认1分钟)
 		OnTicker(h.config.AckCleanupInterval, h.cleanupExpiredAck).
+		// 在线状态清理定时器：定期清理过期的在线状态数据
+		// 使用 OnlineStatus 配置中的 StatusRefreshInterval 和 EnableAutoCleanup
+		IfTicker(h.onlineStatusRepo != nil && h.config.RedisRepository.OnlineStatus != nil && h.config.RedisRepository.OnlineStatus.EnableAutoCleanup,
+			mathx.IfNotZero(h.config.RedisRepository.OnlineStatus.StatusRefreshInterval, 60*time.Second),
+			h.cleanupExpiredOnlineStatus).
 		// 添加消息记录清理定时器（如果启用了消息记录仓库）
 		IfTicker(h.messageRecordRepo != nil,
 			mathx.IfNotZero(h.config.RecordCleanupInterval, 30*time.Minute),
@@ -416,4 +421,23 @@ func (h *Hub) processPendingMessages() {
 // Shutdown 关闭Hub（旧API，兼容性方法）
 func (h *Hub) Shutdown() {
 	_ = h.SafeShutdown()
+}
+
+// cleanupExpiredOnlineStatus 清理过期的在线状态数据
+func (h *Hub) cleanupExpiredOnlineStatus() {
+	cleaned, err := h.onlineStatusRepo.CleanupExpired(h.ctx, h.nodeID)
+	if err != nil {
+		h.logger.ErrorKV("清理在线状态失败",
+			"error", err,
+			"node_id", h.nodeID,
+		)
+		return
+	}
+
+	if cleaned > 0 {
+		h.logger.InfoKV("清理过期在线状态",
+			"count", cleaned,
+			"node_id", h.nodeID,
+		)
+	}
 }

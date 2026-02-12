@@ -88,6 +88,7 @@ type (
 	MessageRecordFilter        = repository.MessageRecordFilter
 	OfflineMessageFilter       = repository.OfflineMessageFilter
 	MessageRole                = repository.MessageRole
+	WorkloadDimension          = models.WorkloadDimension
 )
 
 // 函数导入

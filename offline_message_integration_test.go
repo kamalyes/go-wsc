@@ -34,7 +34,7 @@ func TestOfflineMessageRealWorldScenario(t *testing.T) {
 
 	// 创建存储
 	redisClient := GetTestRedisClient(t)
-	db := GetTestDB(t)
+	db := GetTestDBWithMigration(t, &MessageSendRecord{}, &OfflineMessageRecord{})
 
 	// 创建仓库
 	onlineStatusRepo := NewRedisOnlineStatusRepository(redisClient, &wscconfig.OnlineStatus{
@@ -87,7 +87,7 @@ func TestOfflineMessageRealWorldScenario(t *testing.T) {
 	t.Log("========== 阶段1: 确认3个用户都离线 ==========")
 
 	for _, userID := range []string{user1, user2, user3} {
-		isOnline, _ := onlineStatusRepo.IsOnline(ctx, userID)
+		isOnline, _ := onlineStatusRepo.IsUserOnline(ctx, userID)
 		assert.False(t, isOnline, "用户 %s 应该是离线的", userID)
 	}
 	t.Log("✅ 确认：3个用户都是离线状态")
@@ -388,7 +388,7 @@ func TestOfflineMessage30MessagesStressTest(t *testing.T) {
 
 	// 创建存储
 	redisClient := GetTestRedisClient(t)
-	db := GetTestDB(t)
+	db := GetTestDBWithMigration(t, &MessageSendRecord{}, &OfflineMessageRecord{})
 
 	// 创建仓库
 	onlineStatusRepo := NewRedisOnlineStatusRepository(redisClient, &wscconfig.OnlineStatus{
@@ -437,7 +437,7 @@ func TestOfflineMessage30MessagesStressTest(t *testing.T) {
 	// ========== 阶段1: 确认用户离线 ==========
 	t.Log("========== 阶段1: 确认用户离线 ==========")
 
-	isOnline, _ := onlineStatusRepo.IsOnline(ctx, userID)
+	isOnline, _ := onlineStatusRepo.IsUserOnline(ctx, userID)
 	assert.False(t, isOnline, "用户应该是离线的")
 	t.Log("✅ 确认：用户处于离线状态")
 

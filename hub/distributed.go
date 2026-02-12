@@ -33,24 +33,32 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMe
 		return false, nil
 	}
 
-	// 1. 查询用户在哪个节点
-	nodeID, err := h.onlineStatusRepo.GetUserNode(ctx, userID)
+	// 1. 查询用户在哪些节点（支持多设备）
+	nodeIDs, err := h.onlineStatusRepo.GetUserNodes(ctx, userID)
 	if err != nil {
 		// 查询失败，假设用户在本节点或离线
 		return false, nil
 	}
 
-	// 2. 如果在本节点，返回 false (不需要路由)
-	if nodeID == "" || nodeID == h.nodeID {
+	// 2. 过滤掉本节点，只保留其他节点
+	var otherNodes []string
+	for _, nodeID := range nodeIDs {
+		if nodeID != "" && nodeID != h.nodeID {
+			otherNodes = append(otherNodes, nodeID)
+		}
+	}
+
+	// 3. 如果没有其他节点，返回 false
+	if len(otherNodes) == 0 {
 		return false, nil
 	}
 
-	// 3. 用户在其他节点，通过 PubSub 转发
+	// 4. 向所有其他节点转发消息
 	h.logger.DebugKV("跨节点路由消息",
 		"message_id", msg.MessageID,
 		"user_id", userID,
 		"from_node", h.nodeID,
-		"to_node", nodeID,
+		"to_nodes", otherNodes,
 	)
 
 	distMsg := &DistributedMessage{
@@ -61,16 +69,19 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMe
 		Timestamp: time.Now(),
 	}
 
-	channel := fmt.Sprintf("wsc:node:%s", nodeID)
 	data, _ := json.Marshal(distMsg)
 
-	if err := h.pubsub.Publish(ctx, channel, string(data)); err != nil {
-		h.logger.ErrorKV("跨节点消息发布失败",
-			"error", err,
-			"target_node", nodeID,
-			"message_id", msg.MessageID,
-		)
-		return true, ErrPubSubPublishFailed
+	// 向每个节点发送消息
+	for _, nodeID := range otherNodes {
+		channel := fmt.Sprintf("wsc:node:%s", nodeID)
+		if err := h.pubsub.Publish(ctx, channel, string(data)); err != nil {
+			h.logger.ErrorKV("跨节点消息发布失败",
+				"error", err,
+				"target_node", nodeID,
+				"message_id", msg.MessageID,
+			)
+			// 继续向其他节点发送，不因为一个节点失败而中断
+		}
 	}
 
 	return true, nil

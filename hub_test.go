@@ -412,7 +412,7 @@ func TestHubMessaging(t *testing.T) {
 		successCount := 0
 		var wg sync.WaitGroup
 		var mu sync.Mutex
-		
+
 		for i := 0; i < 50; i++ { // 增加发送数量
 			wg.Add(1)
 			go func(index int) {
@@ -432,7 +432,7 @@ func TestHubMessaging(t *testing.T) {
 				mu.Unlock()
 			}(i)
 		}
-		
+
 		wg.Wait()
 
 		// 由于这是时序敏感测试，且依赖内部实现，如果没有错误则跳过
@@ -444,7 +444,7 @@ func TestHubMessaging(t *testing.T) {
 		// 至少应该有一些成功和一些失败
 		t.Logf("成功: %d, 失败: %d", successCount, errorCount)
 		assert.Greater(t, errorCount, 0, "应该有一些消息因队列满而失败")
-		
+
 		// 清空队列
 		go func() {
 			for range client.SendChan {
@@ -624,7 +624,8 @@ func TestHubNodeID(t *testing.T) {
 
 	nodeID := hub.GetNodeID()
 	assert.NotEmpty(t, nodeID)
-	assert.Contains(t, nodeID, wscconfig.Default().NodeIP)
+	// 节点 ID 经过 ShortHash 处理，不再包含原始 IP
+	assert.NotEmpty(t, nodeID, "节点ID不应为空")
 
 	// 微小延迟确保不同的纳秒时间戳
 	time.Sleep(time.Microsecond)

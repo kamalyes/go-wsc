@@ -149,7 +149,7 @@ func (h *Hub) IsUserOnline(userID string) (bool, error) {
 	if h.onlineStatusRepo != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		return h.onlineStatusRepo.IsOnline(ctx, userID)
+		return h.onlineStatusRepo.IsUserOnline(ctx, userID)
 	}
 
 	return false, nil

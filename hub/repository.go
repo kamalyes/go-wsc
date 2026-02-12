@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/kamalyes/go-cachex"
+	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-wsc/handler"
 	"github.com/kamalyes/go-wsc/repository"
 	"github.com/redis/go-redis/v9"
@@ -56,8 +57,12 @@ func (h *Hub) InitializeRepositories(redisClient *redis.Client, db *gorm.DB) err
 	// 获取 Hub 的 Logger
 	hubLogger := h.GetLogger()
 
-	// 1. 在线状态仓库 (TTL固定为心跳间隔的3倍)
-	h.config.RedisRepository.OnlineStatus.TTL = time.Duration(h.config.HeartbeatInterval) * time.Second * 3
+	// 1. 在线状态仓库
+	// 确保 TTL 至少为心跳间隔的 3 倍
+	h.config.RedisRepository.OnlineStatus.TTL = mathx.Max(
+		h.config.RedisRepository.OnlineStatus.TTL,
+		h.config.HeartbeatInterval*3,
+	)
 	onlineStatusRepo := repository.NewRedisOnlineStatusRepository(
 		redisClient,
 		h.config.RedisRepository.OnlineStatus,
@@ -74,6 +79,7 @@ func (h *Hub) InitializeRepositories(redisClient *redis.Client, db *gorm.DB) err
 	// 3. 负载管理仓库
 	workloadRepo := repository.NewRedisWorkloadRepository(
 		redisClient,
+		db,
 		h.config.RedisRepository.Workload,
 		hubLogger,
 	)

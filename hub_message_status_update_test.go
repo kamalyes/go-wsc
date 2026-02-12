@@ -24,7 +24,7 @@ import (
 
 // TestHubUpdateMessageSendStatusSuccess 测试消息状态更新成功
 func TestHubUpdateMessageSendStatusSuccess(t *testing.T) {
-	db := getTestDB(t)
+	db := GetTestDBWithMigration(t, &MessageSendRecord{})
 	ctx := context.Background()
 	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 	hub := NewHub(wscconfig.Default())
@@ -59,7 +59,7 @@ func TestHubUpdateMessageSendStatusSuccess(t *testing.T) {
 
 // TestHubUpdateMessageSendStatusFailed 测试消息状态更新为失败
 func TestHubUpdateMessageSendStatusFailed(t *testing.T) {
-	db := getTestDB(t)
+	db := GetTestDBWithMigration(t, &MessageSendRecord{})
 	ctx := context.Background()
 	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 	hub := NewHub(wscconfig.Default())
@@ -97,7 +97,7 @@ func TestHubUpdateMessageSendStatusFailed(t *testing.T) {
 
 // TestHubUpdateMessageSendStatusRecordNotExist 测试记录不存在时的处理
 func TestHubUpdateMessageSendStatusRecordNotExist(t *testing.T) {
-	db := getTestDB(t)
+	db := GetTestDBWithMigration(t, &MessageSendRecord{})
 	ctx := context.Background()
 	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 	hub := NewHub(wscconfig.Default())
@@ -120,7 +120,7 @@ func TestHubUpdateMessageSendStatusRecordNotExist(t *testing.T) {
 
 // TestHubUpdateMessageSendStatusRetryMechanism 测试重试机制
 func TestHubUpdateMessageSendStatusRetryMechanism(t *testing.T) {
-	db := getTestDB(t)
+	db := GetTestDBWithMigration(t, &MessageSendRecord{})
 	ctx := context.Background()
 	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 	hub := NewHub(wscconfig.Default())
@@ -152,7 +152,7 @@ func TestHubUpdateMessageSendStatusRetryMechanism(t *testing.T) {
 
 // TestHubUpdateMessageSendStatusConcurrent 测试并发更新
 func TestHubUpdateMessageSendStatusConcurrent(t *testing.T) {
-	db := getTestDB(t)
+	db := GetTestDBWithMigration(t, &MessageSendRecord{})
 	ctx := context.Background()
 	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 	hub := NewHub(wscconfig.Default())
@@ -196,7 +196,7 @@ func TestHubUpdateMessageSendStatusConcurrent(t *testing.T) {
 
 // TestHubUpdateMessageSendStatusMultipleMessages 测试批量更新多条消息
 func TestHubUpdateMessageSendStatusMultipleMessages(t *testing.T) {
-	db := getTestDB(t)
+	db := GetTestDBWithMigration(t, &MessageSendRecord{})
 	ctx := context.Background()
 	repo := NewMessageRecordRepository(db, nil, NewDefaultWSCLogger())
 	hub := NewHub(wscconfig.Default())

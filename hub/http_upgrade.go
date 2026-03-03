@@ -154,21 +154,52 @@ func (h *Hub) HandleWebSocketUpgrade(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	var (
-		client  *Client
-		err     error
-		stage   string = "upgrade" // 当前阶段：upgrade/register
-		success bool
+		client        *Client
+		err           error
+		success       bool
+		isHealthCheck bool
 	)
 
 	// defer 统一记录日志
 	defer func() {
-		logFields := h.buildWebSocketUpgradeLogFields(r, start, client, stage, success)
+		logFields := h.buildWebSocketUpgradeLogFields(r, start, client, success)
+		logFields = append(logFields, "health_check", isHealthCheck)
 		if err != nil {
 			h.logger.WithError(err).ErrorContextKV(ctx, "[WebSocket] 处理失败", logFields...)
 		} else {
 			h.logger.InfoContextKV(ctx, "[WebSocket] 处理成功", logFields...)
 		}
 	}()
+
+	// 检查是否为健康检查请求（使用配置）
+	if h.config.HealthCheck.Enabled {
+		queryValue := r.URL.Query().Get(h.config.HealthCheck.GetQueryParamName())
+		isHealthCheck = h.config.HealthCheck.IsHealthCheckRequest(queryValue)
+
+		if isHealthCheck {
+			h.handleHealthCheck(w, r)
+			success = true
+			return
+		}
+	}
+
+	// 正常业务连接：验证必需参数（使用配置）
+	userID := h.extractAttribute(r, h.config.ClientAttributes.UserIDSources)
+	userType := h.extractAttribute(r, h.config.ClientAttributes.UserTypeSources)
+
+	// 使用配置进行连接验证
+	if h.config.ConnectionValidation.Enabled {
+		valid, reason := h.config.ConnectionValidation.ValidateConnection(userID, userType)
+		if !valid {
+			// 缺少必需参数，拒绝连接
+			h.logger.WarnContextKV(r.Context(), "[WebSocket] 连接被拒绝",
+				"reason", reason,
+				"remote_addr", r.RemoteAddr,
+				"query", r.URL.RawQuery,
+			)
+			return
+		}
+	}
 
 	// 提取客户端属性
 	clientID := h.extractAttribute(r, h.config.ClientAttributes.ClientIDSources)
@@ -180,7 +211,7 @@ func (h *Hub) HandleWebSocketUpgrade(w http.ResponseWriter, r *http.Request) {
 	responseHeader := http.Header{}
 
 	// 如果启用了响应头配置，则添加服务端信息
-	if h.config.ResponseHeaders != nil && h.config.ResponseHeaders.Enabled {
+	if h.config.ResponseHeaders.Enabled {
 		respHeaders := h.config.ResponseHeaders
 
 		// 服务端分配的客户端ID
@@ -202,20 +233,19 @@ func (h *Hub) HandleWebSocketUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 创建并注册客户端
-	stage = "register"
 	client = h.CreateClientFromRequest(r, conn)
 	client.ID = clientID
 	h.Register(client)
 	success = true
 
 	// 发送客户端注册成功确认消息（如果配置启用）
-	if h.config.ResponseHeaders != nil && h.config.ResponseHeaders.SendRegisteredMessage {
+	if h.config.ResponseHeaders.SendRegisteredMessage {
 		h.sendClientRegisteredMessage(client)
 	}
 }
 
 // buildWebSocketUpgradeLogFields 构建 WebSocket 升级日志字段
-func (h *Hub) buildWebSocketUpgradeLogFields(r *http.Request, start time.Time, client *Client, stage string, success bool) []any {
+func (h *Hub) buildWebSocketUpgradeLogFields(r *http.Request, start time.Time, client *Client, success bool) []any {
 	logFields := []any{
 		"method", r.Method,
 		"path", r.URL.Path,
@@ -224,7 +254,6 @@ func (h *Hub) buildWebSocketUpgradeLogFields(r *http.Request, start time.Time, c
 		"user_agent", r.Header.Get("User-Agent"),
 		"origin", r.Header.Get("Origin"),
 		"duration_ms", time.Since(start).Milliseconds(),
-		"stage", stage,
 		"success", success,
 	}
 
@@ -245,10 +274,7 @@ func (h *Hub) buildWebSocketUpgradeLogFields(r *http.Request, start time.Time, c
 // sendClientRegisteredMessage 发送客户端注册成功确认消息
 func (h *Hub) sendClientRegisteredMessage(client *Client) {
 	// 获取自定义消息内容
-	content := "Client registered successfully"
-	if h.config.ResponseHeaders != nil && h.config.ResponseHeaders.RegisteredMessageContent != "" {
-		content = h.config.ResponseHeaders.RegisteredMessageContent
-	}
+	content := h.config.ResponseHeaders.RegisteredMessageContent
 
 	// 构建客户端注册成功消息
 	registeredMsg := NewHubMessage().
@@ -268,7 +294,7 @@ func (h *Hub) sendClientRegisteredMessage(client *Client) {
 		WithOption("timestamp", time.Now().Unix())
 
 	// 添加服务端信息（来自 CustomHeaders）
-	if h.config.ResponseHeaders != nil && h.config.ResponseHeaders.Enabled {
+	if h.config.ResponseHeaders.Enabled {
 		for key, value := range h.config.ResponseHeaders.CustomHeaders {
 			registeredMsg.WithOption(key, value)
 		}
@@ -276,4 +302,40 @@ func (h *Hub) sendClientRegisteredMessage(client *Client) {
 
 	// 发送注册成功消息
 	h.sendToClient(client, registeredMsg)
+}
+
+// handleHealthCheck 处理健康检查请求
+// 升级到 WebSocket 连接后根据配置决定是否立即关闭，不创建客户端记录
+func (h *Hub) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
+	upgrader := h.ConfigureUpgrader()
+
+	// 设置健康检查响应头（使用配置）
+	responseHeader := http.Header{}
+
+	// 升级连接
+	conn, err := upgrader.Upgrade(w, r, responseHeader)
+	if err != nil {
+		return
+	}
+
+	// 根据配置决定是否立即关闭连接
+	if h.config.HealthCheck.CloseImmediately {
+		defer conn.Close()
+	}
+
+	// 根据配置决定是否发送响应消息
+	if h.config.HealthCheck.SendResponseMessage {
+		// 构建健康检查响应消息（使用 HubMessage）
+		healthMsg := NewHubMessage().
+			SetID(h.idGenerator.GenerateRequestID()).
+			SetMessageType(MessageTypeHealthCheck).
+			SetSender(UserTypeSystem.String()).
+			SetSenderType(UserTypeSystem).
+			SetContent("Health check OK").
+			WithOption("status", "ok").
+			WithOption("node_id", h.nodeID).
+			WithOption("timestamp", time.Now().Unix())
+
+		conn.WriteJSON(healthMsg)
+	}
 }

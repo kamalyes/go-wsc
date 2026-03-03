@@ -28,7 +28,6 @@ type WSCLogger = logger.ILogger
 // 日志器构造函数别名
 var (
 	NewDefaultWSCLogger = middleware.NewDefaultWSCLogger
-	NewWSCLogger        = middleware.NewWSCLogger
 )
 
 // ============================================================================

@@ -144,10 +144,12 @@ const (
 	FailureReasonQueueFull = models.FailureReasonQueueFull
 
 	// MessageSendStatus 常量
-	MessageSendStatusPending = models.MessageSendStatusPending
-	MessageSendStatusSending = models.MessageSendStatusSending
-	MessageSendStatusSuccess = models.MessageSendStatusSuccess
-	MessageSendStatusFailed  = models.MessageSendStatusFailed
+	MessageSendStatusPending      = models.MessageSendStatusPending
+	MessageSendStatusSending      = models.MessageSendStatusSending
+	MessageSendStatusSuccess      = models.MessageSendStatusSuccess
+	MessageSendStatusFailed       = models.MessageSendStatusFailed
+	MessageTypeHealthCheck        = models.MessageTypeHealthCheck
+	MessageTypeConnectionRejected = models.MessageTypeConnectionRejected
 
 	// AckStatus 常量
 	AckStatusFailed    = protocol.AckStatusFailed
@@ -336,6 +338,7 @@ type Hub struct {
 	cancel          context.CancelFunc
 	config          *wscconfig.WSC
 	msgPool         sync.Pool
+	chanPools       map[int]*sync.Pool // 多级 channel 对象池，key 为容量
 	rateLimiter     *RateLimiter
 	poolManager     PoolManager
 }
@@ -352,6 +355,10 @@ func NewHub(config *wscconfig.WSC) *Hub {
 	// 设置默认值
 	config.MessageBufferSize = mathx.IfEmpty(config.MessageBufferSize, 1024)
 	config.ClientAttributes = mathx.IfEmpty(config.ClientAttributes, wscconfig.DefaultClientAttributes())
+	config.CapacityEstimation = mathx.IfEmpty(config.CapacityEstimation, wscconfig.DefaultCapacityEstimation())
+
+	// 预估初始容量，减少 map 扩容
+	clientsCap, userToClientsCap, agentClientsCap, observerClientsCap, sseClientsCap := config.CapacityEstimation.CalculateCapacities()
 
 	hub := &Hub{
 		nodeID:      nodeID,
@@ -365,12 +372,12 @@ func NewHub(config *wscconfig.WSC) *Hub {
 			Status:    NodeStatusActive,
 			LastSeen:  time.Now(),
 		},
-		nodes:           make(map[string]*NodeInfo),
-		clients:         make(map[string]*Client),
-		userToClients:   make(map[string]map[string]*Client),
-		agentClients:    make(map[string]map[string]*Client),
-		observerClients: make(map[string]map[string]*Client),
-		sseClients:      make(map[string]map[string]*Client),
+		nodes:           make(map[string]*NodeInfo, config.CapacityEstimation.Nodes),
+		clients:         make(map[string]*Client, clientsCap),
+		userToClients:   make(map[string]map[string]*Client, userToClientsCap),
+		agentClients:    make(map[string]map[string]*Client, agentClientsCap),
+		observerClients: make(map[string]map[string]*Client, observerClientsCap),
+		sseClients:      make(map[string]map[string]*Client, sseClientsCap),
 		register:        make(chan *Client, config.MessageBufferSize),
 		unregister:      make(chan *Client, config.MessageBufferSize),
 		broadcast:       make(chan *HubMessage, config.MessageBufferSize*4),
@@ -383,12 +390,16 @@ func NewHub(config *wscconfig.WSC) *Hub {
 		config:          config,
 		logger:          InitLogger(config),
 		msgPool: sync.Pool{
-			New: func() interface{} {
+			New: func() any {
 				b := make([]byte, 0, 1024)
 				return &b
 			},
 		},
 	}
+
+	// 初始化多级 channel 对象池
+	hub.initChannelPools()
+
 	return hub
 }
 

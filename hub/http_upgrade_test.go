@@ -26,13 +26,21 @@ import (
 
 // TestConfigureUpgrader 测试配置 WebSocket 升级器
 func TestConfigureUpgrader(t *testing.T) {
+	var size = 1028
+	var wscConfig = wscconfig.Default()
 	tests := []struct {
 		name               string
 		config             *wscconfig.WSC
 		expectedBufferSize int
 	}{
-		{"默认配置", &wscconfig.WSC{MessageBufferSize: 0}, 1024},
-		{"自定义缓冲区大小", &wscconfig.WSC{MessageBufferSize: 2048}, 2048},
+		{
+			name: "自定义缓冲区大小",
+			config: func() *wscconfig.WSC {
+				cfg := wscConfig.WithMessageBufferSize(size)
+				return cfg
+			}(),
+			expectedBufferSize: size,
+		},
 	}
 
 	for _, tt := range tests {
@@ -62,7 +70,8 @@ func TestConfigureUpgraderWithOrigins(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			config := &wscconfig.WSC{WebSocketOrigins: tt.allowedOrigins}
+			config := wscconfig.Default()
+			config.WebSocketOrigins = tt.allowedOrigins
 			hub := NewHub(config)
 			upgrader := hub.ConfigureUpgrader()
 
@@ -115,7 +124,7 @@ func TestExtractClientAttributes(t *testing.T) {
 				req.Header.Set(k, v)
 			}
 
-			hub := NewHub(&wscconfig.WSC{})
+			hub := NewHub(wscconfig.Default())
 			extractedClientID, extractedUserID, extractedUserType := hub.extractClientAttributes(req)
 
 			assert.Equal(t, tt.expectedClientID, extractedClientID, "clientID 不匹配")
@@ -274,9 +283,8 @@ func TestExtractClientAttributesWithNilConfig(t *testing.T) {
 	userType := "customer"
 
 	// 创建不带 ClientAttributes 配置的 Hub
-	config := &wscconfig.WSC{
-		ClientAttributes: nil, // 显式设置为 nil
-	}
+	config := wscconfig.Default()
+	config.ClientAttributes = nil // 显式设置为 nil
 	hub := NewHub(config)
 
 	// 测试默认提取逻辑（向后兼容）
@@ -400,9 +408,8 @@ func TestHandleWebSocketUpgrade(t *testing.T) {
 
 // TestHandleWebSocketUpgradeWithInvalidOrigin 测试拒绝无效 Origin
 func TestHandleWebSocketUpgradeWithInvalidOrigin(t *testing.T) {
-	config := &wscconfig.WSC{
-		WebSocketOrigins: []string{"http://allowed.com"},
-	}
+	config := wscconfig.Default()
+	config.WebSocketOrigins = []string{"http://allowed.com"}
 	hub := NewHub(config)
 
 	server := httptest.NewServer(http.HandlerFunc(hub.HandleWebSocketUpgrade))

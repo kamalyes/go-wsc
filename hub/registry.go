@@ -436,7 +436,7 @@ func (h *Hub) removeOnlineStatusFromRedis(client *Client) {
 		})
 }
 
-// closeClientChannel 关闭客户端发送通道
+// closeClientChannel 关闭客户端发送通道并回收到对象池
 func (h *Hub) closeClientChannel(client *Client) {
 	// 使用互斥锁保护关闭操作
 	client.CloseMu.Lock()
@@ -448,9 +448,11 @@ func (h *Hub) closeClientChannel(client *Client) {
 	}
 	client.MarkClosed()
 
-	// 关闭 WebSocket 发送通道
+	// 关闭并回收 WebSocket 发送通道
 	if client.SendChan != nil {
 		close(client.SendChan)
+		// 将 channel 放回对象池复用
+		h.releaseClientSendChan(client)
 	}
 
 	// SSE 客户端需要关闭专用通道

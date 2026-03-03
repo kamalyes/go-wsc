@@ -69,11 +69,6 @@ func NewRateLimitAlertService(
 		return nil, fmt.Errorf("解析封禁邮件模板失败: %w", err)
 	}
 
-	// 如果未提供 logger,使用默认 logger
-	if logger == nil {
-		logger = DefaultLogger
-	}
-
 	return &RateLimitAlertService{
 		emailSender:   emailSender,
 		alertEmails:   alertEmails,

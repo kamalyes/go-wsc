@@ -23,17 +23,8 @@ import (
 // WSCLogger 日志器类型（直接使用 go-logger.ILogger）
 type WSCLogger = logger.ILogger
 
-// NewWSCLogger 创建新的WSC日志器
-var NewWSCLogger = middleware.NewWSCLogger
-
 // NewDefaultWSCLogger 创建默认配置的WSC日志器
 var NewDefaultWSCLogger = middleware.NewDefaultWSCLogger
-
-// NewNoOpLogger 创建空日志实例
-var NewNoOpLogger = middleware.NewNoOpLogger
-
-// SetDefaultLogger 设置默认日志器
-var SetDefaultLogger = middleware.SetDefaultLogger
 
 // InitLogger 根据配置初始化日志器
 var InitLogger = middleware.InitLogger
@@ -95,4 +86,3 @@ var NewRateLimitAlertService = middleware.NewRateLimitAlertService
 // 告警方法：
 // - SendAlert(ctx context.Context, userId, userType string, minuteCount, hourCount int64): 发送告警
 // - SendBlockAlert(ctx context.Context, userId, userType string, minuteCount, hourCount int64): 发送阻止告警
-

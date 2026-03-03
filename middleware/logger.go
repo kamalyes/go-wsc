@@ -20,40 +20,16 @@ import (
 // WSCLogger 直接使用 go-logger.ILogger
 type WSCLogger = logger.ILogger
 
-// NewWSCLogger 创建新的WSC日志器，基于 go-logger
-func NewWSCLogger(config *logger.LogConfig) WSCLogger {
-	return logger.NewLogger(config)
-}
-
 // NewDefaultWSCLogger 创建默认配置的WSC日志器
 func NewDefaultWSCLogger() WSCLogger {
-	config := logger.DefaultConfig().
+	logger := logger.NewLogger().
 		WithLevel(logger.DEBUG).
-		WithPrefix("[WSC] ").
+		WithPrefix("[WSC]").
 		WithShowCaller(false).
 		WithColorful(true).
 		WithTimeFormat(time.RFC3339Nano)
 
-	return logger.NewLogger(config)
-}
-
-// NewNoOpLogger 创建空日志实例
-func NewNoOpLogger() WSCLogger {
-	return logger.NewEmptyLogger()
-}
-
-// 全局日志器
-var (
-	// DefaultLogger 默认日志器实例
-	DefaultLogger WSCLogger = NewDefaultWSCLogger()
-
-	// NoOpLoggerInstance 空日志器实例
-	NoOpLoggerInstance WSCLogger = NewNoOpLogger()
-)
-
-// SetDefaultLogger 设置默认日志器
-func SetDefaultLogger(l WSCLogger) {
-	DefaultLogger = l
+	return logger
 }
 
 // InitLogger 根据配置初始化日志器
@@ -62,6 +38,5 @@ func InitLogger(config *wscconfig.WSC) WSCLogger {
 		return NewDefaultWSCLogger()
 	}
 
-	loggerConfig := config.Logging.ToLoggerConfig()
-	return logger.NewLogger(loggerConfig)
+	return config.Logging.ToLoggerInstance()
 }

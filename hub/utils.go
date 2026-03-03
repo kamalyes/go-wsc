@@ -688,25 +688,14 @@ func (h *Hub) trackHeartbeatStats(client *Client) {
 
 // normalizeMessageFields 规范化消息字段（补充缺失的字段）
 func (h *Hub) normalizeMessageFields(client *Client, msg *HubMessage) {
-	if msg.Sender == "" {
-		msg.Sender = client.UserID
-	}
-	if msg.SenderType == "" {
-		msg.SenderType = client.UserType
-	}
+	msg.Sender = mathx.IfEmpty(msg.Sender, client.UserID)
+	msg.SenderType = mathx.IfEmpty(msg.SenderType, client.UserType)
 	// 🔥 设置发送者客户端ID，用于多端同步时排除当前设备
-	if msg.SenderClient == "" {
-		msg.SenderClient = client.ID
-	}
-	if msg.CreateAt.IsZero() {
-		msg.CreateAt = time.Now()
-	}
-	if msg.MessageType == "" {
-		msg.MessageType = MessageTypeText
-	}
-	if msg.ID == "" {
-		msg.ID = fmt.Sprintf("json_%s_%d", client.UserID, time.Now().UnixNano())
-	}
+	msg.SenderClient = mathx.IfEmpty(msg.SenderClient, client.ID)
+	msg.CreateAt = mathx.IF(msg.CreateAt.IsZero(), time.Now(), msg.CreateAt)
+	msg.MessageType = mathx.IfEmpty(msg.MessageType, MessageTypeText)
+	snowflakeId := h.idGenerator.GenerateRequestID()
+	msg.ID = mathx.IfNotEmpty(msg.ID, fmt.Sprintf("%s-%s", client.UserID, snowflakeId))
 }
 
 // ============================================================================

@@ -277,6 +277,7 @@ func (r *connectionRecordRepositoryImpl) updateConnectionRecord(ctx context.Cont
 		"is_forced_offline":  false,
 		"reconnect_count":    gorm.Expr("reconnect_count + ?", 1),
 		"metadata":           record.Metadata,
+		"error_count":        0,
 		"last_error":         "",
 		"last_error_at":      nil,
 		"disconnect_reason":  "",

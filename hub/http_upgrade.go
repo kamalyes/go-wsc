@@ -206,6 +206,16 @@ func (h *Hub) HandleWebSocketUpgrade(w http.ResponseWriter, r *http.Request) {
 	// 若终端未传入则自动生成一个
 	clientID = mathx.IfEmpty(clientID, h.idGenerator.GenerateRequestID())
 
+	// 检查 Hub 是否正在关闭（在升级连接之前）
+	if h.shutdown.Load() {
+		h.logger.WarnContextKV(r.Context(), "[WebSocket] Hub 正在关闭，拒绝新连接",
+			"client_id", clientID,
+			"user_id", userID,
+			"remote_addr", r.RemoteAddr,
+		)
+		return
+	}
+
 	// 配置升级器并设置响应头
 	upgrader := h.ConfigureUpgrader()
 	responseHeader := http.Header{}

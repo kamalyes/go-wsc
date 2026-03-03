@@ -49,6 +49,17 @@ func (h *Hub) handleRegister(client *Client) {
 		)
 	})
 
+	// 双重检查：如果 Hub 正在关闭，拒绝注册
+	if h.shutdown.Load() {
+		h.logger.WarnKV("Hub 正在关闭，拒绝注册",
+			"client_id", client.ID,
+			"user_id", client.UserID)
+		if client.Conn != nil {
+			_ = client.Conn.Close()
+		}
+		return
+	}
+
 	h.logger.InfoKV("handleRegister开始",
 		"client_id", client.ID,
 		"user_id", client.UserID)

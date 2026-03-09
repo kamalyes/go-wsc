@@ -75,7 +75,7 @@ func (h *Hub) initChannelPools() {
 		}
 	}
 
-	h.logger.InfoKV("多级 channel 对象池已初始化",
+	h.logger.DebugKV("多级 channel 对象池已初始化",
 		"capacities", capacities,
 	)
 }

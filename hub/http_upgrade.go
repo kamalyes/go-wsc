@@ -72,21 +72,41 @@ func (h *Hub) createOriginChecker() func(*http.Request) bool {
 //
 // 返回:
 //   - *Client: 创建的客户端实例
-func (h *Hub) CreateClientFromRequest(r *http.Request, conn *websocket.Conn) *Client {
-	clientID, userID, userType := h.extractClientAttributes(r)
+//
+// ClientAttributes 客户端属性
+type ClientAttributes struct {
+	ClientID string   // 客户端ID
+	UserID   string   // 用户ID
+	UserType UserType // 用户类型
+	DeviceID string   // 设备ID
+}
 
+// CreateClientFromRequest 从 HTTP 请求创建 WebSocket 客户端
+// 提取请求元数据并创建 Client 实例
+//
+// 参数:
+//   - r: HTTP 请求
+//   - conn: WebSocket 连接
+//   - attrs: 客户端属性
+//
+// 返回:
+//   - *Client: 创建的客户端实例
+func (h *Hub) CreateClientFromRequest(r *http.Request, conn *websocket.Conn, attrs *ClientAttributes) *Client {
 	// 使用 metadata 提取所有请求元数据
 	requestMeta := metadata.ExtractRequestMetadata(r)
 	metaMap := requestMeta.ToMap()
 
+	// 将 deviceID 存储到 metadata 中
+	metaMap["x-device-id"] = attrs.DeviceID
+
 	// 使用 NewClient 构造函数创建客户端（自动初始化时间和状态）
-	client := NewClient(clientID, userID, UserType(userType)).
+	client := NewClient(attrs.ClientID, attrs.UserID, attrs.UserType).
 		WithClientIP(requestMeta.ClientIP).
 		WithClientType(MapDeviceTypeToClientType(requestMeta.DeviceType)).
 		WithWebSocketConn(conn).
 		WithNodeInfo(h.nodeID, h.config.NodeIP, h.config.NodePort).
 		WithMetadataMap(metaMap).
-		WithContext(context.WithValue(r.Context(), ContextKeySenderID, userID))
+		WithContext(context.WithValue(r.Context(), ContextKeySenderID, attrs.UserID))
 
 	// 初始化客户端 SendChan（根据客户端类型使用配置的容量）
 	h.initClientSendChan(client)
@@ -95,14 +115,22 @@ func (h *Hub) CreateClientFromRequest(r *http.Request, conn *websocket.Conn) *Cl
 
 // extractClientAttributes 从请求中提取客户端属性
 // 根据配置的来源列表按优先级提取属性
-//
-// 返回: clientID, userID, userType
-func (h *Hub) extractClientAttributes(r *http.Request) (string, string, string) {
+func (h *Hub) extractClientAttributes(r *http.Request) *ClientAttributes {
+	// 提取各个属性
 	clientID := h.extractAttribute(r, h.config.ClientAttributes.ClientIDSources)
 	userID := h.extractAttribute(r, h.config.ClientAttributes.UserIDSources)
+	deviceID := h.extractAttribute(r, h.config.ClientAttributes.DeviceIdSources)
 	userType := h.extractAttribute(r, h.config.ClientAttributes.UserTypeSources)
 
-	return clientID, userID, userType
+	// 若 ClientID 未传入则自动生成（基于 UserID + DeviceID + 时间窗口）
+	clientID = mathx.IfEmpty(clientID, h.temporalHasher.Hash(userID, deviceID))
+
+	return &ClientAttributes{
+		ClientID: clientID,
+		UserID:   userID,
+		UserType: UserType(userType),
+		DeviceID: deviceID,
+	}
 }
 
 // extractAttribute 从请求中提取单个属性
@@ -128,10 +156,6 @@ func (h *Hub) extractFromSource(r *http.Request, source wscconfig.AttributeSourc
 		if cookie, err := r.Cookie(source.Key); err == nil {
 			return cookie.Value
 		}
-		return ""
-	case wscconfig.AttributeSourcePath:
-		// 从 URL 路径中提取（需要路由支持，这里暂时返回空）
-		// 实际使用时可以配合 gorilla/mux 等路由库的 Vars 功能
 		return ""
 	default:
 		return ""
@@ -183,13 +207,12 @@ func (h *Hub) HandleWebSocketUpgrade(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 正常业务连接：验证必需参数（使用配置）
-	userID := h.extractAttribute(r, h.config.ClientAttributes.UserIDSources)
-	userType := h.extractAttribute(r, h.config.ClientAttributes.UserTypeSources)
+	// 提取客户端属性
+	attrs := h.extractClientAttributes(r)
 
 	// 使用配置进行连接验证
 	if h.config.ConnectionValidation.Enabled {
-		valid, reason := h.config.ConnectionValidation.ValidateConnection(userID, userType)
+		valid, reason := h.config.ConnectionValidation.ValidateConnection(attrs.UserID, attrs.UserType.String())
 		if !valid {
 			// 缺少必需参数，拒绝连接
 			h.logger.WarnContextKV(r.Context(), "[WebSocket] 连接被拒绝",
@@ -201,16 +224,11 @@ func (h *Hub) HandleWebSocketUpgrade(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 提取客户端属性
-	clientID := h.extractAttribute(r, h.config.ClientAttributes.ClientIDSources)
-	// 若终端未传入则自动生成一个
-	clientID = mathx.IfEmpty(clientID, h.idGenerator.GenerateRequestID())
-
 	// 检查 Hub 是否正在关闭（在升级连接之前）
 	if h.shutdown.Load() {
 		h.logger.WarnContextKV(r.Context(), "[WebSocket] Hub 正在关闭，拒绝新连接",
-			"client_id", clientID,
-			"user_id", userID,
+			"client_id", attrs.ClientID,
+			"user_id", attrs.UserID,
 			"remote_addr", r.RemoteAddr,
 		)
 		return
@@ -225,7 +243,7 @@ func (h *Hub) HandleWebSocketUpgrade(w http.ResponseWriter, r *http.Request) {
 		respHeaders := h.config.ResponseHeaders
 
 		// 服务端分配的客户端ID
-		responseHeader.Set(respHeaders.GetClientIDKey(), clientID)
+		responseHeader.Set(respHeaders.GetClientIDKey(), attrs.ClientID)
 
 		// 服务端节点信息（分布式场景下很有用）
 		responseHeader.Set(respHeaders.GetNodeIDKey(), h.nodeID)
@@ -243,8 +261,7 @@ func (h *Hub) HandleWebSocketUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 创建并注册客户端
-	client = h.CreateClientFromRequest(r, conn)
-	client.ID = clientID
+	client = h.CreateClientFromRequest(r, conn, attrs)
 	h.Register(client)
 	success = true
 

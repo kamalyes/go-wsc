@@ -89,212 +89,90 @@ func TestExtractClientAttributes(t *testing.T) {
 	idGenerator := idgen.NewDefaultIDGenerator()
 	clientID := idGenerator.GenerateRequestID()
 	userID := idGenerator.GenerateRequestID()
-	userTypes := []string{"customer", "agent", "visitor", "admin"}
-	userType := userTypes[len(clientID)%len(userTypes)]
+	deviceID := idGenerator.GenerateRequestID()
 
-	queryClientID := idGenerator.GenerateRequestID()
-	queryUserID := idGenerator.GenerateRequestID()
-	headerClientID := idGenerator.GenerateRequestID()
-	headerUserID := idGenerator.GenerateRequestID()
+	// 场景1：从查询参数提取
+	req := httptest.NewRequest("GET", "/ws?client_id="+clientID+"&user_id="+userID+"&user_type=customer", nil)
+	hub := NewHub(wscconfig.Default())
+	attrs := hub.extractClientAttributes(req)
+	assert.Equal(t, clientID, attrs.ClientID)
+	assert.Equal(t, userID, attrs.UserID)
+	assert.Equal(t, UserTypeCustomer, attrs.UserType)
 
-	tests := []struct {
-		name             string
-		queryParams      map[string]string
-		headers          map[string]string
-		expectedClientID string
-		expectedUserID   string
-		expectedUserType string
-	}{
-		{"从查询参数提取", map[string]string{"client_id": clientID, "user_id": userID, "user_type": userType}, map[string]string{}, clientID, userID, userType},
-		{"从 Header 提取", map[string]string{}, map[string]string{"X-Client-ID": clientID, "X-User-ID": userID, "X-User-Type": userType}, clientID, userID, userType},
-		{"查询参数优先于 Header", map[string]string{"client_id": queryClientID, "user_id": queryUserID}, map[string]string{"X-Client-ID": headerClientID, "X-User-ID": headerUserID}, queryClientID, queryUserID, ""},
-	}
+	// 场景2：从 Header 提取
+	req = httptest.NewRequest("GET", "/ws", nil)
+	req.Header.Set("X-Client-ID", clientID)
+	req.Header.Set("X-User-ID", userID)
+	req.Header.Set("X-User-Type", "agent")
+	attrs = hub.extractClientAttributes(req)
+	assert.Equal(t, clientID, attrs.ClientID)
+	assert.Equal(t, userID, attrs.UserID)
+	assert.Equal(t, UserTypeAgent, attrs.UserType)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			url := "/ws?"
-			params := []string{}
-			for k, v := range tt.queryParams {
-				params = append(params, k+"="+v)
-			}
-			url += strings.Join(params, "&")
+	// 场景3：查询参数优先于 Header
+	req = httptest.NewRequest("GET", "/ws?client_id="+clientID+"&user_id="+userID, nil)
+	req.Header.Set("X-Client-ID", "ignored")
+	req.Header.Set("X-User-ID", "ignored")
+	attrs = hub.extractClientAttributes(req)
+	assert.Equal(t, clientID, attrs.ClientID)
+	assert.Equal(t, userID, attrs.UserID)
 
-			req := httptest.NewRequest("GET", url, nil)
-			for k, v := range tt.headers {
-				req.Header.Set(k, v)
-			}
+	// 场景4：ClientID 自动生成
+	req = httptest.NewRequest("GET", "/ws?user_id="+userID+"&device_id="+deviceID+"&user_type=customer", nil)
+	attrs = hub.extractClientAttributes(req)
+	assert.NotEmpty(t, attrs.ClientID)
+	assert.Equal(t, userID, attrs.UserID)
+	assert.Equal(t, deviceID, attrs.DeviceID)
 
-			hub := NewHub(wscconfig.Default())
-			extractedClientID, extractedUserID, extractedUserType := hub.extractClientAttributes(req)
+	// 场景5：UserType 默认值
+	req = httptest.NewRequest("GET", "/ws", nil)
+	attrs = hub.extractClientAttributes(req)
+	assert.NotEmpty(t, attrs.ClientID)
+	assert.Equal(t, UserTypeVisitor, attrs.UserType)
 
-			assert.Equal(t, tt.expectedClientID, extractedClientID, "clientID 不匹配")
-			assert.Equal(t, tt.expectedUserID, extractedUserID, "userID 不匹配")
-			assert.Equal(t, tt.expectedUserType, extractedUserType, "userType 不匹配")
-		})
-	}
-}
-
-// TestExtractClientAttributesWithConfig 测试使用配置提取客户端属性
-func TestExtractClientAttributesWithConfig(t *testing.T) {
-	idGenerator := idgen.NewDefaultIDGenerator()
-	clientID := idGenerator.GenerateRequestID()
-	userID := idGenerator.GenerateRequestID()
-	userType := "customer"
-
-	tests := []struct {
-		name             string
-		config           *wscconfig.ClientAttributes
-		queryParams      map[string]string
-		headers          map[string]string
-		cookies          map[string]string
-		expectedClientID string
-		expectedUserID   string
-		expectedUserType string
-	}{
-		{
-			name:             "使用默认配置（query优先）",
-			config:           wscconfig.DefaultClientAttributes(),
-			queryParams:      map[string]string{"client_id": clientID, "user_id": userID, "user_type": userType},
-			headers:          map[string]string{},
-			cookies:          map[string]string{},
-			expectedClientID: clientID,
-			expectedUserID:   userID,
-			expectedUserType: userType,
-		},
-		{
-			name:             "使用默认配置（header作为备选）",
-			config:           wscconfig.DefaultClientAttributes(),
-			queryParams:      map[string]string{},
-			headers:          map[string]string{"X-Client-ID": clientID, "X-User-ID": userID, "X-User-Type": userType},
-			cookies:          map[string]string{},
-			expectedClientID: clientID,
-			expectedUserID:   userID,
-			expectedUserType: userType,
-		},
-		{
-			name: "自定义配置（仅从header提取）",
-			config: &wscconfig.ClientAttributes{
-				ClientIDSources: []wscconfig.AttributeSource{
-					{Type: wscconfig.AttributeSourceHeader, Key: "X-Custom-Client-ID"},
-				},
-				UserIDSources: []wscconfig.AttributeSource{
-					{Type: wscconfig.AttributeSourceHeader, Key: "X-Custom-User-ID"},
-				},
-				UserTypeSources: []wscconfig.AttributeSource{
-					{Type: wscconfig.AttributeSourceHeader, Key: "X-Custom-User-Type"},
-				},
-			},
-			queryParams:      map[string]string{"client_id": "should-be-ignored", "user_id": "should-be-ignored"},
-			headers:          map[string]string{"X-Custom-Client-ID": clientID, "X-Custom-User-ID": userID, "X-Custom-User-Type": userType},
-			cookies:          map[string]string{},
-			expectedClientID: clientID,
-			expectedUserID:   userID,
-			expectedUserType: userType,
-		},
-		{
-			name: "多来源配置（按优先级）",
-			config: &wscconfig.ClientAttributes{
-				ClientIDSources: []wscconfig.AttributeSource{
-					{Type: wscconfig.AttributeSourceQuery, Key: "cid"},
-					{Type: wscconfig.AttributeSourceHeader, Key: "X-Client-ID"},
-					{Type: wscconfig.AttributeSourceCookie, Key: "client_id"},
-				},
-				UserIDSources: []wscconfig.AttributeSource{
-					{Type: wscconfig.AttributeSourceQuery, Key: "uid"},
-					{Type: wscconfig.AttributeSourceHeader, Key: "X-User-ID"},
-				},
-				UserTypeSources: []wscconfig.AttributeSource{
-					{Type: wscconfig.AttributeSourceQuery, Key: "type"},
-				},
-			},
-			queryParams:      map[string]string{"cid": clientID, "uid": userID, "type": userType},
-			headers:          map[string]string{"X-Client-ID": "should-be-ignored", "X-User-ID": "should-be-ignored"},
-			cookies:          map[string]string{},
-			expectedClientID: clientID,
-			expectedUserID:   userID,
-			expectedUserType: userType,
-		},
-		{
-			name: "从Cookie提取",
-			config: &wscconfig.ClientAttributes{
-				ClientIDSources: []wscconfig.AttributeSource{
-					{Type: wscconfig.AttributeSourceCookie, Key: "session_client_id"},
-				},
-				UserIDSources: []wscconfig.AttributeSource{
-					{Type: wscconfig.AttributeSourceCookie, Key: "session_user_id"},
-				},
-				UserTypeSources: []wscconfig.AttributeSource{
-					{Type: wscconfig.AttributeSourceCookie, Key: "session_user_type"},
-				},
-			},
-			queryParams:      map[string]string{},
-			headers:          map[string]string{},
-			cookies:          map[string]string{"session_client_id": clientID, "session_user_id": userID, "session_user_type": userType},
-			expectedClientID: clientID,
-			expectedUserID:   userID,
-			expectedUserType: userType,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// 构建 URL
-			url := "/ws?"
-			params := []string{}
-			for k, v := range tt.queryParams {
-				params = append(params, k+"="+v)
-			}
-			url += strings.Join(params, "&")
-
-			// 创建请求
-			req := httptest.NewRequest("GET", url, nil)
-
-			// 设置 Headers
-			for k, v := range tt.headers {
-				req.Header.Set(k, v)
-			}
-
-			// 设置 Cookies
-			for k, v := range tt.cookies {
-				req.AddCookie(&http.Cookie{Name: k, Value: v})
-			}
-
-			// 创建带配置的 Hub
-			config := wscconfig.Default()
-			config.ClientAttributes = tt.config
-			hub := NewHub(config)
-
-			// 提取属性
-			extractedClientID, extractedUserID, extractedUserType := hub.extractClientAttributes(req)
-
-			// 验证结果
-			assert.Equal(t, tt.expectedClientID, extractedClientID, "clientID 不匹配")
-			assert.Equal(t, tt.expectedUserID, extractedUserID, "userID 不匹配")
-			assert.Equal(t, tt.expectedUserType, extractedUserType, "userType 不匹配")
-		})
-	}
-}
-
-// TestExtractClientAttributesWithNilConfig 测试配置为 nil 时的向后兼容性
-func TestExtractClientAttributesWithNilConfig(t *testing.T) {
-	idGenerator := idgen.NewDefaultIDGenerator()
-	clientID := idGenerator.GenerateRequestID()
-	userID := idGenerator.GenerateRequestID()
-	userType := "customer"
-
-	// 创建不带 ClientAttributes 配置的 Hub
+	// 场景6：自定义配置（仅从 header 提取）
 	config := wscconfig.Default()
-	config.ClientAttributes = nil // 显式设置为 nil
-	hub := NewHub(config)
+	config.ClientAttributes = &wscconfig.ClientAttributes{
+		ClientIDSources: []wscconfig.AttributeSource{
+			{Type: wscconfig.AttributeSourceHeader, Key: "X-Custom-Client-ID"},
+		},
+		UserIDSources: []wscconfig.AttributeSource{
+			{Type: wscconfig.AttributeSourceHeader, Key: "X-Custom-User-ID"},
+		},
+	}
+	hub = NewHub(config)
+	req = httptest.NewRequest("GET", "/ws?client_id=ignored", nil)
+	req.Header.Set("X-Custom-Client-ID", clientID)
+	req.Header.Set("X-Custom-User-ID", userID)
+	attrs = hub.extractClientAttributes(req)
+	assert.Equal(t, clientID, attrs.ClientID)
+	assert.Equal(t, userID, attrs.UserID)
 
-	// 测试默认提取逻辑（向后兼容）
-	req := httptest.NewRequest("GET", "/ws?client_id="+clientID+"&user_id="+userID+"&user_type="+userType, nil)
+	// 场景7：从 Cookie 提取
+	config.ClientAttributes = &wscconfig.ClientAttributes{
+		ClientIDSources: []wscconfig.AttributeSource{
+			{Type: wscconfig.AttributeSourceCookie, Key: "cid"},
+		},
+		UserIDSources: []wscconfig.AttributeSource{
+			{Type: wscconfig.AttributeSourceCookie, Key: "uid"},
+		},
+	}
+	hub = NewHub(config)
+	req = httptest.NewRequest("GET", "/ws", nil)
+	req.AddCookie(&http.Cookie{Name: "cid", Value: clientID})
+	req.AddCookie(&http.Cookie{Name: "uid", Value: userID})
+	attrs = hub.extractClientAttributes(req)
+	assert.Equal(t, clientID, attrs.ClientID)
+	assert.Equal(t, userID, attrs.UserID)
 
-	extractedClientID, extractedUserID, extractedUserType := hub.extractClientAttributes(req)
-
-	assert.Equal(t, clientID, extractedClientID, "clientID 不匹配")
-	assert.Equal(t, userID, extractedUserID, "userID 不匹配")
-	assert.Equal(t, userType, extractedUserType, "userType 不匹配")
+	// 场景8：配置为 nil 时的向后兼容
+	config = wscconfig.Default()
+	config.ClientAttributes = nil
+	hub = NewHub(config)
+	req = httptest.NewRequest("GET", "/ws?client_id="+clientID+"&user_id="+userID, nil)
+	attrs = hub.extractClientAttributes(req)
+	assert.Equal(t, clientID, attrs.ClientID)
+	assert.Equal(t, userID, attrs.UserID)
 }
 
 // TestCreateClientFromRequest 测试从请求创建客户端
@@ -322,8 +200,9 @@ func TestCreateClientFromRequest(t *testing.T) {
 		}
 		defer conn.Close()
 
-		// 创建客户端并发送到 channel
-		client := hub.CreateClientFromRequest(r, conn)
+		// 提取客户端属性并创建客户端
+		attrs := hub.extractClientAttributes(r)
+		client := hub.CreateClientFromRequest(r, conn, attrs)
 		clientChan <- client
 
 		// 保持连接直到测试完成

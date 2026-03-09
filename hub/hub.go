@@ -305,6 +305,7 @@ type Hub struct {
 	offlineMessageHandler OfflineMessageHandler
 	connectionRecordRepo  ConnectionRecordRepository
 	idGenerator           IDGenerator
+	temporalHasher        *safe.TemporalHasher
 	workerID              int64
 
 	// 📡 事件发布订阅
@@ -352,19 +353,29 @@ func NewHub(config *wscconfig.WSC) *Hub {
 
 	workerID := osx.GetWorkerIdForSnowflake()
 	idGenerator := idgen.NewShortFlakeGenerator(workerID)
+
 	// 设置默认值
 	config.MessageBufferSize = mathx.IfEmpty(config.MessageBufferSize, 1024)
 	config.ClientAttributes = mathx.IfEmpty(config.ClientAttributes, wscconfig.DefaultClientAttributes())
+	config.TemporalHasher = mathx.IfEmpty(config.TemporalHasher, wscconfig.DefaultTemporalHasher())
 	config.CapacityEstimation = mathx.IfEmpty(config.CapacityEstimation, wscconfig.DefaultCapacityEstimation())
 
+	// 初始化时间窗口哈希生成器（用于生成 ClientID）
+	thConfig := config.TemporalHasher
+	temporalHasher := safe.NewTemporalHasher(
+		safe.WithWindow(time.Duration(thConfig.GetWindowMinutes())*time.Minute),
+		safe.WithLength(thConfig.GetHashLength()),
+		safe.WithSeparator(thConfig.GetSeparator()),
+	)
 	// 预估初始容量，减少 map 扩容
 	clientsCap, userToClientsCap, agentClientsCap, observerClientsCap, sseClientsCap := config.CapacityEstimation.CalculateCapacities()
 
 	hub := &Hub{
-		nodeID:      nodeID,
-		workerID:    workerID,
-		idGenerator: idGenerator,
-		startTime:   time.Now(),
+		nodeID:         nodeID,
+		workerID:       workerID,
+		idGenerator:    idGenerator,
+		temporalHasher: temporalHasher,
+		startTime:      time.Now(),
 		nodeInfo: &NodeInfo{
 			ID:        nodeID,
 			IPAddress: config.NodeIP,

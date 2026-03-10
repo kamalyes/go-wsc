@@ -72,18 +72,25 @@ func (h *Hub) SendPongResponse(client *Client) error {
 		return errorx.WrapError("failed to marshal pong message", err)
 	}
 
-	// 直接发送
-	select {
-	case client.SendChan <- data:
+	// 使用客户端的 TrySend 方法，它内部已经有锁保护
+	if client.TrySend(data) {
 		h.UpdatePongTime(client.ID)
 		return nil
-	default:
-		return errorx.WrapError("client send channel is full")
 	}
+
+	return errorx.WrapError("client send channel is full or closed")
 }
 
 // handleHeartbeatMessage 处理心跳消息
 func (h *Hub) handleHeartbeatMessage(client *Client) {
+	// 检查客户端是否已关闭（防止处理已断开客户端的心跳）
+	if client.IsClosed() {
+		h.logger.DebugKV("客户端已关闭，忽略心跳消息",
+			"client_id", client.ID,
+			"user_id", client.UserID)
+		return
+	}
+
 	// 更新心跳请求时间（内存）- 收到PING时
 	h.UpdateHeartbeat(client.ID)
 

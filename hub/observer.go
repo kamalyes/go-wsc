@@ -268,20 +268,19 @@ func (h *Hub) sendToObserver(observer *Client, msg *HubMessage) error {
 		return err
 	}
 
-	// 发送到观察者的发送通道（非阻塞）
-	select {
-	case observer.SendChan <- msgData:
+	// 使用 TrySend 方法发送，它内部有锁保护，避免竞态条件
+	if observer.TrySend(msgData) {
 		return nil
-	default:
-		// 观察者缓冲区满，丢弃消息（观察者不应阻塞正常业务）
-		h.logger.WarnKV("观察者缓冲区已满，丢弃消息",
-			"observer_id", observer.UserID,
-			"client_id", observer.ID,
-			"message_id", msg.MessageID,
-			"buffer_size", cap(observer.SendChan),
-		)
-		return ErrQueueAndPendingFull
 	}
+
+	// 观察者缓冲区满或已关闭，丢弃消息（观察者不应阻塞正常业务）
+	h.logger.WarnKV("观察者缓冲区已满或已关闭，丢弃消息",
+		"observer_id", observer.UserID,
+		"client_id", observer.ID,
+		"message_id", msg.MessageID,
+		"buffer_size", cap(observer.SendChan),
+	)
+	return ErrQueueAndPendingFull
 }
 
 // ============================================================================

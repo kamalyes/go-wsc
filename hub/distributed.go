@@ -190,25 +190,22 @@ func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *Distrib
 	// 发送到用户的所有客户端（支持多端登录）
 	successCount := 0
 	for _, client := range userClients {
-		if client.IsClosed() {
-			continue
-		}
-
-		if client.SendChan == nil {
-			continue
-		}
-
-		select {
-		case client.SendChan <- msgData:
+		// 使用 TrySend 方法，它内部有锁保护，避免竞态条件
+		if client.TrySend(msgData) {
 			successCount++
-		case <-ctx.Done():
-			return fmt.Errorf("context cancelled: %w", ctx.Err())
-		default:
-			h.logger.WarnKV("跨节点消息发送失败：发送缓冲区满",
+		} else {
+			h.logger.WarnKV("跨节点消息发送失败：发送缓冲区满或已关闭",
 				"client_id", client.ID,
 				"user_id", distMsg.TargetID,
 				"message_id", distMsg.Message.MessageID,
 			)
+		}
+
+		// 检查上下文是否取消
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("context cancelled: %w", ctx.Err())
+		default:
 		}
 	}
 

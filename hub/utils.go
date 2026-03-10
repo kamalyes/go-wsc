@@ -719,7 +719,7 @@ func (h *Hub) checkHeartbeat() {
 		// 检查是否超时
 		inactiveDuration := now.Sub(lastActive)
 		if inactiveDuration > h.config.ClientTimeout {
-			h.logger.Debug("❤️ 检测到心跳超时，注销客户端",
+			h.logger.DebugKV("❤️ 检测到心跳超时，注销客户端",
 				"client_id", client.ID,
 				"user_id", client.UserID,
 				"user_type", client.UserType,

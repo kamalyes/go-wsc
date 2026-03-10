@@ -276,6 +276,14 @@ func (c *Client) TrySend(data []byte) bool {
 		return false
 	}
 
+	// 使用 defer recover 捕获可能的 send on closed channel panic
+	defer func() {
+		if r := recover(); r != nil {
+			// Channel 已关闭，标记为已关闭状态
+			c.closed.Store(true)
+		}
+	}()
+
 	select {
 	case c.SendChan <- data:
 		return true
@@ -292,6 +300,14 @@ func (c *Client) TrySendSSE(msg *HubMessage) bool {
 	if c.IsClosed() || c.SSEMessageCh == nil {
 		return false
 	}
+
+	// 使用 defer recover 捕获可能的 send on closed channel panic
+	defer func() {
+		if r := recover(); r != nil {
+			// Channel 已关闭，标记为已关闭状态
+			c.closed.Store(true)
+		}
+	}()
 
 	select {
 	case c.SSEMessageCh <- msg:

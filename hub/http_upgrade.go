@@ -122,8 +122,8 @@ func (h *Hub) extractClientAttributes(r *http.Request) *ClientAttributes {
 	deviceID := h.extractAttribute(r, h.config.ClientAttributes.DeviceIdSources)
 	userType := h.extractAttribute(r, h.config.ClientAttributes.UserTypeSources)
 
-	// 若 ClientID 未传入则自动生成（基于 UserID + DeviceID + 时间窗口）
-	clientID = mathx.IfEmpty(clientID, h.temporalHasher.Hash(userID, deviceID))
+	// 若 ClientID 未传入则自动生成（基于 UserID + DeviceID + UserType 时间窗口）
+	clientID = mathx.IfEmpty(clientID, h.temporalHasher.Hash(userID, deviceID, userType))
 
 	return &ClientAttributes{
 		ClientID: clientID,

@@ -11,6 +11,7 @@
 package models
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
@@ -38,7 +39,7 @@ type HubMessage struct {
 	ReceiverNode        string                 `json:"receiver_node,omitempty"`         // 接收者所在节点ID
 	SessionID           string                 `json:"session_id"`                      // 会话ID
 	Content             string                 `json:"content"`                         // 消息内容
-	Data                map[string]interface{} `json:"data,omitempty"`                  // 扩展数据（包含 content_extra 和 metadata）
+	Data                map[string]interface{} `json:"data,omitempty"`                  // 扩展数据（包含 content_extra、metadata、media_info）
 	CreateAt            time.Time              `json:"create_at"`                       // 创建时间
 	MessageID           string                 `json:"message_id"`                      // 业务消息ID
 	SeqNo               int64                  `json:"seq_no"`                          // 消息序列号
@@ -166,6 +167,43 @@ func (m *HubMessage) SetBroadcastType(broadcastType BroadcastType) *HubMessage {
 	return m
 }
 
+// WithMediaInfo 设置媒体信息（接受任意类型，自动序列化为 JSON 字符串，nil 安全）
+func (m *HubMessage) WithMediaInfo(mediaInfo any) *HubMessage {
+	if mediaInfo == nil {
+		return m
+	}
+	if m.Data == nil {
+		m.Data = make(map[string]any)
+	}
+	m.Data[DataKeyMediaInfo] = mediaInfo
+	return m
+}
+
+// GetMediaInfo 获取媒体信息（返回原始值）
+func (m *HubMessage) GetMediaInfo() (any, bool) {
+	if m.Data == nil {
+		return nil, false
+	}
+	value, exists := m.Data[DataKeyMediaInfo]
+	return value, exists
+}
+
+// GetMediaInfoJSON 获取媒体信息的 JSON 字符串表示
+func (m *HubMessage) GetMediaInfoJSON() string {
+	value, exists := m.GetMediaInfo()
+	if !exists || value == nil {
+		return "{}"
+	}
+	if str, ok := value.(string); ok {
+		return str
+	}
+	// 如果是其他类型，尝试序列化
+	if jsonBytes, err := json.Marshal(value); err == nil {
+		return string(jsonBytes)
+	}
+	return "{}"
+}
+
 // SetSkipDatabaseStorage 设置是否跳过主数据库存储
 func (m *HubMessage) SetSkipDatabaseStorage(skip bool) *HubMessage {
 	m.SkipDatabaseStorage = skip
@@ -223,19 +261,75 @@ func (m *HubMessage) GetOption(key string) (interface{}, bool) {
 	return value, exists
 }
 
-// WithContentExtra 设置 content_extra 字段
-func (m *HubMessage) WithContentExtra(key string, value interface{}) *HubMessage {
+// WithContentExtra 设置单个 content_extra 字段
+func (m *HubMessage) WithContentExtra(key string, value any) *HubMessage {
 	return m.setMapValue(DataKeyContentExtra, key, value)
 }
 
+// WithAllContentExtra 批量设置 content_extra（接受任意类型，自动序列化，nil 安全）
+func (m *HubMessage) WithAllContentExtra(contentExtra any) *HubMessage {
+	if contentExtra == nil {
+		return m
+	}
+	if m.Data == nil {
+		m.Data = make(map[string]any)
+	}
+	m.Data[DataKeyContentExtra] = contentExtra
+	return m
+}
+
 // GetContentExtra 获取 content_extra 字段值
-func (m *HubMessage) GetContentExtra(key string) (interface{}, bool) {
+func (m *HubMessage) GetContentExtra(key string) (any, bool) {
 	return m.getMapValue(DataKeyContentExtra, key)
 }
 
-// WithMetadata 设置 metadata 字段
+// GetAllContentExtra 获取整个 content_extra map
+func (m *HubMessage) GetAllContentExtra() map[string]any {
+	if m.Data == nil {
+		return make(map[string]any)
+	}
+	contentExtra, ok := m.Data[DataKeyContentExtra].(map[string]any)
+	if !ok || contentExtra == nil {
+		return make(map[string]any)
+	}
+	return contentExtra
+}
+
+// GetContentExtraJSON 获取 content_extra 的 JSON 字符串表示
+func (m *HubMessage) GetContentExtraJSON() string {
+	if m.Data == nil {
+		return "{}"
+	}
+	value, exists := m.Data[DataKeyContentExtra]
+	if !exists || value == nil {
+		return "{}"
+	}
+	// 如果已经是字符串，直接返回
+	if str, ok := value.(string); ok {
+		return str
+	}
+	// 否则序列化
+	if jsonBytes, err := json.Marshal(value); err == nil {
+		return string(jsonBytes)
+	}
+	return "{}"
+}
+
+// WithMetadata 设置单个 metadata 字段
 func (m *HubMessage) WithMetadata(key string, value string) *HubMessage {
 	return m.setMapValue(DataKeyMetadata, key, value)
+}
+
+// WithAllMetadata 批量设置 metadata（接受任意类型，自动序列化，nil 安全）
+func (m *HubMessage) WithAllMetadata(metadata any) *HubMessage {
+	if metadata == nil {
+		return m
+	}
+	if m.Data == nil {
+		m.Data = make(map[string]any)
+	}
+	m.Data[DataKeyMetadata] = metadata
+	return m
 }
 
 // GetMetadata 获取 metadata 字段值
@@ -245,6 +339,38 @@ func (m *HubMessage) GetMetadata(key string) (string, bool) {
 		return "", false
 	}
 	return value.(string), true
+}
+
+// GetAllMetadata 获取整个 metadata map
+func (m *HubMessage) GetAllMetadata() map[string]any {
+	if m.Data == nil {
+		return make(map[string]any)
+	}
+	metadata, ok := m.Data[DataKeyMetadata].(map[string]any)
+	if !ok || metadata == nil {
+		return make(map[string]any)
+	}
+	return metadata
+}
+
+// GetMetadataJSON 获取 metadata 的 JSON 字符串表示
+func (m *HubMessage) GetMetadataJSON() string {
+	if m.Data == nil {
+		return "{}"
+	}
+	value, exists := m.Data[DataKeyMetadata]
+	if !exists || value == nil {
+		return "{}"
+	}
+	// 如果已经是字符串，直接返回
+	if str, ok := value.(string); ok {
+		return str
+	}
+	// 否则序列化
+	if jsonBytes, err := json.Marshal(value); err == nil {
+		return string(jsonBytes)
+	}
+	return "{}"
 }
 
 // Clone 创建消息的深拷贝，避免并发修改问题

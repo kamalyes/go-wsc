@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	gccommon "github.com/kamalyes/go-config/pkg/common"
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-toolbox/pkg/idgen"
 	"github.com/stretchr/testify/assert"
@@ -133,11 +134,11 @@ func TestExtractClientAttributes(t *testing.T) {
 	// 场景6：自定义配置（仅从 header 提取）
 	config := wscconfig.Default()
 	config.ClientAttributes = &wscconfig.ClientAttributes{
-		ClientIDSources: []wscconfig.AttributeSource{
-			{Type: wscconfig.AttributeSourceHeader, Key: "X-Custom-Client-ID"},
+		ClientIDSources: []gccommon.AttributeSource{
+			{Type: gccommon.SourceTypeHeader, Key: "X-Custom-Client-ID"},
 		},
-		UserIDSources: []wscconfig.AttributeSource{
-			{Type: wscconfig.AttributeSourceHeader, Key: "X-Custom-User-ID"},
+		UserIDSources: []gccommon.AttributeSource{
+			{Type: gccommon.SourceTypeHeader, Key: "X-Custom-User-ID"},
 		},
 	}
 	hub = NewHub(config)
@@ -150,11 +151,11 @@ func TestExtractClientAttributes(t *testing.T) {
 
 	// 场景7：从 Cookie 提取
 	config.ClientAttributes = &wscconfig.ClientAttributes{
-		ClientIDSources: []wscconfig.AttributeSource{
-			{Type: wscconfig.AttributeSourceCookie, Key: "cid"},
+		ClientIDSources: []gccommon.AttributeSource{
+			{Type: gccommon.SourceTypeCookie, Key: "cid"},
 		},
-		UserIDSources: []wscconfig.AttributeSource{
-			{Type: wscconfig.AttributeSourceCookie, Key: "uid"},
+		UserIDSources: []gccommon.AttributeSource{
+			{Type: gccommon.SourceTypeCookie, Key: "uid"},
 		},
 	}
 	hub = NewHub(config)

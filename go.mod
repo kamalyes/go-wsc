@@ -6,10 +6,10 @@ require (
 	github.com/gorilla/websocket v1.4.2
 	github.com/jpillora/backoff v1.0.0
 	github.com/kamalyes/go-cachex v0.1.9-0.20260309111032-f04efdaf771b
-	github.com/kamalyes/go-config v0.13.1-0.20260309115803-913d49ac42ed
+	github.com/kamalyes/go-config v0.13.1-0.20260318160705-0db8984b50a4
 	github.com/kamalyes/go-logger v0.4.6-0.20260309105634-86ce25421507
 	github.com/kamalyes/go-sqlbuilder v0.3.6-0.20260309111222-824a815f2f7b
-	github.com/kamalyes/go-toolbox v0.11.87-0.20260309121501-f546152fb090
+	github.com/kamalyes/go-toolbox v0.11.87-0.20260318125308-349e10be8cad
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/stretchr/testify v1.11.1
 	gorm.io/driver/mysql v1.6.0
@@ -47,10 +47,10 @@ require (
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/arch v0.24.0 // indirect
-	golang.org/x/crypto v0.48.0 // indirect
+	golang.org/x/crypto v0.49.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
-	golang.org/x/text v0.34.0 // indirect
-	google.golang.org/grpc v1.79.2 // indirect
+	golang.org/x/text v0.35.0 // indirect
+	google.golang.org/grpc v1.79.3 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

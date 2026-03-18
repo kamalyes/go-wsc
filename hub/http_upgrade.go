@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	gccommon "github.com/kamalyes/go-config/pkg/common"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/metadata"
 )
@@ -117,10 +117,13 @@ func (h *Hub) CreateClientFromRequest(r *http.Request, conn *websocket.Conn, att
 // 根据配置的来源列表按优先级提取属性
 func (h *Hub) extractClientAttributes(r *http.Request) *ClientAttributes {
 	// 提取各个属性
-	clientID := h.extractAttribute(r, h.config.ClientAttributes.ClientIDSources)
-	userID := h.extractAttribute(r, h.config.ClientAttributes.UserIDSources)
-	deviceID := h.extractAttribute(r, h.config.ClientAttributes.DeviceIdSources)
-	userType := h.extractAttribute(r, h.config.ClientAttributes.UserTypeSources)
+	clientID := gccommon.ExtractAttribute(r, h.config.ClientAttributes.ClientIDSources)
+	userID := gccommon.ExtractAttribute(r, h.config.ClientAttributes.UserIDSources)
+	deviceID := gccommon.ExtractAttribute(r, h.config.ClientAttributes.DeviceIdSources)
+	userType := gccommon.ExtractAttribute(r, h.config.ClientAttributes.UserTypeSources)
+
+	// UserType 默认值为 visitor
+	userType = mathx.IfEmpty(userType, string(UserTypeVisitor))
 
 	// 若 ClientID 未传入则自动生成（基于 UserID + DeviceID + UserType 时间窗口）
 	clientID = mathx.IfEmpty(clientID, h.temporalHasher.Hash(userID, deviceID, userType))
@@ -130,35 +133,6 @@ func (h *Hub) extractClientAttributes(r *http.Request) *ClientAttributes {
 		UserID:   userID,
 		UserType: UserType(userType),
 		DeviceID: deviceID,
-	}
-}
-
-// extractAttribute 从请求中提取单个属性
-// 按配置的来源列表顺序查找，返回第一个非空值
-func (h *Hub) extractAttribute(r *http.Request, sources []wscconfig.AttributeSource) string {
-	for _, source := range sources {
-		value := h.extractFromSource(r, source)
-		if value != "" {
-			return value
-		}
-	}
-	return ""
-}
-
-// extractFromSource 从指定来源提取值
-func (h *Hub) extractFromSource(r *http.Request, source wscconfig.AttributeSource) string {
-	switch source.Type {
-	case wscconfig.AttributeSourceQuery:
-		return r.URL.Query().Get(source.Key)
-	case wscconfig.AttributeSourceHeader:
-		return r.Header.Get(source.Key)
-	case wscconfig.AttributeSourceCookie:
-		if cookie, err := r.Cookie(source.Key); err == nil {
-			return cookie.Value
-		}
-		return ""
-	default:
-		return ""
 	}
 }
 

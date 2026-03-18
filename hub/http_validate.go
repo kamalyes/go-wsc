@@ -15,6 +15,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"time"
+
+	gccommon "github.com/kamalyes/go-config/pkg/common"
 )
 
 // HandleValidateConnection 验证 WebSocket 连接参数
@@ -35,8 +37,8 @@ func (h *Hub) HandleValidateConnection(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	// 提取参数
-	userID := h.extractAttribute(r, h.config.ClientAttributes.UserIDSources)
-	userType := h.extractAttribute(r, h.config.ClientAttributes.UserTypeSources)
+	userID := gccommon.ExtractAttribute(r, h.config.ClientAttributes.UserIDSources)
+	userType := gccommon.ExtractAttribute(r, h.config.ClientAttributes.UserTypeSources)
 
 	// 验证参数
 	if h.config.ConnectionValidation.Enabled {

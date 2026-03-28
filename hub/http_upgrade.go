@@ -125,8 +125,8 @@ func (h *Hub) extractClientAttributes(r *http.Request) *ClientAttributes {
 	// UserType 默认值为 visitor
 	userType = mathx.IfEmpty(userType, string(UserTypeVisitor))
 
-	// 若 ClientID 未传入则自动生成（基于 UserID + DeviceID + UserType 时间窗口）
-	clientID = mathx.IfEmpty(clientID, h.temporalHasher.Hash(userID, deviceID, userType))
+	// 基于 UserID + DeviceID + UserType 时间窗口哈希生成 ClientID
+	clientID = h.temporalHasher.Hash(userID, deviceID, userType)
 
 	return &ClientAttributes{
 		ClientID: clientID,

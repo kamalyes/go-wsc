@@ -356,6 +356,7 @@ const (
 	MessageTypeForceOffline         = models.MessageTypeForceOffline
 	MessageTypeOpenWindow           = models.MessageTypeOpenWindow
 	MessageTypeCloseWindow          = models.MessageTypeCloseWindow
+	MessageTypeBStatusReminder      = models.MessageTypeBStatusReminder
 )
 
 // ==================== 消息优先级常量 ====================

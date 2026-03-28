@@ -91,6 +91,13 @@ func (h *Hub) handleHeartbeatMessage(client *Client) {
 		return
 	}
 
+	// 触发心跳前置回调，返回 false 则跳过后续心跳处理
+	if h.beforeHeartbeatCallback != nil {
+		if !h.beforeHeartbeatCallback(client) {
+			return
+		}
+	}
+
 	// 更新心跳请求时间（内存）- 收到PING时
 	h.UpdateHeartbeat(client.ID)
 
@@ -118,9 +125,19 @@ func (h *Hub) handleHeartbeatMessage(client *Client) {
 			"error", err,
 		)
 	}
-
+	
 	// 异步追踪心跳统计（不阻塞主流程）
 	h.trackHeartbeatStats(client)
+
+	// 触发心跳上报回调
+	if h.heartbeatReportCallback != nil {
+		h.heartbeatReportCallback(client)
+	}
+
+	// 触发心跳后置回调
+	if h.afterHeartbeatCallback != nil {
+		h.afterHeartbeatCallback(client)
+	}
 }
 
 // ============================================================================

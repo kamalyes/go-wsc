@@ -144,6 +144,56 @@ func (h *Hub) OnHeartbeatTimeout(callback HeartbeatTimeoutCallback) {
 	h.heartbeatTimeoutCallback = callback
 }
 
+// OnHeartbeatReport 注册心跳上报回调
+// 当收到客户端心跳消息时会调用此回调
+//
+// 参数:
+//   - client: 发送心跳的客户端
+//
+// 示例:
+//
+//	hub.OnHeartbeatReport(func(client *Client) {
+//	    log.Printf("收到客户端 %s 心跳上报", client.ID)
+//	    // 更新业务层在线状态、记录心跳日志等
+//	})
+func (h *Hub) OnHeartbeatReport(callback HeartbeatReportCallback) {
+	h.heartbeatReportCallback = callback
+}
+
+// OnBeforeHeartbeat 注册心跳处理前回调
+// 在心跳处理前调用，返回 false 则跳过后续心跳处理流程
+//
+// 参数:
+//   - client: 发送心跳的客户端
+//
+// 返回:
+//   - bool: true 继续处理心跳，false 跳过
+//
+// 示例:
+//
+//	hub.OnBeforeHeartbeat(func(client *Client) bool {
+//	    // 校验或预处理
+//	    return true
+//	})
+func (h *Hub) OnBeforeHeartbeat(callback BeforeHeartbeatCallback) {
+	h.beforeHeartbeatCallback = callback
+}
+
+// OnAfterHeartbeat 注册心跳处理后回调
+// 在心跳处理完成后调用
+//
+// 参数:
+//   - client: 发送心跳的客户端
+//
+// 示例:
+//
+//	hub.OnAfterHeartbeat(func(client *Client) {
+//	    log.Printf("客户端 %s 心跳处理完成", client.ID)
+//	})
+func (h *Hub) OnAfterHeartbeat(callback AfterHeartbeatCallback) {
+	h.afterHeartbeatCallback = callback
+}
+
 // ============================================================================
 // 应用层回调注册方法
 // ============================================================================

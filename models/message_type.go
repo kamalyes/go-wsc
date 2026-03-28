@@ -119,6 +119,7 @@ const (
 	MessageTypeForceOffline         MessageType = "force_offline"          // 强制下线通知（异地登录等，发给被下线的客户端）
 	MessageTypeOpenWindow           MessageType = "open_window"            // 打开窗口消息
 	MessageTypeCloseWindow          MessageType = "close_window"           // 关闭窗口消息
+	MessageTypeBStatusReminder      MessageType = "b_status_reminder"      // 业务状态提醒消息
 )
 
 // String 实现Stringer接口
@@ -151,7 +152,7 @@ func (t MessageType) IsValid() bool {
 		MessageTypeServerStats, MessageTypeClientConfig, MessageTypeConfigUpdate, MessageTypeHealthCheck,
 		MessageTypeHealthResponse, MessageTypeConnected, MessageTypeClientRegistered, MessageTypeConnectionRejected, MessageTypeDisconnected, MessageTypeReconnected,
 		MessageTypeConnectionError, MessageTypeConnectionTimeout, MessageTypeKickOut, MessageTypeForceOffline,
-		MessageTypeCloseWindow, MessageTypeOpenWindow:
+		MessageTypeCloseWindow, MessageTypeOpenWindow, MessageTypeBStatusReminder:
 		return true
 	default:
 		return false
@@ -185,7 +186,7 @@ func (t MessageType) IsSystemType() bool {
 	switch t {
 	case MessageTypeSystem, MessageTypeNotice, MessageTypeEvent, MessageTypeAnnouncement,
 		MessageTypeAlert, MessageTypeError, MessageTypeInfo, MessageTypeSuccess,
-		MessageTypeWarning, MessageTypeHeartbeat, MessageTypePing, MessageTypePong:
+		MessageTypeWarning, MessageTypeHeartbeat, MessageTypePing, MessageTypePong, MessageTypeBStatusReminder:
 		return true
 	default:
 		return false
@@ -265,7 +266,8 @@ func (t MessageType) ShouldSkipDatabaseRecord() bool {
 func (t MessageType) IsBusinessType() bool {
 	switch t {
 	case MessageTypePayment, MessageTypeOrder, MessageTypeProduct, MessageTypeTicketCreated, MessageTypeTicketAssigned,
-		MessageTypeTicketClosed, MessageTypeTicketTimeoutClosed, MessageTypeTicketTransfer, MessageTypeTicketActive:
+		MessageTypeTicketClosed, MessageTypeTicketTimeoutClosed, MessageTypeTicketTransfer, MessageTypeTicketActive,
+		MessageTypeBStatusReminder:
 		return true
 	default:
 		return false
@@ -295,6 +297,7 @@ var MessageTypeEmojiMap = map[MessageType]string{
 	MessageTypeReaction:  "❤️",
 	MessageTypeEdit:      "✏️",
 	MessageTypeRecall:    "↩️",
+	MessageTypeBStatusReminder: "⏰",
 }
 
 // GetEmoji 获取消息类型对应的 emoji，未找到返回默认值
@@ -517,7 +520,7 @@ func GetAllMessageTypes() []MessageType {
 		MessageTypeUserJoined, MessageTypeUserLeft, MessageTypeUserStatusChanged, MessageTypeServerStatus,
 		MessageTypeServerStats, MessageTypeClientConfig, MessageTypeConfigUpdate, MessageTypeHealthCheck,
 		MessageTypeHealthResponse, MessageTypeConnected, MessageTypeClientRegistered, MessageTypeConnectionRejected, MessageTypeDisconnected, MessageTypeReconnected, MessageTypeConnectionError,
-		MessageTypeConnectionTimeout, MessageTypeKickOut, MessageTypeForceOffline, MessageTypeCloseWindow, MessageTypeOpenWindow,
+		MessageTypeConnectionTimeout, MessageTypeKickOut, MessageTypeForceOffline, MessageTypeCloseWindow, MessageTypeOpenWindow, MessageTypeBStatusReminder,
 	}
 }
 

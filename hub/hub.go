@@ -254,6 +254,12 @@ type (
 	QueueFullCallback func(msg *HubMessage, recipient string, queueType QueueType, err errorx.BaseError)
 	// HeartbeatTimeoutCallback 心跳超时回调
 	HeartbeatTimeoutCallback func(clientID string, userID string, lastHeartbeat time.Time)
+	// HeartbeatReportCallback 心跳上报回调
+	HeartbeatReportCallback func(client *Client)
+	// BeforeHeartbeatCallback 心跳处理前回调，返回 false 则跳过后续心跳处理
+	BeforeHeartbeatCallback func(client *Client) bool
+	// AfterHeartbeatCallback 心跳处理后回调
+	AfterHeartbeatCallback func(client *Client)
 	// ClientConnectCallback 客户端连接回调
 	ClientConnectCallback func(ctx context.Context, client *Client) error
 	// ClientDisconnectCallback 客户端断开回调
@@ -315,6 +321,9 @@ type Hub struct {
 	messageSendCallback        MessageSendCallback
 	queueFullCallback          QueueFullCallback
 	heartbeatTimeoutCallback   HeartbeatTimeoutCallback
+	heartbeatReportCallback    HeartbeatReportCallback
+	beforeHeartbeatCallback    BeforeHeartbeatCallback
+	afterHeartbeatCallback     AfterHeartbeatCallback
 	clientConnectCallback      ClientConnectCallback
 	clientDisconnectCallback   ClientDisconnectCallback
 	messageReceivedCallback    MessageReceivedCallback

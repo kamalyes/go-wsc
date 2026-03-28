@@ -32,6 +32,9 @@ type (
 	MessageSendCallback        = hub.MessageSendCallback
 	QueueFullCallback          = hub.QueueFullCallback
 	HeartbeatTimeoutCallback   = hub.HeartbeatTimeoutCallback
+	HeartbeatReportCallback    = hub.HeartbeatReportCallback
+	BeforeHeartbeatCallback    = hub.BeforeHeartbeatCallback
+	AfterHeartbeatCallback     = hub.AfterHeartbeatCallback
 	ClientConnectCallback      = hub.ClientConnectCallback
 	ClientDisconnectCallback   = hub.ClientDisconnectCallback
 	MessageReceivedCallback    = hub.MessageReceivedCallback

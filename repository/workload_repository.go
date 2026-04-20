@@ -12,6 +12,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -55,6 +56,23 @@ type WorkloadRepository interface {
 
 	// GetLeastLoadedAgent 获取负载最小的在线客服
 	GetLeastLoadedAgent(ctx context.Context, onlineAgents []string, dimension WorkloadDimension) (string, int64, error)
+
+	// AcquireLeastLoadedAgent 原子地选择负载最小的在线客服并将其负载 +1
+	//
+	// 与 GetLeastLoadedAgent 的区别：
+	//   - GetLeastLoadedAgent 只读，纯查询，返回后业务侧还需单独调用 IncrementAgentWorkload，
+	//     这会导致"读-改-写"之间存在 TOCTOU 窗口，多进程/多 goroutine 并发时读到同一份旧负载快照，
+	//     选出同一个客服，造成工单扎堆分配到同一人（负载均衡不均）
+	//   - AcquireLeastLoadedAgent 在同一段 Lua 中完成 "选中 + 所有维度原子 +1"，
+	//     Redis 单线程保证跨进程原子，是分布式场景下负载均衡分配的正确做法
+	//
+	// 返回值:
+	//   - agentID: 被选中的客服 ID
+	//   - workload: 选中客服在选中前的 realtime 负载值（用于日志/监控）
+	//   - error: 执行失败的错误
+	//
+	// 业务失败回滚：调用方应在后续业务失败时调用 DecrementAgentWorkload 回滚此次预扣减。
+	AcquireLeastLoadedAgent(ctx context.Context, onlineAgents []string, dimension WorkloadDimension) (string, int64, error)
 
 	// RemoveAgentWorkload 移除客服负载记录（客服下线时调用）
 	// 只删除 ZSet 记录，保留 string key 以便重新上线时恢复
@@ -137,7 +155,12 @@ func (r *RedisWorkloadRepository) ReloadAgentWorkload(ctx context.Context, agent
 	if err == nil {
 		// Redis 中存在，解析负载值
 		roundNone := convert.RoundNone
-		existingWorkload, _ := convert.MustIntT[int64](workloadStr, &roundNone)
+		existingWorkload, parseErr := convert.MustIntT[int64](workloadStr, &roundNone)
+		if parseErr != nil {
+			// Redis 中值被污染（非数字），记录告警并按 0 处理，避免后续广播错误值
+			r.logger.Warnf("⚠️ 客服 %s Redis 负载值解析失败(%q): %v，降级为 0", agentID, workloadStr, parseErr)
+			existingWorkload = 0
+		}
 
 		// 同步所有维度到 ZSet
 		if err := r.syncAllDimensionsToZSet(ctx, agentID, existingWorkload, now); err != nil {
@@ -148,13 +171,19 @@ func (r *RedisWorkloadRepository) ReloadAgentWorkload(ctx context.Context, agent
 		return existingWorkload, nil
 	}
 
+	// Redis 错误但不是 key 不存在 —— 视为底层故障上抛，避免误覆盖为 0
+	if err != redis.Nil {
+		return 0, errorx.WrapError("failed to read agent workload from redis", err)
+	}
+
 	// 2. Redis 不存在，从 DB 加载 realtime 维度
 	var finalWorkload int64
-	if r.db != nil && err == redis.Nil {
+	if r.db != nil {
 		var dbModel AgentWorkloadModel
-		if err := r.db.WithContext(ctx).
+		dbErr := r.db.WithContext(ctx).
 			Where("agent_id = ? AND dimension = ? AND time_key = ?", agentID, WorkloadDimensionRealtime, "").
-			First(&dbModel).Error; err == nil {
+			First(&dbModel).Error
+		if dbErr == nil {
 			finalWorkload = dbModel.Workload
 
 			// 恢复所有维度到 Redis
@@ -164,6 +193,10 @@ func (r *RedisWorkloadRepository) ReloadAgentWorkload(ctx context.Context, agent
 
 			r.logger.Debugf("🔄 客服 %s 上线，从 DB 恢复负载: %d", agentID, finalWorkload)
 			return finalWorkload, nil
+		}
+		// DB 查询出错且不是“记录不存在” —— 不能当作 0 初始化，避免覆盖真实历史负载
+		if !errors.Is(dbErr, gorm.ErrRecordNotFound) {
+			return 0, errorx.WrapError("failed to load agent workload from db", dbErr)
 		}
 	}
 
@@ -177,6 +210,12 @@ func (r *RedisWorkloadRepository) ReloadAgentWorkload(ctx context.Context, agent
 }
 
 // syncAllDimensionsToZSet 同步所有维度到 ZSet
+//
+// 语义：仅用于 ReloadAgentWorkload 的"恢复"场景（客服上线/重连时将 string key 的真实负载同步到 ZSet）
+// 为了避免与并发的 IncrementAgentWorkload/AcquireLeastLoadedAgent 发生 ZADD 覆盖竞态
+// （调用方读到 string=9 → 另一路径 INCRBY 至 10 并 ZADD 10 → 本方法再 ZADD 9 覆盖回 9），
+// 这里使用 ZADD NX：仅当 ZSet 中不存在该 agent 时才写入
+// 如果 ZSet 中已经有该 agent 的 score（意味着有其他流程正在维护实时值），则保留现值不覆盖
 func (r *RedisWorkloadRepository) syncAllDimensionsToZSet(ctx context.Context, agentID string, workload int64, t time.Time) error {
 	luaScript := `
 		local keyPrefix = ARGV[1]
@@ -197,7 +236,8 @@ func (r *RedisWorkloadRepository) syncAllDimensionsToZSet(ctx context.Context, a
 				zsetKey = keyPrefix .. dimension .. ":" .. timeKey .. ":zset"
 			end
 			
-			redis.call('ZADD', zsetKey, workload, agentID)
+			-- 仅在 ZSet 中不存在该 agent 时才写入，避免覆盖并发维护的真实值
+			redis.call('ZADD', zsetKey, 'NX', workload, agentID)
 			
 			argIndex = argIndex + 2
 		end
@@ -307,16 +347,26 @@ func (r *RedisWorkloadRepository) GetAgentWorkload(ctx context.Context, agentID 
 	workloadStr, err := r.client.Get(ctx, realtimeKey).Result()
 	if err == nil {
 		roundNone := convert.RoundNone
-		workload, _ := convert.MustIntT[int64](workloadStr, &roundNone)
+		workload, parseErr := convert.MustIntT[int64](workloadStr, &roundNone)
+		if parseErr != nil {
+			r.logger.Warnf("⚠️ 客服 %s Redis 负载值解析失败(%q): %v，降级为 0", agentID, workloadStr, parseErr)
+			return 0, nil
+		}
 		return workload, nil
 	}
 
+	// Redis 错误但不是 key 不存在 —— 视为底层故障上抛
+	if err != redis.Nil {
+		return 0, errorx.WrapError("failed to get agent workload", err)
+	}
+
 	// 2. Redis 未命中，从 DB 加载 realtime 维度
-	if err == redis.Nil && r.db != nil {
+	if r.db != nil {
 		var dbModel AgentWorkloadModel
-		if err := r.db.WithContext(ctx).
+		dbErr := r.db.WithContext(ctx).
 			Where("agent_id = ? AND dimension = ? AND time_key = ?", agentID, WorkloadDimensionRealtime, "").
-			First(&dbModel).Error; err == nil {
+			First(&dbModel).Error
+		if dbErr == nil {
 			// 回写到 Redis
 			if err := r.client.Set(ctx, realtimeKey, dbModel.Workload, 0).Err(); err != nil {
 				r.logger.Warnf("⚠️ 回写 Redis 失败: %v", err)
@@ -324,11 +374,14 @@ func (r *RedisWorkloadRepository) GetAgentWorkload(ctx context.Context, agentID 
 			r.logger.Debugf("📥 从 DB 加载客服 %s 负载: %d", agentID, dbModel.Workload)
 			return dbModel.Workload, nil
 		}
-		// DB 也没有，返回 0
-		return 0, nil
+		// DB 查询出错且不是“记录不存在” —— 上抛，避免静默吞掉故障
+		if !errors.Is(dbErr, gorm.ErrRecordNotFound) {
+			return 0, errorx.WrapError("failed to get agent workload from db", dbErr)
+		}
 	}
 
-	return 0, errorx.WrapError("failed to get agent workload", err)
+	// 3. Redis 和 DB 均无记录，视为 0（而非错误）
+	return 0, nil
 }
 
 // IncrementAgentWorkload 增加客服负载（支持多维度）
@@ -449,82 +502,67 @@ func (r *RedisWorkloadRepository) GetLeastLoadedAgent(ctx context.Context, onlin
 // getLeastLoadedAgentFromRedis 从 Redis ZSet 获取负载最小的客服（支持多维度）
 func (r *RedisWorkloadRepository) getLeastLoadedAgentFromRedis(ctx context.Context, onlineAgents []string, dimension WorkloadDimension, t time.Time) (string, int64, error) {
 	// 使用 Lua 脚本在 Redis 端完成筛选、随机选择和降级处理
-	// 当多个客服负载相同时，在它们之间随机选择，实现真正的负载均衡
+	// 算法：
+	//   1. 遍历传入的所有在线客服，通过 ZSCORE 查询各自负载
+	//   2. ZSet 中未命中的客服从 string key (GET) 读取负载并回填 ZSet
+	//   3. 收集所有负载等于最小值的客服，作为候选池
+	//   4. 从候选池中使用 math.random 等概率随机选择一个
+	// 修复：不再使用 ZRANGE 0..maxCandidates-1 截断候选集合，避免仅在 ZSet 排序靠前的
+	//       固定几个客服之间轮换（导致其他在线客服永远分配不到任务，表现为不均匀分配）
 	luaScript := `
 		local zsetKey = KEYS[1]
 		local keyPrefix = KEYS[2]
 		local dimension = KEYS[3]
 		local timeKey = KEYS[4]
-		local maxCandidates = tonumber(ARGV[1])
-		local onlineAgents = {}
 
-		-- 初始化随机数种子（使用当前时间的微秒数）
-		math.randomseed(tonumber(redis.call('TIME')[2]))
+		-- 初始化随机数种子（使用当前时间的微秒数，避免多次调用返回相同结果）
+		local t = redis.call('TIME')
+		math.randomseed(tonumber(t[1]) * 1000000 + tonumber(t[2]))
+		-- 预热一次，规避部分 Lua 实现第一次 random 不够随机的问题
+		math.random()
 
-		-- 构建在线客服集合
-		for i = 2, #ARGV do
-			onlineAgents[ARGV[i]] = true
+		-- 构建单个客服在 realtime / 时间分片维度下的 string key
+		local function buildWorkloadKey(agentID)
+			if timeKey == "" then
+				return keyPrefix .. dimension .. ":agent:" .. agentID
+			else
+				return keyPrefix .. dimension .. ":" .. timeKey .. ":agent:" .. agentID
+			end
 		end
 
-		-- 获取前 N 个最低负载的客服（N 由配置决定）
-		local results = redis.call('ZRANGE', zsetKey, 0, maxCandidates - 1, 'WITHSCORES')
-
-		-- 找到最小负载值和所有具有该负载的在线客服
 		local minWorkload = nil
 		local candidateAgents = {}
 
-		for i = 1, #results, 2 do
-			local agentID = results[i]
-			local workload = tonumber(results[i+1])
-			
-			if onlineAgents[agentID] then
-				if minWorkload == nil or workload < minWorkload then
-					-- 发现更小的负载，清空之前的候选
-					minWorkload = workload
-					candidateAgents = {agentID}
-				elseif workload == minWorkload then
-					-- 相同负载，添加到候选列表
-					table.insert(candidateAgents, agentID)
+		-- 遍历所有传入的在线客服，确保每一个都参与候选比较
+		for i = 1, #ARGV do
+			local agentID = ARGV[i]
+			local score = redis.call('ZSCORE', zsetKey, agentID)
+			local workload
+
+			if score then
+				workload = tonumber(score)
+			else
+				-- ZSet 中缺失，降级从 string key 读取，并回填 ZSet
+				local workloadStr = redis.call('GET', buildWorkloadKey(agentID))
+				if workloadStr then
+					workload = tonumber(workloadStr)
+				else
+					workload = 0
 				end
+				redis.call('ZADD', zsetKey, workload, agentID)
+			end
+
+			if minWorkload == nil or workload < minWorkload then
+				minWorkload = workload
+				candidateAgents = {agentID}
+			elseif workload == minWorkload then
+				table.insert(candidateAgents, agentID)
 			end
 		end
 
-		-- 从候选客服中随机选择一个
 		if #candidateAgents > 0 then
 			local randomIndex = math.random(1, #candidateAgents)
 			return {candidateAgents[randomIndex], minWorkload}
-		end
-
-		-- ZSet 中未找到，降级：从 string key 中随机选择一个在线客服
-		-- 注意: pairs() 的遍历顺序不确定，但不影响最终的随机性
-		-- 因为我们会从收集到的所有客服中使用 math.random() 随机选择
-		local fallbackAgents = {}
-		for agentID in pairs(onlineAgents) do
-			-- 构建维度 key: workload:agent:{agentID}:{dimension}:{timeKey}
-			local workloadKey
-			if timeKey == "" then
-				workloadKey = keyPrefix .. "agent:" .. agentID .. ":" .. dimension
-			else
-				workloadKey = keyPrefix .. "agent:" .. agentID .. ":" .. dimension .. ":" .. timeKey
-			end
-			
-			local workload = redis.call('GET', workloadKey)
-			if workload then
-				table.insert(fallbackAgents, {agentID, tonumber(workload)})
-			end
-		end
-
-		if #fallbackAgents > 0 then
-			-- 从所有候选客服中随机选择一个
-			local randomIndex = math.random(1, #fallbackAgents)
-			local selected = fallbackAgents[randomIndex]
-			local selectedAgent = selected[1]
-			local selectedWorkload = selected[2]
-			
-			-- 同步到 ZSet
-			redis.call('ZADD', zsetKey, selectedWorkload, selectedAgent)
-			
-			return {selectedAgent, selectedWorkload}
 		end
 
 		return nil
@@ -535,11 +573,10 @@ func (r *RedisWorkloadRepository) getLeastLoadedAgentFromRedis(ctx context.Conte
 	keyPrefix := r.keyPrefix
 	timeKey := dimension.FormatTimeKey(t)
 
-	// 准备参数：第一个参数是 maxCandidates，后面是在线客服列表
-	args := make([]any, len(onlineAgents)+1)
-	args[0] = r.maxCandidates
+	// 参数：所有在线客服列表（不再需要 maxCandidates）
+	args := make([]any, len(onlineAgents))
 	for i, agentID := range onlineAgents {
-		args[i+1] = agentID
+		args[i] = agentID
 	}
 
 	// 执行 Lua 脚本
@@ -561,22 +598,202 @@ func (r *RedisWorkloadRepository) getLeastLoadedAgentFromRedis(ctx context.Conte
 	return "", 0, errorx.WrapError("no online agents available")
 }
 
-// RemoveAgentWorkload 从所有维度的 ZSet 中移除客服（保留 string key）
+// AcquireLeastLoadedAgent 原子地选择负载最小的在线客服并将其负载 +1（分布式安全）
+//
+// 算法（整个流程在单个 Lua 脚本内完成，Redis 单线程保证原子性）：
+//  1. 基于 realtime 维度遍历所有传入的在线客服，通过 ZSCORE 查询各自负载；
+//     ZSet 中未命中的客服从 string key (GET) 读取并回填 ZSet
+//  2. 收集所有负载等于最小值的客服作为候选池，使用 math.random 等概率随机选一个
+//  3. 对选中客服的所有维度（realtime/hourly/daily/monthly/yearly）执行 INCRBY +1 并更新 ZSet
+//  4. 返回选中的客服 ID、选中前的 realtime 负载、以及各维度的新负载（用于异步同步到 DB）
+//
+// 为什么需要原子化：多副本部署/多 goroutine 并发时，若"选择"和"扣减"分两步执行，
+// 多个调用会读到同一份旧负载快照，选出同一客服，导致分配严重不均
+func (r *RedisWorkloadRepository) AcquireLeastLoadedAgent(ctx context.Context, onlineAgents []string, dimension WorkloadDimension) (string, int64, error) {
+	if len(onlineAgents) == 0 {
+		return "", 0, errorx.WrapError("no online agents available")
+	}
+
+	// 目前仅支持 realtime 维度参与分配（与 GetLeastLoadedAgent 保持一致）
+	if dimension != WorkloadDimensionRealtime {
+		return "", 0, errorx.WrapError(fmt.Sprintf("AcquireLeastLoadedAgent only supports realtime dimension, got: %s", dimension))
+	}
+
+	now := time.Now()
+
+	// Lua 脚本：选择 + 多维度原子 +1
+	luaScript := `
+		local keyPrefix = ARGV[1]
+		local realtimeTimeKey = ARGV[2]
+		local hourlyTimeKey = ARGV[3]
+		local dailyTimeKey = ARGV[4]
+		local monthlyTimeKey = ARGV[5]
+		local yearlyTimeKey = ARGV[6]
+		-- ARGV[7..] 为在线客服 ID 列表
+
+		-- 初始化随机种子
+		local t = redis.call('TIME')
+		math.randomseed(tonumber(t[1]) * 1000000 + tonumber(t[2]))
+		math.random()
+
+		local function buildWorkloadKey(dimension, timeKey, agentID)
+			if timeKey == "" then
+				return keyPrefix .. dimension .. ":agent:" .. agentID
+			else
+				return keyPrefix .. dimension .. ":" .. timeKey .. ":agent:" .. agentID
+			end
+		end
+
+		local function buildZSetKey(dimension, timeKey)
+			if timeKey == "" then
+				return keyPrefix .. dimension .. ":zset"
+			else
+				return keyPrefix .. dimension .. ":" .. timeKey .. ":zset"
+			end
+		end
+
+		-- 维度配置 {dimension, timeKey, ttl(秒)}
+		local dimensions = {
+			{"realtime", realtimeTimeKey, 0},
+			{"hourly",   hourlyTimeKey,   604800},
+			{"daily",    dailyTimeKey,    7776000},
+			{"monthly",  monthlyTimeKey,  63072000},
+			{"yearly",   yearlyTimeKey,   157680000}
+		}
+
+		local realtimeZSetKey = buildZSetKey("realtime", realtimeTimeKey)
+
+		-- 1. 基于 realtime 维度，遍历在线客服收集最小负载候选集
+		local minWorkload = nil
+		local candidateAgents = {}
+
+		for i = 7, #ARGV do
+			local agentID = ARGV[i]
+			local score = redis.call('ZSCORE', realtimeZSetKey, agentID)
+			local workload
+
+			if score then
+				workload = tonumber(score)
+			else
+				-- ZSet 缺失，降级从 string key 读取并回填 ZSet
+				local workloadStr = redis.call('GET', buildWorkloadKey("realtime", realtimeTimeKey, agentID))
+				if workloadStr then
+					workload = tonumber(workloadStr)
+				else
+					workload = 0
+				end
+				redis.call('ZADD', realtimeZSetKey, workload, agentID)
+			end
+
+			if minWorkload == nil or workload < minWorkload then
+				minWorkload = workload
+				candidateAgents = {agentID}
+			elseif workload == minWorkload then
+				table.insert(candidateAgents, agentID)
+			end
+		end
+
+		if #candidateAgents == 0 then
+			return nil
+		end
+
+		-- 2. 从候选池随机选一个
+		local selected = candidateAgents[math.random(1, #candidateAgents)]
+
+		-- 3. 对选中客服的所有维度原子 +1
+		local newWorkloads = {}
+		for i, dim in ipairs(dimensions) do
+			local dimName = dim[1]
+			local timeKey = dim[2]
+			local ttl = dim[3]
+
+			local workloadKey = buildWorkloadKey(dimName, timeKey, selected)
+			local zsetKey = buildZSetKey(dimName, timeKey)
+
+			local newWorkload = redis.call('INCRBY', workloadKey, 1)
+			if newWorkload < 0 then
+				newWorkload = 0
+				redis.call('SET', workloadKey, 0)
+			end
+			redis.call('ZADD', zsetKey, newWorkload, selected)
+
+			if ttl > 0 then
+				redis.call('EXPIRE', workloadKey, ttl)
+				redis.call('EXPIRE', zsetKey, ttl)
+			end
+
+			table.insert(newWorkloads, newWorkload)
+		end
+
+		-- 返回 {selectedAgentID, minWorkloadBeforeIncrement, realtimeNew, hourlyNew, dailyNew, monthlyNew, yearlyNew}
+		return {selected, minWorkload, newWorkloads[1], newWorkloads[2], newWorkloads[3], newWorkloads[4], newWorkloads[5]}
+	`
+
+	args := make([]any, 0, 6+len(onlineAgents))
+	args = append(args,
+		r.keyPrefix,
+		WorkloadDimensionRealtime.FormatTimeKey(now),
+		WorkloadDimensionHourly.FormatTimeKey(now),
+		WorkloadDimensionDaily.FormatTimeKey(now),
+		WorkloadDimensionMonthly.FormatTimeKey(now),
+		WorkloadDimensionYearly.FormatTimeKey(now),
+	)
+	for _, agentID := range onlineAgents {
+		args = append(args, agentID)
+	}
+
+	result, err := r.evalLua(ctx, luaScript, []string{}, args...)
+	if err != nil && err != redis.Nil {
+		return "", 0, errorx.WrapError("failed to acquire least loaded agent", err)
+	}
+
+	if result == nil {
+		return "", 0, errorx.WrapError("no online agents available")
+	}
+
+	resultArray, ok := result.([]any)
+	if !ok || len(resultArray) < 7 {
+		return "", 0, errorx.WrapError("unexpected lua result shape")
+	}
+
+	selected, _ := resultArray[0].(string)
+	minWorkload := r.parseWorkloadResult(resultArray[1])
+
+	// 异步同步各维度新负载到 DB（与 incrementMultiDimension 语义一致）
+	dims := []WorkloadDimension{
+		WorkloadDimensionRealtime,
+		WorkloadDimensionHourly,
+		WorkloadDimensionDaily,
+		WorkloadDimensionMonthly,
+		WorkloadDimensionYearly,
+	}
+	for i, dim := range dims {
+		newWorkload := r.parseWorkloadResult(resultArray[2+i])
+		r.asyncSyncMultiDimensionToDB(selected, dim, dim.FormatTimeKey(now), newWorkload)
+	}
+
+	r.logger.Debugf("🎯 原子选择并预扣减负载 [%s]: %s (选中前负载: %d)", dimension, selected, minWorkload)
+	return selected, minWorkload, nil
+}
+
+// RemoveAgentWorkload 客服下线时从参与分配的 ZSet 中移除该客服（保留 string key）
+//
+// 只移除 realtime 维度的 ZSet：
+//  1. 参与负载均衡分配的仅是 realtime 维度（详见 GetLeastLoadedAgent）
+//  2. 时间分片维度（hourly/daily/monthly/yearly）的 ZSet key 依赖当前时间戳，
+//     客服跨小时/跨天下线时，time.Now() 只能命中“当前”时间片的 ZSet，
+//     前一时间片 ZSet 中残留的该客服记录无法被清理；同时这些维度本就是
+//     用于统计的累计数据，不应在下线时清除。
 func (r *RedisWorkloadRepository) RemoveAgentWorkload(ctx context.Context, agentID string) error {
 	now := time.Now()
 
-	// 移除所有维度的 ZSet 记录
-	for _, dimension := range AllWorkloadDimensions {
-		zsetKey := r.GetDimensionZSetKey(dimension, now)
-		if err := r.client.ZRem(ctx, zsetKey, agentID).Err(); err != nil {
-			r.logger.Errorf("❌ 从 ZSet [%s] 移除客服 %s 失败: %v", dimension, agentID, err)
-			// 继续移除其他维度，不中断
-			continue
-		}
-		r.logger.Debugf("✅ 从 ZSet [%s] 移除客服 %s", dimension, agentID)
+	zsetKey := r.GetDimensionZSetKey(WorkloadDimensionRealtime, now)
+	if err := r.client.ZRem(ctx, zsetKey, agentID).Err(); err != nil {
+		r.logger.Errorf("❌ 从 ZSet [%s] 移除客服 %s 失败: %v", WorkloadDimensionRealtime, agentID, err)
+		return errorx.WrapError("failed to remove agent from realtime zset", err)
 	}
 
-	r.logger.Debugf("👋 客服 %s 下线，已从所有维度 ZSet 移除（保留 string key）", agentID)
+	r.logger.Debugf("👋 客服 %s 下线，已从 realtime ZSet 移除（保留 string key 及统计维度）", agentID)
 	return nil
 }
 

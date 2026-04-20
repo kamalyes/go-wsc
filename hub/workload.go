@@ -87,6 +87,34 @@ func (h *Hub) GetLeastLoadedAgent(dimension WorkloadDimension) (string, int64, e
 	return h.workloadRepo.GetLeastLoadedAgent(h.ctx, onlineAgents, dimension)
 }
 
+// AcquireLeastLoadedAgent 原子地选择负载最小的在线客服并将其负载 +1（分布式安全）
+//
+// 与 GetLeastLoadedAgent 的区别：在同一个 Redis Lua 中完成"选中 + 多维度原子 +1"，
+// 多副本/多 goroutine 并发场景下不会因"读-改-写"窗口读到同一份旧快照而选中同一客服
+//
+// 参数 onlineAgents 由调用方传入（可以是过滤后的"可接单"列表）；若传入空切片，
+// 函数会自动回退到调用 GetOnlineUsersByType(UserTypeAgent) 获取全部在线客服
+//
+// 业务失败回滚：调用方应在后续业务失败时显式调用 DecrementAgentWorkload 回滚此次预扣减
+func (h *Hub) AcquireLeastLoadedAgent(onlineAgents []string, dimension WorkloadDimension) (string, int64, error) {
+	if err := h.checkWorkloadRepo("原子获取并预扣减负载最小的客服"); err != nil {
+		return "", 0, err
+	}
+
+	if len(onlineAgents) == 0 {
+		agents, err := h.GetOnlineUsersByType(UserTypeAgent)
+		if err != nil {
+			return "", 0, err
+		}
+		if len(agents) == 0 {
+			return "", 0, nil
+		}
+		onlineAgents = agents
+	}
+
+	return h.workloadRepo.AcquireLeastLoadedAgent(h.ctx, onlineAgents, dimension)
+}
+
 // ReloadAgentWorkload 重新加载客服工作负载（客服上线时调用）
 func (h *Hub) ReloadAgentWorkload(agentID string) (int64, error) {
 	if err := h.checkWorkloadRepo("重新加载工作负载"); err != nil {

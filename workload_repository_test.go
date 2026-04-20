@@ -395,3 +395,181 @@ func TestClose(t *testing.T) {
 	err := tr.repo.Close()
 	assert.NoError(t, err)
 }
+
+// ============================================================================
+// 7. AcquireLeastLoadedAgent 原子选择+扣减测试
+// ============================================================================
+
+// TestAcquireLeastLoadedAgent_SelectsMinimum 验证优先选择负载最小的客服，并对其所有维度原子 +1
+func TestAcquireLeastLoadedAgent_SelectsMinimum(t *testing.T) {
+	tr := newTestWorkloadRepo(t)
+	tr.checkRedisHealth()
+
+	agentA := tr.agentID(tr.idGenerator.GenerateRequestID())
+	agentB := tr.agentID(tr.idGenerator.GenerateRequestID())
+	agentC := tr.agentID(tr.idGenerator.GenerateRequestID())
+	agents := map[string]int64{agentA: 10, agentB: 2, agentC: 8}
+	defer tr.cleanupMap(agents)
+
+	for id, w := range agents {
+		require.NoError(t, tr.repo.ForceSetAgentWorkload(tr.ctx, id, w))
+	}
+
+	selected, minBefore, err := tr.repo.AcquireLeastLoadedAgent(
+		tr.ctx, []string{agentA, agentB, agentC}, repository.WorkloadDimensionRealtime,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, agentB, selected, "应选择负载最小的 agentB")
+	assert.Equal(t, int64(2), minBefore, "返回的负载应为选中前的值 2")
+
+	// 选中客服所有维度应 +1
+	for _, dim := range repository.AllWorkloadDimensions {
+		w := tr.getWorkloadFromDimension(agentB, dim)
+		assert.Equal(t, int64(3), w, "agentB 维度 %s 负载应 +1 为 3", dim)
+	}
+	// 未选中客服维度不变
+	assert.Equal(t, int64(10), tr.getWorkloadFromDimension(agentA, repository.WorkloadDimensionRealtime))
+	assert.Equal(t, int64(8), tr.getWorkloadFromDimension(agentC, repository.WorkloadDimensionRealtime))
+}
+
+// TestAcquireLeastLoadedAgent_RandomOnTie 验证负载相等时在候选集内近似等概率随机
+func TestAcquireLeastLoadedAgent_RandomOnTie(t *testing.T) {
+	tr := newTestWorkloadRepo(t)
+	tr.checkRedisHealth()
+
+	const agentCount = 4
+	const rounds = 200
+
+	agentIDs := make([]string, 0, agentCount)
+	agents := map[string]int64{}
+	for range agentCount {
+		id := tr.agentID(tr.idGenerator.GenerateRequestID())
+		agentIDs = append(agentIDs, id)
+		agents[id] = 0
+	}
+	defer tr.cleanupMap(agents)
+
+	for _, id := range agentIDs {
+		require.NoError(t, tr.repo.ForceSetAgentWorkload(tr.ctx, id, 0))
+	}
+
+	hits := map[string]int{}
+	for range rounds {
+		// 每轮都把所有人重置为 0，制造 tie
+		for _, id := range agentIDs {
+			require.NoError(t, tr.repo.ForceSetAgentWorkload(tr.ctx, id, 0))
+		}
+		selected, _, err := tr.repo.AcquireLeastLoadedAgent(tr.ctx, agentIDs, repository.WorkloadDimensionRealtime)
+		require.NoError(t, err)
+		hits[selected]++
+	}
+
+	// 每个客服至少被选中一次，验证没有固定偏向
+	for _, id := range agentIDs {
+		assert.Greaterf(t, hits[id], 0, "agent %s 在 %d 轮 tie 中一次都没选中，可能存在固定偏向", id, rounds)
+	}
+}
+
+// TestAcquireLeastLoadedAgent_Concurrent 验证并发场景下每次调用独立扣减，不会多选同一客服导致分配不均
+//
+// 场景：2 个客服初始负载均为 0，并发发起 N 次 Acquire，期望最终总负载 = N（不丢扣减），
+// 且两人被选中次数之差不超过 1（在每次 Acquire 时总会选择当前最小的，保持严格均衡）
+func TestAcquireLeastLoadedAgent_Concurrent(t *testing.T) {
+	tr := newTestWorkloadRepo(t)
+	tr.checkRedisHealth()
+
+	agentA := tr.agentID(tr.idGenerator.GenerateRequestID())
+	agentB := tr.agentID(tr.idGenerator.GenerateRequestID())
+	defer tr.cleanupMap(map[string]int64{agentA: 0, agentB: 0})
+
+	require.NoError(t, tr.repo.ForceSetAgentWorkload(tr.ctx, agentA, 0))
+	require.NoError(t, tr.repo.ForceSetAgentWorkload(tr.ctx, agentB, 0))
+
+	const n = 50
+	results := make(chan string, n)
+	for range n {
+		go func() {
+			selected, _, err := tr.repo.AcquireLeastLoadedAgent(tr.ctx, []string{agentA, agentB}, repository.WorkloadDimensionRealtime)
+			if err != nil {
+				results <- ""
+				return
+			}
+			results <- selected
+		}()
+	}
+
+	hits := map[string]int{}
+	for range n {
+		r := <-results
+		if r != "" {
+			hits[r]++
+		}
+	}
+
+	// 总次数等于并发次数，代表每次 Acquire 都成功扣减
+	total := hits[agentA] + hits[agentB]
+	assert.Equal(t, n, total, "应有 %d 次成功扣减", n)
+
+	// 负载最终分布近似均衡（差不超过 1）
+	workloadA := tr.getWorkloadFromDimension(agentA, repository.WorkloadDimensionRealtime)
+	workloadB := tr.getWorkloadFromDimension(agentB, repository.WorkloadDimensionRealtime)
+	assert.Equal(t, int64(n), workloadA+workloadB, "两人负载之和应等于扣减总次数")
+	diff := workloadA - workloadB
+	if diff < 0 {
+		diff = -diff
+	}
+	assert.LessOrEqualf(t, diff, int64(1), "并发扣减后两人负载之差应 ≤ 1，实际 A=%d B=%d", workloadA, workloadB)
+}
+
+// TestAcquireLeastLoadedAgent_EmptyAgents 空在线客服列表应返回错误
+func TestAcquireLeastLoadedAgent_EmptyAgents(t *testing.T) {
+	tr := newTestWorkloadRepo(t)
+	tr.checkRedisHealth()
+
+	_, _, err := tr.repo.AcquireLeastLoadedAgent(tr.ctx, []string{}, repository.WorkloadDimensionRealtime)
+	assert.Error(t, err, "空客服列表应报错")
+}
+
+// TestAcquireLeastLoadedAgent_RejectsNonRealtimeDimension 非 realtime 维度应拒绝
+func TestAcquireLeastLoadedAgent_RejectsNonRealtimeDimension(t *testing.T) {
+	tr := newTestWorkloadRepo(t)
+	tr.checkRedisHealth()
+
+	agentID := tr.agentID(tr.idGenerator.GenerateRequestID())
+	defer tr.cleanup(agentID)
+	require.NoError(t, tr.repo.ForceSetAgentWorkload(tr.ctx, agentID, 0))
+
+	_, _, err := tr.repo.AcquireLeastLoadedAgent(tr.ctx, []string{agentID}, repository.WorkloadDimensionHourly)
+	assert.Error(t, err, "非 realtime 维度应报错")
+}
+
+// TestAcquireLeastLoadedAgent_FallbackToStringKey 验证 ZSet 中缺失时从 string key 回填
+//
+// 场景：客服已有 string key 负载，但 realtime ZSet 里没有该条目（模拟刚重连但尚未完成 ZADD 的场景），
+// Acquire 应仍能正确读到真实负载并选中
+func TestAcquireLeastLoadedAgent_FallbackToStringKey(t *testing.T) {
+	tr := newTestWorkloadRepo(t)
+	tr.checkRedisHealth()
+
+	agentA := tr.agentID(tr.idGenerator.GenerateRequestID())
+	agentB := tr.agentID(tr.idGenerator.GenerateRequestID())
+	defer tr.cleanupMap(map[string]int64{agentA: 0, agentB: 0})
+
+	require.NoError(t, tr.repo.ForceSetAgentWorkload(tr.ctx, agentA, 5))
+	require.NoError(t, tr.repo.ForceSetAgentWorkload(tr.ctx, agentB, 3))
+
+	// 从 realtime ZSet 中移除 B，模拟 B 曾被 RemoveAgentWorkload 移出 ZSet 的情况
+	zsetKey := tr.repoImpl.GetDimensionZSetKey(repository.WorkloadDimensionRealtime, time.Now())
+	require.NoError(t, tr.client.ZRem(tr.ctx, zsetKey, agentB).Err())
+
+	// Acquire 应仍能从 string key 读到 B 的真实负载 3 并选中 B
+	selected, minBefore, err := tr.repo.AcquireLeastLoadedAgent(
+		tr.ctx, []string{agentA, agentB}, repository.WorkloadDimensionRealtime,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, agentB, selected, "应通过 string key 回填选中 B")
+	assert.Equal(t, int64(3), minBefore, "应读到 B 的真实负载 3")
+
+	// B 被选中后 realtime 应为 4
+	assert.Equal(t, int64(4), tr.getWorkloadFromDimension(agentB, repository.WorkloadDimensionRealtime))
+}

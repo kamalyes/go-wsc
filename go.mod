@@ -9,7 +9,7 @@ require (
 	github.com/kamalyes/go-config v0.16.0
 	github.com/kamalyes/go-logger v0.4.6-0.20260423015836-299999af76ec
 	github.com/kamalyes/go-sqlbuilder v0.3.6
-	github.com/kamalyes/go-toolbox v0.11.88-0.20260422051535-9c51526b8753
+	github.com/kamalyes/go-toolbox v0.11.88
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/stretchr/testify v1.11.1
 	gorm.io/driver/mysql v1.6.0

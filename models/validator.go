@@ -11,20 +11,20 @@
 package models
 
 import (
-	"github.com/kamalyes/go-toolbox/pkg/types"
+	"github.com/kamalyes/go-toolbox/pkg/validator"
 )
 
 // 全局枚举验证器实例
 var (
 	// UserRoleValidator 用户角色验证器
-	UserRoleValidator = types.NewEnumValidator(
+	UserRoleValidator = validator.NewEnumValidator(
 		UserRoleCustomer,
 		UserRoleAgent,
 		UserRoleAdmin,
 	)
 
 	// UserTypeValidator 用户类型验证器
-	UserTypeValidator = types.NewEnumValidator(
+	UserTypeValidator = validator.NewEnumValidator(
 		UserTypeVisitor,
 		UserTypeCustomer,
 		UserTypeAgent,
@@ -35,7 +35,7 @@ var (
 	)
 
 	// UserStatusValidator 用户状态验证器
-	UserStatusValidator = types.NewEnumValidator(
+	UserStatusValidator = validator.NewEnumValidator(
 		UserStatusOnline,
 		UserStatusOffline,
 		UserStatusBusy,
@@ -44,7 +44,7 @@ var (
 	)
 
 	// DisconnectReasonValidator 断开原因验证器
-	DisconnectReasonValidator = types.NewEnumValidator(
+	DisconnectReasonValidator = validator.NewEnumValidator(
 		DisconnectReasonReadError,
 		DisconnectReasonWriteError,
 		DisconnectReasonContextDone,
@@ -59,7 +59,7 @@ var (
 	)
 
 	// ErrorSeverityValidator 错误严重程度验证器
-	ErrorSeverityValidator = types.NewEnumValidator(
+	ErrorSeverityValidator = validator.NewEnumValidator(
 		ErrorSeverityInfo,
 		ErrorSeverityWarning,
 		ErrorSeverityError,
@@ -68,7 +68,7 @@ var (
 	)
 
 	// QueueTypeValidator 队列类型验证器
-	QueueTypeValidator = types.NewEnumValidator(
+	QueueTypeValidator = validator.NewEnumValidator(
 		QueueTypeBroadcast,
 		QueueTypePending,
 		QueueTypeAllQueues,
@@ -77,7 +77,7 @@ var (
 	)
 
 	// MessageTypeValidator 消息类型验证器
-	MessageTypeValidator = types.NewEnumValidator(
+	MessageTypeValidator = validator.NewEnumValidator(
 		MessageTypeText, MessageTypeImage, MessageTypeFile, MessageTypeAudio, MessageTypeVideo,
 		MessageTypeSystem, MessageTypeNotice, MessageTypeEvent, MessageTypeAck, MessageTypeLocation,
 		MessageTypeCard, MessageTypeEmoji, MessageTypeSticker, MessageTypeLink, MessageTypeQuote,
@@ -104,7 +104,7 @@ var (
 	)
 
 	// PushTypeValidator 推送类型验证器
-	PushTypeValidator = types.NewEnumValidator(
+	PushTypeValidator = validator.NewEnumValidator(
 		PushTypeDirect,
 		PushTypeQueue,
 		PushTypeOffline,
@@ -112,27 +112,27 @@ var (
 	)
 
 	// BroadcastTypeValidator 广播类型验证器
-	BroadcastTypeValidator = types.NewEnumValidator(
+	BroadcastTypeValidator = validator.NewEnumValidator(
 		BroadcastTypeNone,
 		BroadcastTypeSession,
 		BroadcastTypeGlobal,
 	)
 
 	// VIPLevelValidator VIP等级验证器
-	VIPLevelValidator = types.NewEnumValidator(
+	VIPLevelValidator = validator.NewEnumValidator(
 		VIPLevelV0, VIPLevelV1, VIPLevelV2, VIPLevelV3,
 		VIPLevelV4, VIPLevelV5, VIPLevelV6, VIPLevelV7, VIPLevelV8,
 	)
 
 	// UrgencyLevelValidator 紧急等级验证器
-	UrgencyLevelValidator = types.NewEnumValidator(
+	UrgencyLevelValidator = validator.NewEnumValidator(
 		UrgencyLevelLow,
 		UrgencyLevelNormal,
 		UrgencyLevelHigh,
 	)
 
 	// BusinessCategoryValidator 业务分类验证器
-	BusinessCategoryValidator = types.NewEnumValidator(
+	BusinessCategoryValidator = validator.NewEnumValidator(
 		BusinessCategoryGeneral,
 		BusinessCategoryCustomer,
 		BusinessCategorySales,
@@ -147,7 +147,7 @@ var (
 	)
 
 	// MessageStatusValidator 消息状态验证器
-	MessageStatusValidator = types.NewEnumValidator(
+	MessageStatusValidator = validator.NewEnumValidator(
 		MessageStatusPending,
 		MessageStatusSent,
 		MessageStatusDelivered,
@@ -156,14 +156,14 @@ var (
 	)
 
 	// NodeStatusValidator 节点状态验证器
-	NodeStatusValidator = types.NewEnumValidator(
+	NodeStatusValidator = validator.NewEnumValidator(
 		NodeStatusActive,
 		NodeStatusInactive,
 		NodeStatusOffline,
 	)
 
 	// ConnectionStatusValidator 连接状态验证器
-	ConnectionStatusValidator = types.NewEnumValidator(
+	ConnectionStatusValidator = validator.NewEnumValidator(
 		ConnectionStatusConnecting,
 		ConnectionStatusConnected,
 		ConnectionStatusDisconnected,
@@ -172,7 +172,7 @@ var (
 	)
 
 	// OperationTypeValidator 操作类型验证器
-	OperationTypeValidator = types.NewEnumValidator(
+	OperationTypeValidator = validator.NewEnumValidator(
 		OperationTypeJoin,
 		OperationTypeLeave,
 		OperationTypeMessage,
@@ -184,7 +184,7 @@ var (
 	)
 
 	// ClientTypeValidator 客户端类型验证器
-	ClientTypeValidator = types.NewEnumValidator(
+	ClientTypeValidator = validator.NewEnumValidator(
 		ClientTypeWeb,
 		ClientTypeMobile,
 		ClientTypeDesktop,
@@ -192,7 +192,7 @@ var (
 	)
 
 	// PriorityValidator 优先级验证器
-	PriorityValidator = types.NewEnumValidator(
+	PriorityValidator = validator.NewEnumValidator(
 		PriorityLow,
 		PriorityNormal,
 		PriorityHigh,
@@ -201,7 +201,7 @@ var (
 	)
 
 	// DepartmentValidator 部门验证器
-	DepartmentValidator = types.NewEnumValidator(
+	DepartmentValidator = validator.NewEnumValidator(
 		DepartmentSales,
 		DepartmentSupport,
 		DepartmentBilling,
@@ -210,7 +210,7 @@ var (
 	)
 
 	// SkillValidator 技能验证器
-	SkillValidator = types.NewEnumValidator(
+	SkillValidator = validator.NewEnumValidator(
 		SkillTechnical,
 		SkillSales,
 		SkillBilling,
@@ -221,7 +221,7 @@ var (
 	)
 
 	// MessageSendStatusValidator 消息发送状态验证器
-	MessageSendStatusValidator = types.NewEnumValidator(
+	MessageSendStatusValidator = validator.NewEnumValidator(
 		MessageSendStatusPending,
 		MessageSendStatusSending,
 		MessageSendStatusSuccess,
@@ -233,7 +233,7 @@ var (
 	)
 
 	// MessageSourceValidator 消息来源验证器
-	MessageSourceValidator = types.NewEnumValidator(
+	MessageSourceValidator = validator.NewEnumValidator(
 		MessageSourceOnline,
 		MessageSourceOffline,
 	)

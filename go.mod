@@ -5,11 +5,11 @@ go 1.25.0
 require (
 	github.com/gorilla/websocket v1.4.2
 	github.com/jpillora/backoff v1.0.0
-	github.com/kamalyes/go-cachex v0.1.9-0.20260320162159-9ee0f598da5e
+	github.com/kamalyes/go-cachex v0.1.9
 	github.com/kamalyes/go-config v0.16.0
-	github.com/kamalyes/go-logger v0.4.6-0.20260423015836-299999af76ec
-	github.com/kamalyes/go-sqlbuilder v0.3.6
-	github.com/kamalyes/go-toolbox v0.11.88-0.20260422051535-9c51526b8753
+	github.com/kamalyes/go-logger v0.4.6
+	github.com/kamalyes/go-sqlbuilder v0.3.7
+	github.com/kamalyes/go-toolbox v0.12.1-0.20260513095929-fd679e7646ee
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/stretchr/testify v1.11.1
 	gorm.io/driver/mysql v1.6.0

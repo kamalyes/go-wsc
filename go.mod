@@ -6,7 +6,7 @@ require (
 	github.com/gorilla/websocket v1.4.2
 	github.com/jpillora/backoff v1.0.0
 	github.com/kamalyes/go-cachex v0.1.9
-	github.com/kamalyes/go-config v0.16.0
+	github.com/kamalyes/go-config v0.17.0
 	github.com/kamalyes/go-logger v0.4.6
 	github.com/kamalyes/go-sqlbuilder v0.3.7
 	github.com/kamalyes/go-toolbox v0.12.1-0.20260513095929-fd679e7646ee

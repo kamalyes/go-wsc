@@ -10,9 +10,7 @@
  */
 package models
 
-import (
-	"github.com/kamalyes/go-toolbox/pkg/validator"
-)
+import validator "github.com/kamalyes/go-argus/validate"
 
 // 全局枚举验证器实例
 var (

@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-12-28 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-01-02 12:15:30
+ * @LastEditTime: 2026-05-17 15:12:26
  * @FilePath: \go-wsc\hub\hub.go
  * @Description: Slim orchestration Hub —— 组装域管理器与过载/集群/连接组件的编排层
  *
@@ -90,6 +90,9 @@ type Hub struct {
 	grpcBatchDispatcher *cluster.GRPCBatchDispatcher
 	// nodeQueryFlight 用户节点查询 in-flight 合并器（热点用户并发扇入共享单次回源）
 	nodeQueryFlight nodeQueryFlight
+	// nodeIndexCache 投递热路径节点索引短 TTL 缓存（串行连发消减重复回源，
+	// 见 node_index_cache.go 的消费边界与陈旧窗口分析）
+	nodeIndexCache nodeIndexCache
 	// grpcDispatchSem gRPC 并发投递信号量（dispatchViaGRPC 与 grpcBroadcastGroups 共用，
 	// 懒初始化见 grpcDispatchSemaphore——测试零值 Hub 直接构造时安全）
 	grpcDispatchSem chan struct{}

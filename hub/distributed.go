@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-01-30 01:20:15
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-01-30 11:20:15
+ * @LastEditTime: 2026-05-17 15:12:26
  * @FilePath: \go-wsc\hub\distributed.go
  * @Description: Hub 分布式消息订阅与处理
  *
@@ -58,6 +58,8 @@ func (h *Hub) queryUserNodes(ctx context.Context, userID string) ([]string, erro
 // 消除历史上分散在各方法中的重复路由逻辑
 //
 // presetNodes 非空时跳过节点查询（SendToUserWithRetry 本地 miss 时已预取，单次 Redis 往返）
+// presetNodes 为空时节点索引经短 TTL 缓存（nodeIndexCache，毫秒级窗口复用最近快照），
+// 串行连发同收件人时消减重复回源；陈旧窗口风险由既有兜底链路吸收（见 node_index_cache.go）
 //
 // 返回: (是否在其他节点, 实际投递的目标节点列表, 错误)
 //   - routed=true:  消息已路由到 targetNodes，调用方无需本地发送
@@ -73,16 +75,24 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *model
 
 	// 1. 查询用户所在节点
 	var nodeIDs []string
-	var err error
-	if presetNodes != nil {
+	indexCached := false
+	switch {
+	case presetNodes != nil:
 		// 调用方已预取（SendToUserWithRetry 入口单次往返共享结果）
 		nodeIDs = presetNodes
-	} else {
-		nodeIDs, err = h.queryUserNodes(ctx, userID)
-	}
-	if err != nil {
-		// 查询失败，假设用户在本节点或离线，继续本地发送流程
-		return false, nil, err
+	default:
+		key := nodeIndexCacheKey(ctx, userID)
+		if nodes, ok := h.nodeIndexCache.load(key); ok {
+			nodeIDs, indexCached = nodes, true
+		} else {
+			nodes, err := h.queryUserNodes(ctx, userID)
+			if err != nil {
+				// 查询失败，假设用户在本节点或离线，继续本地发送流程（失败不写缓存）
+				return false, nil, err
+			}
+			nodeIDs = nodes
+			h.nodeIndexCache.store(key, nodes)
+		}
 	}
 
 	// 2. 过滤掉本节点，只保留其他节点
@@ -100,6 +110,7 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *model
 			"message_id", msg.MessageID,
 			"node_id", h.nodeID,
 			"all_nodes", nodeIDs,
+			"node_index_cached", indexCached,
 		)
 		return false, nil, nil
 	}
@@ -111,6 +122,7 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *model
 		"to_nodes", otherNodes,
 		"all_nodes", nodeIDs,
 		"grpc_enabled", h.IsGRPCEnabled(),
+		"node_index_cached", indexCached,
 	)
 
 	// 记录 P2P 定向路由目标（user_not_found 重路由守卫：区分已尝试/新节点，防重复投递与漏投递）

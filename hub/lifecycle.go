@@ -60,6 +60,11 @@ func (h *Hub) Run() {
 		cg.Info("✅ Hub 启动成功")
 		cg.GroupEnd()
 
+		// 启动心跳统计批量聚合器
+		if h.heartbeatBatcher != nil {
+			h.heartbeatBatcher.Start()
+		}
+
 		// 启动指标收集器（如果已配置）
 		close(h.startCh)
 	}
@@ -278,6 +283,12 @@ func (h *Hub) SafeShutdown() error {
 
 	// 等待异步统计任务完成（避免统计丢失）
 	cg.Info("→ 等待异步统计任务完成...")
+
+	// 停止心跳统计批量聚合器，刷写剩余数据
+	if h.heartbeatBatcher != nil {
+		h.heartbeatBatcher.Stop()
+	}
+
 	time.Sleep(50 * time.Millisecond)
 
 	// 关闭所有客户端连接

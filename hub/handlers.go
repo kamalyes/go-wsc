@@ -72,13 +72,38 @@ func (h *Hub) SendPongResponse(client *Client) error {
 		return errorx.WrapError("failed to marshal pong message", err)
 	}
 
-	// 使用客户端的 TrySend 方法，它内部已经有锁保护
+	h.logWithClient(logger.DEBUG, "💓 准备发送心跳 pong 响应", client)
+
+	// 优先使用非阻塞发送
 	if client.TrySend(data) {
 		h.UpdatePongTime(client.ID)
 		return nil
 	}
 
-	return errorx.WrapError("client send channel is full or closed")
+	// 非阻塞发送失败（通道满或客户端刚注册写协程尚未就绪），
+	// 使用带超时的阻塞发送重试，避免 pong 响应被静默丢弃
+	client.CloseMu.Lock()
+	defer client.CloseMu.Unlock()
+
+	if client.IsClosed() || client.SendChan == nil {
+		h.logWithClient(logger.DEBUG, "💓 发送心跳 pong 响应失败，客户端已关闭", client)
+		return errorx.WrapError("client is closed or send channel is nil")
+	}
+
+	timer := time.NewTimer(500 * time.Millisecond)
+	defer timer.Stop()
+
+	select {
+	case client.SendChan <- data:
+		h.UpdatePongTime(client.ID)
+		return nil
+	case <-timer.C:
+		h.logger.WarnKV("心跳 pong 响应发送超时",
+			"client_id", client.ID,
+			"user_id", client.UserID,
+		)
+		return errorx.WrapError("pong send timeout, client send channel may be full")
+	}
 }
 
 // handleHeartbeatMessage 处理心跳消息
@@ -125,7 +150,7 @@ func (h *Hub) handleHeartbeatMessage(client *Client) {
 			"error", err,
 		)
 	}
-	
+
 	// 异步追踪心跳统计（不阻塞主流程）
 	h.trackHeartbeatStats(client)
 

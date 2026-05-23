@@ -337,10 +337,11 @@ func TestMultiLoginDisabledWithOnlineStatus(t *testing.T) {
 	assert.Equal(t, 1, len(clientMap), "应该只有1个客户端")
 	assert.Contains(t, clientMap, client2.ID, "应该是第二个客户端")
 
-	// 用户仍然在线
-	isOnline, err = onlineStatusRepo.IsUserOnline(ctx, client1.UserID)
-	require.NoError(t, err)
-	assert.True(t, isOnline, "用户应该在线")
+	// 用户仍然在线（踢旧连、上新连后 Redis 应与 Hub 一致）
+	require.Eventually(t, func() bool {
+		isOnline, err := onlineStatusRepo.IsUserOnline(ctx, client1.UserID)
+		return err == nil && isOnline
+	}, 5*time.Second, 100*time.Millisecond, "用户应该在线")
 
 	// 注销第二个客户端
 	hub.Unregister(client2)

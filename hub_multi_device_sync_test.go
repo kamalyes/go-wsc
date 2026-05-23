@@ -51,44 +51,43 @@ func TestMultiDeviceMessageSync(t *testing.T) {
 	receivedByD := make(chan *HubMessage, 10)
 	receivedByF := make(chan *HubMessage, 10)
 
-	go func() {
-		for msg := range deviceB.SendChan {
-			t.Logf("设备B收到消息: %s", string(msg))
-		}
-	}()
-
-	go func() {
-		for msgData := range deviceC.SendChan {
-			var msg HubMessage
-			if err := json.Unmarshal(msgData, &msg); err == nil {
-				receivedByC <- &msg
-			}
-		}
-	}()
-
-	go func() {
-		for msgData := range deviceD.SendChan {
-			var msg HubMessage
-			if err := json.Unmarshal(msgData, &msg); err == nil {
-				receivedByD <- &msg
-			}
-		}
-	}()
-
-	go func() {
-		for msgData := range userF.SendChan {
-			var msg HubMessage
-			if err := json.Unmarshal(msgData, &msg); err == nil {
-				receivedByF <- &msg
-			}
-		}
-	}()
-
-	// 注册所有设备
 	hub.Register(deviceB)
 	hub.Register(deviceC)
 	hub.Register(deviceD)
 	hub.Register(userF)
+
+	go func() {
+		deviceB.DrainSendChan(func(msg []byte) {
+			t.Logf("设备B收到消息: %s", string(msg))
+		})
+	}()
+
+	go func() {
+		deviceC.DrainSendChan(func(msgData []byte) {
+			var msg HubMessage
+			if err := json.Unmarshal(msgData, &msg); err == nil {
+				receivedByC <- &msg
+			}
+		})
+	}()
+
+	go func() {
+		deviceD.DrainSendChan(func(msgData []byte) {
+			var msg HubMessage
+			if err := json.Unmarshal(msgData, &msg); err == nil {
+				receivedByD <- &msg
+			}
+		})
+	}()
+
+	go func() {
+		userF.DrainSendChan(func(msgData []byte) {
+			var msg HubMessage
+			if err := json.Unmarshal(msgData, &msg); err == nil {
+				receivedByF <- &msg
+			}
+		})
+	}()
 	time.Sleep(100 * time.Millisecond)
 
 	// 设置消息接收回调，模拟B设备发送消息给F
@@ -176,10 +175,14 @@ func TestMultiDeviceSyncExcludeSender(t *testing.T) {
 	// 用户F
 	userF := createTestClientWithDeviceIDs(userFID, deviceFID)
 
+	hub.Register(deviceB)
+	hub.Register(deviceC)
+	hub.Register(userF)
+
 	// 统计设备B收到的消息数（应该只有欢迎消息，不应该收到自己发的消息）
 	receivedByB := 0
 	go func() {
-		for msgData := range deviceB.SendChan {
+		deviceB.DrainSendChan(func(msgData []byte) {
 			var msg HubMessage
 			if err := json.Unmarshal(msgData, &msg); err == nil {
 				if msg.MessageType != MessageTypeWelcome {
@@ -187,29 +190,24 @@ func TestMultiDeviceSyncExcludeSender(t *testing.T) {
 					t.Logf("设备B收到消息: %+v", msg)
 				}
 			}
-		}
+		})
 	}()
 
 	receivedByC := make(chan *HubMessage, 10)
 	go func() {
-		for msgData := range deviceC.SendChan {
+		deviceC.DrainSendChan(func(msgData []byte) {
 			var msg HubMessage
 			if err := json.Unmarshal(msgData, &msg); err == nil {
 				if msg.MessageType != MessageTypeWelcome {
 					receivedByC <- &msg
 				}
 			}
-		}
+		})
 	}()
 
 	go func() {
-		for range userF.SendChan {
-		}
+		userF.DrainSendChan(nil)
 	}()
-
-	hub.Register(deviceB)
-	hub.Register(deviceC)
-	hub.Register(userF)
 	time.Sleep(100 * time.Millisecond)
 
 	// 设置消息接收回调
@@ -274,30 +272,30 @@ func TestMultiDeviceSelfMessage(t *testing.T) {
 	receivedByB := make(chan *HubMessage, 10)
 	receivedByC := make(chan *HubMessage, 10)
 
+	hub.Register(deviceB)
+	hub.Register(deviceC)
+
 	go func() {
-		for msgData := range deviceB.SendChan {
+		deviceB.DrainSendChan(func(msgData []byte) {
 			var msg HubMessage
 			if err := json.Unmarshal(msgData, &msg); err == nil {
 				if msg.MessageType != MessageTypeWelcome {
 					receivedByB <- &msg
 				}
 			}
-		}
+		})
 	}()
 
 	go func() {
-		for msgData := range deviceC.SendChan {
+		deviceC.DrainSendChan(func(msgData []byte) {
 			var msg HubMessage
 			if err := json.Unmarshal(msgData, &msg); err == nil {
 				if msg.MessageType != MessageTypeWelcome {
 					receivedByC <- &msg
 				}
 			}
-		}
+		})
 	}()
-
-	hub.Register(deviceB)
-	hub.Register(deviceC)
 	time.Sleep(100 * time.Millisecond)
 
 	hub.OnMessageReceived(func(ctx context.Context, client *Client, msg *HubMessage) error {

@@ -89,33 +89,35 @@ func TestHubRedisStatistics(t *testing.T) {
 			LastHeartbeat:  time.Now(),
 			NodeID:         hub.GetNodeID(),
 		}
+		hub.Register(clients[i])
 		// 添加消息消费者防止SendChan阻塞
 		go func(c *Client) {
-			for range c.SendChan {
-			}
+			c.DrainSendChan(nil)
 		}(clients[i])
-		hub.Register(clients[i])
+		// 分批注册，给活跃连接数防抖同步留出写入窗口（100ms debounce）
+		if (i+1)%25 == 0 {
+			time.Sleep(150 * time.Millisecond)
+		}
 	}
 
-	// 等待统计同步（异步操作可能需要时间）
-	time.Sleep(400 * time.Millisecond) // 等待防抖定时器触发(100ms) + Redis写入完成 + 缓冲时间
+	// 等待 Hub 本地注册完成，再等待 Redis 统计（活跃连接数经 100ms 防抖批量同步）
+	require.Eventually(t, func() bool {
+		return hub.GetClientsCount() == clientCount
+	}, 10*time.Second, 50*time.Millisecond, "Hub 本地应注册 %d 个客户端", clientCount)
 
-	// 使用重试机制等待活跃连接数同步到 Redis
-	maxRetries := 30
-	for retry := range maxRetries {
-		nodeStats, err = statsRepo.GetNodeStats(ctx, hub.GetNodeID())
-		require.NoError(t, err)
-		t.Logf("第%d次检查: 总连接=%d, 活跃连接=%d", retry+1, nodeStats.TotalConnections, nodeStats.ActiveConnections)
-		if nodeStats.TotalConnections >= int64(clientCount) && nodeStats.ActiveConnections >= int64(clientCount) {
-			t.Logf("✅ 统计同步成功 (第%d次检查, 耗时约%dms)", retry+1, 500+retry*100)
-			break
+	require.Eventually(t, func() bool {
+		nodeStats, err := statsRepo.GetNodeStats(ctx, hub.GetNodeID())
+		if err != nil {
+			return false
 		}
-		if retry == maxRetries-1 {
-			t.Fatalf("⚠️ 统计同步超时: 总连接=%d, 活跃连接=%d (已重试%d次, 期望=%d)",
-				nodeStats.TotalConnections, nodeStats.ActiveConnections, maxRetries, clientCount)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+		local := hub.GetClientsCount()
+		return nodeStats.TotalConnections >= int64(clientCount) &&
+			nodeStats.ActiveConnections >= int64(local) &&
+			local == clientCount
+	}, 15*time.Second, 200*time.Millisecond, "Redis 统计应与本地连接数对齐")
+
+	nodeStats, err = statsRepo.GetNodeStats(ctx, hub.GetNodeID())
+	require.NoError(t, err)
 
 	// 验证总连接数和活跃连接数
 	assert.GreaterOrEqual(t, nodeStats.TotalConnections, int64(clientCount), "总连接数应至少为%d", clientCount)
@@ -239,28 +241,26 @@ func TestHubClusterStatistics(t *testing.T) {
 	node1Clients := make([]*Client, 2)
 	for i := range 2 {
 		node1Clients[i] = createTestClientWithIDGen(UserTypeCustomer)
+		hub1.Register(node1Clients[i])
 		// 添加消息消费者防止SendChan阻塞
 		go func(c *Client) {
-			for range c.SendChan {
-			}
+			c.DrainSendChan(nil)
 		}(node1Clients[i])
-		hub1.Register(node1Clients[i])
 	}
 
 	// 5. 节点2注册3个客户端
 	node2Clients := make([]*Client, 3)
 	for i := range 3 {
 		node2Clients[i] = createTestClientWithIDGen(UserTypeAgent)
+		hub2.Register(node2Clients[i])
 		// 添加消息消费者防止SendChan阻塞
 		go func(c *Client) {
-			for range c.SendChan {
-			}
+			c.DrainSendChan(nil)
 		}(node2Clients[i])
-		hub2.Register(node2Clients[i])
 	}
 
 	// 6. 使用重试机制等待集群统计同步
-	time.Sleep(1 * time.Second) // 等待异步统计任务完成（避免并发竞态）
+	time.Sleep(500 * time.Millisecond) // 等待注册与异步统计写入
 	maxRetries := 30
 	var clusterStats *ClusterStats
 	var err error
@@ -282,13 +282,16 @@ func TestHubClusterStatistics(t *testing.T) {
 			t.Logf("  节点2 %s: 总连接=%d, 活跃=%d", hub2.GetNodeID(), node2Stats.TotalConnections, node2Stats.ActiveConnections)
 		}
 
-		if clusterStats.TotalNodes >= 2 && clusterStats.TotalConnections >= 5 && clusterStats.ActiveConnections >= 5 {
+		// 活跃连接数可能略滞后于总连接数，需等到两者对齐
+		if clusterStats.TotalNodes >= 2 &&
+			clusterStats.TotalConnections >= 5 &&
+			clusterStats.ActiveConnections >= clusterStats.TotalConnections {
 			t.Logf("✅ 集群统计同步成功 (第%d次检查)", retry+1)
 			break
 		}
 
 		if retry == maxRetries-1 {
-			t.Errorf("⚠️ 集群统计未完全同步: 节点数=%d, 总连接=%d, 活跃连接=%d",
+			t.Fatalf("⚠️ 集群统计未完全同步: 节点数=%d, 总连接=%d, 活跃连接=%d",
 				clusterStats.TotalNodes, clusterStats.TotalConnections, clusterStats.ActiveConnections)
 		}
 		time.Sleep(500 * time.Millisecond) // 增加重试间隔，等待异步更新
@@ -297,6 +300,7 @@ func TestHubClusterStatistics(t *testing.T) {
 	// 验证集群统计
 	assert.GreaterOrEqual(t, clusterStats.TotalConnections, int64(5), "集群总连接数应至少为5")
 	assert.GreaterOrEqual(t, clusterStats.ActiveConnections, int64(5), "集群活跃连接数应至少为5")
+	assert.Equal(t, clusterStats.ActiveConnections, clusterStats.TotalConnections, "活跃连接数应与总连接数一致")
 	assert.Equal(t, 2, clusterStats.TotalNodes, "集群节点数应为2")
 
 	t.Logf("✅ 集群统计:")

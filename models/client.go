@@ -22,6 +22,9 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// 默认 overflow buffer 容量
+const DefaultOverflowBufferSize = 64
+
 // Client 客户端连接（统一管理 WebSocket 和 SSE 连接）
 type Client struct {
 	ID             string                 `json:"id"`              // 客户端ID
@@ -55,6 +58,30 @@ type Client struct {
 	SSEFlusher   http.Flusher        `json:"-"` // SSE Flusher（不序列化）
 	SSEMessageCh chan *HubMessage    `json:"-"` // SSE 消息通道（不序列化）
 	SSECloseCh   chan struct{}       `json:"-"` // SSE 关闭通道（不序列化）
+
+	// Overflow buffer：当 SendChan 满时暂存消息，drain goroutine 异步回灌
+	overflowMu      sync.Mutex    `json:"-"`
+	overflowBuf     [][]byte      `json:"-"` // WebSocket overflow 缓冲
+	overflowDrainCh chan struct{} `json:"-"` // 通知 drain goroutine 有新数据
+	overflowStopCh  chan struct{} `json:"-"` // 停止 drain goroutine
+	overflowStarted atomic.Bool   `json:"-"` // drain goroutine 是否已启动
+
+	// SSE overflow buffer
+	sseOverflowMu      sync.Mutex    `json:"-"`
+	sseOverflowBuf     []*HubMessage `json:"-"` // SSE overflow 缓冲
+	sseOverflowDrainCh chan struct{} `json:"-"`
+	sseOverflowStopCh  chan struct{} `json:"-"`
+	sseOverflowStarted atomic.Bool   `json:"-"`
+
+	// Overflow 容量（0 表示不启用 overflow）
+	OverflowBufferSize int `json:"-"`
+
+	// 心跳重连：已关闭客户端收到心跳的累计次数，超过阈值触发重连
+	closedHeartbeatCount atomic.Int32 `json:"-"`
+	reconnecting         atomic.Bool  `json:"-"` // 防重：重连进行中标记
+
+	// Pong 失败计数：心跳 pong 响应连续失败次数，超过阈值注销客户端
+	pongFailCount atomic.Int32 `json:"-"`
 }
 
 // NewClient 创建新的客户端实例
@@ -267,7 +294,117 @@ func (c *Client) MarkClosed() {
 	c.closed.Store(true)
 }
 
-// TrySend 尝试向客户端发送数据（WebSocket），如果已关闭或失败则返回false
+// Reopen 重新打开客户端（用于心跳重连恢复），将 closed 状态重置为 false
+func (c *Client) Reopen() {
+	c.closed.Store(false)
+}
+
+// IncrClosedHeartbeatCount 已关闭客户端收到心跳时递增计数，返回递增后的值
+func (c *Client) IncrClosedHeartbeatCount() int32 {
+	return c.closedHeartbeatCount.Add(1)
+}
+
+// ResetClosedHeartbeatCount 重置已关闭客户端的心跳计数
+func (c *Client) ResetClosedHeartbeatCount() {
+	c.closedHeartbeatCount.Store(0)
+}
+
+// GetClosedHeartbeatCount 获取已关闭客户端的心跳计数
+func (c *Client) GetClosedHeartbeatCount() int32 {
+	return c.closedHeartbeatCount.Load()
+}
+
+// IncrPongFailCount 递增 pong 失败计数，返回递增后的值
+func (c *Client) IncrPongFailCount() int32 {
+	return c.pongFailCount.Add(1)
+}
+
+// ResetPongFailCount 重置 pong 失败计数
+func (c *Client) ResetPongFailCount() {
+	c.pongFailCount.Store(0)
+}
+
+// GetPongFailCount 获取 pong 失败计数
+func (c *Client) GetPongFailCount() int32 {
+	return c.pongFailCount.Load()
+}
+
+// TryStartReconnect 尝试进入重连状态（防重），成功返回 true
+func (c *Client) TryStartReconnect() bool {
+	return c.reconnecting.CompareAndSwap(false, true)
+}
+
+// FinishReconnect 结束重连状态
+func (c *Client) FinishReconnect() {
+	c.reconnecting.Store(false)
+}
+
+// IsReconnecting 是否正在重连中
+func (c *Client) IsReconnecting() bool {
+	return c.reconnecting.Load()
+}
+
+// SendChanRef 在 CloseMu 保护下返回当前 SendChan 引用
+// 用于写协程启动时快照，或与 closeClientChannel / releaseClientSendChan 并发时安全读取
+func (c *Client) SendChanRef() chan []byte {
+	c.CloseMu.Lock()
+	ch := c.SendChan
+	c.CloseMu.Unlock()
+	return ch
+}
+
+// DrainSendChan 消费 SendChan 直至关闭；handler 为 nil 时仅丢弃消息
+func (c *Client) DrainSendChan(handler func([]byte)) {
+	ch := c.SendChanRef()
+	if ch == nil {
+		return
+	}
+	for data := range ch {
+		if handler != nil {
+			handler(data)
+		}
+	}
+}
+
+// DrainSendChanBuffer 非阻塞清空 SendChan 中已缓冲的消息
+func (c *Client) DrainSendChanBuffer() {
+	ch := c.SendChanRef()
+	if ch == nil {
+		return
+	}
+	for {
+		select {
+		case <-ch:
+		default:
+			return
+		}
+	}
+}
+
+// WatchSendChan 在 SendChan 快照上监听消息，直到 channel 关闭或 stop 信号触发
+func (c *Client) WatchSendChan(stop <-chan struct{}, handler func()) {
+	ch := c.SendChanRef()
+	if ch == nil {
+		return
+	}
+	for {
+		select {
+		case _, ok := <-ch:
+			if !ok {
+				return
+			}
+			if handler != nil {
+				handler()
+			}
+		case <-stop:
+			return
+		}
+	}
+}
+
+// TrySend 尝试向客户端发送数据（WebSocket），非阻塞写入 SendChan
+// 如果已关闭、SendChan 为 nil 或通道已满，返回 false
+// overflow 逻辑由 Hub 层管理
 func (c *Client) TrySend(data []byte) bool {
 	c.CloseMu.Lock()
 	defer c.CloseMu.Unlock()
@@ -279,7 +416,6 @@ func (c *Client) TrySend(data []byte) bool {
 	// 使用 defer recover 捕获可能的 send on closed channel panic
 	defer func() {
 		if r := recover(); r != nil {
-			// Channel 已关闭，标记为已关闭状态
 			c.closed.Store(true)
 		}
 	}()
@@ -292,7 +428,9 @@ func (c *Client) TrySend(data []byte) bool {
 	}
 }
 
-// TrySendSSE 尝试向SSE客户端发送消息，如果已关闭或失败则返回false
+// TrySendSSE 尝试向SSE客户端发送消息，非阻塞写入 SSEMessageCh
+// 如果已关闭、SSEMessageCh 为 nil 或通道已满，返回 false
+// overflow 逻辑由 Hub 层管理
 func (c *Client) TrySendSSE(msg *HubMessage) bool {
 	c.CloseMu.Lock()
 	defer c.CloseMu.Unlock()
@@ -304,7 +442,6 @@ func (c *Client) TrySendSSE(msg *HubMessage) bool {
 	// 使用 defer recover 捕获可能的 send on closed channel panic
 	defer func() {
 		if r := recover(); r != nil {
-			// Channel 已关闭，标记为已关闭状态
 			c.closed.Store(true)
 		}
 	}()
@@ -316,6 +453,90 @@ func (c *Client) TrySendSSE(msg *HubMessage) bool {
 		return false
 	}
 }
+
+// StopOverflowDrain 停止 overflow drain goroutine
+func (c *Client) StopOverflowDrain() {
+	if c.overflowStarted.CompareAndSwap(true, false) {
+		close(c.overflowStopCh)
+	}
+}
+
+// OverflowLen 返回 overflow buffer 中的消息数量
+func (c *Client) OverflowLen() int {
+	c.overflowMu.Lock()
+	defer c.overflowMu.Unlock()
+	return len(c.overflowBuf)
+}
+
+// StopSSEOverflowDrain 停止 SSE overflow drain goroutine
+func (c *Client) StopSSEOverflowDrain() {
+	if c.sseOverflowStarted.CompareAndSwap(true, false) {
+		close(c.sseOverflowStopCh)
+	}
+}
+
+// SSEOverflowLen 返回 SSE overflow buffer 中的消息数量
+func (c *Client) SSEOverflowLen() int {
+	c.sseOverflowMu.Lock()
+	defer c.sseOverflowMu.Unlock()
+	return len(c.sseOverflowBuf)
+}
+
+// ============================================================================
+// Overflow 字段访问方法（供 Hub 层管理 overflow 逻辑使用）
+// ============================================================================
+
+// --- WebSocket overflow ---
+
+// OverflowMu 返回 overflow 互斥锁
+func (c *Client) OverflowMu() *sync.Mutex { return &c.overflowMu }
+
+// OverflowBuf 返回 overflow 缓冲切片
+func (c *Client) OverflowBuf() [][]byte { return c.overflowBuf }
+
+// SetOverflowBuf 设置 overflow 缓冲切片
+func (c *Client) SetOverflowBuf(buf [][]byte) { c.overflowBuf = buf }
+
+// OverflowDrainCh 返回 overflow drain 通知通道
+func (c *Client) OverflowDrainCh() chan struct{} { return c.overflowDrainCh }
+
+// SetOverflowDrainCh 设置 overflow drain 通知通道
+func (c *Client) SetOverflowDrainCh(ch chan struct{}) { c.overflowDrainCh = ch }
+
+// OverflowStopCh 返回 overflow drain 停止通道
+func (c *Client) OverflowStopCh() chan struct{} { return c.overflowStopCh }
+
+// SetOverflowStopCh 设置 overflow drain 停止通道
+func (c *Client) SetOverflowStopCh(ch chan struct{}) { c.overflowStopCh = ch }
+
+// OverflowStarted 返回 overflow drain 是否已启动
+func (c *Client) OverflowStarted() *atomic.Bool { return &c.overflowStarted }
+
+// --- SSE overflow ---
+
+// SSEOverflowMu 返回 SSE overflow 互斥锁
+func (c *Client) SSEOverflowMu() *sync.Mutex { return &c.sseOverflowMu }
+
+// SSEOverflowBuf 返回 SSE overflow 缓冲切片
+func (c *Client) SSEOverflowBuf() []*HubMessage { return c.sseOverflowBuf }
+
+// SetSSEOverflowBuf 设置 SSE overflow 缓冲切片
+func (c *Client) SetSSEOverflowBuf(buf []*HubMessage) { c.sseOverflowBuf = buf }
+
+// SSEOverflowDrainCh 返回 SSE overflow drain 通知通道
+func (c *Client) SSEOverflowDrainCh() chan struct{} { return c.sseOverflowDrainCh }
+
+// SetSSEOverflowDrainCh 设置 SSE overflow drain 通知通道
+func (c *Client) SetSSEOverflowDrainCh(ch chan struct{}) { c.sseOverflowDrainCh = ch }
+
+// SSEOverflowStopCh 返回 SSE overflow drain 停止通道
+func (c *Client) SSEOverflowStopCh() chan struct{} { return c.sseOverflowStopCh }
+
+// SetSSEOverflowStopCh 设置 SSE overflow drain 停止通道
+func (c *Client) SetSSEOverflowStopCh(ch chan struct{}) { c.sseOverflowStopCh = ch }
+
+// SSEOverflowStarted 返回 SSE overflow drain 是否已启动
+func (c *Client) SSEOverflowStarted() *atomic.Bool { return &c.sseOverflowStarted }
 
 // ============================================================================
 // WebSocket Close Code 配置

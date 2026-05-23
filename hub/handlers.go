@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-12-28 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-12-28 00:00:00
+ * @LastEditTime: 2026-05-23 17:24:42
  * @FilePath: \go-wsc\hub\handlers.go
  * @Description: Hub 处理器方法
  *
@@ -18,6 +18,7 @@ import (
 
 	"github.com/kamalyes/go-logger"
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
+	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 )
 
@@ -110,9 +111,48 @@ func (h *Hub) SendPongResponse(client *Client) error {
 func (h *Hub) handleHeartbeatMessage(client *Client) {
 	// 检查客户端是否已关闭（防止处理已断开客户端的心跳）
 	if client.IsClosed() {
-		h.logger.DebugKV("客户端已关闭，忽略心跳消息",
+		count := client.IncrClosedHeartbeatCount()
+		threshold := h.ClosedHeartbeatThreshold
+		if threshold <= 0 {
+			threshold = DefaultClosedHeartbeatThreshold
+		}
+
+		h.logger.WarnKV("已关闭客户端收到心跳消息",
 			"client_id", client.ID,
-			"user_id", client.UserID)
+			"user_id", client.UserID,
+			"heartbeat_count", count,
+			"threshold", threshold,
+		)
+
+		// 超过阈值，自动恢复客户端并发送 pong
+		if count >= threshold {
+			// 防重：同一客户端同一时间只允许一个重连流程
+			if client.TryStartReconnect() {
+				h.logger.InfoKV("已关闭客户端心跳超过阈值，自动恢复连接",
+					"client_id", client.ID,
+					"user_id", client.UserID,
+					"heartbeat_count", count,
+				)
+
+				// 恢复客户端状态
+				h.recoverClosedClient(client)
+
+				// 触发回调通知业务层
+				if h.closedClientHeartbeatCallback != nil {
+					h.closedClientHeartbeatCallback(client, count)
+				}
+
+				// 重连完成
+				client.FinishReconnect()
+			} else {
+				h.logger.DebugKV("客户端重连进行中，跳过重复触发",
+					"client_id", client.ID,
+					"user_id", client.UserID,
+				)
+			}
+			// 无论是否触发重连，都重置计数器
+			client.ResetClosedHeartbeatCount()
+		}
 		return
 	}
 
@@ -144,11 +184,31 @@ func (h *Hub) handleHeartbeatMessage(client *Client) {
 
 	// 直接发送 pong 响应（使用已获取的客户端对象，避免竞态条件）
 	if err := h.SendPongResponse(client); err != nil {
+		// pong 发送失败，递增失败计数
+		failCount := client.IncrPongFailCount()
+		threshold := mathx.IfLeZero(h.PongFailThreshold, DefaultPongFailThreshold)
 		h.logger.WarnKV("心跳 pong 响应发送失败",
 			"client_id", client.ID,
 			"user_id", client.UserID,
 			"error", err,
+			"fail_count", failCount,
+			"threshold", threshold,
 		)
+
+		// 连续失败超过阈值，注销清理僵尸客户端
+		if failCount >= threshold {
+			h.logger.InfoKV("心跳 pong 连续失败超过阈值，注销清理僵尸客户端",
+				"client_id", client.ID,
+				"user_id", client.UserID,
+				"fail_count", failCount,
+			)
+			h.Unregister(client)
+			client.ResetPongFailCount()
+			return
+		}
+	} else {
+		// pong 发送成功，重置失败计数器
+		client.ResetPongFailCount()
 	}
 
 	// 异步追踪心跳统计（不阻塞主流程）
@@ -162,6 +222,71 @@ func (h *Hub) handleHeartbeatMessage(client *Client) {
 	// 触发心跳后置回调
 	if h.afterHeartbeatCallback != nil {
 		h.afterHeartbeatCallback(client)
+	}
+}
+
+// ============================================================================
+// 已关闭客户端恢复
+// ============================================================================
+
+// recoverClosedClient 恢复已关闭的客户端
+// 当已关闭客户端持续发送心跳超过阈值时，自动恢复其连接状态并发送 pong 响应
+func (h *Hub) recoverClosedClient(client *Client) {
+	// 在锁内完成状态恢复
+	client.CloseMu.Lock()
+
+	// 再次检查，防止并发问题
+	if !client.IsClosed() {
+		client.CloseMu.Unlock()
+		return
+	}
+
+	h.logger.InfoKV("开始恢复已关闭客户端",
+		"client_id", client.ID,
+		"user_id", client.UserID,
+	)
+
+	// 1. 重新初始化 SendChan（如果已被关闭/回收）
+	if client.SendChan == nil {
+		capacity := h.getClientCapacity(client)
+		client.SendChan = h.getChan(capacity)
+		h.logger.DebugKV("已为恢复客户端重新初始化 SendChan",
+			"client_id", client.ID,
+			"capacity", capacity,
+		)
+	}
+
+	// 2. 重置关闭状态
+	client.Reopen()
+
+	// 3. 更新心跳时间
+	h.UpdateHeartbeat(client.ID)
+	h.UpdatePongTime(client.ID)
+	client.LastSeen = time.Now()
+
+	// 释放锁后再发送 pong，避免与 SendPongResponse 中的 CloseMu 死锁
+	client.CloseMu.Unlock()
+
+	// 4. 发送 pong 响应告知客户端连接已恢复
+	if err := h.SendPongResponse(client); err != nil {
+		h.logger.WarnKV("恢复客户端后发送 pong 失败，底层连接可能已断开",
+			"client_id", client.ID,
+			"user_id", client.UserID,
+			"error", err,
+		)
+		// 恢复后 pong 仍失败，说明底层连接已不可用，注销清理
+		h.Unregister(client)
+		return
+	} else {
+		h.logger.InfoKV("已恢复客户端并发送 pong 响应",
+			"client_id", client.ID,
+			"user_id", client.UserID,
+		)
+	}
+
+	// 5. 启动写协程（如果 WebSocket 连接仍然有效）
+	if client.Conn != nil {
+		go h.handleClientWrite(client)
 	}
 }
 

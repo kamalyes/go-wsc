@@ -87,36 +87,13 @@ func TestMultiClientMessageSend(t *testing.T) {
 		defer close(stopChan)
 
 		go func() {
-			for {
-				select {
-				case <-client1.SendChan:
-					atomic.AddInt32(&count1, 1)
-				case <-stopChan:
-					return
-				}
-			}
+			client1.WatchSendChan(stopChan, func() { atomic.AddInt32(&count1, 1) })
 		}()
-
 		go func() {
-			for {
-				select {
-				case <-client2.SendChan:
-					atomic.AddInt32(&count2, 1)
-				case <-stopChan:
-					return
-				}
-			}
+			client2.WatchSendChan(stopChan, func() { atomic.AddInt32(&count2, 1) })
 		}()
-
 		go func() {
-			for {
-				select {
-				case <-client3.SendChan:
-					atomic.AddInt32(&count3, 1)
-				case <-stopChan:
-					return
-				}
-			}
+			client3.WatchSendChan(stopChan, func() { atomic.AddInt32(&count3, 1) })
 		}()
 
 		// 发送消息，不指定 ReceiverClient
@@ -145,9 +122,9 @@ func TestMultiClientMessageSend(t *testing.T) {
 
 	t.Run("SendToSpecificClient_WhenReceiverClientSpecified", func(t *testing.T) {
 		// 清空所有客户端的消息队列
-		drainChannel(client1.SendChan)
-		drainChannel(client2.SendChan)
-		drainChannel(client3.SendChan)
+		client1.DrainSendChanBuffer()
+		client2.DrainSendChanBuffer()
+		client3.DrainSendChanBuffer()
 
 		// 计数器
 		var count1, count2, count3 int32
@@ -157,36 +134,13 @@ func TestMultiClientMessageSend(t *testing.T) {
 		defer close(stopChan)
 
 		go func() {
-			for {
-				select {
-				case <-client1.SendChan:
-					atomic.AddInt32(&count1, 1)
-				case <-stopChan:
-					return
-				}
-			}
+			client1.WatchSendChan(stopChan, func() { atomic.AddInt32(&count1, 1) })
 		}()
-
 		go func() {
-			for {
-				select {
-				case <-client2.SendChan:
-					atomic.AddInt32(&count2, 1)
-				case <-stopChan:
-					return
-				}
-			}
+			client2.WatchSendChan(stopChan, func() { atomic.AddInt32(&count2, 1) })
 		}()
-
 		go func() {
-			for {
-				select {
-				case <-client3.SendChan:
-					atomic.AddInt32(&count3, 1)
-				case <-stopChan:
-					return
-				}
-			}
+			client3.WatchSendChan(stopChan, func() { atomic.AddInt32(&count3, 1) })
 		}()
 
 		// 发送消息，指定 ReceiverClient 为 client2
@@ -213,9 +167,9 @@ func TestMultiClientMessageSend(t *testing.T) {
 
 	t.Run("NoMessageSent_WhenSpecifiedClientNotExists", func(t *testing.T) {
 		// 清空所有客户端的消息队列
-		drainChannel(client1.SendChan)
-		drainChannel(client2.SendChan)
-		drainChannel(client3.SendChan)
+		client1.DrainSendChanBuffer()
+		client2.DrainSendChanBuffer()
+		client3.DrainSendChanBuffer()
 
 		// 计数器
 		var count1, count2, count3 int32
@@ -225,36 +179,13 @@ func TestMultiClientMessageSend(t *testing.T) {
 		defer close(stopChan)
 
 		go func() {
-			for {
-				select {
-				case <-client1.SendChan:
-					atomic.AddInt32(&count1, 1)
-				case <-stopChan:
-					return
-				}
-			}
+			client1.WatchSendChan(stopChan, func() { atomic.AddInt32(&count1, 1) })
 		}()
-
 		go func() {
-			for {
-				select {
-				case <-client2.SendChan:
-					atomic.AddInt32(&count2, 1)
-				case <-stopChan:
-					return
-				}
-			}
+			client2.WatchSendChan(stopChan, func() { atomic.AddInt32(&count2, 1) })
 		}()
-
 		go func() {
-			for {
-				select {
-				case <-client3.SendChan:
-					atomic.AddInt32(&count3, 1)
-				case <-stopChan:
-					return
-				}
-			}
+			client3.WatchSendChan(stopChan, func() { atomic.AddInt32(&count3, 1) })
 		}()
 
 		// 发送消息，指定一个不存在的 ReceiverClient
@@ -285,14 +216,3 @@ func TestMultiClientMessageSend(t *testing.T) {
 	hub.Unregister(client3)
 }
 
-// drainChannel 清空channel中的所有消息
-func drainChannel(ch chan []byte) {
-	for {
-		select {
-		case <-ch:
-			// 继续清空
-		default:
-			return
-		}
-	}
-}

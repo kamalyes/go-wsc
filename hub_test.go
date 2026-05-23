@@ -447,8 +447,7 @@ func TestHubMessaging(t *testing.T) {
 
 		// 清空队列
 		go func() {
-			for range client.SendChan {
-			}
+			client.DrainSendChan(nil)
 		}()
 	})
 }
@@ -2565,12 +2564,10 @@ func TestHubComplexScenarios(t *testing.T) {
 					"nickname": fmt.Sprintf("User%d", i),
 				},
 			}
-			// 启动消息消费goroutine
-			go func(c *Client) {
-				for range c.SendChan {
-				}
-			}(users[i])
 			hub.Register(users[i])
+			go func(c *Client) {
+				c.DrainSendChan(nil)
+			}(users[i])
 		}
 		// 等待客户端注册完成
 		time.Sleep(100 * time.Millisecond)
@@ -2637,12 +2634,10 @@ func TestHubComplexScenarios(t *testing.T) {
 				SendChan: make(chan []byte, 256),
 				Context:  context.Background(),
 			}
-			// 启动消息消费goroutine
-			go func(c *Client) {
-				for range c.SendChan {
-				}
-			}(customers[i])
 			hub.Register(customers[i])
+			go func(c *Client) {
+				c.DrainSendChan(nil)
+			}(customers[i])
 		}
 
 		for i := 0; i < 3; i++ {
@@ -2656,12 +2651,10 @@ func TestHubComplexScenarios(t *testing.T) {
 				SendChan: make(chan []byte, 256),
 				Context:  context.Background(),
 			}
-			// 启动消息消费goroutine
-			go func(c *Client) {
-				for range c.SendChan {
-				}
-			}(agents[i])
 			hub.Register(agents[i])
+			go func(c *Client) {
+				c.DrainSendChan(nil)
+			}(agents[i])
 		}
 		// 等待客户端注册完成
 		time.Sleep(100 * time.Millisecond)
@@ -2862,14 +2855,10 @@ func TestHubStressAndPerformance(t *testing.T) {
 				Context:  context.Background(),
 			}
 
-			// 启动消息消费goroutine，防止SendChan阻塞
-			go func(c *Client) {
-				for range c.SendChan {
-					// 消费消息，防止阻塞
-				}
-			}(users[i])
-
 			hub.Register(users[i])
+			go func(c *Client) {
+				c.DrainSendChan(nil)
+			}(users[i])
 		}
 
 		// 等待所有用户注册完成（race模式下需要更长时间）

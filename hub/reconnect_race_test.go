@@ -418,10 +418,15 @@ func TestSendPongResponseRetryOnFullChannel(t *testing.T) {
 	// 填满 SendChan
 	client.SendChan <- []byte("filler-message")
 
+	// 先获取 SendChan 引用，避免与 SendPongResponse 的 CloseMu 死锁
+	sendCh := client.SendChanRef()
+
 	// 在另一个 goroutine 中消费消息，让重试有机会成功
 	go func() {
 		time.Sleep(100 * time.Millisecond)
-		<-client.SendChan
+		if sendCh != nil {
+			<-sendCh
+		}
 	}()
 
 	// 发送 pong，应该通过重试机制成功

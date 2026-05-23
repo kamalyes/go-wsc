@@ -25,6 +25,14 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// expectedTemporalClientID 与 extractClientAttributes 一致：始终由 UserID+DeviceID+UserType 哈希生成 ClientID。
+func expectedTemporalClientID(hub *Hub, userID, deviceID, userType string) string {
+	if userType == "" {
+		userType = string(UserTypeVisitor)
+	}
+	return hub.GetTemporalHasher().Hash(userID, deviceID, userType)
+}
+
 // TestConfigureUpgrader 测试配置 WebSocket 升级器
 func TestConfigureUpgrader(t *testing.T) {
 	var size = 1028
@@ -88,47 +96,48 @@ func TestConfigureUpgraderWithOrigins(t *testing.T) {
 // TestExtractClientAttributes 测试提取客户端属性
 func TestExtractClientAttributes(t *testing.T) {
 	idGenerator := idgen.NewDefaultIDGenerator()
-	clientID := idGenerator.GenerateRequestID()
+	queryClientID := idGenerator.GenerateRequestID() // URL/Header 中的 client_id 不再作为最终 ClientID
 	userID := idGenerator.GenerateRequestID()
 	deviceID := idGenerator.GenerateRequestID()
 
-	// 场景1：从查询参数提取
-	req := httptest.NewRequest("GET", "/ws?client_id="+clientID+"&user_id="+userID+"&user_type=customer", nil)
 	hub := NewHub(wscconfig.Default())
+
+	// 场景1：从查询参数提取 user_id/user_type，ClientID 由 temporalHasher 生成
+	req := httptest.NewRequest("GET", "/ws?client_id="+queryClientID+"&user_id="+userID+"&user_type=customer", nil)
 	attrs := hub.extractClientAttributes(req)
-	assert.Equal(t, clientID, attrs.ClientID)
+	assert.Equal(t, expectedTemporalClientID(hub, userID, "", "customer"), attrs.ClientID)
 	assert.Equal(t, userID, attrs.UserID)
 	assert.Equal(t, UserTypeCustomer, attrs.UserType)
 
 	// 场景2：从 Header 提取
 	req = httptest.NewRequest("GET", "/ws", nil)
-	req.Header.Set("X-Client-ID", clientID)
+	req.Header.Set("X-Client-ID", queryClientID)
 	req.Header.Set("X-User-ID", userID)
 	req.Header.Set("X-User-Type", "agent")
 	attrs = hub.extractClientAttributes(req)
-	assert.Equal(t, clientID, attrs.ClientID)
+	assert.Equal(t, expectedTemporalClientID(hub, userID, "", "agent"), attrs.ClientID)
 	assert.Equal(t, userID, attrs.UserID)
 	assert.Equal(t, UserTypeAgent, attrs.UserType)
 
-	// 场景3：查询参数优先于 Header
-	req = httptest.NewRequest("GET", "/ws?client_id="+clientID+"&user_id="+userID, nil)
+	// 场景3：查询参数优先于 Header（ClientID 仍由哈希生成）
+	req = httptest.NewRequest("GET", "/ws?client_id="+queryClientID+"&user_id="+userID, nil)
 	req.Header.Set("X-Client-ID", "ignored")
 	req.Header.Set("X-User-ID", "ignored")
 	attrs = hub.extractClientAttributes(req)
-	assert.Equal(t, clientID, attrs.ClientID)
+	assert.Equal(t, expectedTemporalClientID(hub, userID, "", string(UserTypeVisitor)), attrs.ClientID)
 	assert.Equal(t, userID, attrs.UserID)
 
-	// 场景4：ClientID 自动生成
+	// 场景4：ClientID 由 user_id + device_id + user_type 哈希生成
 	req = httptest.NewRequest("GET", "/ws?user_id="+userID+"&device_id="+deviceID+"&user_type=customer", nil)
 	attrs = hub.extractClientAttributes(req)
-	assert.NotEmpty(t, attrs.ClientID)
+	assert.Equal(t, expectedTemporalClientID(hub, userID, deviceID, "customer"), attrs.ClientID)
 	assert.Equal(t, userID, attrs.UserID)
 	assert.Equal(t, deviceID, attrs.DeviceID)
 
-	// 场景5：UserType 默认值
+	// 场景5：UserType 默认值 visitor
 	req = httptest.NewRequest("GET", "/ws", nil)
 	attrs = hub.extractClientAttributes(req)
-	assert.NotEmpty(t, attrs.ClientID)
+	assert.Equal(t, expectedTemporalClientID(hub, "", "", string(UserTypeVisitor)), attrs.ClientID)
 	assert.Equal(t, UserTypeVisitor, attrs.UserType)
 
 	// 场景6：自定义配置（仅从 header 提取）
@@ -143,10 +152,10 @@ func TestExtractClientAttributes(t *testing.T) {
 	}
 	hub = NewHub(config)
 	req = httptest.NewRequest("GET", "/ws?client_id=ignored", nil)
-	req.Header.Set("X-Custom-Client-ID", clientID)
+	req.Header.Set("X-Custom-Client-ID", queryClientID)
 	req.Header.Set("X-Custom-User-ID", userID)
 	attrs = hub.extractClientAttributes(req)
-	assert.Equal(t, clientID, attrs.ClientID)
+	assert.Equal(t, expectedTemporalClientID(hub, userID, "", string(UserTypeVisitor)), attrs.ClientID)
 	assert.Equal(t, userID, attrs.UserID)
 
 	// 场景7：从 Cookie 提取
@@ -160,19 +169,19 @@ func TestExtractClientAttributes(t *testing.T) {
 	}
 	hub = NewHub(config)
 	req = httptest.NewRequest("GET", "/ws", nil)
-	req.AddCookie(&http.Cookie{Name: "cid", Value: clientID})
+	req.AddCookie(&http.Cookie{Name: "cid", Value: queryClientID})
 	req.AddCookie(&http.Cookie{Name: "uid", Value: userID})
 	attrs = hub.extractClientAttributes(req)
-	assert.Equal(t, clientID, attrs.ClientID)
+	assert.Equal(t, expectedTemporalClientID(hub, userID, "", string(UserTypeVisitor)), attrs.ClientID)
 	assert.Equal(t, userID, attrs.UserID)
 
 	// 场景8：配置为 nil 时的向后兼容
 	config = wscconfig.Default()
 	config.ClientAttributes = nil
 	hub = NewHub(config)
-	req = httptest.NewRequest("GET", "/ws?client_id="+clientID+"&user_id="+userID, nil)
+	req = httptest.NewRequest("GET", "/ws?client_id="+queryClientID+"&user_id="+userID, nil)
 	attrs = hub.extractClientAttributes(req)
-	assert.Equal(t, clientID, attrs.ClientID)
+	assert.Equal(t, expectedTemporalClientID(hub, userID, "", string(UserTypeVisitor)), attrs.ClientID)
 	assert.Equal(t, userID, attrs.UserID)
 }
 
@@ -183,10 +192,10 @@ func TestCreateClientFromRequest(t *testing.T) {
 
 	// 随机生成测试数据
 	idGenerator := idgen.NewDefaultIDGenerator()
-	clientID := idGenerator.GenerateRequestID()
 	userID := idGenerator.GenerateRequestID()
 	userTypes := []string{"customer", "agent", "visitor", "admin"}
-	userType := userTypes[len(clientID)%len(userTypes)]
+	userType := userTypes[len(userID)%len(userTypes)]
+	expectedID := expectedTemporalClientID(hub, userID, "", userType)
 
 	// 用于传递客户端信息的 channel
 	clientChan := make(chan *Client, 1)
@@ -212,7 +221,7 @@ func TestCreateClientFromRequest(t *testing.T) {
 	defer server.Close()
 
 	// 连接到测试服务器
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "?client_id=" + clientID + "&user_id=" + userID + "&user_type=" + userType
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "?user_id=" + userID + "&user_type=" + userType
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	assert.NoError(t, err, "WebSocket 连接失败")
 	defer conn.Close()
@@ -221,7 +230,7 @@ func TestCreateClientFromRequest(t *testing.T) {
 	client := <-clientChan
 
 	// 验证客户端属性
-	assert.Equal(t, clientID, client.ID, "client.ID 不匹配")
+	assert.Equal(t, expectedID, client.ID, "client.ID 不匹配")
 	assert.Equal(t, userID, client.UserID, "client.UserID 不匹配")
 	assert.Equal(t, userType, string(client.UserType), "client.UserType 不匹配")
 	assert.Equal(t, ConnectionTypeWebSocket, client.ConnectionType, "client.ConnectionType 不匹配")
@@ -246,17 +255,17 @@ func TestHandleWebSocketUpgrade(t *testing.T) {
 
 	// 随机生成测试数据
 	idGenerator := idgen.NewDefaultIDGenerator()
-	clientID := idGenerator.GenerateRequestID()
 	userID := idGenerator.GenerateRequestID()
 	userTypes := []string{"customer", "agent", "visitor", "admin"}
-	userType := userTypes[len(clientID)%len(userTypes)]
+	userType := userTypes[len(userID)%len(userTypes)]
+	expectedID := expectedTemporalClientID(hub, userID, "", userType)
 
 	// 创建测试服务器
 	server := httptest.NewServer(http.HandlerFunc(hub.HandleWebSocketUpgrade))
 	defer server.Close()
 
 	// 连接到测试服务器
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "?client_id=" + clientID + "&user_id=" + userID + "&user_type=" + userType
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "?user_id=" + userID + "&user_type=" + userType
 	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	assert.NoError(t, err, "WebSocket 连接失败")
 	defer conn.Close()
@@ -280,7 +289,7 @@ func TestHandleWebSocketUpgrade(t *testing.T) {
 	// 验证注册的客户端信息
 	if len(clients) > 0 {
 		client := clients[0]
-		assert.Equal(t, clientID, client.ID, "client.ID 不匹配")
+		assert.Equal(t, expectedID, client.ID, "client.ID 不匹配")
 		assert.Equal(t, userID, client.UserID, "client.UserID 不匹配")
 		assert.Equal(t, userType, string(client.UserType), "client.UserType 不匹配")
 	}

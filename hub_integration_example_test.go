@@ -330,35 +330,37 @@ func TestHubOnlineStatusQuery(t *testing.T) {
 	hub.Register(customerClient)
 	hub.Register(agentClient)
 
-	// 等待注册完成（异步操作）
-	time.Sleep(500 * time.Millisecond)
+	// syncOnlineStatus 异步写入 Redis，使用重试等待聚合索引就绪
+	require.Eventually(t, func() bool {
+		customerOnline, err1 := hub.IsUserOnline(customerClient.UserID)
+		agentOnline, err2 := hub.IsUserOnline(agentClient.UserID)
+		if err1 != nil || err2 != nil || !customerOnline || !agentOnline {
+			return false
+		}
+		allOnlineUsers, err := onlineStatusRepo.GetAllOnlineUsers(ctx)
+		if err != nil {
+			return false
+		}
+		return len(allOnlineUsers) >= 2
+	}, 10*time.Second, 200*time.Millisecond, "等待 Redis 在线状态同步")
 
-	agentOnline, _ := hub.IsUserOnline(agentClient.UserID)
-	require.True(t, agentOnline, "Agent用户应该在线")
-
-	// 等待 Redis 状态同步
-	time.Sleep(2 * time.Second)
-
-	// 查询所有在线用户
 	allOnlineUsers, err := onlineStatusRepo.GetAllOnlineUsers(ctx)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	t.Logf("在线用户总数: %d, 用户: %+v", len(allOnlineUsers), allOnlineUsers)
 	assert.GreaterOrEqual(t, len(allOnlineUsers), 2)
 
-	// 按类型查询
 	customerIDs, err := onlineStatusRepo.GetOnlineUsersByType(ctx, UserTypeCustomer)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	t.Logf("Customer类型在线: %d, IDs: %v", len(customerIDs), customerIDs)
 	assert.GreaterOrEqual(t, len(customerIDs), 1)
 
 	agentIDs, err := onlineStatusRepo.GetOnlineUsersByType(ctx, UserTypeAgent)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	t.Logf("Agent类型在线: %d, IDs: %v", len(agentIDs), agentIDs)
 	assert.GreaterOrEqual(t, len(agentIDs), 1)
 
-	// 获取在线数量
 	count, err := onlineStatusRepo.GetOnlineCount(ctx)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.GreaterOrEqual(t, count, int64(2))
 
 	// 清理

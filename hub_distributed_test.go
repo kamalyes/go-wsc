@@ -25,18 +25,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// setupClientWithMessageReceiver 设置客户端的 SendChan 并返回接收消息的 channel
-func setupClientWithMessageReceiver(client *Client) chan *HubMessage {
+// registerClientWithMessageReceiver 注册客户端并启动消息接收 goroutine
+func registerClientWithMessageReceiver(hub *Hub, client *Client) chan *HubMessage {
 	receivedMsg := make(chan *HubMessage, 10)
-	client.SendChan = make(chan []byte, 10)
-	go func() {
-		for data := range client.SendChan {
+	hub.Register(client)
+	go func(c *Client) {
+		c.DrainSendChan(func(data []byte) {
 			var msg HubMessage
 			if err := json.Unmarshal(data, &msg); err == nil {
 				receivedMsg <- &msg
 			}
-		}
-	}()
+		})
+	}(client)
 	return receivedMsg
 }
 
@@ -189,11 +189,7 @@ func TestCheckAndRouteToNode(t *testing.T) {
 	client := createTestClientWithIDGen(UserTypeCustomer)
 	client.NodeID = hub2.GetNodeID()
 
-	// 用于接收消息的channel
-	receivedMsg := setupClientWithMessageReceiver(client)
-
-	// 注册客户端到 hub2
-	hub2.Register(client)
+	receivedMsg := registerClientWithMessageReceiver(hub2, client)
 	time.Sleep(200 * time.Millisecond)
 
 	// 验证用户节点映射
@@ -298,9 +294,7 @@ func TestBroadcastToAllNodes(t *testing.T) {
 
 	// 创建客户端并连接到 hub2
 	client := createTestClientWithIDGen(UserTypeCustomer)
-	receivedMsg := setupClientWithMessageReceiver(client)
-
-	hub2.Register(client)
+	receivedMsg := registerClientWithMessageReceiver(hub2, client)
 	time.Sleep(200 * time.Millisecond)
 
 	// 从 hub1 广播消息
@@ -333,9 +327,7 @@ func TestSubscribeNodeMessages(t *testing.T) {
 
 	// 创建并注册客户端
 	client := createTestClientWithIDGen(UserTypeCustomer)
-	receivedMsg := setupClientWithMessageReceiver(client)
-
-	hub.Register(client)
+	receivedMsg := registerClientWithMessageReceiver(hub, client)
 	time.Sleep(200 * time.Millisecond)
 
 	// 发送分布式消息到节点频道（模拟来自其他节点的消息）
@@ -376,9 +368,7 @@ func TestSubscribeBroadcastChannel(t *testing.T) {
 
 	// 创建并注册客户端
 	client := createTestClientWithIDGen(UserTypeCustomer)
-	receivedMsg := setupClientWithMessageReceiver(client)
-
-	hub.Register(client)
+	receivedMsg := registerClientWithMessageReceiver(hub, client)
 	time.Sleep(200 * time.Millisecond)
 
 	// 发送分布式广播消息（模拟来自其他节点）
@@ -440,29 +430,20 @@ func TestDistributedMessageTypes(t *testing.T) {
 	go hub.Run()
 	hub.WaitForStart()
 
-	// 创建并注册客户端
-	client := createTestClientWithIDGen(UserTypeCustomer)
-	client.SendChan = make(chan []byte, 10)
-	hub.Register(client)
-	time.Sleep(200 * time.Millisecond)
-
 	tests := []struct {
 		name       string
 		msgType    models.OperationType
-		verifyFunc func(t *testing.T)
+		verifyFunc func(t *testing.T, client *Client, receivedMsg chan *HubMessage)
 	}{
 		{
 			name:    "发送消息",
 			msgType: models.OperationTypeSendMessage,
-			verifyFunc: func(t *testing.T) {
+			verifyFunc: func(t *testing.T, client *Client, receivedMsg chan *HubMessage) {
 				select {
-				case data := <-client.SendChan:
-					var msg HubMessage
-					if err := json.Unmarshal(data, &msg); err == nil {
-						assert.NotEmpty(t, msg.MessageID, "应该收到消息")
-						t.Logf("成功收到发送消息类型")
-					}
-				case <-time.After(1 * time.Second):
+				case msg := <-receivedMsg:
+					assert.NotEmpty(t, msg.MessageID, "应该收到消息")
+					t.Logf("成功收到发送消息类型")
+				case <-time.After(2 * time.Second):
 					t.Log("未收到消息（可能用户不存在）")
 				}
 			},
@@ -470,8 +451,7 @@ func TestDistributedMessageTypes(t *testing.T) {
 		{
 			name:    "踢出用户",
 			msgType: models.OperationTypeKickUser,
-			verifyFunc: func(t *testing.T) {
-				// 验证连接状态应该改变
+			verifyFunc: func(t *testing.T, client *Client, receivedMsg chan *HubMessage) {
 				time.Sleep(200 * time.Millisecond)
 				t.Log("踢出用户消息已发送")
 			},
@@ -479,15 +459,12 @@ func TestDistributedMessageTypes(t *testing.T) {
 		{
 			name:    "广播消息",
 			msgType: models.OperationTypeBroadcast,
-			verifyFunc: func(t *testing.T) {
+			verifyFunc: func(t *testing.T, client *Client, receivedMsg chan *HubMessage) {
 				select {
-				case data := <-client.SendChan:
-					var msg HubMessage
-					if err := json.Unmarshal(data, &msg); err == nil {
-						assert.NotEmpty(t, msg.MessageID, "应该收到广播消息")
-						t.Logf("成功收到广播消息")
-					}
-				case <-time.After(1 * time.Second):
+				case msg := <-receivedMsg:
+					assert.NotEmpty(t, msg.MessageID, "应该收到广播消息")
+					t.Logf("成功收到广播消息")
+				case <-time.After(2 * time.Second):
 					t.Fatal("超时：未收到广播消息")
 				}
 			},
@@ -496,16 +473,23 @@ func TestDistributedMessageTypes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// 每个子测试使用独立客户端，避免踢人影响后续广播
+			client := createTestClientWithIDGen(UserTypeCustomer)
+			receivedMsg := registerClientWithMessageReceiver(hub, client)
+			time.Sleep(200 * time.Millisecond)
+
 			distMsg := &DistributedMessage{
 				Type:      tt.msgType,
-				NodeID:    "node-2",
+				NodeID:    "node-2", // 模拟来自其他节点，避免被忽略
 				TargetID:  client.UserID,
 				Message:   createTestHubMessage(MessageTypeText),
 				Reason:    "test",
 				Timestamp: time.Now(),
 			}
+			if tt.msgType == models.OperationTypeBroadcast {
+				distMsg.Message.BroadcastType = BroadcastTypeGlobal
+			}
 
-			// 发布消息到相应频道
 			var channel string
 			if tt.msgType == models.OperationTypeBroadcast {
 				channel = "wsc:broadcast"
@@ -513,12 +497,12 @@ func TestDistributedMessageTypes(t *testing.T) {
 				channel = fmt.Sprintf("wsc:node:%s", hub.GetNodeID())
 			}
 
-			data, _ := json.Marshal(distMsg)
-			err := hub.GetPubSub().Publish(ctx, channel, string(data))
-			assert.NoError(t, err, "发布消息应该成功")
+			data, err := json.Marshal(distMsg)
+			require.NoError(t, err)
+			err = hub.GetPubSub().Publish(ctx, channel, string(data))
+			require.NoError(t, err, "发布消息应该成功")
 
-			// 验证消息处理
-			tt.verifyFunc(t)
+			tt.verifyFunc(t, client, receivedMsg)
 		})
 	}
 }

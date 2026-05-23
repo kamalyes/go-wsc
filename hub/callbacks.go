@@ -238,3 +238,29 @@ func (h *Hub) OnError(callback ErrorCallback) {
 func (h *Hub) OnBatchSendFailure(callback BatchSendFailureCallback) {
 	h.batchSendFailureCallback = callback
 }
+
+// OnClosedClientHeartbeat 注册已关闭客户端收到心跳的回调
+// 当已关闭的客户端持续收到心跳消息超过阈值时触发，可用于实现自动重连
+//
+// 参数:
+//   - client: 发送心跳的已关闭客户端
+//   - heartbeatCount: 累计心跳次数
+//
+// 示例:
+//
+//	hub.OnClosedClientHeartbeat(func(client *Client, heartbeatCount int32) {
+//	    log.Printf("已关闭客户端 %s 仍在发送心跳(第%d次)，触发重连", client.ID, heartbeatCount)
+//	    // 重新注册客户端、恢复连接等
+//	})
+func (h *Hub) OnClosedClientHeartbeat(callback ClosedClientHeartbeatCallback) {
+	h.closedClientHeartbeatCallback = callback
+}
+
+// SetClosedHeartbeatThreshold 设置已关闭客户端心跳重连阈值
+// 当已关闭客户端连续收到心跳消息超过此阈值，触发 ClosedClientHeartbeatCallback
+// 默认值为 3
+func (h *Hub) SetClosedHeartbeatThreshold(threshold int32) {
+	if threshold > 0 {
+		h.ClosedHeartbeatThreshold = threshold
+	}
+}

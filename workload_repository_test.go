@@ -243,7 +243,7 @@ func TestGetLeastLoadedAgentByDimension(t *testing.T) {
 // 3. 下线清理测试
 // ============================================================================
 
-// TestRemoveAgentWorkloadAllDimensions 测试移除客服时清理所有维度
+// TestRemoveAgentWorkloadAllDimensions 测试 RemoveAgentWorkload 仅从 realtime ZSet 移除（统计维度保留）
 func TestRemoveAgentWorkloadAllDimensions(t *testing.T) {
 	tr := newTestWorkloadRepo(t)
 	tr.checkRedisHealth()
@@ -261,18 +261,32 @@ func TestRemoveAgentWorkloadAllDimensions(t *testing.T) {
 		assert.Equal(t, int64(10), workload)
 	}
 
-	// 移除客服
+	// 移除客服（仅参与负载均衡的 realtime ZSet）
 	err = tr.repo.RemoveAgentWorkload(tr.ctx, agentID)
 	require.NoError(t, err)
 
-	// 验证所有维度的 ZSet 都已移除（string key 保留）
 	now := time.Now()
-	for _, dimension := range repository.AllWorkloadDimensions {
+
+	// realtime ZSet 应已移除
+	realtimeZsetKey := tr.repoImpl.GetDimensionZSetKey(repository.WorkloadDimensionRealtime, now)
+	realtimeScore := tr.client.ZScore(tr.ctx, realtimeZsetKey, agentID).Val()
+	assert.Equal(t, float64(0), realtimeScore, "realtime ZSet 应该已移除")
+
+	// 时间分片统计维度的 ZSet 应保留
+	statDimensions := []repository.WorkloadDimension{
+		repository.WorkloadDimensionHourly,
+		repository.WorkloadDimensionDaily,
+		repository.WorkloadDimensionMonthly,
+		repository.WorkloadDimensionYearly,
+	}
+	for _, dimension := range statDimensions {
 		zsetKey := tr.repoImpl.GetDimensionZSetKey(dimension, now)
 		score := tr.client.ZScore(tr.ctx, zsetKey, agentID).Val()
-		assert.Equal(t, float64(0), score, "维度 %s 的 ZSet 应该已移除", dimension)
+		assert.Equal(t, float64(10), score, "维度 %s 的 ZSet 应保留", dimension)
+	}
 
-		// string key 应该保留
+	// 所有维度的 string key 应保留
+	for _, dimension := range repository.AllWorkloadDimensions {
 		workload := tr.getWorkloadFromDimension(agentID, dimension)
 		assert.Equal(t, int64(10), workload, "维度 %s 的 string key 应该保留", dimension)
 	}

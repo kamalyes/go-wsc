@@ -148,6 +148,9 @@ func (h *Hub) initClientSendChan(client *Client) {
 		return
 	}
 
+	client.CloseMu.Lock()
+	defer client.CloseMu.Unlock()
+
 	// 如果 SendChan 已经初始化，不再重新初始化
 	if client.SendChan != nil {
 		return
@@ -169,6 +172,7 @@ func (h *Hub) initClientSendChan(client *Client) {
 
 // releaseClientSendChan 释放客户端的 SendChan 回对象池
 // 在客户端断开连接时调用，复用 channel 减少内存分配
+// 调用方必须已持有 client.CloseMu（见 closeClientChannel）
 func (h *Hub) releaseClientSendChan(client *Client) {
 	if client == nil || client.SendChan == nil {
 		return

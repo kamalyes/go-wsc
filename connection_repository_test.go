@@ -262,19 +262,20 @@ func TestUpdatePingStats(t *testing.T) {
 
 	updated, err := tc.repo.GetByConnectionID(tc.ctx, connID)
 	assert.NoError(t, err)
-	assert.Equal(t, 50.5, updated.AveragePingMs)
-	assert.Equal(t, 50.5, updated.MaxPingMs)
-	assert.Equal(t, 50.5, updated.MinPingMs)
+	assert.InDelta(t, 50.5, updated.AveragePingMs, 0.001)
+	assert.InDelta(t, 50.5, updated.MaxPingMs, 0.001)
+	assert.InDelta(t, 50.5, updated.MinPingMs, 0.001)
 
-	// 再次更新
+	// 再次更新（repository 使用 EMA: new_avg = old_avg * 0.7 + ping * 0.3）
 	err = tc.repo.UpdatePingStats(tc.ctx, connID, 30.0)
 	assert.NoError(t, err)
 
 	updated, err = tc.repo.GetByConnectionID(tc.ctx, connID)
 	assert.NoError(t, err)
-	assert.Equal(t, 40.25, updated.AveragePingMs)
-	assert.Equal(t, 50.5, updated.MaxPingMs)
-	assert.Equal(t, 30.0, updated.MinPingMs)
+	expectedAvg := 50.5*0.7 + 30.0*0.3 // 44.35
+	assert.InDelta(t, expectedAvg, updated.AveragePingMs, 0.001)
+	assert.InDelta(t, 50.5, updated.MaxPingMs, 0.001)
+	assert.InDelta(t, 30.0, updated.MinPingMs, 0.001)
 }
 
 // TestAddError 测试记录错误

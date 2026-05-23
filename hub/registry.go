@@ -109,8 +109,10 @@ func (h *Hub) handleRegister(client *Client) {
 		}
 	}
 
+	// 同步在线状态到 Redis，确保后续旧连接下线清理时 user_clients 中已有新连接
+	h.syncOnlineStatus(client)
+
 	// 异步任务
-	go h.syncOnlineStatus(client)
 	go h.pushOfflineMessagesOnConnect(client)
 
 	// 📡 发布用户上线事件（所有用户类型）
@@ -485,6 +487,10 @@ func (h *Hub) closeClientChannel(client *Client) {
 		return // 已经关闭过了
 	}
 	client.MarkClosed()
+
+	// 停止 overflow drain goroutine
+	client.StopOverflowDrain()
+	client.StopSSEOverflowDrain()
 
 	// 关闭并回收 WebSocket 发送通道
 	if client.SendChan != nil {

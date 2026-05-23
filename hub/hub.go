@@ -159,6 +159,14 @@ const (
 	MessageSourceOffline = models.MessageSourceOffline
 
 	BroadcastTypeGlobal = models.BroadcastTypeGlobal
+
+	// DefaultClosedHeartbeatThreshold 已关闭客户端心跳重连默认阈值
+	// 当已关闭客户端连续收到心跳消息超过此阈值，触发 ClosedClientHeartbeatCallback
+	DefaultClosedHeartbeatThreshold int32 = 3
+
+	// DefaultPongFailThreshold 心跳 pong 响应连续失败注销默认阈值
+	// 当客户端连续 pong 失败超过此阈值，注销清理僵尸客户端
+	DefaultPongFailThreshold int32 = 3
 )
 
 var (
@@ -270,6 +278,8 @@ type (
 	ErrorCallback func(ctx context.Context, err error, severity ErrorSeverity) error
 	// BatchSendFailureCallback 批量发送失败回调
 	BatchSendFailureCallback func(userID string, msg *HubMessage, err error)
+	// ClosedClientHeartbeatCallback 已关闭客户端收到心跳回调（可用于触发重连）
+	ClosedClientHeartbeatCallback func(client *Client, heartbeatCount int32)
 )
 
 // ============================================================================
@@ -317,18 +327,25 @@ type Hub struct {
 	// 📡 事件发布订阅
 	pubsub *cachex.PubSub
 
-	offlineMessagePushCallback OfflineMessagePushCallback
-	messageSendCallback        MessageSendCallback
-	queueFullCallback          QueueFullCallback
-	heartbeatTimeoutCallback   HeartbeatTimeoutCallback
-	heartbeatReportCallback    HeartbeatReportCallback
-	beforeHeartbeatCallback    BeforeHeartbeatCallback
-	afterHeartbeatCallback     AfterHeartbeatCallback
-	clientConnectCallback      ClientConnectCallback
-	clientDisconnectCallback   ClientDisconnectCallback
-	messageReceivedCallback    MessageReceivedCallback
-	errorCallback              ErrorCallback
-	batchSendFailureCallback   BatchSendFailureCallback
+	offlineMessagePushCallback    OfflineMessagePushCallback
+	messageSendCallback           MessageSendCallback
+	queueFullCallback             QueueFullCallback
+	heartbeatTimeoutCallback      HeartbeatTimeoutCallback
+	heartbeatReportCallback       HeartbeatReportCallback
+	beforeHeartbeatCallback       BeforeHeartbeatCallback
+	afterHeartbeatCallback        AfterHeartbeatCallback
+	clientConnectCallback         ClientConnectCallback
+	clientDisconnectCallback      ClientDisconnectCallback
+	messageReceivedCallback       MessageReceivedCallback
+	errorCallback                 ErrorCallback
+	batchSendFailureCallback      BatchSendFailureCallback
+	closedClientHeartbeatCallback ClosedClientHeartbeatCallback
+
+	// ClosedHeartbeatThreshold 已关闭客户端心跳重连阈值（0 使用默认值 3）
+	ClosedHeartbeatThreshold int32
+
+	// PongFailThreshold 心跳 pong 响应连续失败注销阈值（0 使用默认值 3）
+	PongFailThreshold int32
 
 	wg       sync.WaitGroup
 	shutdown atomic.Bool
@@ -436,6 +453,7 @@ func NewHub(config *wscconfig.WSC) *Hub {
 func (h *Hub) GetNodeID() string                           { return h.nodeID }
 func (h *Hub) GetWorkerID() int64                          { return h.workerID }
 func (h *Hub) GetIDGenerator() IDGenerator                 { return h.idGenerator }
+func (h *Hub) GetTemporalHasher() *safe.TemporalHasher     { return h.temporalHasher }
 func (h *Hub) GetLogger() WSCLogger                        { return h.logger }
 func (h *Hub) GetContext() context.Context                 { return h.ctx }
 func (h *Hub) IsStarted() bool                             { return h.started.Load() }

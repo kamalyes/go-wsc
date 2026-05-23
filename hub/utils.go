@@ -380,10 +380,16 @@ func (h *Hub) handleClientWrite(client *Client) {
 	}()
 
 	h.logWithClient(logger.INFO, "客户端写入协程启动", client)
+	
+	// 缓存 SendChan 到局部变量，避免与 closeClientChannel 置 nil 竞态
+	sendChan := client.SendChanRef()
+	if sendChan == nil {
+		return
+	}
 
 	for {
 		select {
-		case message, ok := <-client.SendChan:
+		case message, ok := <-sendChan:
 			if !ok {
 				h.logWithClient(logger.INFO, "客户端发送通道关闭", client)
 				return
@@ -663,20 +669,28 @@ func (h *Hub) trackHeartbeatStats(client *Client) {
 		return
 	}
 
+	// 在 Hub 锁下读取客户端时间字段，避免与注册/心跳更新竞态
+	h.mutex.RLock()
+	userType := client.UserType
+	clientID := client.ID
+	lastHeartbeat := client.LastHeartbeat
+	lastPong := client.LastPong
+	h.mutex.RUnlock()
+
 	// 排除系统、机器人、观察者
-	if !h.shouldTrackUserStats(client.UserType) {
+	if !h.shouldTrackUserStats(userType) {
 		return
 	}
 
 	// 计算Ping延迟
 	pingMs := float64(0)
-	if !client.LastHeartbeat.IsZero() {
-		pingMs = float64(time.Since(client.LastHeartbeat).Milliseconds())
+	if !lastHeartbeat.IsZero() {
+		pingMs = float64(time.Since(lastHeartbeat).Milliseconds())
 	}
 
 	// 使用批量聚合器，避免每次心跳都启动 goroutine
 	if h.heartbeatBatcher != nil {
-		h.heartbeatBatcher.Add(client.ID, client.LastHeartbeat, client.LastPong, pingMs, client.LastHeartbeat)
+		h.heartbeatBatcher.Add(clientID, lastHeartbeat, lastPong, pingMs, lastHeartbeat)
 	}
 }
 
@@ -879,9 +893,9 @@ func (h *Hub) sendToClient(client *Client, msg *HubMessage) {
 	// 🔥 如果 MessageID 为空，使用 HubID
 	msgID := mathx.IfNotEmpty(msg.MessageID, msg.ID)
 
-	// SSE 客户端使用专用的消息通道
+	// SSE 客户端使用专用的消息通道（含 overflow）
 	if client.ConnectionType == ConnectionTypeSSE {
-		if client.TrySendSSE(msg) {
+		if h.TrySendSSEWithOverflow(client, msg) {
 			client.LastSeen = time.Now()
 			h.logger.DebugKV("SSE消息发送", "message_id", msg.MessageID, "client_id", client.ID, "user_id", client.UserID)
 			// SSE消息成功发送，更新为成功状态
@@ -890,12 +904,20 @@ func (h *Hub) sendToClient(client *Client, msg *HubMessage) {
 					return h.messageRecordRepo.UpdateStatus(ctx, msgID, MessageSendStatusSuccess, "", "")
 				})
 			}
+			// 如果 SSE overflow buffer 中有积压消息，记录警告
+			if overflowLen := client.SSEOverflowLen(); overflowLen > 0 {
+				h.logger.WarnKV("SSE客户端消息通道已满，消息暂存到overflow buffer",
+					"client_id", client.ID,
+					"user_id", client.UserID,
+					"overflow_len", overflowLen,
+				)
+			}
 		} else {
-			h.logger.WarnKV("SSE客户端消息通道已满或已关闭", "client_id", client.ID, "user_id", client.UserID)
-			// SSE通道已满或已关闭，更新为失败状态
+			h.logger.WarnKV("SSE客户端已关闭或消息通道不可用", "client_id", client.ID, "user_id", client.UserID)
+			// SSE客户端已关闭，更新为失败状态
 			if h.messageRecordRepo != nil {
 				go contextx.WithTimeoutOrBackground(h.ctx, 2*time.Second, func(ctx context.Context) error {
-					return h.messageRecordRepo.UpdateStatus(ctx, msgID, MessageSendStatusFailed, FailureReasonQueueFull, "SSE channel full or closed")
+					return h.messageRecordRepo.UpdateStatus(ctx, msgID, MessageSendStatusFailed, FailureReasonQueueFull, "SSE client closed or channel unavailable")
 				})
 			}
 		}
@@ -915,7 +937,7 @@ func (h *Hub) sendToClient(client *Client, msg *HubMessage) {
 		return
 	}
 
-	if client.TrySend(data) {
+	if h.TrySendWithOverflow(client, data) {
 		// 消息成功发送到客户端通道，更新为成功状态
 		if h.messageRecordRepo != nil {
 			go contextx.WithTimeoutOrBackground(h.ctx, 2*time.Second, func(ctx context.Context) error {
@@ -925,12 +947,23 @@ func (h *Hub) sendToClient(client *Client, msg *HubMessage) {
 
 		// 更新接收者的消息统计和字节统计
 		h.trackReceiverMessageStats(client.ID, client.UserType, len(data))
+
+		// 如果 overflow buffer 中有积压消息，记录警告
+		if overflowLen := client.OverflowLen(); overflowLen > 0 {
+			h.logger.WarnKV("客户端发送通道已满，消息暂存到overflow buffer",
+				"client_id", client.ID,
+				"overflow_len", overflowLen,
+			)
+		}
 	} else {
-		h.logger.WarnKV("客户端发送通道已满或已关闭", "client_id", client.ID)
-		// 发送通道已满或已关闭，更新为失败状态
+		h.logger.WarnKV("客户端已关闭或发送通道不可用",
+			"client_id", client.ID,
+			"user_id", client.UserID,
+		)
+		// 客户端已关闭，更新为失败状态
 		if h.messageRecordRepo != nil {
 			go contextx.WithTimeoutOrBackground(h.ctx, 2*time.Second, func(ctx context.Context) error {
-				return h.messageRecordRepo.UpdateStatus(ctx, msgID, MessageSendStatusFailed, FailureReasonQueueFull, "client send channel full or closed")
+				return h.messageRecordRepo.UpdateStatus(ctx, msgID, MessageSendStatusFailed, FailureReasonQueueFull, "client closed or send channel unavailable")
 			})
 		}
 	}
@@ -983,7 +1016,7 @@ func (h *Hub) addNewClient(client *Client) {
 // kickExistingClientsUnsafe 踢掉现有客户端（不加锁）
 func (h *Hub) kickExistingClientsUnsafe(clients map[string]*Client, reason DisconnectReason) {
 	for _, client := range clients {
-		h.kickClientWithNotification(client, reason, "您的账号在其他设备登录，当前连接将被断开")
+		h.kickClientDuringRegisterUnsafe(client, "您的账号在其他设备登录，当前连接将被断开")
 
 		h.logger.InfoKV("踢出旧连接",
 			"user_id", client.UserID,
@@ -1018,25 +1051,30 @@ func (h *Hub) kickOldestConnection(clients map[string]*Client) {
 		"connected_at", oldestClient.ConnectedAt,
 	)
 
-	h.kickClientWithNotification(oldestClient, DisconnectReasonForceOffline, "连接数已达上限，当前连接将被断开")
+	h.kickClientDuringRegisterUnsafe(oldestClient, "连接数已达上限，当前连接将被断开")
 }
 
-// kickClientWithNotification 踢掉客户端并发送通知（公共方法）
-func (h *Hub) kickClientWithNotification(client *Client, reason DisconnectReason, message string) {
-	// 发送强制下线通知
-	if client.Conn != nil {
-		forceOfflineMsg := models.NewHubMessage().
-			SetMessageType(models.MessageTypeForceOffline).
-			SetSender("system").
-			SetSenderType(models.UserTypeSystem).
-			SetReceiver(client.UserID).
-			SetReceiverType(client.UserType).
-			SetContent(message)
+// kickClientDuringRegisterUnsafe 在 handleRegister 持锁期间踢掉旧连接（同步移除，避免与新区间的 Redis 上线竞态）
+func (h *Hub) kickClientDuringRegisterUnsafe(client *Client, message string) {
+	h.sendKickNotification(client, message)
+	h.removeClientUnsafe(client)
+}
 
-		h.sendToClient(client, forceOfflineMsg)
-		time.Sleep(100 * time.Millisecond) // 等待消息发送
+// sendKickNotification 向客户端发送强制下线通知
+func (h *Hub) sendKickNotification(client *Client, message string) {
+	if client == nil || client.Conn == nil {
+		return
 	}
-	h.Unregister(client)
+	forceOfflineMsg := models.NewHubMessage().
+		SetMessageType(models.MessageTypeForceOffline).
+		SetSender("system").
+		SetSenderType(models.UserTypeSystem).
+		SetReceiver(client.UserID).
+		SetReceiverType(client.UserType).
+		SetContent(message)
+
+	h.sendToClient(client, forceOfflineMsg)
+	time.Sleep(100 * time.Millisecond) // 等待消息发送
 }
 
 // ============================================================================

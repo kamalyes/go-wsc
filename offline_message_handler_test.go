@@ -202,26 +202,28 @@ func TestOfflineMessageHandler_GetOfflineMessages(t *testing.T) {
 		userID4 := tc.idGen.GenerateCorrelationID()
 		tc.cleanupUserIDs = append(tc.cleanupUserIDs, userID4)
 
-		// 存储20条消息
-		for i := 0; i < 20; i++ {
+		const wantCount = 20
+
+		// 存储20条消息（每条使用唯一 MessageID）
+		for i := 0; i < wantCount; i++ {
 			msg := tc.createTestMessage(userID4)
+			msg.MessageID = tc.idGen.GenerateRequestID()
 			err := tc.handler.StoreOfflineMessage(tc.ctx, userID4, msg)
 			require.NoError(t, err)
-			time.Sleep(10 * time.Millisecond)
 		}
+
+		storedCount, err := tc.handler.GetOfflineMessageCount(tc.ctx, userID4)
+		require.NoError(t, err)
+		require.Equal(t, int64(wantCount), storedCount, "存储后应有 %d 条离线消息", wantCount)
 
 		allMessages := make([]*HubMessage, 0)
 		cursor := ""
 		pageCount := 0
 
-		// 循环分页获取
-		for {
+		// 循环分页获取（Redis 游标为 redis:continue）
+		for pageCount < 10 {
 			messages, nextCursor, err := tc.handler.GetOfflineMessages(tc.ctx, userID4, 5, cursor)
-			assert.NoError(t, err)
-
-			if len(messages) == 0 {
-				break
-			}
+			require.NoError(t, err)
 
 			allMessages = append(allMessages, messages...)
 			pageCount++
@@ -229,17 +231,11 @@ func TestOfflineMessageHandler_GetOfflineMessages(t *testing.T) {
 			if nextCursor == "" {
 				break
 			}
-
 			cursor = nextCursor
-
-			// 防止无限循环
-			if pageCount > 10 {
-				break
-			}
 		}
 
 		t.Logf("分页获取完成: 共 %d 页, %d 条消息", pageCount, len(allMessages))
-		assert.GreaterOrEqual(t, len(allMessages), 20)
+		assert.Equal(t, wantCount, len(allMessages))
 	})
 }
 

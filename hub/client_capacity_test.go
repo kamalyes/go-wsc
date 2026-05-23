@@ -477,6 +477,147 @@ func BenchmarkGetChan(b *testing.B) {
 	})
 }
 
+// ============================================================================
+// Closed Channel 对象池安全测试
+// ============================================================================
+
+// TestReleaseChan_ClosedChannelNotReturnedToPool 已关闭的 channel 不放回对象池
+func TestReleaseChan_ClosedChannelNotReturnedToPool(t *testing.T) {
+	config := wscconfig.Default()
+	hub := NewHub(config)
+
+	capacity := 256
+
+	// 获取一个 channel
+	ch := hub.getChan(capacity)
+	require.NotNil(t, ch)
+
+	// 关闭 channel
+	close(ch)
+
+	// 释放已关闭的 channel，不应放回对象池
+	hub.releaseChan(ch, capacity)
+
+	// 从对象池获取 channel，不应取到已关闭的那个
+	newCh := hub.getChan(capacity)
+	require.NotNil(t, newCh)
+
+	// 验证新 channel 可用（未关闭）
+	canSend := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				canSend = false
+			}
+		}()
+		select {
+		case newCh <- []byte("test"):
+			canSend = true
+		default:
+			canSend = true // channel 有容量，只是满了
+		}
+	}()
+	assert.True(t, canSend, "从对象池获取的 channel 应该可用（未关闭）")
+}
+
+// TestGetChan_SkipsClosedChannelsInPool 对象池中已关闭的 channel 被跳过
+func TestGetChan_SkipsClosedChannelsInPool(t *testing.T) {
+	config := wscconfig.Default()
+	hub := NewHub(config)
+
+	capacity := 256
+
+	// 手动向对象池放入一个已关闭的 channel
+	closedCh := make(chan []byte, capacity)
+	close(closedCh)
+	if pool, exists := hub.chanPools[capacity]; exists {
+		pool.Put(closedCh)
+	}
+
+	// getChan 应跳过已关闭的 channel，返回新的可用 channel
+	ch := hub.getChan(capacity)
+	require.NotNil(t, ch)
+
+	// 验证返回的 channel 可用
+	canSend := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				canSend = false
+			}
+		}()
+		select {
+		case ch <- []byte("test"):
+			canSend = true
+		default:
+			canSend = true
+		}
+	}()
+	assert.True(t, canSend, "getChan 应返回可用的 channel，跳过已关闭的")
+}
+
+// TestReleaseChan_OpenChannelReturnedToPool 未关闭的 channel 正常放回对象池
+func TestReleaseChan_OpenChannelReturnedToPool(t *testing.T) {
+	config := wscconfig.Default()
+	hub := NewHub(config)
+
+	capacity := 256
+
+	// 获取并释放一个未关闭的 channel
+	ch := hub.getChan(capacity)
+	chPtr := ch // 记录指针
+	hub.releaseChan(ch, capacity)
+
+	// 再次获取，应该能从对象池取到同一个 channel
+	newCh := hub.getChan(capacity)
+	assert.Equal(t, chPtr, newCh, "未关闭的 channel 应被放回对象池并复用")
+}
+
+// TestClosedChannelPool_ClientLifecycle 模拟客户端生命周期：注册→关闭→新客户端注册
+func TestClosedChannelPool_ClientLifecycle(t *testing.T) {
+	config := wscconfig.Default()
+	config.AllowMultiLogin = true
+	hub := NewHub(config)
+	defer hub.Shutdown()
+
+	go hub.Run()
+	time.Sleep(100 * time.Millisecond)
+
+	// 第一个客户端注册
+	client1 := &Client{
+		ID:       "lifecycle-test-1",
+		UserID:   "lifecycle-user",
+		UserType: UserTypeAgent,
+		Status:   UserStatusOnline,
+		LastSeen: time.Now(),
+		Context:  context.Background(),
+	}
+	hub.Register(client1)
+	time.Sleep(50 * time.Millisecond)
+	require.NotNil(t, client1.SendChan)
+
+	// 注销第一个客户端（会 close SendChan 并放回池）
+	hub.Unregister(client1)
+	time.Sleep(100 * time.Millisecond)
+
+	// 第二个客户端注册，不应取到已关闭的 channel
+	client2 := &Client{
+		ID:       "lifecycle-test-2",
+		UserID:   "lifecycle-user-2",
+		UserType: UserTypeAgent,
+		Status:   UserStatusOnline,
+		LastSeen: time.Now(),
+		Context:  context.Background(),
+	}
+	hub.Register(client2)
+	time.Sleep(50 * time.Millisecond)
+	require.NotNil(t, client2.SendChan)
+
+	// 验证第二个客户端的 SendChan 可用
+	canSend := client2.TrySend([]byte("test-message"))
+	assert.True(t, canSend, "新客户端的 SendChan 应该可用")
+}
+
 // BenchmarkInitClientSendChan 性能测试：初始化客户端SendChan
 func BenchmarkInitClientSendChan(b *testing.B) {
 	config := wscconfig.Default()

@@ -115,8 +115,31 @@ func (h *Hub) getUniqueCapacities() []int {
 func (h *Hub) getChan(capacity int) chan []byte {
 	// 尝试从对应容量的对象池获取
 	if pool, exists := h.chanPools[capacity]; exists {
-		if ch := pool.Get(); ch != nil {
-			return ch.(chan []byte)
+		for {
+			obj := pool.Get()
+			if obj == nil {
+				break
+			}
+			ch := obj.(chan []byte)
+			// 验证 channel 是否可用（未关闭）
+			// 向已关闭的 channel 发送会 panic
+			closed := false
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						closed = true
+					}
+				}()
+				select {
+				case ch <- nil:
+					<-ch // 立即取出恢复
+				default:
+				}
+			}()
+			if !closed {
+				return ch
+			}
+			// 已关闭的 channel 丢弃，继续尝试下一个
 		}
 	}
 
@@ -125,6 +148,7 @@ func (h *Hub) getChan(capacity int) chan []byte {
 }
 
 // releaseChan 释放 channel 回对象池
+// 注意：已关闭的 channel 不能放回对象池，因为 Go 的 channel 关闭后无法重新打开
 func (h *Hub) releaseChan(ch chan []byte, capacity int) {
 	if ch == nil {
 		return
@@ -133,6 +157,29 @@ func (h *Hub) releaseChan(ch chan []byte, capacity int) {
 	// 清空 channel 中的数据
 	for len(ch) > 0 {
 		<-ch
+	}
+
+	// 检测 channel 是否已关闭
+	// 向已关闭的 channel 发送会 panic，用 recover 捕获
+	closed := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				closed = true
+			}
+		}()
+		select {
+		case ch <- nil:
+			// 成功写入，立即取出恢复状态
+			<-ch
+		default:
+			// channel 已满（不太可能，因为刚排空），但未关闭
+		}
+	}()
+
+	// 已关闭的 channel 不放回对象池，直接丢弃
+	if closed {
+		return
 	}
 
 	// 如果存在该容量的对象池，放回对象池

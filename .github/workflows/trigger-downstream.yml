@@ -1,0 +1,63 @@
+name: Trigger Downstream
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      should-dispatch: ${{ steps.filter.outputs.should-dispatch }}
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Check changed files
+        id: filter
+        shell: bash
+        run: |
+          current_tag="${GITHUB_REF_NAME}"
+          previous_tag="$(git tag --sort=-v:refname | grep -v "^${current_tag}$" | head -n 1 || true)"
+
+          if [ -z "${previous_tag}" ]; then
+            echo "should-dispatch=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          changed_files="$(git diff --name-only "${previous_tag}..${current_tag}")"
+          if [ -z "${changed_files}" ]; then
+            echo "should-dispatch=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if echo "${changed_files}" | grep -Ev '(^docs/|\.md$)' >/dev/null; then
+            echo "should-dispatch=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should-dispatch=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  dispatch:
+    needs: changes
+    if: needs.changes.outputs.should-dispatch == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        repo:
+          - kamalyes/go-rpc-gateway
+    steps:
+      - name: Dispatch to ${{ matrix.repo }}
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.GH_GPA_TOKEN }}
+          repository: ${{ matrix.repo }}
+          event-type: upstream-updated
+          client-payload: >-
+            {"module":"github.com/kamalyes/go-wsc","version":"${{ github.ref_name }}","sha":"${{ github.sha }}","commit_message":"📦 deps: 同步上游依赖 ${{ github.ref_name }}\n\n- 📦 更新 github.com/kamalyes/go-wsc 到 ${{ github.ref_name }} (go.mod, go.sum)\n- 🔄 自动联动下游版本标签 (bump-upstream.yml)\n\nsync upstream ${{ github.ref_name }}"}

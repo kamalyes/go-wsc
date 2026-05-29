@@ -1,0 +1,129 @@
+name: Bump Upstream
+
+on:
+  repository_dispatch:
+    types: [upstream-updated]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bump-upstream
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_GPA_TOKEN || github.token }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Bump upstream dependency
+        id: bump
+        shell: bash
+        run: |
+          module="${{ github.event.client_payload.module }}"
+          version="${{ github.event.client_payload.version }}"
+          echo "Bumping ${module} to ${version}"
+
+          old_version="$(go list -m -f '{{.Version}}' "${module}" 2>/dev/null || true)"
+          echo "Current ${module} version: ${old_version:-none}"
+
+          go get "${module}@${version}"
+          go mod tidy
+
+          bump_level="patch"
+          old_clean="${old_version#v}"
+          old_clean="${old_clean%%-*}"
+          new_clean="${version#v}"
+          new_clean="${new_clean%%-*}"
+          IFS='.' read -r old_major old_minor old_patch <<< "${old_clean}"
+          IFS='.' read -r new_major new_minor new_patch <<< "${new_clean}"
+          if [[ "${old_major}" =~ ^[0-9]+$ && "${old_minor}" =~ ^[0-9]+$ && "${old_patch}" =~ ^[0-9]+$ && "${new_major}" =~ ^[0-9]+$ && "${new_minor}" =~ ^[0-9]+$ && "${new_patch}" =~ ^[0-9]+$ ]]; then
+            if (( new_major > old_major )); then
+              bump_level="major"
+            elif (( new_major == old_major && new_minor > old_minor )); then
+              bump_level="minor"
+            fi
+          fi
+          echo "bump-level=${bump_level}" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push
+        id: commit
+        shell: bash
+        env:
+          COMMIT_MESSAGE: ${{ github.event.client_payload.commit_message }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add go.mod
+          [ -f go.sum ] && git add go.sum
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -n "${COMMIT_MESSAGE}" ]; then
+            printf '%s\n' "${COMMIT_MESSAGE}" > commit_message.txt
+            git commit -F commit_message.txt
+          else
+            git commit \
+              -m "📦 deps: 同步上游依赖 ${{ github.event.client_payload.version }}" \
+              -m "- 📦 更新 ${{ github.event.client_payload.module }} 到 ${{ github.event.client_payload.version }} (go.mod, go.sum)" \
+              -m "- 🔄 自动联动下游版本标签 (bump-upstream.yml)" \
+              -m "sync upstream ${{ github.event.client_payload.version }}"
+          fi
+          git push
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create downstream tag
+        if: steps.commit.outputs.changed == 'true'
+        shell: bash
+        run: |
+          git fetch --tags
+          bump_level="${{ steps.bump.outputs.bump-level }}"
+          latest_tag="$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
+          if [ -z "${latest_tag}" ]; then
+            case "${bump_level}" in
+              major) tag="v1.0.0" ;;
+              minor) tag="v0.1.0" ;;
+              *) tag="v0.1.0" ;;
+            esac
+          else
+            latest="${latest_tag#v}"
+            IFS='.' read -r major minor patch <<< "${latest}"
+            case "${bump_level}" in
+              major) tag="v$((major + 1)).0.0" ;;
+              minor) tag="v${major}.$((minor + 1)).0" ;;
+              *) tag="v${major}.${minor}.$((patch + 1))" ;;
+            esac
+          fi
+
+          current_module="$(go list -m)"
+          tag_major="${tag#v}"
+          tag_major="${tag_major%%.*}"
+          if (( tag_major >= 2 )) && [[ ! "${current_module}" =~ /v${tag_major}$ ]]; then
+            echo "::error::Cannot create ${tag}; Go module ${current_module} must use /v${tag_major} semantic import version suffix first"
+            exit 1
+          fi
+
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "Tag ${tag} already exists, skip"
+            exit 0
+          fi
+
+          git tag -a "${tag}" \
+            -m "🔄 sync: 发布下游依赖联动版本 ${tag}" \
+            -m "- 📦 同步 ${{ github.event.client_payload.module }} 到 ${{ github.event.client_payload.version }} (go.mod, go.sum)" \
+            -m "- 🔄 按上游版本跨度生成下游 ${bump_level} tag (bump-upstream.yml)" \
+            -m "sync downstream tag ${tag}"
+          git push origin "refs/tags/${tag}"

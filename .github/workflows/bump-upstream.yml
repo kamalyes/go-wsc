@@ -86,7 +86,7 @@ jobs:
           echo "changed=true" >> "$GITHUB_OUTPUT"
 
       - name: Create downstream tag
-        if: steps.commit.outputs.changed == 'true'
+        if: steps.commit.outputs.changed == 'true' && github.event.client_payload.create_tag == true
         shell: bash
         run: |
           git fetch --tags

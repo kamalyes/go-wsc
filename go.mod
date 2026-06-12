@@ -9,7 +9,7 @@ require (
 	github.com/kamalyes/go-cachex v0.2.2
 	github.com/kamalyes/go-config v0.21.4
 	github.com/kamalyes/go-logger v0.5.3
-	github.com/kamalyes/go-sqlbuilder v0.5.3
+	github.com/kamalyes/go-sqlbuilder v0.5.4
 	github.com/kamalyes/go-toolbox v0.15.3
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/stretchr/testify v1.11.1

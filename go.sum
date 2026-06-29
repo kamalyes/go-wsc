@@ -53,8 +53,8 @@ github.com/kamalyes/go-config v0.21.4 h1:9dcK1sS+3bow++kE8hsv42Deaz9nTKHZ79ik1hK
 github.com/kamalyes/go-config v0.21.4/go.mod h1:sP1wno4IrWAGyAb6ThKzjhnmL7H8Wu7tDpTWwevurtg=
 github.com/kamalyes/go-logger v0.5.3 h1:srnQfqhrSLqT1ZBnEJbmzhml5uJCYdO+2BlCkxkAvg8=
 github.com/kamalyes/go-logger v0.5.3/go.mod h1:F5gQ6jKubk+fSzig+dPJWB1We2dta6xFA8l5YLPjymE=
-github.com/kamalyes/go-sqlbuilder v0.5.4 h1:0TPV37cGa8++r9oyVhnSv7Y5yJViCVl6X8rrqu70MiU=
-github.com/kamalyes/go-sqlbuilder v0.5.4/go.mod h1:/5ZdlgC71IBOC0QC3nEbdvQNt5s108XCOl5K5Wq/8KQ=
+github.com/kamalyes/go-sqlbuilder v0.5.5 h1:o7DqAgWLg9Ati1qc8R8vdqozGalfQQWkONDu9TsfG5Q=
+github.com/kamalyes/go-sqlbuilder v0.5.5/go.mod h1:/5ZdlgC71IBOC0QC3nEbdvQNt5s108XCOl5K5Wq/8KQ=
 github.com/kamalyes/go-toolbox v0.15.3 h1:dQbKyFjWq1QaiNcHI37zML0Nla+4z/7iydjjETj7lYE=
 github.com/kamalyes/go-toolbox v0.15.3/go.mod h1:Mepa3KH5/brwYVgxZB7UkiLrSG8loHwfUPAQWRNMJiM=
 github.com/klauspost/cpuid/v2 v2.3.0 h1:S4CRMLnYUhGeDFDqkGriYKdfoFlDnMtqTiI/sFzhA9Y=

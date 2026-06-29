@@ -20,7 +20,7 @@ type OfflineMessageRecord struct {
 	Sender         string            `gorm:"index;size:255;comment:发送者ID" json:"sender"`
 	Receiver       string            `gorm:"index;size:255;not null;uniqueIndex:idx_message_receiver;comment:接收者ID,与message_id组成唯一索引" json:"receiver"`
 	SessionID      string            `gorm:"column:session_id;size:64;not null;index;comment:会话ID" json:"session_id"`
-	CompressedData []byte            `gorm:"type:longblob;not null;comment:压缩完整的HubMessage JSON数据" json:"-"`
+	CompressedData []byte            `gorm:"not null;comment:压缩完整的HubMessage JSON数据" json:"-"`
 	Status         MessageSendStatus `gorm:"column:status;size:20;not null;default:'user_offline';index;comment:消息状态,复用MessageSendStatus" json:"status"`
 	RetryCount     int               `gorm:"column:retry_count;default:0;comment:推送重试次数" json:"retry_count"`
 	MaxRetry       int               `gorm:"column:max_retry;default:3;comment:最大重试次数" json:"max_retry"`

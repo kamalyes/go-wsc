@@ -47,6 +47,8 @@ type (
 	HubHealthInfo              = hub.HubHealthInfo
 	ObserverManagerStats       = hub.ObserverManagerStats
 	ObserverStats              = hub.ObserverStats
+	ConnectionClaims           = hub.ConnectionClaims           // 连接 Token JWT Claims（user_id/user_type/device_id 加密载体）
+	ConnectionTokenDecoder     = hub.ConnectionTokenDecoder     // 连接 Token 解码器接口
 )
 
 // 常量导出
@@ -60,7 +62,10 @@ const (
 // ============================================================================
 
 var (
-	NewHub = hub.NewHub
+	NewHub                    = hub.NewHub
+	NewConnectionTokenDecoder = hub.NewConnectionTokenDecoder // 创建连接 Token 解码器
+	IssueConnectionToken      = hub.IssueConnectionToken      // 生成连接 Token（业务层调用）
+	RevokeConnectionToken    = hub.RevokeConnectionToken     // 吊销连接 Token（多节点生效）
 )
 
 // ============================================================================

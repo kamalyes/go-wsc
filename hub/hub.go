@@ -303,16 +303,17 @@ type Hub struct {
 	nodeMessage     chan *DistributedMessage
 	pendingMessages chan *HubMessage
 
-	ackManager            *AckManager
-	messageRecordRepo     MessageRecordRepository
-	onlineStatusRepo      OnlineStatusRepository
-	statsRepo             HubStatsRepository
-	workloadRepo          WorkloadRepository
-	offlineMessageHandler OfflineMessageHandler
-	connectionRecordRepo  ConnectionRecordRepository
-	idGenerator           IDGenerator
-	temporalHasher        *safe.TemporalHasher
-	workerID              int64
+	ackManager             *AckManager
+	messageRecordRepo      MessageRecordRepository
+	onlineStatusRepo       OnlineStatusRepository
+	statsRepo              HubStatsRepository
+	workloadRepo           WorkloadRepository
+	offlineMessageHandler  OfflineMessageHandler
+	connectionRecordRepo   ConnectionRecordRepository
+	connectionTokenDecoder ConnectionTokenDecoder // 连接 Token 解码器（可选启用，nil 时走明文参数）
+	idGenerator            IDGenerator
+	temporalHasher         *safe.TemporalHasher
+	workerID               int64
 
 	// 📡 事件发布订阅
 	pubsub *cachex.PubSub
@@ -417,10 +418,37 @@ func NewHub(config *wscconfig.WSC) *Hub {
 		},
 	}
 
+	// 根据功能开关条件化初始化专用映射，禁用的模块保持 nil 以跳过相关逻辑（读 nil map 安全，仅写需守卫）
+	if !config.EnableAgent {
+		hub.agentClients = nil
+	}
+	if !config.EnableObserver {
+		hub.observerClients = nil
+	}
+
+	// 初始化连接 Token 解码器（若启用）
+	// 此时 Redis 客户端未知，仅创建 JWT 解码能力；
+	// 后续在 InitializeRepositories 中通过 SetConnectionTokenRedis 注入 Redis 客户端
+	if config.Security != nil && config.Security.ConnectionToken.IsEnabled() {
+		hub.connectionTokenDecoder = NewConnectionTokenDecoder(config.Security.ConnectionToken, nil, hub.logger)
+		hub.logger.InfoKV("[Hub] 连接 Token 解码器已启用", "use_redis", config.Security.ConnectionToken.UseRedis)
+	}
+
 	// 初始化多级 channel 对象池
 	hub.initChannelPools()
 
 	return hub
+}
+
+// SetConnectionTokenDecoder 注入连接 Token 解码器
+// 高级用法：允许业务层自定义 decoder 实现（例如自定义 Redis 客户端或自定义校验逻辑）
+func (h *Hub) SetConnectionTokenDecoder(decoder ConnectionTokenDecoder) {
+	h.connectionTokenDecoder = decoder
+}
+
+// GetConnectionTokenDecoder 获取连接 Token 解码器
+func (h *Hub) GetConnectionTokenDecoder() ConnectionTokenDecoder {
+	return h.connectionTokenDecoder
 }
 
 // ============================================================================

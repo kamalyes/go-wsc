@@ -76,14 +76,18 @@ func (h *Hub) InitializeRepositories(redisClient *redis.Client, db *gorm.DB) err
 	)
 	h.SetHubStatsRepository(statsRepo)
 
-	// 3. 负载管理仓库
-	workloadRepo := repository.NewRedisWorkloadRepository(
-		redisClient,
-		db,
-		h.config.RedisRepository.Workload,
-		hubLogger,
-	)
-	h.SetWorkloadRepository(workloadRepo)
+	// 3. 负载管理仓库（仅在启用客服负载管理时初始化）
+	if h.config.EnableWorkload {
+		workloadRepo := repository.NewRedisWorkloadRepository(
+			redisClient,
+			db,
+			h.config.RedisRepository.Workload,
+			hubLogger,
+		)
+		h.SetWorkloadRepository(workloadRepo)
+	} else {
+		h.logger.DebugContextKV(ctx, "⏭️ 客服负载管理已禁用，跳过 workloadRepo 初始化", "enable-workload", false)
+	}
 
 	// 4. 消息记录仓库 (MySQL GORM)
 	messageRecordRepo := repository.NewMessageRecordRepository(
@@ -124,6 +128,14 @@ func (h *Hub) InitializeRepositories(redisClient *redis.Client, db *gorm.DB) err
 		}
 		pubsub := cachex.NewPubSub(redisClient, pubsubCfg)
 		h.SetPubSub(pubsub)
+	}
+
+	// 8. 注入 Redis 客户端到连接 Token 解码器（若启用 Redis 白名单校验）
+	// NewHub 中创建 decoder 时 redisCli 为 nil，这里补齐以启用跨节点会话校验
+	if h.connectionTokenDecoder != nil && h.config.Security != nil && h.config.Security.ConnectionToken.IsRedisEnabled() {
+		h.connectionTokenDecoder = NewConnectionTokenDecoder(h.config.Security.ConnectionToken, redisClient, hubLogger)
+		h.logger.InfoKV("[Hub] 连接 Token Redis 白名单已启用",
+			"key_prefix", h.config.Security.ConnectionToken.GetRedisKeyPrefix())
 	}
 
 	// 使用 Console 展示仓库初始化信息

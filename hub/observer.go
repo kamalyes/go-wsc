@@ -70,6 +70,10 @@ func (h *Hub) IsObserver(userID string) bool {
 // addObserver 添加观察者到专用映射 - O(1)
 // 注意：此方法不加锁，需要外部调用者持有锁
 func (h *Hub) addObserver(client *Client) {
+	// 观察者模块未启用时跳过（observerClients 为 nil，写操作会 panic）
+	if h.observerClients == nil {
+		return
+	}
 	if h.observerClients[client.UserID] == nil {
 		h.observerClients[client.UserID] = make(map[string]*Client)
 	}
@@ -108,6 +112,11 @@ func (h *Hub) removeObserver(client *Client) {
 // notifyObservers 通知所有观察者（内部方法）- O(n) 但 n 是观察者设备数，通常很小
 // 在消息发送时自动调用，将消息推送给所有观察者的所有设备
 func (h *Hub) notifyObservers(msg *HubMessage) {
+	// 观察者模块未启用时直接返回，跳过本地通知与跨节点广播
+	if h.observerClients == nil {
+		return
+	}
+
 	// 快速检查：无观察者时直接返回 - O(1)
 	observerCount := syncx.WithRLockReturnValue(&h.mutex, func() int {
 		return len(h.observerClients)

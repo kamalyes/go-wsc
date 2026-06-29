@@ -982,6 +982,10 @@ func (h *Hub) addNewClient(client *Client) {
 
 	// 如果是客服或机器人，添加到客服映射
 	if client.UserType == UserTypeAgent || client.UserType == UserTypeBot {
+		// 客服模块未启用时跳过（agentClients 为 nil，写操作会 panic）
+		if h.agentClients == nil {
+			return
+		}
 		if _, exists := h.agentClients[client.UserID]; !exists {
 			h.agentClients[client.UserID] = make(map[string]*Client)
 		}

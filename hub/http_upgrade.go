@@ -115,8 +115,46 @@ func (h *Hub) CreateClientFromRequest(r *http.Request, conn *websocket.Conn, att
 
 // extractClientAttributes 从请求中提取客户端属性
 // 根据配置的来源列表按优先级提取属性
+// 若启用连接 Token (Security.ConnectionToken.Enabled)，优先从 JWT token 解码；失败时按 AllowFallback 决定是否回退到明文
 func (h *Hub) extractClientAttributes(r *http.Request) *ClientAttributes {
-	// 提取各个属性
+	// 优先尝试连接 Token 解码（若启用）
+	if h.connectionTokenDecoder != nil {
+		claims, err := h.connectionTokenDecoder.Decode(r)
+		if err != nil {
+			// 解码失败
+			cfg := h.config.Security.ConnectionToken
+			if cfg != nil && cfg.AllowFallback {
+				// 允许回退：记录警告后继续走明文提取
+				h.logger.WarnContextKV(r.Context(), "[WebSocket] 连接 Token 解码失败，回退到明文参数",
+					"error", err, "remote_addr", r.RemoteAddr)
+				// 继续走下面的明文流程
+			} else {
+				// 不允许回退：拒绝连接（返回 nil，调用方需检查并拒绝）
+				h.logger.WarnContextKV(r.Context(), "[WebSocket] 连接 Token 解码失败，拒绝连接",
+					"error", err, "remote_addr", r.RemoteAddr, "query", r.URL.RawQuery)
+				return nil
+			}
+		} else {
+			// 解码成功
+			userID := claims.UserID
+			userType := claims.UserType
+			deviceID := claims.DeviceID
+			// UserType 默认值为 visitor
+			if userType == "" {
+				userType = string(UserTypeVisitor)
+			}
+			// 基于 UserID + DeviceID + UserType 时间窗口哈希生成 ClientID
+			clientID := h.temporalHasher.Hash(userID, deviceID, userType)
+			return &ClientAttributes{
+				ClientID: clientID,
+				UserID:   userID,
+				UserType: UserType(userType),
+				DeviceID: deviceID,
+			}
+		}
+	}
+
+	// 明文提取（原有逻辑）
 	clientID := gccommon.ExtractAttribute(r, h.config.ClientAttributes.ClientIDSources)
 	userID := gccommon.ExtractAttribute(r, h.config.ClientAttributes.UserIDSources)
 	deviceID := gccommon.ExtractAttribute(r, h.config.ClientAttributes.DeviceIdSources)
@@ -183,6 +221,11 @@ func (h *Hub) HandleWebSocketUpgrade(w http.ResponseWriter, r *http.Request) {
 
 	// 提取客户端属性
 	attrs := h.extractClientAttributes(r)
+
+	// 启用连接 Token 且不允许回退时，attrs 可能为 nil（已记录拒绝日志）
+	if attrs == nil {
+		return
+	}
 
 	// 使用配置进行连接验证
 	if h.config.ConnectionValidation.Enabled {

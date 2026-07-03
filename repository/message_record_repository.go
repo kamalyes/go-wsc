@@ -253,12 +253,19 @@ func (r *MessageRecordGormRepository) DeleteByMessageID(ctx context.Context, mes
 }
 
 // UpdateStatus 更新状态
+//
+// 优化说明：原先通过两次 UPDATE 完成 first_send_time 的条件更新，在高并发 ACK 确认场景下
+// 会产生瞬时双倍磁盘写入 I/O现合并为单条 UPDATE，使用 CASE WHEN 表达式在数据库侧
+// 完成「仅在 first_send_time 为 NULL 时才写入」的条件更新，I/O 开销减半
 func (r *MessageRecordGormRepository) UpdateStatus(ctx context.Context, messageID string, status MessageSendStatus, reason FailureReason, errorMsg string) error {
 	now := time.Now()
 
 	updates := map[string]interface{}{
 		"status":         status,
 		"last_send_time": &now,
+		// 使用 CASE WHEN 条件更新：仅在 first_send_time 为 NULL 时设置为当前时间，
+		// 否则保持原值不变避免额外的 UPDATE 查询带来的磁盘 I/O 开销
+		"first_send_time": gorm.Expr("CASE WHEN first_send_time IS NULL THEN ? ELSE first_send_time END", now),
 	}
 
 	// 设置失败原因和错误信息
@@ -274,19 +281,10 @@ func (r *MessageRecordGormRepository) UpdateStatus(ctx context.Context, messageI
 		updates["success_time"] = &now
 	}
 
-	// 🔥 直接更新，无需预查询。使用子查询条件：仅在 first_send_time 为 NULL 时设置
-	// 注意：GORM 的 Updates 不会更新零值，所以需要显式处理 first_send_time
+	// 单次 UPDATE 完成所有字段更新（含 first_send_time 的条件更新）
 	result := r.db.WithContext(ctx).Model(&MessageSendRecord{}).
 		Where(QueryMessageIDWhere, messageID).
 		Updates(updates)
-
-	// 如果记录存在且 first_send_time 还未设置，则单独更新它
-	if result.Error == nil && result.RowsAffected > 0 {
-		r.db.WithContext(ctx).Model(&MessageSendRecord{}).
-			Where(QueryMessageIDWhere, messageID).
-			Where("first_send_time IS NULL").
-			Update("first_send_time", &now)
-	}
 
 	// 🔥 如果没有找到记录（RowsAffected == 0），静默返回（记录可能尚未创建或不需要记录）
 	if result.Error != nil {

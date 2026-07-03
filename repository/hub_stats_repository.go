@@ -39,6 +39,93 @@ const (
 	KeySuffixNodes     = "nodes"
 )
 
+// Lua 脚本常量
+//
+// 设计说明：原先使用 Pipeline 逐条发送命令，存在两个问题：
+//  1. Pipeline 非原子，多命令间可能插入其他客户端命令
+//  2. 每次 HINCRBY/HSET 后都无条件 EXPIRE，在 AOF 持久化场景下产生大量冗余写
+//
+// 优化策略：用 Lua 脚本合并为单次往返、原子执行；并加入「条件续期」逻辑——
+// 仅当 TTL 低于阈值（statsExpire/2）时才调用 EXPIRE，避免冗余的 EXPIRE 写操作，
+// 在 AOF appendfsync=always/everysec 时显著降低磁盘 I/O
+const (
+	// luaHIncrByWithExpire HINCRBY + 条件续期
+	// KEYS[1] = stats key
+	// ARGV[1] = field, ARGV[2] = delta, ARGV[3] = expireSeconds, ARGV[4] = refreshThresholdSeconds
+	luaHIncrByWithExpire = `
+local current = redis.call('HINCRBY', KEYS[1], ARGV[1], ARGV[2])
+local ttl = redis.call('TTL', KEYS[1])
+local threshold = tonumber(ARGV[4])
+if ttl < threshold then
+    redis.call('EXPIRE', KEYS[1], ARGV[3])
+end
+return current
+`
+
+	// luaHIncrByWithExpireAndNodeSet HINCRBY + 条件续期 + SADD 节点到集合
+	// KEYS[1] = stats key, KEYS[2] = nodes set key
+	// ARGV[1] = field, ARGV[2] = delta, ARGV[3] = nodeID, ARGV[4] = expireSeconds, ARGV[5] = refreshThresholdSeconds
+	luaHIncrByWithExpireAndNodeSet = `
+local current = redis.call('HINCRBY', KEYS[1], ARGV[1], ARGV[2])
+local ttl = redis.call('TTL', KEYS[1])
+local threshold = tonumber(ARGV[5])
+if ttl < threshold then
+    redis.call('EXPIRE', KEYS[1], ARGV[4])
+end
+redis.call('SADD', KEYS[2], ARGV[3])
+return current
+`
+
+	// luaHSetWithExpire HSET + 条件续期
+	// KEYS[1] = stats key
+	// ARGV[1] = field, ARGV[2] = value, ARGV[3] = expireSeconds, ARGV[4] = refreshThresholdSeconds
+	luaHSetWithExpire = `
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+local ttl = redis.call('TTL', KEYS[1])
+local threshold = tonumber(ARGV[4])
+if ttl < threshold then
+    redis.call('EXPIRE', KEYS[1], ARGV[3])
+end
+return 1
+`
+
+	// luaUpdateConnectionStats 合并连接统计更新（原 5 个 Pipeline 操作 → 1 次 Lua）
+	// KEYS[1] = stats key, KEYS[2] = heartbeat key, KEYS[3] = nodes set key
+	// ARGV[1] = nodeID, ARGV[2] = activeCount, ARGV[3] = expireSeconds, ARGV[4] = timestamp, ARGV[5] = refreshThresholdSeconds
+	luaUpdateConnectionStats = `
+redis.call('HINCRBY', KEYS[1], 'total_connections', 1)
+redis.call('HSET', KEYS[1], 'active_connections', ARGV[2])
+local ttl = redis.call('TTL', KEYS[1])
+local threshold = tonumber(ARGV[5])
+if ttl < threshold then
+    redis.call('EXPIRE', KEYS[1], ARGV[3])
+end
+redis.call('SADD', KEYS[3], ARGV[1])
+redis.call('SET', KEYS[2], ARGV[4], 'EX', ARGV[3])
+return 1
+`
+
+	// luaRegisterNode 注册节点（HSET start_time + EXPIRE + SADD）
+	// KEYS[1] = stats key, KEYS[2] = nodes set key
+	// ARGV[1] = nodeID, ARGV[2] = startTime, ARGV[3] = expireSeconds
+	luaRegisterNode = `
+redis.call('HSET', KEYS[1], 'start_time', ARGV[2])
+redis.call('EXPIRE', KEYS[1], ARGV[3])
+redis.call('SADD', KEYS[2], ARGV[1])
+return 1
+`
+
+	// luaCleanupNodeStats 清理节点统计（DEL stats + DEL heartbeat + SREM nodes）
+	// KEYS[1] = stats key, KEYS[2] = heartbeat key, KEYS[3] = nodes set key
+	// ARGV[1] = nodeID
+	luaCleanupNodeStats = `
+redis.call('DEL', KEYS[1])
+redis.call('DEL', KEYS[2])
+redis.call('SREM', KEYS[3], ARGV[1])
+return 1
+`
+)
+
 // HubStatsRepository Hub 统计信息仓库接口
 type HubStatsRepository interface {
 	// UpdateConnectionStats 批量更新连接统计(总连接数+1,活跃连接数,心跳时间)
@@ -109,9 +196,10 @@ type ClusterStats struct {
 
 // RedisHubStatsRepository Redis 实现的 Hub 统计仓库
 type RedisHubStatsRepository struct {
-	client      *redis.Client
-	keyPrefix   string        // Redis key 前缀，例如 "wsc:stats:"
-	statsExpire time.Duration // 统计数据过期时间，默认 7 天
+	client                 *redis.Client
+	keyPrefix              string        // Redis key 前缀，例如 "wsc:stats:"
+	statsExpire            time.Duration // 统计数据过期时间，默认 7 天
+	expireRefreshThreshold int64         // 续期阈值（秒）：仅当 TTL 低于此值时才调用 EXPIRE
 }
 
 // NewRedisHubStatsRepository 创建 Redis Hub 统计仓库
@@ -122,10 +210,14 @@ func NewRedisHubStatsRepository(client *redis.Client, config *wscconfig.Stats) *
 	keyPrefix := mathx.IF(config.KeyPrefix == "", DefaultStatsKeyPrefix, config.KeyPrefix)
 	ttl := mathx.IF(config.TTL == 0, 7*24*time.Hour, config.TTL)
 
+	// 续期阈值 = TTL / 2，仅当剩余 TTL 不足一半时才续期，避免每次更新都写 EXPIRE
+	refreshThreshold := int64(ttl.Seconds() / 2)
+
 	return &RedisHubStatsRepository{
-		client:      client,
-		keyPrefix:   keyPrefix,
-		statsExpire: ttl,
+		client:                 client,
+		keyPrefix:              keyPrefix,
+		statsExpire:            ttl,
+		expireRefreshThreshold: refreshThreshold,
 	}
 }
 
@@ -145,88 +237,95 @@ func (r *RedisHubStatsRepository) GetNodesSetKey() string {
 }
 
 // UpdateConnectionStats 批量更新连接统计(总连接数+1,活跃连接数,心跳时间)
-// 这个方法将3个Redis操作合并到一个Pipeline中,提高性能
+// 优化：原先 5 个 Pipeline 操作现合并为 1 次 Lua 脚本，原子执行且单次网络往返
 func (r *RedisHubStatsRepository) UpdateConnectionStats(ctx context.Context, nodeID string, activeCount int64) error {
-	key := r.GetNodeKey(nodeID)
-	heartbeatKey := r.GetHeartbeatKey(nodeID)
-	nodesSetKey := r.GetNodesSetKey()
-
-	pipe := r.client.Pipeline()
-	// 增加总连接数
-	pipe.HIncrBy(ctx, key, FieldTotalConnections, 1)
-	// 设置活跃连接数
-	pipe.HSet(ctx, key, FieldActiveConnections, activeCount)
-	// 设置过期时间
-	pipe.Expire(ctx, key, r.statsExpire)
-	// 添加到节点集合
-	pipe.SAdd(ctx, nodesSetKey, nodeID)
-	// 更新心跳时间
-	pipe.Set(ctx, heartbeatKey, time.Now().Unix(), r.statsExpire)
-
-	_, err := pipe.Exec(ctx)
-	return err
+	keys := []string{r.GetNodeKey(nodeID), r.GetHeartbeatKey(nodeID), r.GetNodesSetKey()}
+	args := []any{
+		nodeID,
+		activeCount,
+		int64(r.statsExpire.Seconds()),
+		time.Now().Unix(),
+		r.expireRefreshThreshold,
+	}
+	return r.client.Eval(ctx, luaUpdateConnectionStats, keys, args...).Err()
 }
 
 // IncrementTotalConnections 增加总连接数
+// 优化：HINCRBY + 条件续期 + SADD 合并为 1 次 Lua 脚本
 func (r *RedisHubStatsRepository) IncrementTotalConnections(ctx context.Context, nodeID string, delta int64) error {
-	key := r.GetNodeKey(nodeID)
-	pipe := r.client.Pipeline()
-	pipe.HIncrBy(ctx, key, FieldTotalConnections, delta)
-	pipe.Expire(ctx, key, r.statsExpire)
-	pipe.SAdd(ctx, r.GetNodesSetKey(), nodeID)
-	_, err := pipe.Exec(ctx)
-	return err
+	keys := []string{r.GetNodeKey(nodeID), r.GetNodesSetKey()}
+	args := []any{
+		FieldTotalConnections,
+		delta,
+		nodeID,
+		int64(r.statsExpire.Seconds()),
+		r.expireRefreshThreshold,
+	}
+	return r.client.Eval(ctx, luaHIncrByWithExpireAndNodeSet, keys, args...).Err()
 }
 
 // SetActiveConnections 设置当前活跃连接数
+// 优化：HSET + 条件续期合并为 1 次 Lua 脚本
 func (r *RedisHubStatsRepository) SetActiveConnections(ctx context.Context, nodeID string, count int64) error {
-	key := r.GetNodeKey(nodeID)
-	pipe := r.client.Pipeline()
-	pipe.HSet(ctx, key, FieldActiveConnections, count)
-	pipe.Expire(ctx, key, r.statsExpire)
-	_, err := pipe.Exec(ctx)
-	return err
+	keys := []string{r.GetNodeKey(nodeID)}
+	args := []any{
+		FieldActiveConnections,
+		count,
+		int64(r.statsExpire.Seconds()),
+		r.expireRefreshThreshold,
+	}
+	return r.client.Eval(ctx, luaHSetWithExpire, keys, args...).Err()
 }
 
 // IncrementMessagesSent 增加已发送消息数
+// 优化：HINCRBY + 条件续期合并为 1 次 Lua 脚本，高频调用下显著减少 EXPIRE 写
 func (r *RedisHubStatsRepository) IncrementMessagesSent(ctx context.Context, nodeID string, delta int64) error {
-	key := r.GetNodeKey(nodeID)
-	pipe := r.client.Pipeline()
-	pipe.HIncrBy(ctx, key, FieldMessagesSent, delta)
-	pipe.Expire(ctx, key, r.statsExpire)
-	_, err := pipe.Exec(ctx)
-	return err
+	keys := []string{r.GetNodeKey(nodeID)}
+	args := []any{
+		FieldMessagesSent,
+		delta,
+		int64(r.statsExpire.Seconds()),
+		r.expireRefreshThreshold,
+	}
+	return r.client.Eval(ctx, luaHIncrByWithExpire, keys, args...).Err()
 }
 
 // IncrementMessagesReceived 增加已接收消息数
+// 优化：HINCRBY + 条件续期合并为 1 次 Lua 脚本
 func (r *RedisHubStatsRepository) IncrementMessagesReceived(ctx context.Context, nodeID string, delta int64) error {
-	key := r.GetNodeKey(nodeID)
-	pipe := r.client.Pipeline()
-	pipe.HIncrBy(ctx, key, FieldMessagesReceived, delta)
-	pipe.Expire(ctx, key, r.statsExpire)
-	_, err := pipe.Exec(ctx)
-	return err
+	keys := []string{r.GetNodeKey(nodeID)}
+	args := []any{
+		FieldMessagesReceived,
+		delta,
+		int64(r.statsExpire.Seconds()),
+		r.expireRefreshThreshold,
+	}
+	return r.client.Eval(ctx, luaHIncrByWithExpire, keys, args...).Err()
 }
 
 // IncrementBroadcastsSent 增加已发送广播数
+// 优化：HINCRBY + 条件续期合并为 1 次 Lua 脚本，每次广播时调用，高频路径
 func (r *RedisHubStatsRepository) IncrementBroadcastsSent(ctx context.Context, nodeID string, delta int64) error {
-	key := r.GetNodeKey(nodeID)
-	pipe := r.client.Pipeline()
-	pipe.HIncrBy(ctx, key, FieldBroadcastsSent, delta)
-	pipe.Expire(ctx, key, r.statsExpire)
-	_, err := pipe.Exec(ctx)
-	return err
+	keys := []string{r.GetNodeKey(nodeID)}
+	args := []any{
+		FieldBroadcastsSent,
+		delta,
+		int64(r.statsExpire.Seconds()),
+		r.expireRefreshThreshold,
+	}
+	return r.client.Eval(ctx, luaHIncrByWithExpire, keys, args...).Err()
 }
 
 // RegisterNode 注册节点并初始化统计信息
+// 优化：HSET + EXPIRE + SADD 合并为 1 次 Lua 脚本（启动时调用，低频但保持一致性）
 func (r *RedisHubStatsRepository) RegisterNode(ctx context.Context, nodeID string, startTime int64) error {
-	key := r.GetNodeKey(nodeID)
-	pipe := r.client.Pipeline()
-	pipe.HSet(ctx, key, FieldStartTime, startTime)
-	pipe.Expire(ctx, key, r.statsExpire)
-	pipe.SAdd(ctx, r.GetNodesSetKey(), nodeID)
-	_, err := pipe.Exec(ctx)
-	return err
+	keys := []string{r.GetNodeKey(nodeID), r.GetNodesSetKey()}
+	args := []any{
+		nodeID,
+		startTime,
+		int64(r.statsExpire.Seconds()),
+	}
+	return r.client.Eval(ctx, luaRegisterNode, keys, args...).Err()
 }
 
 // UpdateNodeHeartbeat 更新节点心跳时间
@@ -351,11 +450,9 @@ func (r *RedisHubStatsRepository) GetActiveNodes(ctx context.Context, timeout ti
 }
 
 // CleanupNodeStats 清理已下线节点的统计数据
+// 优化：DEL stats + DEL heartbeat + SREM nodes 合并为 1 次 Lua 脚本，原子执行
 func (r *RedisHubStatsRepository) CleanupNodeStats(ctx context.Context, nodeID string) error {
-	pipe := r.client.Pipeline()
-	pipe.Del(ctx, r.GetNodeKey(nodeID))
-	pipe.Del(ctx, r.GetHeartbeatKey(nodeID))
-	pipe.SRem(ctx, r.GetNodesSetKey(), nodeID)
-	_, err := pipe.Exec(ctx)
-	return err
+	keys := []string{r.GetNodeKey(nodeID), r.GetHeartbeatKey(nodeID), r.GetNodesSetKey()}
+	args := []any{nodeID}
+	return r.client.Eval(ctx, luaCleanupNodeStats, keys, args...).Err()
 }

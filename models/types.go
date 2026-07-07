@@ -26,10 +26,10 @@ type IDGenerator interface {
 // HubStats Hub统计信息结构体
 type HubStats struct {
 	// 连接统计
-	TotalClients     int `json:"total_clients"`     // 总客户端数
-	WebSocketClients int `json:"websocket_clients"` // WebSocket客户端数
-	SSEClients       int `json:"sse_clients"`       // SSE客户端数
-	AgentConnections int `json:"agent_connections"` // 座席连接数
+	TotalClients     int64 `json:"total_clients"`     // 总客户端数
+	WebSocketClients int64 `json:"websocket_clients"` // WebSocket客户端数
+	SSEClients       int64 `json:"sse_clients"`       // SSE客户端数
+	AgentConnections int64 `json:"agent_connections"` // 座席连接数
 
 	// 消息统计
 	MessagesSent     int64 `json:"messages_sent"`     // 已发送消息数

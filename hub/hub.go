@@ -283,9 +283,8 @@ type Hub struct {
 	nodes     map[string]*NodeInfo
 	startTime time.Time
 
-	clients       map[string]*Client
-	userToClients map[string]map[string]*Client
-	agentClients  map[string]map[string]*Client
+	// 以下仅保留分类索引（sseClients/agentClients/observerClients）作为辅助查询
+	agentClients map[string]map[string]*Client
 
 	// 观察者专用映射 - 支持多端登录 - O(1) 访问
 	observerClients map[string]map[string]*Client
@@ -317,6 +316,17 @@ type Hub struct {
 
 	// 📡 事件发布订阅
 	pubsub *cachex.PubSub
+
+	// 🚀 性能优化组件（v2 新增）
+	// workerPool 按任务类型分池控制并发，防止 goroutine 泛滥
+	workerPool *HubWorkerPool
+	// routerCache 用户→节点路由缓存（KVCache 三层兜底），加速分布式路由判断
+	routerCache *RouterCache
+	// shardedRegistry 分片注册表（64 shard），降低高并发锁竞争
+	// 替代 clients/userToClients 的单 mutex 访问
+	shardedRegistry *ShardedRegistry
+	// messageBatcher 消息批处理器，聚合短时间内的消息批量发送
+	messageBatcher *MessageBatcher
 
 	offlineMessagePushCallback OfflineMessagePushCallback
 	messageSendCallback        MessageSendCallback
@@ -377,8 +387,8 @@ func NewHub(config *wscconfig.WSC) *Hub {
 		safe.WithLength(thConfig.GetHashLength()),
 		safe.WithSeparator(thConfig.GetSeparator()),
 	)
-	// 预估初始容量，减少 map 扩容
-	clientsCap, userToClientsCap, agentClientsCap, observerClientsCap, sseClientsCap := config.CapacityEstimation.CalculateCapacities()
+	// 预估初始容量，减少 map 扩容（clients/userToClients 容量由 shardedRegistry 内部管理）
+	_, _, agentClientsCap, observerClientsCap, sseClientsCap := config.CapacityEstimation.CalculateCapacities()
 
 	hub := &Hub{
 		nodeID:         nodeID,
@@ -394,8 +404,6 @@ func NewHub(config *wscconfig.WSC) *Hub {
 			LastSeen:  time.Now(),
 		},
 		nodes:           make(map[string]*NodeInfo, config.CapacityEstimation.Nodes),
-		clients:         make(map[string]*Client, clientsCap),
-		userToClients:   make(map[string]map[string]*Client, userToClientsCap),
 		agentClients:    make(map[string]map[string]*Client, agentClientsCap),
 		observerClients: make(map[string]map[string]*Client, observerClientsCap),
 		sseClients:      make(map[string]map[string]*Client, sseClientsCap),
@@ -436,6 +444,12 @@ func NewHub(config *wscconfig.WSC) *Hub {
 
 	// 初始化多级 channel 对象池
 	hub.initChannelPools()
+
+	// 🚀 初始化性能优化组件
+	// 分片注册表（替代单 mutex 的 clients/userToClients map）
+	hub.shardedRegistry = NewShardedRegistry()
+	// WorkerPool（按任务类型分池控制并发，防止 goroutine 泛滥）
+	hub.workerPool = NewHubWorkerPool(DefaultWorkerPoolConfig(), hub.logger)
 
 	return hub
 }
@@ -485,12 +499,26 @@ func (h *Hub) SetPoolManager(manager PoolManager) {
 
 func (h *Hub) SetPubSub(pubsub *cachex.PubSub) {
 	h.pubsub = pubsub
+
+	// 🚀 初始化路由缓存（需要 Redis 客户端，从 PubSub 获取）
+	// KVCache 三层兜底：本地 map → Redis Hash → BatchLoader 回源
+	if pubsub != nil && h.onlineStatusRepo != nil {
+		h.routerCache = NewRouterCache(pubsub.GetClient(), h.onlineStatusRepo, DefaultRouterCacheConfig())
+		h.logger.InfoKV("路由缓存已启用", "type", "KVCache三层兜底")
+	}
+
 	h.logger.InfoKV("PubSub已设置", "enabled", true)
 }
 
 func (h *Hub) GetPubSub() *cachex.PubSub {
 	return h.pubsub
 }
+
+// 🚀 性能优化组件 Getter 方法
+func (h *Hub) GetWorkerPool() *HubWorkerPool        { return h.workerPool }
+func (h *Hub) GetRouterCache() *RouterCache         { return h.routerCache }
+func (h *Hub) GetShardedRegistry() *ShardedRegistry { return h.shardedRegistry }
+func (h *Hub) GetMessageBatcher() *MessageBatcher   { return h.messageBatcher }
 
 // ============================================================================
 // K8s 兼容的节点ID生成

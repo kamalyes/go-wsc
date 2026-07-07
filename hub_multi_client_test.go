@@ -76,7 +76,7 @@ func TestMultiClientMessageSend(t *testing.T) {
 
 	// 验证所有客户端都已注册
 	clientCount := hub.GetClientsCount()
-	assert.Equal(t, 3, clientCount, "应该有3个活跃连接")
+	assert.Equal(t, int64(3), clientCount, "应该有3个活跃连接")
 
 	t.Run("SendToAllClients_WhenReceiverClientNotSpecified", func(t *testing.T) {
 		// 计数器：跟踪每个客户端收到的消息数

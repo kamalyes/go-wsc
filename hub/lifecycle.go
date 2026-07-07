@@ -281,12 +281,12 @@ func (h *Hub) SafeShutdown() error {
 	time.Sleep(50 * time.Millisecond)
 
 	// 关闭所有客户端连接
+	// 使用 shardedRegistry 获取所有客户端快照，避免持锁关闭
 	cg.Info("→ 关闭所有客户端连接...")
-	h.mutex.Lock()
-	for _, client := range h.clients {
+	allClients := h.shardedRegistry.GetAllClients()
+	for _, client := range allClients {
 		h.removeClientUnsafe(client)
 	}
-	h.mutex.Unlock()
 
 	// 取消context（通知所有 goroutine 停止）
 	cg.Info("→ 取消所有上下文...")

@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/kamalyes/go-toolbox/pkg/contextx"
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/retry"
@@ -532,4 +533,118 @@ func (h *Hub) SendConditional(ctx context.Context, condition func(*Client) bool,
 		})
 
 	return int(successCount)
+}
+
+// SendToAllClientsInMap 发送消息到映射中的所有客户端
+func (h *Hub) SendToAllClientsInMap(clientMap map[string]*Client, msg *HubMessage) {
+	// 复制客户端列表,避免在遍历时map被修改导致竞争
+	clients := CopyClientsFromMap(clientMap)
+
+	// 遍历复制后的列表发送消息
+	for _, client := range clients {
+		h.sendToClient(client, msg)
+	}
+}
+
+// sendToClient 发送消息到客户端
+func (h *Hub) sendToClient(client *Client, msg *HubMessage) {
+	// 检查客户端是否已关闭
+	if client.IsClosed() {
+		return
+	}
+
+	// 🔥 如果 MessageID 为空，使用 HubID
+	msgID := mathx.IfNotEmpty(msg.MessageID, msg.ID)
+
+	// SSE 客户端使用专用的消息通道
+	if client.ConnectionType == ConnectionTypeSSE {
+		if client.TrySendSSE(msg) {
+			client.LastSeen = time.Now()
+			h.logger.DebugKV("SSE消息发送", "message_id", msg.MessageID, "client_id", client.ID, "user_id", client.UserID)
+			// SSE消息成功发送，更新为成功状态
+			if h.messageRecordRepo != nil {
+				go contextx.WithTimeoutOrBackground(h.ctx, 2*time.Second, func(ctx context.Context) error {
+					return h.messageRecordRepo.UpdateStatus(ctx, msgID, MessageSendStatusSuccess, "", "")
+				})
+			}
+		} else {
+			h.logger.WarnKV("SSE客户端消息通道已满或已关闭", "client_id", client.ID, "user_id", client.UserID)
+			// SSE通道已满或已关闭，更新为失败状态
+			if h.messageRecordRepo != nil {
+				go contextx.WithTimeoutOrBackground(h.ctx, 2*time.Second, func(ctx context.Context) error {
+					return h.messageRecordRepo.UpdateStatus(ctx, msgID, MessageSendStatusFailed, FailureReasonQueueFull, "SSE channel full or closed")
+				})
+			}
+		}
+		return
+	}
+
+	// WebSocket 客户端使用原有逻辑
+	data, err := json.Marshal(msg)
+	if err != nil {
+		h.logger.ErrorKV("消息序列化失败", "error", err)
+		// 更新为失败状态
+		if h.messageRecordRepo != nil {
+			go contextx.WithTimeoutOrBackground(h.ctx, 2*time.Second, func(ctx context.Context) error {
+				return h.messageRecordRepo.UpdateStatus(ctx, msgID, MessageSendStatusFailed, FailureReasonUnknown, err.Error())
+			})
+		}
+		return
+	}
+
+	if client.TrySend(data) {
+		// 消息成功发送到客户端通道，更新为成功状态
+		if h.messageRecordRepo != nil {
+			go contextx.WithTimeoutOrBackground(h.ctx, 2*time.Second, func(ctx context.Context) error {
+				return h.messageRecordRepo.UpdateStatus(ctx, msgID, MessageSendStatusSuccess, "", "")
+			})
+		}
+
+		// 更新接收者的消息统计和字节统计
+		h.trackReceiverMessageStats(client.ID, client.UserType, len(data))
+	} else {
+		h.logger.WarnKV("客户端发送通道已满或已关闭", "client_id", client.ID)
+		// 发送通道已满或已关闭，更新为失败状态
+		if h.messageRecordRepo != nil {
+			go contextx.WithTimeoutOrBackground(h.ctx, 2*time.Second, func(ctx context.Context) error {
+				return h.messageRecordRepo.UpdateStatus(ctx, msgID, MessageSendStatusFailed, FailureReasonQueueFull, "client send channel full or closed")
+			})
+		}
+	}
+}
+
+// syncToSenderDevices 同步消息给发送者的其他设备（多端同步）
+// 场景：用户A在设备B、C、D登录，设备B发送消息给用户F，设备C和D应该收到此消息
+func (h *Hub) syncToSenderDevices(msg *HubMessage) {
+	if msg.Sender == "" {
+		return
+	}
+
+	// 获取发送者的所有在线设备
+	senderClients := h.GetClientsCopyForUser(msg.Sender, "")
+	if len(senderClients) <= 1 {
+		// 只有一个设备或没有设备，无需同步
+		return
+	}
+
+	// 过滤掉发送消息的设备（排除自己）
+	otherDevices := mathx.FilterSlice(senderClients, func(client *Client) bool {
+		return client.ID != msg.SenderClient
+	})
+
+	if len(otherDevices) == 0 {
+		return
+	}
+
+	h.logger.DebugKV("🔄 多端同步消息给发送者的其他设备",
+		"sender", msg.Sender,
+		"sender_client", msg.SenderClient,
+		"other_devices_count", len(otherDevices),
+		"message_id", msg.MessageID,
+	)
+
+	// 发送给发送者的其他设备
+	for _, device := range otherDevices {
+		h.sendToClient(device, msg)
+	}
 }

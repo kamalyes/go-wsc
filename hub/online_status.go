@@ -16,33 +16,16 @@ import (
 )
 
 // GetAllOnlineUserIDs 获取所有在线用户ID列表
+// 使用 shardedRegistry 批量查询（主存储已包含 WS 和 SSE 用户）
 // 返回:
 //   - []string: 用户ID列表
 //   - error: 错误信息
 func (h *Hub) GetAllOnlineUserIDs() ([]string, error) {
 	// 如果没有 repository，返回本地在线用户
 	if h.onlineStatusRepo == nil {
-		userIDs := make(map[string]bool)
-
-		// 收集 WebSocket 用户
-		h.mutex.RLock()
-		for _, client := range h.clients {
-			userIDs[client.UserID] = true
-		}
-		h.mutex.RUnlock()
-
-		// 收集 SSE 用户
-		h.sseMutex.RLock()
-		for userID := range h.sseClients {
-			userIDs[userID] = true
-		}
-		h.sseMutex.RUnlock()
-
-		result := make([]string, 0, len(userIDs))
-		for userID := range userIDs {
-			result = append(result, userID)
-		}
-		return result, nil
+		// shardedRegistry 主存储已包含所有用户（WS + SSE）
+		// shardedRegistry 是 SSE 客户端的超集（SSE 客户端也会写入 shardedRegistry）
+		return h.shardedRegistry.GetOnlineUserIDs(), nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -95,12 +78,8 @@ func (h *Hub) SyncOnlineStatusToRedis() error {
 		return ErrOnlineStatusRepositoryNotSet
 	}
 
-	h.mutex.RLock()
-	clientsArray := make([]*Client, 0, len(h.clients))
-	for _, client := range h.clients {
-		clientsArray = append(clientsArray, client)
-	}
-	h.mutex.RUnlock()
+	// shardedRegistry 批量获取所有客户端（分片读锁，粒度细）
+	clientsArray := h.shardedRegistry.GetAllClients()
 
 	// 使用批量接口
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

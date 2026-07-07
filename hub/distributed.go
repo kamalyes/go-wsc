@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
+	pb "github.com/kamalyes/go-wsc/models/pb"
 )
 
 // ============================================================================
@@ -26,6 +27,10 @@ import (
 // ============================================================================
 
 // checkAndRouteToNode 检查用户是否在其他节点，如果是则路由过去
+// 优化：
+//  1. 使用 routerCache（KVCache 三层兜底）加速用户节点查询，减少 Redis 往返
+//  2. 使用 protobuf 序列化跨节点消息（相比 JSON 体积减少 50%+，速度提升 3-5x）
+//
 // 返回: (是否在其他节点, 错误)
 func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMessage) (bool, error) {
 	// 如果没有启用 PubSub，说明是单机模式
@@ -33,8 +38,15 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMe
 		return false, nil
 	}
 
-	// 1. 查询用户在哪些节点（支持多设备）
-	nodeIDs, err := h.onlineStatusRepo.GetUserNodes(ctx, userID)
+	// 1. 查询用户在哪些节点（优先走 routerCache 三层兜底）
+	var nodeIDs []string
+	var err error
+	if h.routerCache != nil {
+		nodeIDs, err = h.routerCache.GetUserNodes(ctx, userID)
+	} else {
+		// 降级：直接查 Redis
+		nodeIDs, err = h.onlineStatusRepo.GetUserNodes(ctx, userID)
+	}
 	if err != nil {
 		// 查询失败，假设用户在本节点或离线
 		return false, nil
@@ -69,7 +81,16 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMe
 		Timestamp: time.Now(),
 	}
 
-	data, _ := json.Marshal(distMsg)
+	// 🚀 使用 protobuf 序列化（高性能、低体积）
+	data, mErr := pb.MarshalDistributedMessage(distMsg)
+	if mErr != nil {
+		// protobuf 序列化失败，降级到 JSON
+		h.logger.WarnKV("protobuf 序列化失败，降级到 JSON",
+			"error", mErr,
+			"message_id", msg.MessageID,
+		)
+		data, _ = json.Marshal(distMsg)
+	}
 
 	// 向每个节点发送消息
 	for _, nodeID := range otherNodes {
@@ -92,6 +113,7 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMe
 // ============================================================================
 
 // SubscribeNodeMessages 订阅本节点的消息通道
+// 优先使用 protobuf 反序列化，失败时降级到 JSON（兼容旧节点发送的消息）
 func (h *Hub) SubscribeNodeMessages(ctx context.Context) error {
 	if h.pubsub == nil {
 		return ErrPubSubNotSet
@@ -108,14 +130,23 @@ func (h *Hub) SubscribeNodeMessages(ctx context.Context) error {
 		}).
 		Exec(func() {
 			_, err := h.pubsub.Subscribe([]string{channel}, func(subCtx context.Context, ch string, msg string) error {
-				var distMsg DistributedMessage
-				if err := json.Unmarshal([]byte(msg), &distMsg); err != nil {
-					h.logger.ErrorKV("解析分布式消息失败", "error", err)
-					return err
+				// 🚀 优先尝试 protobuf 反序列化
+				distMsg, pErr := pb.UnmarshalDistributedMessage([]byte(msg))
+				if pErr != nil {
+					// 降级到 JSON（兼容旧节点或非 protobuf 消息）
+					var jsonMsg DistributedMessage
+					if jErr := json.Unmarshal([]byte(msg), &jsonMsg); jErr != nil {
+						h.logger.ErrorKV("解析分布式消息失败",
+							"protobuf_error", pErr,
+							"json_error", jErr,
+						)
+						return jErr
+					}
+					distMsg = &jsonMsg
 				}
 
 				// 使用订阅回调提供的 subCtx，而不是外层的 ctx
-				return h.handleDistributedMessage(subCtx, &distMsg)
+				return h.handleDistributedMessage(subCtx, distMsg)
 			})
 
 			if err != nil {
@@ -166,20 +197,21 @@ func (h *Hub) handleDistributedMessage(ctx context.Context, distMsg *Distributed
 }
 
 // handleDistributedSendMessage 处理跨节点发送消息
+// 使用 shardedRegistry 查找用户客户端（分片读锁）
 func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *DistributedMessage) error {
 	if distMsg.Message == nil {
 		return fmt.Errorf("message data not found")
 	}
 
-	// 查找用户的所有客户端（使用 userToClients 而不是 clients）
-	h.mutex.RLock()
-	userClients, exists := h.userToClients[distMsg.TargetID]
-	h.mutex.RUnlock()
-
+	// 通过 shardedRegistry 查找用户的所有客户端
+	userClients, exists := h.shardedRegistry.GetUserClients(distMsg.TargetID)
 	if !exists || len(userClients) == 0 {
 		h.logger.DebugKV("用户不在本节点", "user_id", distMsg.TargetID)
 		return fmt.Errorf("user not found on this node: %s", distMsg.TargetID)
 	}
+
+	// 复制一份客户端引用，避免遍历过程中 map 被修改
+	clientsCopy := CopyClientsFromMap(userClients)
 
 	// 序列化消息为字节
 	msgData, err := json.Marshal(distMsg.Message)
@@ -188,8 +220,9 @@ func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *Distrib
 	}
 
 	// 发送到用户的所有客户端（支持多端登录）
+	// 遍历复制后的切片，避免持锁发送导致死锁
 	successCount := 0
-	for _, client := range userClients {
+	for _, client := range clientsCopy {
 		// 使用 TrySend 方法，它内部有锁保护，避免竞态条件
 		if client.TrySend(msgData) {
 			successCount++

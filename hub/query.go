@@ -26,17 +26,21 @@ import (
 
 // GetStats 获取Hub统计信息
 func (h *Hub) GetStats() *HubStats {
-	wsCount, agentCount := syncx.WithRLockReturnWithE(&h.mutex, func() (int, int) {
-		return len(h.clients), len(h.agentClients)
+	// shardedRegistry 主存储原子计数（WS + SSE 都在主存储）
+	wsCount := h.shardedRegistry.GetClientCount()
+
+	// 分类索引计数（agentClients 保持独立锁）
+	agentCount := syncx.WithRLockReturnValue(&h.mutex, func() int64 {
+		return int64(len(h.agentClients))
 	})
 
-	sseCount := syncx.WithRLockReturnValue(&h.sseMutex, func() int {
-		return len(h.sseClients)
+	sseCount := syncx.WithRLockReturnValue(&h.sseMutex, func() int64 {
+		return int64(len(h.sseClients))
 	})
 
 	stats := &HubStats{
-		TotalClients:     wsCount + sseCount,
-		WebSocketClients: wsCount,
+		TotalClients:     wsCount,
+		WebSocketClients: wsCount - sseCount, // WS 连接数 = 总连接数 - SSE 连接数
 		SSEClients:       sseCount,
 		AgentConnections: agentCount,
 		QueuedMessages:   len(h.pendingMessages),
@@ -65,13 +69,8 @@ func (h *Hub) GetUptime() int64 {
 
 // GetOnlineUsers 获取所有在线用户ID列表
 func (h *Hub) GetOnlineUsers() []string {
-	wsUsers := syncx.WithRLockReturnValue(&h.mutex, func() []string {
-		users := make([]string, 0, len(h.userToClients))
-		for userID := range h.userToClients {
-			users = append(users, userID)
-		}
-		return users
-	})
+	// 从 shardedRegistry 获取所有在线用户（主存储）
+	wsUsers := h.shardedRegistry.GetOnlineUserIDs()
 
 	sseUsers := syncx.WithRLockReturnValue(&h.sseMutex, func() []string {
 		users := make([]string, 0, len(h.sseClients))
@@ -104,14 +103,12 @@ func (h *Hub) GetOnlineUserCountByType(userType UserType) (int64, error) {
 }
 
 // GetClientsCount 获取客户端连接总数
-func (h *Hub) GetClientsCount() int {
-	return syncx.WithRLockReturnValue(&h.mutex, func() int {
-		return len(h.clients)
-	})
+func (h *Hub) GetClientsCount() int64 {
+	return int64(h.shardedRegistry.GetClientCount())
 }
 
 // GetClientCount 获取客户端总数（别名方法）
-func (h *Hub) GetClientCount() int {
+func (h *Hub) GetClientCount() int64 {
 	return h.GetClientsCount()
 }
 
@@ -121,21 +118,12 @@ func (h *Hub) GetClientCount() int {
 
 // IsUserOnline 检查用户是否在线
 func (h *Hub) IsUserOnline(userID string) (bool, error) {
-	// 优先检查本地 WebSocket 连接
-	isOnline := syncx.WithRLockReturnValue(&h.mutex, func() bool {
-		for _, client := range h.clients {
-			if client.UserID == userID {
-				return true
-			}
-		}
-		return false
-	})
-
-	if isOnline {
+	// 1. 检查 shardedRegistry 主存储（原子读）
+	if h.shardedRegistry.HasUser(userID) {
 		return true, nil
 	}
 
-	// 检查 SSE 连接
+	// 2. 检查 SSE 索引
 	sseExists := syncx.WithRLockReturnValue(&h.sseMutex, func() bool {
 		clientMap, exists := h.sseClients[userID]
 		return exists && len(clientMap) > 0
@@ -145,7 +133,7 @@ func (h *Hub) IsUserOnline(userID string) (bool, error) {
 		return true, nil
 	}
 
-	// 如果有 Redis repository，检查其他节点
+	// 3. 如果有 Redis repository，检查其他节点
 	if h.onlineStatusRepo != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -163,14 +151,10 @@ func (h *Hub) GetClientByID(clientID string) *Client {
 
 // GetClientsByUserID 根据用户ID获取所有客户端
 func (h *Hub) GetClientsByUserID(userID string) []*Client {
-	clientMap := syncx.WithRLockReturnValue(&h.mutex, func() map[string]*Client {
-		return h.userToClients[userID]
-	})
-
-	if len(clientMap) == 0 {
+	clientMap, exists := h.shardedRegistry.GetUserClients(userID)
+	if !exists || len(clientMap) == 0 {
 		return nil
 	}
-
 	return CopyClientsFromMap(clientMap)
 }
 
@@ -229,11 +213,7 @@ func (h *Hub) getClientIPFromClient(client *Client) string {
 
 // GetClientMetadata 获取客户端元数据
 func (h *Hub) GetClientMetadata(clientID string, key string) (interface{}, bool) {
-	client, exists := syncx.WithRLockReturnWithE(&h.mutex, func() (*Client, bool) {
-		client, exists := h.clients[clientID]
-		return client, exists
-	})
-
+	client, exists := h.shardedRegistry.GetClient(clientID)
 	if !exists || client.Metadata == nil {
 		return nil, false
 	}
@@ -243,11 +223,7 @@ func (h *Hub) GetClientMetadata(clientID string, key string) (interface{}, bool)
 
 // UpdateClientMetadata 更新客户端元数据
 func (h *Hub) UpdateClientMetadata(clientID string, key string, value interface{}) error {
-	client, exists := syncx.WithRLockReturnWithE(&h.mutex, func() (*Client, bool) {
-		client, exists := h.clients[clientID]
-		return client, exists
-	})
-
+	client, exists := h.shardedRegistry.GetClient(clientID)
 	if !exists {
 		return errorx.NewError(ErrTypeClientNotFound, "client_id: %s", clientID)
 	}
@@ -310,16 +286,10 @@ func (h *Hub) GetClientsWithStatus(status UserStatus) []*Client {
 
 // GetConnectionDetail 获取连接详细信息（返回 Client 结构体副本）
 func (h *Hub) GetConnectionDetail(clientID string) *Client {
-	client, exists := syncx.WithRLockReturnWithE(&h.mutex, func() (*Client, bool) {
-		client, exists := h.clients[clientID]
-		return client, exists
-	})
-
+	client, exists := h.shardedRegistry.GetClient(clientID)
 	if !exists {
 		return nil
 	}
-
-	// 返回副本，避免外部修改
 	return client
 }
 
@@ -347,4 +317,196 @@ func (h *Hub) FilterClients(predicate func(*Client) bool) []*Client {
 	}
 	allClients := h.GetClientsCopy()
 	return mathx.FilterSlice(allClients, predicate)
+}
+
+// ============================================================================
+// 客户端存在性检查（原 context.go，合并至此避免文件碎片化）
+// ============================================================================
+
+// GetMostRecentClient 获取用户对应的客户端（返回最近活跃的客户端）
+func (h *Hub) GetMostRecentClient(userID string) *Client {
+	clientMap, exists := h.shardedRegistry.GetUserClients(userID)
+	if !exists || len(clientMap) == 0 {
+		return nil
+	}
+	return findMostRecentClient(clientMap)
+}
+
+// findMostRecentClient 从客户端map中找到最近活跃的客户端
+func findMostRecentClient(clientMap map[string]*Client) *Client {
+	if len(clientMap) == 0 {
+		return nil
+	}
+	var mostRecent *Client
+	for _, client := range clientMap {
+		if mostRecent == nil || client.LastSeen.After(mostRecent.LastSeen) {
+			mostRecent = client
+		}
+	}
+	return mostRecent
+}
+
+// HasClient 检查是否存在指定ID的客户端
+func (h *Hub) HasClient(clientID string) bool {
+	_, exists := h.shardedRegistry.GetClient(clientID)
+	return exists
+}
+
+// HasUserClient 检查是否存在指定用户ID的客户端
+func (h *Hub) HasUserClient(userID string) bool {
+	return h.shardedRegistry.HasUser(userID)
+}
+
+// HasSSEClient 检查是否存在指定用户ID的SSE连接
+func (h *Hub) HasSSEClient(userID string) bool {
+	return syncx.WithRLockReturnValue(&h.sseMutex, func() bool {
+		clientMap, exists := h.sseClients[userID]
+		return exists && len(clientMap) > 0
+	})
+}
+
+// HasAgentClient 检查是否存在指定用户ID的代理客户端
+func (h *Hub) HasAgentClient(userID string) bool {
+	return syncx.WithRLockReturnValue(&h.mutex, func() bool {
+		clientMap, exists := h.agentClients[userID]
+		return exists && len(clientMap) > 0
+	})
+}
+
+// GetClientsCopy 获取所有客户端的副本
+// 使用 shardedRegistry 的批量查询接口，分片读锁粒度细
+func (h *Hub) GetClientsCopy() []*Client {
+	return h.shardedRegistry.GetAllClients()
+}
+
+// GetUserClientsCopy 获取每个用户最活跃的客户端副本列表
+// 遍历所有 shard，每个用户取最近活跃的客户端
+func (h *Hub) GetUserClientsCopy() []*Client {
+	result := make([]*Client, 0, h.shardedRegistry.GetUserCount())
+	h.shardedRegistry.ForEachUser(func(_ string, clientMap map[string]*Client) bool {
+		if len(clientMap) == 0 {
+			return true
+		}
+		// 找到最近活跃的客户端
+		var mostRecent *Client
+		for _, client := range clientMap {
+			if mostRecent == nil || client.LastSeen.After(mostRecent.LastSeen) {
+				mostRecent = client
+			}
+		}
+		if mostRecent != nil {
+			result = append(result, mostRecent)
+		}
+		return true
+	})
+	return result
+}
+
+// GetUserClientsMapWithLock 获取指定用户的所有客户端映射(带锁)
+// 返回的是 shardedRegistry 内部 map 的引用（持有读锁时获取的快照）
+// 注意：调用方不应长时间持有该引用，建议立即复制使用
+func (h *Hub) GetUserClientsMapWithLock(userID string) (map[string]*Client, bool) {
+	return h.shardedRegistry.GetUserClients(userID)
+}
+
+// GetClientsCopyForUser 获取用户的客户端列表副本（线程安全）
+// 如果指定了 clientID，只返回该客户端；否则返回用户的所有客户端
+func (h *Hub) GetClientsCopyForUser(userID, clientID string) []*Client {
+	clientMap, exists := h.shardedRegistry.GetUserClients(userID)
+	if !exists || len(clientMap) == 0 {
+		return nil
+	}
+
+	// 如果指定了客户端ID，只返回该客户端
+	if clientID != "" {
+		if targetClient, ok := clientMap[clientID]; ok {
+			return []*Client{targetClient}
+		}
+		return nil
+	}
+
+	// 返回所有客户端的副本
+	return CopyClientsFromMap(clientMap)
+}
+
+// GetConnectionsByUserID 获取用户的所有连接
+func (h *Hub) GetConnectionsByUserID(userID string) []*Client {
+	clientMap, exists := h.shardedRegistry.GetUserClients(userID)
+	if !exists {
+		return nil
+	}
+	return CopyClientsFromMap(clientMap)
+}
+
+// checkUserOnline 检查用户是否在线（支持分布式）
+func (h *Hub) checkUserOnline(userID string) bool {
+	// 1. 先检查本地 shardedRegistry 是否在线（原子读，零锁开销）
+	if h.shardedRegistry.HasUser(userID) {
+		return true
+	}
+
+	// 2. 如果本地不在线，且启用了分布式，则查询Redis
+	if h.onlineStatusRepo != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		defer cancel()
+
+		nodes, err := h.onlineStatusRepo.GetUserNodes(ctx, userID)
+		if err == nil && len(nodes) > 0 {
+			// 用户在其他节点在线
+			return true
+		}
+	}
+
+	// 3. 本地和Redis都没有，用户离线
+	return false
+}
+
+// GetClientByIDWithLock 获取客户端(返回是否存在)
+// 使用 shardedRegistry 的 clientID→userID 索引定位 shard
+func (h *Hub) GetClientByIDWithLock(clientID string) (*Client, bool) {
+	return h.shardedRegistry.GetClient(clientID)
+}
+
+// GetHubHealth 获取Hub健康状态
+// 使用 shardedRegistry 原子计数器
+func (h *Hub) GetHubHealth() *HubHealthInfo {
+	wsCount := int(h.shardedRegistry.GetClientCount())
+
+	return &HubHealthInfo{
+		Status:           "healthy",
+		IsRunning:        h.IsStarted(),
+		WebSocketCount:   wsCount,
+		SSECount:         0, // SSE 功能待实现
+		TotalConnections: wsCount,
+		NodeID:           h.nodeID,
+	}
+}
+
+// GetOnlineUsersByType 按用户类型获取在线用户列表
+func (h *Hub) GetOnlineUsersByType(userType UserType) ([]string, error) {
+	clients := h.FilterClients(func(c *Client) bool {
+		return c.UserType == userType
+	})
+
+	userIDs := make([]string, 0, len(clients))
+	seen := make(map[string]bool)
+
+	for _, client := range clients {
+		if !seen[client.UserID] {
+			userIDs = append(userIDs, client.UserID)
+			seen[client.UserID] = true
+		}
+	}
+
+	return userIDs, nil
+}
+
+// CopyClientsFromMap 从客户端映射中复制客户端列表
+// 用于避免在遍历时map被修改导致的数据竞争
+func CopyClientsFromMap(clientMap map[string]*Client) []*Client {
+	clients := make([]*Client, 0, len(clientMap))
+	for _, client := range clientMap {
+		clients = append(clients, client)
+	}
+	return clients
 }

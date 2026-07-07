@@ -8,15 +8,17 @@ require (
 	github.com/gorilla/websocket v1.4.2
 	github.com/jpillora/backoff v1.0.0
 	github.com/kamalyes/go-argus v0.2.1
-	github.com/kamalyes/go-cachex v0.2.3
+	github.com/kamalyes/go-cachex v0.2.4-0.20260707070038-14739977e540
 	github.com/kamalyes/go-config v0.21.5-0.20260629071806-990ad9d9b7f5
 	github.com/kamalyes/go-logger v0.5.3
+	github.com/kamalyes/go-pbmo v0.1.5-0.20260706095123-f6d04e0c255e
 	github.com/kamalyes/go-sqlbuilder v0.5.6
-	github.com/kamalyes/go-toolbox v0.15.3
-	github.com/redis/go-redis/v9 v9.18.0
+	github.com/kamalyes/go-toolbox v0.15.4-0.20260706162621-92e82cf316fc
+	github.com/redis/go-redis/v9 v9.21.0
 	github.com/stretchr/testify v1.11.1
+	google.golang.org/protobuf v1.36.11
 	gorm.io/driver/mysql v1.6.0
-	gorm.io/gorm v1.31.1
+	gorm.io/gorm v1.31.2
 )
 
 require (
@@ -27,8 +29,7 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
-	github.com/dgraph-io/ristretto/v2 v2.4.0 // indirect
-	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
+	github.com/dgraph-io/ristretto/v2 v2.4.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-sql-driver/mysql v1.8.1 // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
@@ -47,9 +48,8 @@ require (
 	golang.org/x/arch v0.24.0 // indirect
 	golang.org/x/crypto v0.53.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
-	golang.org/x/text v0.38.0 // indirect
-	google.golang.org/grpc v1.81.1 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
+	golang.org/x/text v0.39.0 // indirect
+	google.golang.org/grpc v1.82.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 

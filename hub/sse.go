@@ -71,10 +71,7 @@ func (h *Hub) RegisterSSE(userID string, w http.ResponseWriter, userType UserTyp
 
 // UnregisterSSE 注销SSE连接
 func (h *Hub) UnregisterSSE(clientID string) {
-	h.mutex.RLock()
-	client, exists := h.clients[clientID]
-	h.mutex.RUnlock()
-
+	client, exists := h.shardedRegistry.GetClient(clientID)
 	if exists && client.ConnectionType == ConnectionTypeSSE {
 		h.unregister <- client
 		h.logger.InfoKV("SSE连接已注销",

@@ -21,6 +21,7 @@ import (
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/events"
+	"github.com/kamalyes/go-wsc/models"
 )
 
 // ============================================================================
@@ -64,85 +65,136 @@ func (h *Hub) handleRegister(client *Client) {
 		"client_id", client.ID,
 		"user_id", client.UserID)
 
-	h.mutex.Lock()
-	defer h.mutex.Unlock()
-
-	// 设置客户端所在节点
+	// ================================================================
+	// 客户端初始化（无锁，client 尚未共享）
+	// ============================================================
 	client.NodeID = h.nodeID
 	client.NodeIP = h.config.NodeIP
 	client.NodePort = h.config.NodePort
 
-	// 初始化客户端 SendChan（根据客户端类型使用配置的容量）
+	// 初始化客户端 SendChan
 	h.initClientSendChan(client)
 
-	// 初始化客户端时间戳（如果未设置）
+	// 初始化客户端时间戳
 	now := time.Now()
 	client.ConnectedAt = mathx.IfNotZero(client.ConnectedAt, now)
 	client.LastHeartbeat = mathx.IfNotZero(client.LastHeartbeat, now)
 	client.LastSeen = mathx.IfNotZero(client.LastSeen, now)
 
-	// 统一处理多端登录逻辑
-	h.handleMultiLoginPolicy(client)
-	h.syncClientStats()              // 增量更新总连接数（异步读最新值）
-	h.syncActiveConnectionsToRedis() // 设置活跃连接数（异步读最新值）
-	h.logClientConnection(client)
+	// ================================================================
+	// 临界区 - 仅 map 操作（shardedRegistry 分片锁，粒度细）
+	// 多端登录策略 + 添加到注册表，同一 shard 内原子完成
+	// ============================================================
+	h.handleMultiLoginPolicy(client) // 内部通过 shardedRegistry 加分片锁
 
-	// 保存连接记录到数据库（异步）
+	// ================================================================
+	// Phase 3: 非临界区 - IO 操作异步执行（WorkerPool 控制并发）
+	// 不再持有任何锁，避免阻塞其他客户端的注册/注销/发送
+	// ============================================================
+	ctx := context.Background()
+
+	// 统计同步 + 日志（提交到记录池，可丢弃）
+	h.workerPool.TrySubmitRecord(func() {
+		h.syncClientStats()
+		h.syncActiveConnectionsToRedis()
+		h.logClientConnection(client)
+	})
+
+	// 保存连接记录到数据库（提交到记录池）
 	if h.connectionRecordRepo != nil {
 		record := h.CreateConnectionRecord(client)
-		h.saveConnectionRecord(record)
+		h.workerPool.TrySubmitRecord(func() {
+			h.saveConnectionRecord(record)
+		})
 	}
 
-	// 调用客户端连接回调
-	if h.clientConnectCallback != nil {
-		ctx := context.Background()
-		if err := h.clientConnectCallback(ctx, client); err != nil {
-			h.logger.ErrorKV("客户端连接回调执行失败",
-				"client_id", client.ID,
-				"user_id", client.UserID,
-				"error", err,
-			)
-			// 调用错误回调
-			if h.errorCallback != nil {
-				_ = h.errorCallback(ctx, err, ErrorSeverityError)
+	// 调用客户端连接回调（提交到回调池，不可丢弃）
+	h.workerPool.SubmitCallback(ctx, func() {
+		if h.clientConnectCallback != nil {
+			if err := h.clientConnectCallback(ctx, client); err != nil {
+				h.logger.ErrorKV("客户端连接回调执行失败",
+					"client_id", client.ID,
+					"user_id", client.UserID,
+					"error", err,
+				)
+				if h.errorCallback != nil {
+					_ = h.errorCallback(ctx, err, ErrorSeverityError)
+				}
 			}
 		}
-	}
+	})
 
-	// 异步任务
-	go h.syncOnlineStatus(client)
-	go h.pushOfflineMessagesOnConnect(client)
+	// 在线状态同步 + 离线消息推送（提交到分布式池）
+	h.workerPool.TrySubmitDistributed(func() {
+		h.syncOnlineStatus(client)
+		h.pushOfflineMessagesOnConnect(client)
+	})
 
-	// 📡 发布用户上线事件（所有用户类型）
-	go events.PublishUserOnline(h, client.UserID, client.UserType, client.ID)
+	// 📡 发布用户上线事件（提交到回调池）
+	h.workerPool.TrySubmitCallback(func() {
+		events.PublishUserOnline(h, client.UserID, client.UserType, client.ID)
+	})
 
-	h.sendWelcomeMessage(client)
+	// 发送欢迎消息（提交到消息池）
+	h.workerPool.TrySubmitMessage(func() {
+		h.sendWelcomeMessage(client)
+	})
 
+	// 启动客户端读写 goroutine
 	if client.Conn != nil {
 		go h.handleClientWrite(client)
 		go h.handleClientRead(client)
+	}
+
+	// 🚀 失效路由缓存（让其他节点下次路由时重新加载用户节点信息）
+	if h.routerCache != nil {
+		h.routerCache.InvalidateUser(ctx, client.UserID)
 	}
 }
 
 // handleUnregister 处理客户端注销（内部方法）
 func (h *Hub) handleUnregister(client *Client) {
-	// 📡 发布用户下线事件（所有用户类型，在锁外发布）
+	// 📡 发布用户下线事件（在锁外发布，避免阻塞）
 	go events.PublishUserOffline(h, client.UserID, client.UserType, client.ID)
 
-	h.mutex.Lock()
-	defer h.mutex.Unlock()
+	// Phase 1: 临界区 - 仅从注册表移除（shardedRegistry 分片锁）
 	h.removeClientUnsafe(client)
+
+	// Phase 2: 非临界区 - IO 操作异步执行
+	ctx := context.Background()
+
+	// 调用断开回调（提交到回调池）
+	if h.clientDisconnectCallback != nil {
+		h.workerPool.SubmitCallback(ctx, func() {
+			if err := h.clientDisconnectCallback(ctx, client, DisconnectReasonClientRequest); err != nil {
+				h.logger.ErrorKV("客户端断开回调执行失败",
+					"client_id", client.ID,
+					"user_id", client.UserID,
+					"error", err,
+				)
+				if h.errorCallback != nil {
+					_ = h.errorCallback(ctx, err, ErrorSeverityWarning)
+				}
+			}
+		})
+	}
+
+	// 🚀 失效路由缓存
+	if h.routerCache != nil {
+		h.routerCache.InvalidateUser(ctx, client.UserID)
+	}
 }
 
 // ============================================================================
 // 多端登录策略处理
 // ============================================================================
 
-// handleMultiLoginPolicy 统一处理多端登录策略（内部方法，需要外部加锁）
+// handleMultiLoginPolicy 统一处理多端登录策略（内部方法）
 // 根据配置决定是否允许多端登录、是否限制连接数
 func (h *Hub) handleMultiLoginPolicy(newClient *Client) {
 	userID := newClient.UserID
-	existingClients, exists := h.userToClients[userID]
+	// 通过 shardedRegistry 获取用户现有客户端（分片读锁）
+	existingClients, exists := h.shardedRegistry.GetUserClients(userID)
 
 	h.logger.DebugKV("处理多端登录策略",
 		"user_id", userID,
@@ -157,11 +209,14 @@ func (h *Hub) handleMultiLoginPolicy(newClient *Client) {
 		return
 	}
 
+	// 复制一份现有客户端引用，避免在踢人过程中 map 被修改
+	existingClientsCopy := CopyClientsFromMap(existingClients)
+
 	// 不允许多端登录：踢掉所有旧连接
 	if !h.config.AllowMultiLogin {
 		h.logger.InfoKV("不允许多端登录，踢掉所有旧连接",
 			"user_id", userID,
-			"old_connections", len(existingClients))
+			"old_connections", len(existingClientsCopy))
 
 		h.kickExistingClientsUnsafe(existingClients, DisconnectReasonForceOffline)
 		h.addNewClient(newClient)
@@ -170,7 +225,7 @@ func (h *Hub) handleMultiLoginPolicy(newClient *Client) {
 
 	// 允许多端登录，但有连接数限制
 	if h.config.MaxConnectionsPerUser > 0 {
-		currentCount := len(existingClients)
+		currentCount := len(existingClientsCopy)
 		maxAllowed := h.config.MaxConnectionsPerUser
 
 		// 如果未达到上限，直接添加
@@ -272,40 +327,31 @@ func (h *Hub) KickUserSimple(userID string, reason string) int {
 // 内部辅助方法
 // ============================================================================
 
-// removeClientUnsafe 移除客户端（不加锁，需要外部加锁）
+// removeClientUnsafe 移除客户端（数据清理，不含回调）
+// 主存储由 shardedRegistry 移除（分片锁），分类索引单独清理
+// 回调由调用方（handleUnregister）通过 workerPool 处理，避免重复
 func (h *Hub) removeClientUnsafe(client *Client) {
-	if _, exists := h.clients[client.ID]; !exists {
+	// 1. 从 shardedRegistry 移除主存储（若不存在则直接返回）
+	removed := h.shardedRegistry.RemoveClient(client.ID, client.UserID)
+	if removed == nil {
 		return
 	}
 
+	// 2. 日志
 	h.logClientDisconnection(client)
-	h.removeClientFromMaps(client)
+
+	// 3. 清理分类索引（sseClients/agentClients/observerClients + 原子计数器）
+	h.removeClientFromIndexes(client)
+
+	// 4. Redis 同步（IO 操作，调用方应通过 workerPool 异步化）
 	h.syncClientRemovalToRedis(client)
+
+	// 5. 关闭 channel 和连接
 	h.closeClientChannel(client)
-	h.closeClientConnection(client) // 关闭 WebSocket 连接
+	h.closeClientConnection(client)
 
-	// 更新连接断开记录
+	// 6. 更新连接断开记录
 	h.updateConnectionOnDisconnect(client, DisconnectReasonClientRequest)
-
-	// 调用客户端断开回调
-	if h.clientDisconnectCallback != nil {
-		syncx.Go().
-			OnError(func(err error) {
-				h.logger.ErrorKV("客户端断开回调执行失败",
-					"client_id", client.ID,
-					"user_id", client.UserID,
-					"error", err,
-				)
-				// 调用错误回调
-				if h.errorCallback != nil {
-					ctx := context.Background()
-					_ = h.errorCallback(ctx, err, ErrorSeverityWarning)
-				}
-			}).
-			ExecWithContext(func(execCtx context.Context) error {
-				return h.clientDisconnectCallback(execCtx, client, DisconnectReasonClientRequest)
-			})
-	}
 }
 
 // logClientDisconnection 记录客户端断开日志
@@ -314,31 +360,22 @@ func (h *Hub) logClientDisconnection(client *Client) {
 		"client_id", client.ID,
 		"user_id", client.UserID,
 		"user_type", client.UserType,
-		"remaining_connections", len(h.clients)-1,
+		"remaining_connections", h.shardedRegistry.GetClientCount(),
 	)
 }
 
-// removeClientFromMaps 从内存映射中移除客户端
-func (h *Hub) removeClientFromMaps(client *Client) {
-	delete(h.clients, client.ID)
-
-	// 更新原子计数器
+// removeClientFromIndexes 从分类索引中移除客户端
+// 主存储（clients/userToClients）已由 shardedRegistry.RemoveClient 处理
+// 这里只清理 sseClients/agentClients/observerClients 索引和原子计数器
+func (h *Hub) removeClientFromIndexes(client *Client) {
+	// 更新分类原子计数器
 	if client.ConnectionType == ConnectionTypeSSE {
 		h.sseClientsCount.Add(-1)
 	} else {
 		h.activeClientsCount.Add(-1)
 	}
 
-	// 从用户连接列表中移除
-	if clientMap, exists := h.userToClients[client.UserID]; exists {
-		delete(clientMap, client.ID)
-		// 如果该用户没有其他连接了，删除整个 map
-		if len(clientMap) == 0 {
-			delete(h.userToClients, client.UserID)
-		}
-	}
-
-	// SSE 客户端从专用 map 中移除
+	// SSE 客户端从专用索引中移除
 	if client.ConnectionType == ConnectionTypeSSE {
 		h.sseMutex.Lock()
 		if sseMap, exists := h.sseClients[client.UserID]; exists {
@@ -351,12 +388,12 @@ func (h *Hub) removeClientFromMaps(client *Client) {
 		h.sseMutex.Unlock()
 	}
 
-	// 如果是观察者，从观察者映射中移除 - O(1)
+	// 如果是观察者，从观察者索引中移除 - O(1)
 	if client.UserType == UserTypeObserver {
 		h.removeObserver(client)
 	}
 
-	// 从客服连接列表中移除
+	// 从客服连接索引中移除
 	if client.UserType == UserTypeAgent || client.UserType == UserTypeBot {
 		if agentMap, exists := h.agentClients[client.UserID]; exists {
 			delete(agentMap, client.ID)
@@ -417,11 +454,8 @@ func (h *Hub) syncActiveConnectionsToRedis() {
 				if h.shutdown.Load() {
 					return h.statsRepo.SetActiveConnections(ctx, h.nodeID, 0)
 				}
-				// 读取当前连接数（使用读锁）
-				count := syncx.WithRLockReturnValue(&h.mutex, func() int {
-					return len(h.clients)
-				})
-				return h.statsRepo.SetActiveConnections(ctx, h.nodeID, int64(count))
+				// 读取当前连接数（shardedRegistry 原子计数器，零锁开销）
+				return h.statsRepo.SetActiveConnections(ctx, h.nodeID, h.shardedRegistry.GetClientCount())
 			})
 	})
 }
@@ -482,4 +516,146 @@ func (h *Hub) closeClientConnection(client *Client) {
 	if client.Conn != nil {
 		client.Conn.Close()
 	}
+}
+
+// addNewClient 添加新客户端到注册表
+// 主存储（clients/userToClients）由 shardedRegistry 管理（分片锁粒度细）
+// 分类索引（sseClients/agentClients/observerClients）单独维护
+func (h *Hub) addNewClient(client *Client) {
+	// 1. 主存储：shardedRegistry（分片锁，原子计数）
+	h.shardedRegistry.AddClient(client)
+
+	// 2. 分类原子计数器
+	if client.ConnectionType == ConnectionTypeSSE {
+		h.sseClientsCount.Add(1)
+	} else {
+		h.activeClientsCount.Add(1)
+	}
+
+	// 3. SSE 索引（支持多设备）
+	if client.ConnectionType == ConnectionTypeSSE {
+		h.sseMutex.Lock()
+		if _, exists := h.sseClients[client.UserID]; !exists {
+			h.sseClients[client.UserID] = make(map[string]*Client)
+		}
+		h.sseClients[client.UserID][client.ID] = client
+		h.sseMutex.Unlock()
+	}
+
+	// 4. 观察者索引 - O(1)
+	if client.UserType == UserTypeObserver {
+		h.addObserver(client)
+	}
+
+	// 5. 客服索引
+	if client.UserType == UserTypeAgent || client.UserType == UserTypeBot {
+		// 客服模块未启用时跳过（agentClients 为 nil，写操作会 panic）
+		if h.agentClients == nil {
+			return
+		}
+		if _, exists := h.agentClients[client.UserID]; !exists {
+			h.agentClients[client.UserID] = make(map[string]*Client)
+		}
+		h.agentClients[client.UserID][client.ID] = client
+	}
+}
+
+// kickExistingClientsUnsafe 踢掉现有客户端（不加锁）
+func (h *Hub) kickExistingClientsUnsafe(clients map[string]*Client, reason DisconnectReason) {
+	for _, client := range clients {
+		h.kickClientWithNotification(client, reason, "您的账号在其他设备登录，当前连接将被断开")
+
+		h.logger.InfoKV("踢出旧连接",
+			"user_id", client.UserID,
+			"client_id", client.ID,
+			"reason", reason,
+		)
+	}
+}
+
+// kickOldestConnection 踢掉最不活跃的连接（基于最后心跳时间）
+// 优先踢掉长时间没有心跳的连接，保留活跃连接
+func (h *Hub) kickOldestConnection(clients map[string]*Client) {
+	var oldestClient *Client
+	var oldestTime time.Time
+
+	// 找出最久没有心跳的客户端
+	for _, client := range clients {
+		if oldestClient == nil || client.LastHeartbeat.Before(oldestTime) {
+			oldestClient = client
+			oldestTime = client.LastHeartbeat
+		}
+	}
+
+	if oldestClient == nil {
+		return
+	}
+
+	h.logger.InfoKV("踢掉最不活跃的连接",
+		"client_id", oldestClient.ID,
+		"user_id", oldestClient.UserID,
+		"last_heartbeat", oldestClient.LastHeartbeat,
+		"connected_at", oldestClient.ConnectedAt,
+	)
+
+	h.kickClientWithNotification(oldestClient, DisconnectReasonForceOffline, "连接数已达上限，当前连接将被断开")
+}
+
+// kickClientWithNotification 踢掉客户端并发送通知（公共方法）
+func (h *Hub) kickClientWithNotification(client *Client, reason DisconnectReason, message string) {
+	// 发送强制下线通知
+	if client.Conn != nil {
+		forceOfflineMsg := models.NewHubMessage().
+			SetMessageType(models.MessageTypeForceOffline).
+			SetSender("system").
+			SetSenderType(models.UserTypeSystem).
+			SetReceiver(client.UserID).
+			SetReceiverType(client.UserType).
+			SetContent(message)
+
+		h.sendToClient(client, forceOfflineMsg)
+		time.Sleep(100 * time.Millisecond) // 等待消息发送
+	}
+	h.Unregister(client)
+}
+
+// createKickNotification 创建踢人通知消息
+func (h *Hub) createKickNotification(userID, reason, customMsg string, kickedAt time.Time) *HubMessage {
+	content := customMsg
+	if content == "" {
+		content = fmt.Sprintf("您已被踢出: %s", reason)
+	}
+
+	return &HubMessage{
+		MessageType: MessageTypeKickOut,
+		Sender:      "system",
+		Receiver:    userID,
+		Content:     content,
+		CreateAt:    kickedAt,
+		Data: map[string]interface{}{
+			"reason":    reason,
+			"kicked_at": kickedAt.Unix(),
+		},
+	}
+}
+
+// sendKickNotificationToClients 发送踢人通知到客户端
+func (h *Hub) sendKickNotificationToClients(clients []*Client, msg *HubMessage) bool {
+	if len(clients) == 0 {
+		return false
+	}
+
+	for _, client := range clients {
+		h.sendToClient(client, msg)
+	}
+	return true
+}
+
+// CloseAllClientsInMap 关闭用户的所有客户端连接(并发)
+func (h *Hub) CloseAllClientsInMap(clientMap map[string]*Client) {
+	syncx.ParallelForEach(clientMap, func(_ string, client *Client) {
+		if client.Conn != nil {
+			client.Conn.Close()
+		}
+	})
 }

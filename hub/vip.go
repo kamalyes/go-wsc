@@ -13,8 +13,6 @@ package hub
 
 import (
 	"context"
-
-	"github.com/kamalyes/go-toolbox/pkg/syncx"
 )
 
 // ============================================================================
@@ -37,12 +35,10 @@ func (h *Hub) SendToExactVIPLevel(ctx context.Context, vipLevel VIPLevel, msg *H
 
 // SendWithVIPPriority 根据用户VIP等级自动设置消息优先级
 func (h *Hub) SendWithVIPPriority(ctx context.Context, userID string, msg *HubMessage) {
-	// 根据用户VIP等级设置消息优先级
-	clientMap := syncx.WithRLockReturnValue(&h.mutex, func() map[string]*Client {
-		return h.userToClients[userID]
-	})
+	// 通过 shardedRegistry 获取用户客户端（分片读锁）
+	clientMap, exists := h.shardedRegistry.GetUserClients(userID)
 
-	if len(clientMap) > 0 {
+	if exists && len(clientMap) > 0 {
 		// 获取第一个客户端的VIP等级
 		var client *Client
 		for _, c := range clientMap {
@@ -116,42 +112,41 @@ func (h *Hub) SendToUserWithClassification(ctx context.Context, userID string, m
 
 // GetVIPStatistics 获取VIP用户统计
 func (h *Hub) GetVIPStatistics() map[string]int {
-	return syncx.WithRLockReturnValue(&h.mutex, func() map[string]int {
-		stats := make(map[string]int)
+	stats := make(map[string]int)
 
-		// 统计各VIP等级用户数量
-		for _, level := range GetAllVIPLevels() {
-			stats[string(level)] = 0
+	// 统计各VIP等级用户数量
+	for _, level := range GetAllVIPLevels() {
+		stats[string(level)] = 0
+	}
+
+	// shardedRegistry 遍历所有客户端
+	h.shardedRegistry.ForEachClient(func(_ string, client *Client) bool {
+		if client.VIPLevel.IsValid() {
+			stats[string(client.VIPLevel)]++
 		}
-
-		for _, client := range h.clients {
-			if client.VIPLevel.IsValid() {
-				stats[string(client.VIPLevel)]++
-			}
-		}
-
-		stats["total_vip"] = 0
-		for level, count := range stats {
-			if level != "v0" && level != "total_vip" {
-				stats["total_vip"] += count
-			}
-		}
-
-		return stats
+		return true
 	})
+
+	stats["total_vip"] = 0
+	for level, count := range stats {
+		if level != "v0" && level != "total_vip" {
+			stats["total_vip"] += count
+		}
+	}
+
+	return stats
 }
 
 // FilterVIPClients 筛选VIP用户客户端
 func (h *Hub) FilterVIPClients(minLevel VIPLevel) []*Client {
-	return syncx.WithRLockReturnValue(&h.mutex, func() []*Client {
-		var vipClients []*Client
-		for _, client := range h.clients {
-			if client.VIPLevel.GetLevel() >= minLevel.GetLevel() {
-				vipClients = append(vipClients, client)
-			}
+	var vipClients []*Client
+	h.shardedRegistry.ForEachClient(func(_ string, client *Client) bool {
+		if client.VIPLevel.GetLevel() >= minLevel.GetLevel() {
+			vipClients = append(vipClients, client)
 		}
-		return vipClients
+		return true
 	})
+	return vipClients
 }
 
 // ============================================================================
@@ -160,28 +155,26 @@ func (h *Hub) FilterVIPClients(minLevel VIPLevel) []*Client {
 
 // UpgradeVIPLevel 升级用户VIP等级
 func (h *Hub) UpgradeVIPLevel(userID string, newLevel VIPLevel) bool {
-	return syncx.WithLockReturnValue(&h.mutex, func() bool {
-		clientMap, exists := h.userToClients[userID]
-		if !exists || len(clientMap) == 0 || !newLevel.IsValid() {
-			return false
-		}
-
-		// 获取任意一个客户端的当前等级(所有客户端等级一致)
-		var currentLevel VIPLevel
-		for _, client := range clientMap {
-			currentLevel = client.VIPLevel
-			break
-		}
-
-		// 只允许升级，不允许降级
-		if newLevel.GetLevel() > currentLevel.GetLevel() {
-			// 升级所有客户端的VIP等级
-			for _, client := range clientMap {
-				client.VIPLevel = newLevel
-			}
-			return true
-		}
-
+	clientMap, exists := h.shardedRegistry.GetUserClients(userID)
+	if !exists || len(clientMap) == 0 || !newLevel.IsValid() {
 		return false
-	})
+	}
+
+	// 获取任意一个客户端的当前等级(所有客户端等级一致)
+	var currentLevel VIPLevel
+	for _, client := range clientMap {
+		currentLevel = client.VIPLevel
+		break
+	}
+
+	// 只允许升级，不允许降级
+	if newLevel.GetLevel() > currentLevel.GetLevel() {
+		// 升级所有客户端的VIP等级
+		for _, client := range clientMap {
+			client.VIPLevel = newLevel
+		}
+		return true
+	}
+
+	return false
 }

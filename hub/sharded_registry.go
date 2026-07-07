@@ -37,6 +37,32 @@ import (
 // 64 个分片在 8-32 核 CPU 上能充分并行，且内存开销可控
 const defaultShardCount = 64
 
+// RegistryCapacity 容量提示（用于预分配各 ShardedMap 的每 shard 内部 map 容量）
+//
+// 设计思路：
+//   - 总容量除以 shardCount 得到每 shard 提示，减少 map 扩容次数
+//   - 各分类索引（SSE/Observer/Agent）按预估占比独立分配，避免过度预分配
+//   - 0 表示不预分配，由 map 自适应扩容
+type RegistryCapacity struct {
+	// TotalClients 总客户端连接数预估（主存储 userShards）
+	TotalClients int
+	// SSEClients SSE 客户端连接数预估（sseShards）
+	SSEClients int
+	// ObserverClients 观察者连接数预估（observerShards）
+	ObserverClients int
+	// AgentClients 客服/Bot 连接数预估（agentShards）
+	AgentClients int
+}
+
+// perShardHint 总容量除以分片数，向上取整
+// 总容量 <=0 时返回 0（不预分配）
+func (c RegistryCapacity) perShardHint(total int) int {
+	if total <= 0 {
+		return 0
+	}
+	return (total + defaultShardCount - 1) / defaultShardCount
+}
+
 // ShardedRegistry 分片注册表
 // 基于 syncx.ShardedMap 实现，替代 Hub 的单一 mutex + map 结构
 // 同时承担原本由 Hub 维护的 sseClients/observerClients/agentClients 分类索引
@@ -76,20 +102,32 @@ type ShardedRegistry struct {
 // NewShardedRegistry 创建分片注册表
 // agentEnabled / observerEnabled 控制是否启用对应分类分片；
 // 未启用的分类 shards 保持 nil，相关读写直接跳过，避免无谓内存与锁开销
-func NewShardedRegistry(agentEnabled, observerEnabled bool) *ShardedRegistry {
+//
+// capacity 提供总容量预估，用于预分配各 ShardedMap 的每 shard 内部 map 容量；
+// 传入零值 RegistryCapacity 时退化为不预分配（与旧版兼容）
+func NewShardedRegistry(agentEnabled, observerEnabled bool, capacity RegistryCapacity) *ShardedRegistry {
 	r := &ShardedRegistry{
-		// 主存储与 SSE 索引始终启用
-		userShards:       syncx.NewShardedMap[string, map[string]*Client](defaultShardCount),
-		sseShards:        syncx.NewShardedMap[string, map[string]*Client](defaultShardCount),
+		userShards:       newClientShardedMap(capacity.TotalClients),
+		sseShards:        newClientShardedMap(capacity.SSEClients),
 		clientIDToUserID: sync.Map{},
 	}
 	if agentEnabled {
-		r.agentShards = syncx.NewShardedMap[string, map[string]*Client](defaultShardCount)
+		r.agentShards = newClientShardedMap(capacity.AgentClients)
 	}
 	if observerEnabled {
-		r.observerShards = syncx.NewShardedMap[string, map[string]*Client](defaultShardCount)
+		r.observerShards = newClientShardedMap(capacity.ObserverClients)
 	}
 	return r
+}
+
+// newClientShardedMap 创建统一类型的客户端分片映射表（userID → (clientID → *Client)）
+// 封装默认 shardCount + WithPerShardHint 选项，避免每个分类索引重复书写
+// totalHint 为该索引预估总容量，内部按 defaultShardCount 平均分摊
+func newClientShardedMap(totalHint int) *syncx.ShardedMap[string, map[string]*Client] {
+	return syncx.NewShardedMapWithOptions(
+		defaultShardCount,
+		syncx.WithPerShardHint[string, map[string]*Client](RegistryCapacity{}.perShardHint(totalHint)),
+	)
 }
 
 // ============================================================================

@@ -374,6 +374,18 @@ func NewHub(config *wscconfig.WSC) *Hub {
 		safe.WithSeparator(thConfig.GetSeparator()),
 	)
 
+	// 预估初始容量，减少 map 扩容
+	// CalculateCapacities 返回：(clients, userToClients, agentClients, observerClients, sseClients)
+	// 主存储 userShards 用 clients（连接数）作为总容量提示
+	// 各分类索引用对应类型的预估连接数
+	clientsCap, _, agentClientsCap, observerClientsCap, sseClientsCap := config.CapacityEstimation.CalculateCapacities()
+	registryCapacity := RegistryCapacity{
+		TotalClients:    clientsCap,
+		SSEClients:      sseClientsCap,
+		ObserverClients: observerClientsCap,
+		AgentClients:    agentClientsCap,
+	}
+
 	hub := &Hub{
 		nodeID:         nodeID,
 		workerID:       workerID,
@@ -421,7 +433,8 @@ func NewHub(config *wscconfig.WSC) *Hub {
 	// 🚀 初始化性能优化组件
 	// 分片注册表（替代单 mutex 的 clients/userToClients map）
 	// 同时内化了 SSE/Observer/Agent 三个分类分片索引（按功能开关条件化初始化）
-	hub.shardedRegistry = NewShardedRegistry(config.EnableAgent, config.EnableObserver)
+	// 同时按预估容量预分配每 shard 内部 map，减少扩容次数
+	hub.shardedRegistry = NewShardedRegistry(config.EnableAgent, config.EnableObserver, registryCapacity)
 	// WorkerPool（按任务类型分池控制并发，防止 goroutine 泛滥）
 	hub.workerPool = NewHubWorkerPool(DefaultWorkerPoolConfig(), hub.logger)
 

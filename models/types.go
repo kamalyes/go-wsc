@@ -79,7 +79,7 @@ type NodeInfo struct {
 	Status      NodeStatus `json:"status"`
 	LoadScore   float64    `json:"load_score"`
 	LastSeen    time.Time  `json:"last_seen"`
-	Connections int        `json:"connections"`
+	Connections int64      `json:"connections"`
 }
 
 // KickUserResult 踢人结果

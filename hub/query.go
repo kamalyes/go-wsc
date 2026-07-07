@@ -17,7 +17,6 @@ import (
 
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
-	"github.com/kamalyes/go-toolbox/pkg/syncx"
 )
 
 // ============================================================================
@@ -26,21 +25,14 @@ import (
 
 // GetStats 获取Hub统计信息
 func (h *Hub) GetStats() *HubStats {
-	// shardedRegistry 主存储原子计数（WS + SSE 都在主存储）
-	wsCount := h.shardedRegistry.GetClientCount()
-
-	// 分类索引计数（agentClients 保持独立锁）
-	agentCount := syncx.WithRLockReturnValue(&h.mutex, func() int64 {
-		return int64(len(h.agentClients))
-	})
-
-	sseCount := syncx.WithRLockReturnValue(&h.sseMutex, func() int64 {
-		return int64(len(h.sseClients))
-	})
+	// shardedRegistry 原子计数（主存储 + 分类索引）
+	totalCount := h.shardedRegistry.GetClientCount()
+	sseCount := h.shardedRegistry.GetSSEClientCount()
+	agentCount := int64(h.shardedRegistry.GetAgentUserCount())
 
 	stats := &HubStats{
-		TotalClients:     wsCount,
-		WebSocketClients: wsCount - sseCount, // WS 连接数 = 总连接数 - SSE 连接数
+		TotalClients:     totalCount,
+		WebSocketClients: totalCount - sseCount, // WS 连接数 = 总连接数 - SSE 连接数
 		SSEClients:       sseCount,
 		AgentConnections: agentCount,
 		QueuedMessages:   len(h.pendingMessages),
@@ -68,20 +60,9 @@ func (h *Hub) GetUptime() int64 {
 }
 
 // GetOnlineUsers 获取所有在线用户ID列表
+// 主存储已包含所有连接类型（WS + SSE），直接返回即可
 func (h *Hub) GetOnlineUsers() []string {
-	// 从 shardedRegistry 获取所有在线用户（主存储）
-	wsUsers := h.shardedRegistry.GetOnlineUserIDs()
-
-	sseUsers := syncx.WithRLockReturnValue(&h.sseMutex, func() []string {
-		users := make([]string, 0, len(h.sseClients))
-		for userID := range h.sseClients {
-			users = append(users, userID)
-		}
-		return users
-	})
-
-	// 合并并去重
-	return mathx.SliceUniq(append(wsUsers, sseUsers...))
+	return h.shardedRegistry.GetOnlineUserIDs()
 }
 
 // GetOnlineUsersCount 获取在线用户数量
@@ -118,22 +99,12 @@ func (h *Hub) GetClientCount() int64 {
 
 // IsUserOnline 检查用户是否在线
 func (h *Hub) IsUserOnline(userID string) (bool, error) {
-	// 1. 检查 shardedRegistry 主存储（原子读）
+	// 检查 shardedRegistry 主存储（原子读，包含 WS + SSE）
 	if h.shardedRegistry.HasUser(userID) {
 		return true, nil
 	}
 
-	// 2. 检查 SSE 索引
-	sseExists := syncx.WithRLockReturnValue(&h.sseMutex, func() bool {
-		clientMap, exists := h.sseClients[userID]
-		return exists && len(clientMap) > 0
-	})
-
-	if sseExists {
-		return true, nil
-	}
-
-	// 3. 如果有 Redis repository，检查其他节点
+	// 如果有 Redis repository，检查其他节点
 	if h.onlineStatusRepo != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -357,20 +328,14 @@ func (h *Hub) HasUserClient(userID string) bool {
 	return h.shardedRegistry.HasUser(userID)
 }
 
-// HasSSEClient 检查是否存在指定用户ID的SSE连接
+// HasSSEClient 检查是否存在指定用户ID的SSE连接 - O(1)
 func (h *Hub) HasSSEClient(userID string) bool {
-	return syncx.WithRLockReturnValue(&h.sseMutex, func() bool {
-		clientMap, exists := h.sseClients[userID]
-		return exists && len(clientMap) > 0
-	})
+	return h.shardedRegistry.HasSSEUser(userID)
 }
 
-// HasAgentClient 检查是否存在指定用户ID的代理客户端
+// HasAgentClient 检查是否存在指定用户ID的代理客户端 - O(1)
 func (h *Hub) HasAgentClient(userID string) bool {
-	return syncx.WithRLockReturnValue(&h.mutex, func() bool {
-		clientMap, exists := h.agentClients[userID]
-		return exists && len(clientMap) > 0
-	})
+	return h.shardedRegistry.HasAgent(userID)
 }
 
 // GetClientsCopy 获取所有客户端的副本
@@ -470,14 +435,15 @@ func (h *Hub) GetClientByIDWithLock(clientID string) (*Client, bool) {
 // GetHubHealth 获取Hub健康状态
 // 使用 shardedRegistry 原子计数器
 func (h *Hub) GetHubHealth() *HubHealthInfo {
-	wsCount := int(h.shardedRegistry.GetClientCount())
+	totalCount := int(h.shardedRegistry.GetClientCount())
+	sseCount := int(h.shardedRegistry.GetSSEClientCount())
 
 	return &HubHealthInfo{
 		Status:           "healthy",
 		IsRunning:        h.IsStarted(),
-		WebSocketCount:   wsCount,
-		SSECount:         0, // SSE 功能待实现
-		TotalConnections: wsCount,
+		WebSocketCount:   totalCount - sseCount,
+		SSECount:         sseCount,
+		TotalConnections: totalCount,
 		NodeID:           h.nodeID,
 	}
 }

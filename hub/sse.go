@@ -16,8 +16,6 @@ import (
 	"fmt"
 	"net/http"
 	"time"
-
-	"github.com/kamalyes/go-toolbox/pkg/syncx"
 )
 
 // ============================================================================
@@ -86,10 +84,9 @@ func (h *Hub) UnregisterSSE(clientID string) {
 // ============================================================================
 
 // SendToUserViaSSE 通过SSE发送消息给指定用户（支持多设备）
+// 通过 shardedRegistry.sseShards 分片读锁获取该用户所有 SSE 客户端
 func (h *Hub) SendToUserViaSSE(userID string, msg *HubMessage) bool {
-	h.sseMutex.RLock()
-	clientMap, exists := h.sseClients[userID]
-	h.sseMutex.RUnlock()
+	clientMap, exists := h.shardedRegistry.GetSSEUserClients(userID)
 
 	if !exists || len(clientMap) == 0 {
 		h.logger.WarnKV("SSE用户不存在",
@@ -140,22 +137,20 @@ func (h *Hub) SendToUserViaSSE(userID string, msg *HubMessage) bool {
 }
 
 // broadcastToSSEClients 广播消息到所有SSE客户端
+// 通过 shardedRegistry.ForEachSSEClient 分片读锁遍历，无外置锁
 func (h *Hub) broadcastToSSEClients(msg *HubMessage) {
-	syncx.WithRLock(&h.sseMutex, func() {
-		for userID, clientMap := range h.sseClients {
-			for clientID, client := range clientMap {
-				select {
-				case client.SSEMessageCh <- msg:
-					client.LastSeen = time.Now()
-				default:
-					// 消息通道满，跳过
-					h.logger.WarnKV("SSE客户端消息通道已满，跳过",
-						"user_id", userID,
-						"client_id", clientID,
-					)
-				}
-			}
+	h.shardedRegistry.ForEachSSEClient(func(userID, clientID string, client *Client) bool {
+		select {
+		case client.SSEMessageCh <- msg:
+			client.LastSeen = time.Now()
+		default:
+			// 消息通道满，跳过
+			h.logger.WarnKV("SSE客户端消息通道已满，跳过",
+				"user_id", userID,
+				"client_id", clientID,
+			)
 		}
+		return true
 	})
 }
 
@@ -163,34 +158,23 @@ func (h *Hub) broadcastToSSEClients(msg *HubMessage) {
 // SSE 查询方法
 // ============================================================================
 
-// GetSSEClientCount 获取SSE客户端数量
+// GetSSEClientCount 获取SSE客户端数量（原子计数器，零锁开销）
 func (h *Hub) GetSSEClientCount() int {
-	h.sseMutex.RLock()
-	defer h.sseMutex.RUnlock()
-	count := 0
-	for _, clientMap := range h.sseClients {
-		count += len(clientMap)
-	}
-	return count
+	return int(h.shardedRegistry.GetSSEClientCount())
 }
 
 // GetSSEClients 获取所有SSE客户端列表
+// 通过 shardedRegistry.ForEachSSEClient 收集（分片读锁粒度细）
 func (h *Hub) GetSSEClients() []*Client {
-	h.sseMutex.RLock()
-	defer h.sseMutex.RUnlock()
 	clients := make([]*Client, 0)
-	for _, clientMap := range h.sseClients {
-		for _, client := range clientMap {
-			clients = append(clients, client)
-		}
-	}
+	h.shardedRegistry.ForEachSSEClient(func(_, _ string, client *Client) bool {
+		clients = append(clients, client)
+		return true
+	})
 	return clients
 }
 
-// IsSSEClientOnline 检查SSE客户端是否在线
+// IsSSEClientOnline 检查SSE客户端是否在线 - O(1)
 func (h *Hub) IsSSEClientOnline(userID string) bool {
-	h.sseMutex.RLock()
-	defer h.sseMutex.RUnlock()
-	clientMap, exists := h.sseClients[userID]
-	return exists && len(clientMap) > 0
+	return h.shardedRegistry.HasSSEUser(userID)
 }

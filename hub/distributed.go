@@ -315,7 +315,7 @@ func (h *Hub) RegisterNode(ctx context.Context) error {
 		Port:        h.config.NodePort,
 		Status:      NodeStatusActive,
 		LastSeen:    time.Now(),
-		Connections: int(h.activeClientsCount.Load()),
+		Connections: int(h.shardedRegistry.GetClientCount()),
 	}
 
 	key := fmt.Sprintf("wsc:nodes:%s", h.nodeID)

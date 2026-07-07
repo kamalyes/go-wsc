@@ -158,9 +158,9 @@ func (h *Hub) Run() {
 
 // reportPerformanceMetrics 报告性能指标
 func (h *Hub) reportPerformanceMetrics() {
-	// 使用原子计数器快速获取连接数，避免加锁
-	activeClients := h.activeClientsCount.Load()
-	sseClients := h.sseClientsCount.Load()
+	// 使用 shardedRegistry 原子计数器快速获取连接数，避免加锁
+	activeClients := h.shardedRegistry.GetActiveClientCount()
+	sseClients := h.shardedRegistry.GetSSEClientCount()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -302,8 +302,8 @@ func (h *Hub) SafeShutdown() error {
 	baseTimeout := mathx.IfNotZero(h.config.ShutdownBaseTimeout, 5*time.Second)
 	maxTimeout := mathx.IfNotZero(h.config.ShutdownMaxTimeout, 60*time.Second)
 
-	// 使用原子计数器获取连接数（无需加锁）
-	totalClients := h.activeClientsCount.Load() + h.sseClientsCount.Load()
+	// 使用 shardedRegistry 原子计数器获取连接数（无需加锁）
+	totalClients := h.shardedRegistry.GetClientCount()
 
 	// 每个连接增加10ms超时时间，限制在最大超时范围内
 	calculatedTimeout := mathx.IfClamp(

@@ -328,10 +328,10 @@ func (h *Hub) KickUserSimple(userID string, reason string) int {
 // ============================================================================
 
 // removeClientUnsafe 移除客户端（数据清理，不含回调）
-// 主存储由 shardedRegistry 移除（分片锁），分类索引单独清理
+// 主存储 + 分类索引（SSE/Observer/Agent）全部由 shardedRegistry.RemoveClient 内部原子完成
 // 回调由调用方（handleUnregister）通过 workerPool 处理，避免重复
 func (h *Hub) removeClientUnsafe(client *Client) {
-	// 1. 从 shardedRegistry 移除主存储（若不存在则直接返回）
+	// 1. 从 shardedRegistry 移除主存储 + 分类索引（若不存在则直接返回）
 	removed := h.shardedRegistry.RemoveClient(client.ID, client.UserID)
 	if removed == nil {
 		return
@@ -340,17 +340,14 @@ func (h *Hub) removeClientUnsafe(client *Client) {
 	// 2. 日志
 	h.logClientDisconnection(client)
 
-	// 3. 清理分类索引（sseClients/agentClients/observerClients + 原子计数器）
-	h.removeClientFromIndexes(client)
-
-	// 4. Redis 同步（IO 操作，调用方应通过 workerPool 异步化）
+	// 3. Redis 同步（IO 操作，调用方应通过 workerPool 异步化）
 	h.syncClientRemovalToRedis(client)
 
-	// 5. 关闭 channel 和连接
+	// 4. 关闭 channel 和连接
 	h.closeClientChannel(client)
 	h.closeClientConnection(client)
 
-	// 6. 更新连接断开记录
+	// 5. 更新连接断开记录
 	h.updateConnectionOnDisconnect(client, DisconnectReasonClientRequest)
 }
 
@@ -362,47 +359,6 @@ func (h *Hub) logClientDisconnection(client *Client) {
 		"user_type", client.UserType,
 		"remaining_connections", h.shardedRegistry.GetClientCount(),
 	)
-}
-
-// removeClientFromIndexes 从分类索引中移除客户端
-// 主存储（clients/userToClients）已由 shardedRegistry.RemoveClient 处理
-// 这里只清理 sseClients/agentClients/observerClients 索引和原子计数器
-func (h *Hub) removeClientFromIndexes(client *Client) {
-	// 更新分类原子计数器
-	if client.ConnectionType == ConnectionTypeSSE {
-		h.sseClientsCount.Add(-1)
-	} else {
-		h.activeClientsCount.Add(-1)
-	}
-
-	// SSE 客户端从专用索引中移除
-	if client.ConnectionType == ConnectionTypeSSE {
-		h.sseMutex.Lock()
-		if sseMap, exists := h.sseClients[client.UserID]; exists {
-			delete(sseMap, client.ID)
-			// 如果该用户没有其他 SSE 连接了，删除整个 map
-			if len(sseMap) == 0 {
-				delete(h.sseClients, client.UserID)
-			}
-		}
-		h.sseMutex.Unlock()
-	}
-
-	// 如果是观察者，从观察者索引中移除 - O(1)
-	if client.UserType == UserTypeObserver {
-		h.removeObserver(client)
-	}
-
-	// 从客服连接索引中移除
-	if client.UserType == UserTypeAgent || client.UserType == UserTypeBot {
-		if agentMap, exists := h.agentClients[client.UserID]; exists {
-			delete(agentMap, client.ID)
-			// 如果该客服没有其他连接了，删除整个 map
-			if len(agentMap) == 0 {
-				delete(h.agentClients, client.UserID)
-			}
-		}
-	}
 }
 
 // syncClientRemovalToRedis 同步客户端移除到Redis
@@ -519,45 +475,9 @@ func (h *Hub) closeClientConnection(client *Client) {
 }
 
 // addNewClient 添加新客户端到注册表
-// 主存储（clients/userToClients）由 shardedRegistry 管理（分片锁粒度细）
-// 分类索引（sseClients/agentClients/observerClients）单独维护
+// 主存储 + 分类索引（SSE/Observer/Agent）全部由 shardedRegistry.AddClient 内部原子完成
 func (h *Hub) addNewClient(client *Client) {
-	// 1. 主存储：shardedRegistry（分片锁，原子计数）
 	h.shardedRegistry.AddClient(client)
-
-	// 2. 分类原子计数器
-	if client.ConnectionType == ConnectionTypeSSE {
-		h.sseClientsCount.Add(1)
-	} else {
-		h.activeClientsCount.Add(1)
-	}
-
-	// 3. SSE 索引（支持多设备）
-	if client.ConnectionType == ConnectionTypeSSE {
-		h.sseMutex.Lock()
-		if _, exists := h.sseClients[client.UserID]; !exists {
-			h.sseClients[client.UserID] = make(map[string]*Client)
-		}
-		h.sseClients[client.UserID][client.ID] = client
-		h.sseMutex.Unlock()
-	}
-
-	// 4. 观察者索引 - O(1)
-	if client.UserType == UserTypeObserver {
-		h.addObserver(client)
-	}
-
-	// 5. 客服索引
-	if client.UserType == UserTypeAgent || client.UserType == UserTypeBot {
-		// 客服模块未启用时跳过（agentClients 为 nil，写操作会 panic）
-		if h.agentClients == nil {
-			return
-		}
-		if _, exists := h.agentClients[client.UserID]; !exists {
-			h.agentClients[client.UserID] = make(map[string]*Client)
-		}
-		h.agentClients[client.UserID][client.ID] = client
-	}
 }
 
 // kickExistingClientsUnsafe 踢掉现有客户端（不加锁）

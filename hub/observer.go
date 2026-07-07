@@ -22,105 +22,47 @@ import (
 
 // ============================================================================
 // 观察者管理 - O(1) 性能，支持多端登录
+// 全部通过 shardedRegistry.observerShards 分片读写，无外置锁
 // ============================================================================
 
-// GetObserverClients 获取所有观察者客户端（所有设备）- O(n) n=观察者数量
+// GetObserverClients 获取所有观察者客户端（所有设备）- O(n) n=观察者设备数
 // 自动过滤已关闭的客户端，避免并发场景下的 "send on closed channel" panic
 func (h *Hub) GetObserverClients() []*Client {
-	return syncx.WithRLockReturnValue(&h.mutex, func() []*Client {
-		observers := make([]*Client, 0)
-		for _, clientMap := range h.observerClients {
-			for _, client := range clientMap {
-				// 只返回未关闭的客户端
-				if !client.IsClosed() {
-					observers = append(observers, client)
-				}
-			}
+	observers := make([]*Client, 0)
+	h.shardedRegistry.ForEachObserver(func(_, _ string, client *Client) bool {
+		if !client.IsClosed() {
+			observers = append(observers, client)
 		}
-		return observers
+		return true
 	})
+	return observers
 }
 
 // GetObserverCount 获取观察者数量（用户数，非设备数）- O(1)
 func (h *Hub) GetObserverCount() int {
-	return syncx.WithRLockReturnValue(&h.mutex, func() int {
-		return len(h.observerClients)
-	})
+	return h.shardedRegistry.GetObserverUserCount()
 }
 
 // GetObserverDeviceCount 获取观察者设备总数 - O(n) n=观察者数量
 func (h *Hub) GetObserverDeviceCount() int {
-	return syncx.WithRLockReturnValue(&h.mutex, func() int {
-		count := 0
-		for _, clientMap := range h.observerClients {
-			count += len(clientMap)
-		}
-		return count
-	})
+	return h.shardedRegistry.GetObserverDeviceCount()
 }
 
 // IsObserver 检查用户是否为观察者 - O(1)
 func (h *Hub) IsObserver(userID string) bool {
-	return syncx.WithRLockReturnValue(&h.mutex, func() bool {
-		_, exists := h.observerClients[userID]
-		return exists
-	})
-}
-
-// addObserver 添加观察者到专用映射 - O(1)
-// 注意：此方法不加锁，需要外部调用者持有锁
-func (h *Hub) addObserver(client *Client) {
-	// 观察者模块未启用时跳过（observerClients 为 nil，写操作会 panic）
-	if h.observerClients == nil {
-		return
-	}
-	if h.observerClients[client.UserID] == nil {
-		h.observerClients[client.UserID] = make(map[string]*Client)
-	}
-	h.observerClients[client.UserID][client.ID] = client
-
-	h.logger.DebugKV("✅ 观察者已添加",
-		"observer_id", client.UserID,
-		"client_id", client.ID,
-		"device_count", len(h.observerClients[client.UserID]),
-		"total_observers", len(h.observerClients),
-		"user_type", client.UserType.String(),
-		"client_type", client.ClientType.String(),
-	)
-}
-
-// removeObserver 从专用映射移除观察者 - O(1)
-// 注意：此方法不加锁，需要外部调用者持有锁
-func (h *Hub) removeObserver(client *Client) {
-	if clientMap, exists := h.observerClients[client.UserID]; exists {
-		delete(clientMap, client.ID)
-
-		// 如果该观察者没有其他设备了，删除整个映射
-		if len(clientMap) == 0 {
-			delete(h.observerClients, client.UserID)
-		}
-
-		h.logger.DebugKV("❌ 观察者已移除",
-			"observer_id", client.UserID,
-			"client_id", client.ID,
-			"remaining_devices", len(clientMap),
-			"total_observers", len(h.observerClients),
-		)
-	}
+	return h.shardedRegistry.HasObserver(userID)
 }
 
 // notifyObservers 通知所有观察者（内部方法）- O(n) 但 n 是观察者设备数，通常很小
 // 在消息发送时自动调用，将消息推送给所有观察者的所有设备
 func (h *Hub) notifyObservers(msg *HubMessage) {
 	// 观察者模块未启用时直接返回，跳过本地通知与跨节点广播
-	if h.observerClients == nil {
+	if !h.shardedRegistry.ObserverEnabled() {
 		return
 	}
 
 	// 快速检查：无观察者时直接返回 - O(1)
-	observerCount := syncx.WithRLockReturnValue(&h.mutex, func() int {
-		return len(h.observerClients)
-	})
+	observerCount := h.shardedRegistry.GetObserverUserCount()
 
 	h.logger.DebugKV("开始通知观察者",
 		"message_id", msg.MessageID,

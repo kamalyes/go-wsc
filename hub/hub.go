@@ -283,19 +283,6 @@ type Hub struct {
 	nodes     map[string]*NodeInfo
 	startTime time.Time
 
-	// 以下仅保留分类索引（sseClients/agentClients/observerClients）作为辅助查询
-	agentClients map[string]map[string]*Client
-
-	// 观察者专用映射 - 支持多端登录 - O(1) 访问
-	observerClients map[string]map[string]*Client
-
-	// SSE 连接（使用统一的 Client 结构）- 支持多设备
-	sseClients map[string]map[string]*Client
-
-	// 原子计数器：用于快速获取连接数，避免加锁
-	activeClientsCount atomic.Int64
-	sseClientsCount    atomic.Int64
-
 	register        chan *Client
 	unregister      chan *Client
 	broadcast       chan *HubMessage
@@ -354,7 +341,6 @@ type Hub struct {
 	welcomeProvider WelcomeMessageProvider
 	logger          WSCLogger
 	mutex           sync.RWMutex
-	sseMutex        sync.RWMutex
 	ctx             context.Context
 	cancel          context.CancelFunc
 	config          *wscconfig.WSC
@@ -387,8 +373,6 @@ func NewHub(config *wscconfig.WSC) *Hub {
 		safe.WithLength(thConfig.GetHashLength()),
 		safe.WithSeparator(thConfig.GetSeparator()),
 	)
-	// 预估初始容量，减少 map 扩容（clients/userToClients 容量由 shardedRegistry 内部管理）
-	_, _, agentClientsCap, observerClientsCap, sseClientsCap := config.CapacityEstimation.CalculateCapacities()
 
 	hub := &Hub{
 		nodeID:         nodeID,
@@ -404,9 +388,6 @@ func NewHub(config *wscconfig.WSC) *Hub {
 			LastSeen:  time.Now(),
 		},
 		nodes:           make(map[string]*NodeInfo, config.CapacityEstimation.Nodes),
-		agentClients:    make(map[string]map[string]*Client, agentClientsCap),
-		observerClients: make(map[string]map[string]*Client, observerClientsCap),
-		sseClients:      make(map[string]map[string]*Client, sseClientsCap),
 		register:        make(chan *Client, config.MessageBufferSize),
 		unregister:      make(chan *Client, config.MessageBufferSize),
 		broadcast:       make(chan *HubMessage, config.MessageBufferSize*4),
@@ -426,14 +407,6 @@ func NewHub(config *wscconfig.WSC) *Hub {
 		},
 	}
 
-	// 根据功能开关条件化初始化专用映射，禁用的模块保持 nil 以跳过相关逻辑（读 nil map 安全，仅写需守卫）
-	if !config.EnableAgent {
-		hub.agentClients = nil
-	}
-	if !config.EnableObserver {
-		hub.observerClients = nil
-	}
-
 	// 初始化连接 Token 解码器（若启用）
 	// 此时 Redis 客户端未知，仅创建 JWT 解码能力；
 	// 后续在 InitializeRepositories 中通过 SetConnectionTokenRedis 注入 Redis 客户端
@@ -447,7 +420,8 @@ func NewHub(config *wscconfig.WSC) *Hub {
 
 	// 🚀 初始化性能优化组件
 	// 分片注册表（替代单 mutex 的 clients/userToClients map）
-	hub.shardedRegistry = NewShardedRegistry()
+	// 同时内化了 SSE/Observer/Agent 三个分类分片索引（按功能开关条件化初始化）
+	hub.shardedRegistry = NewShardedRegistry(config.EnableAgent, config.EnableObserver)
 	// WorkerPool（按任务类型分池控制并发，防止 goroutine 泛滥）
 	hub.workerPool = NewHubWorkerPool(DefaultWorkerPoolConfig(), hub.logger)
 

@@ -50,6 +50,8 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 	routed, err := h.checkAndRouteToNode(ctx, toUserID, msgCopy)
 	if err != nil {
 		// 路由失败，记录错误但继续尝试本地发送
+		// 注意：此处不将消息标记为失败，因为会 fallback 到本地发送
+		// 如果本地发送也失败，下游的 default 分支会标记为 QueueFull 失败
 		h.logger.WarnKV("跨节点路由失败，尝试本地发送",
 			"user_id", toUserID,
 			"message_id", msgCopy.MessageID,
@@ -536,18 +538,44 @@ func (h *Hub) SendConditional(ctx context.Context, condition func(*Client) bool,
 }
 
 // SendToAllClientsInMap 发送消息到映射中的所有客户端
+// 预序列化一次消息，避免对每个客户端重复 json.Marshal
 func (h *Hub) SendToAllClientsInMap(clientMap map[string]*Client, msg *HubMessage) {
 	// 复制客户端列表,避免在遍历时map被修改导致竞争
 	clients := CopyClientsFromMap(clientMap)
+	if len(clients) == 0 {
+		return
+	}
+
+	// 预序列化一次（WebSocket 客户端共用）
+	// SSE 客户端走 TrySendSSE(msg) 不需要 []byte，跳过序列化
+	var preSerialized []byte
+	for _, c := range clients {
+		if c.ConnectionType != ConnectionTypeSSE && !c.IsClosed() {
+			data, err := json.Marshal(msg)
+			if err != nil {
+				h.logger.ErrorKV("批量消息序列化失败", "error", err)
+			} else {
+				preSerialized = data
+			}
+			break // 只需序列化一次
+		}
+	}
 
 	// 遍历复制后的列表发送消息
 	for _, client := range clients {
-		h.sendToClient(client, msg)
+		h.sendToClientSerialized(client, msg, preSerialized)
 	}
 }
 
-// sendToClient 发送消息到客户端
+// sendToClient 发送消息到客户端（内部序列化）
 func (h *Hub) sendToClient(client *Client, msg *HubMessage) {
+	h.sendToClientSerialized(client, msg, nil)
+}
+
+// sendToClientSerialized 发送消息到客户端（支持预序列化数据）
+// preSerialized 为预序列化的 []byte，为 nil 时内部序列化
+// SSE 客户端忽略 preSerialized，直接发送 msg 对象
+func (h *Hub) sendToClientSerialized(client *Client, msg *HubMessage, preSerialized []byte) {
 	// 检查客户端是否已关闭
 	if client.IsClosed() {
 		return
@@ -579,17 +607,23 @@ func (h *Hub) sendToClient(client *Client, msg *HubMessage) {
 		return
 	}
 
-	// WebSocket 客户端使用原有逻辑
-	data, err := json.Marshal(msg)
-	if err != nil {
-		h.logger.ErrorKV("消息序列化失败", "error", err)
-		// 更新为失败状态
-		if h.messageRecordRepo != nil {
-			go contextx.WithTimeoutOrBackground(h.ctx, 2*time.Second, func(ctx context.Context) error {
-				return h.messageRecordRepo.UpdateStatus(ctx, msgID, MessageSendStatusFailed, FailureReasonUnknown, err.Error())
-			})
+	// WebSocket 客户端：使用预序列化数据或现场序列化
+	var data []byte
+	if preSerialized != nil {
+		data = preSerialized
+	} else {
+		var err error
+		data, err = json.Marshal(msg)
+		if err != nil {
+			h.logger.ErrorKV("消息序列化失败", "error", err)
+			// 更新为失败状态
+			if h.messageRecordRepo != nil {
+				go contextx.WithTimeoutOrBackground(h.ctx, 2*time.Second, func(ctx context.Context) error {
+					return h.messageRecordRepo.UpdateStatus(ctx, msgID, MessageSendStatusFailed, FailureReasonUnknown, err.Error())
+				})
+			}
+			return
 		}
-		return
 	}
 
 	if client.TrySend(data) {

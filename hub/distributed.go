@@ -48,8 +48,9 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMe
 		nodeIDs, err = h.onlineStatusRepo.GetUserNodes(ctx, userID)
 	}
 	if err != nil {
-		// 查询失败，假设用户在本节点或离线
-		return false, nil
+		// 查询失败，假设用户在本节点或离线，继续本地发送流程
+		// 不标记消息为失败：本地发送可能成功
+		return false, err
 	}
 
 	// 2. 过滤掉本节点，只保留其他节点
@@ -60,7 +61,7 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMe
 		}
 	}
 
-	// 3. 如果没有其他节点，返回 false
+	// 3. 如果没有其他节点，返回 false（用户在本节点或离线）
 	if len(otherNodes) == 0 {
 		return false, nil
 	}
@@ -82,27 +83,36 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMe
 	}
 
 	// 🚀 使用 protobuf 序列化（高性能、低体积）
-	data, mErr := pb.MarshalDistributedMessage(distMsg)
-	if mErr != nil {
-		// protobuf 序列化失败，降级到 JSON
-		h.logger.WarnKV("protobuf 序列化失败，降级到 JSON",
-			"error", mErr,
-			"message_id", msg.MessageID,
-		)
-		data, _ = json.Marshal(distMsg)
-	}
+	data := h.marshalDistributedMessage(distMsg, msg.MessageID)
 
 	// 向每个节点发送消息
+	// 统计成功与失败，只要有一个节点发布成功就认为路由成功
+	publishedCount := 0
+	var lastPublishErr error
 	for _, nodeID := range otherNodes {
 		channel := fmt.Sprintf("wsc:node:%s", nodeID)
 		if err := h.pubsub.Publish(ctx, channel, string(data)); err != nil {
+			lastPublishErr = err
 			h.logger.ErrorKV("跨节点消息发布失败",
 				"error", err,
 				"target_node", nodeID,
 				"message_id", msg.MessageID,
 			)
 			// 继续向其他节点发送，不因为一个节点失败而中断
+			continue
 		}
+		publishedCount++
+	}
+
+	// 所有节点都发布失败 → 返回错误，让上层 fallback 到本地发送
+	if publishedCount == 0 && lastPublishErr != nil {
+		h.logger.ErrorKV("跨节点消息发布全部失败，尝试本地发送",
+			"message_id", msg.MessageID,
+			"user_id", userID,
+			"target_node_count", len(otherNodes),
+			"last_error", lastPublishErr,
+		)
+		return false, lastPublishErr
 	}
 
 	return true, nil
@@ -112,8 +122,47 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMe
 // 节点间消息订阅
 // ============================================================================
 
+// unmarshalDistributedMessage 反序列化分布式消息
+// 优先使用 protobuf（高性能、低体积），失败时降级到 JSON（兼容旧节点）
+// 三处订阅回调（节点消息/广播/观察者）共用此方法，避免逻辑重复
+func (h *Hub) unmarshalDistributedMessage(data []byte) (*DistributedMessage, error) {
+	// 🚀 优先尝试 protobuf 反序列化
+	distMsg, pErr := pb.UnmarshalDistributedMessage(data)
+	if pErr == nil {
+		return distMsg, nil
+	}
+
+	// 降级到 JSON（兼容旧节点或非 protobuf 消息）
+	var jsonMsg DistributedMessage
+	if jErr := json.Unmarshal(data, &jsonMsg); jErr != nil {
+		h.logger.ErrorKV("解析分布式消息失败",
+			"protobuf_error", pErr,
+			"json_error", jErr,
+		)
+		return nil, jErr
+	}
+	return &jsonMsg, nil
+}
+
+// marshalDistributedMessage 序列化分布式消息
+// 优先使用 protobuf（高性能、低体积），失败时降级到 JSON
+func (h *Hub) marshalDistributedMessage(distMsg *DistributedMessage, messageID string) []byte {
+	// 🚀 使用 protobuf 序列化（高性能、低体积）
+	data, mErr := pb.MarshalDistributedMessage(distMsg)
+	if mErr == nil {
+		return data
+	}
+
+	// protobuf 序列化失败，降级到 JSON
+	h.logger.WarnKV("protobuf 序列化失败，降级到 JSON",
+		"error", mErr,
+		"message_id", messageID,
+	)
+	data, _ = json.Marshal(distMsg)
+	return data
+}
+
 // SubscribeNodeMessages 订阅本节点的消息通道
-// 优先使用 protobuf 反序列化，失败时降级到 JSON（兼容旧节点发送的消息）
 func (h *Hub) SubscribeNodeMessages(ctx context.Context) error {
 	if h.pubsub == nil {
 		return ErrPubSubNotSet
@@ -130,19 +179,9 @@ func (h *Hub) SubscribeNodeMessages(ctx context.Context) error {
 		}).
 		Exec(func() {
 			_, err := h.pubsub.Subscribe([]string{channel}, func(subCtx context.Context, ch string, msg string) error {
-				// 🚀 优先尝试 protobuf 反序列化
-				distMsg, pErr := pb.UnmarshalDistributedMessage([]byte(msg))
-				if pErr != nil {
-					// 降级到 JSON（兼容旧节点或非 protobuf 消息）
-					var jsonMsg DistributedMessage
-					if jErr := json.Unmarshal([]byte(msg), &jsonMsg); jErr != nil {
-						h.logger.ErrorKV("解析分布式消息失败",
-							"protobuf_error", pErr,
-							"json_error", jErr,
-						)
-						return jErr
-					}
-					distMsg = &jsonMsg
+				distMsg, err := h.unmarshalDistributedMessage([]byte(msg))
+				if err != nil {
+					return err
 				}
 
 				// 使用订阅回调提供的 subCtx，而不是外层的 ctx
@@ -492,6 +531,7 @@ func (h *Hub) ReleaseDistributedLock(ctx context.Context, key string) error {
 // ============================================================================
 
 // broadcastToAllNodes 广播消息到所有节点
+// 使用 protobuf 序列化（相比 JSON 体积减少 50%+，速度提升 3-5x）
 func (h *Hub) broadcastToAllNodes(ctx context.Context, msg *HubMessage) error {
 	if h.pubsub == nil {
 		return nil // 单机模式，不需要跨节点广播
@@ -506,7 +546,7 @@ func (h *Hub) broadcastToAllNodes(ctx context.Context, msg *HubMessage) error {
 
 	// 发布到全局广播频道
 	channel := "wsc:broadcast"
-	data, _ := json.Marshal(distMsg)
+	data := h.marshalDistributedMessage(distMsg, msg.MessageID)
 
 	return h.pubsub.Publish(ctx, channel, string(data))
 }
@@ -597,9 +637,8 @@ func (h *Hub) SubscribeBroadcastChannel(ctx context.Context) error {
 		}).
 		Exec(func() {
 			_, err := h.pubsub.Subscribe([]string{channel}, func(subCtx context.Context, ch string, msg string) error {
-				var distMsg DistributedMessage
-				if err := json.Unmarshal([]byte(msg), &distMsg); err != nil {
-					h.logger.ErrorKV("解析广播消息失败", "error", err)
+				distMsg, err := h.unmarshalDistributedMessage([]byte(msg))
+				if err != nil {
 					return err
 				}
 
@@ -609,7 +648,7 @@ func (h *Hub) SubscribeBroadcastChannel(ctx context.Context) error {
 				}
 
 				// 使用订阅回调提供的 subCtx，而不是外层的 ctx
-				return h.handleDistributedMessage(subCtx, &distMsg)
+				return h.handleDistributedMessage(subCtx, distMsg)
 			})
 
 			if err != nil {
@@ -644,14 +683,13 @@ func (h *Hub) SubscribeObserverChannel(ctx context.Context) error {
 		}).
 		Exec(func() {
 			_, err := h.pubsub.Subscribe([]string{channel}, func(subCtx context.Context, ch string, msg string) error {
-				var distMsg DistributedMessage
-				if err := json.Unmarshal([]byte(msg), &distMsg); err != nil {
-					h.logger.ErrorKV("解析观察者通知失败", "error", err)
+				distMsg, err := h.unmarshalDistributedMessage([]byte(msg))
+				if err != nil {
 					return err
 				}
 
 				// 使用订阅回调提供的 subCtx，而不是外层的 ctx
-				return h.handleDistributedMessage(subCtx, &distMsg)
+				return h.handleDistributedMessage(subCtx, distMsg)
 			})
 
 			if err != nil {

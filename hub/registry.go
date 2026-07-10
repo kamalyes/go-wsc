@@ -212,6 +212,20 @@ func (h *Hub) handleMultiLoginPolicy(newClient *Client) {
 	// 复制一份现有客户端引用，避免在踢人过程中 map 被修改
 	existingClientsCopy := CopyClientsFromMap(existingClients)
 
+	// 检测断线重连：如果新客户端与旧客户端的 ClientID 相同，
+	// 说明是同一用户+设备在时间窗口内重连（TemporalHasher 特性）
+	// 需要先清理旧客户端的通道和连接，避免旧协程干扰新连接
+	if oldClient, sameIDExists := existingClients[newClient.ID]; sameIDExists {
+		h.logger.InfoKV("检测到相同ClientID的旧连接，执行断线重连替换",
+			"user_id", userID,
+			"client_id", newClient.ID,
+		)
+		// 清理旧客户端：关闭通道和连接，停止旧协程
+		// 注意：不调用 removeClientFromMaps，因为 addNewClient 会覆盖 map 条目
+		h.closeClientChannel(oldClient)
+		h.closeClientConnection(oldClient)
+	}
+
 	// 不允许多端登录：踢掉所有旧连接
 	if !h.config.AllowMultiLogin {
 		h.logger.InfoKV("不允许多端登录，踢掉所有旧连接",
@@ -334,6 +348,20 @@ func (h *Hub) removeClientUnsafe(client *Client) {
 	// 1. 从 shardedRegistry 移除主存储 + 分类索引（若不存在则直接返回）
 	removed := h.shardedRegistry.RemoveClient(client.ID, client.UserID)
 	if removed == nil {
+		return
+	}
+
+	// 关键修复：验证客户端指针是否一致
+	// TemporalHasher 在时间窗口内为相同用户+设备生成相同 ClientID，
+	// 断线重连时新客户端会覆盖旧客户端的注册表条目，
+	// 旧客户端的读协程退出时调用 Unregister 不应删除新客户端
+	if removed != client {
+		// 旧客户端已被新连接替换，重新添加新客户端并跳过旧客户端的注销
+		h.shardedRegistry.AddClient(removed)
+		h.logger.InfoKV("客户端已被新连接替换，跳过旧客户端的注销",
+			"client_id", client.ID,
+			"user_id", client.UserID,
+		)
 		return
 	}
 

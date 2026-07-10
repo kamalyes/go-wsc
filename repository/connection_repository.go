@@ -371,35 +371,20 @@ func (r *connectionRecordRepositoryImpl) IncrementBytesStats(ctx context.Context
 }
 
 // UpdatePingStats 更新Ping延迟统计
+// 优化：使用纯 SQL 表达式更新，避免先查再改的两次数据库操作
 func (r *connectionRecordRepositoryImpl) UpdatePingStats(ctx context.Context, connectionID string, pingMs float64) error {
-	record, err := r.GetByConnectionID(ctx, connectionID)
-	if err != nil {
-		// 连接记录不存在（可能已断开），直接返回nil而不是错误
-		// 这是正常情况，不需要记录为错误
+	if pingMs <= 0 {
 		return nil
 	}
 
-	// 计算新的平均值
-	newAverage := pingMs
-	if record.AveragePingMs > 0 {
-		newAverage = (record.AveragePingMs + pingMs) / 2
-	}
-
-	// 更新最大最小值
-	newMax := record.MaxPingMs
-	if newMax == 0 || pingMs > newMax {
-		newMax = pingMs
-	}
-
-	newMin := record.MinPingMs
-	if newMin == 0 || pingMs < newMin {
-		newMin = pingMs
-	}
-
+	// 使用 SQL 表达式直接更新，无需先查询
 	updates := map[string]any{
-		"average_ping_ms": newAverage,
-		"max_ping_ms":     newMax,
-		"min_ping_ms":     newMin,
+		// 移动平均：new_avg = old_avg * 0.7 + new_ping * 0.3
+		"average_ping_ms": gorm.Expr("CASE WHEN average_ping_ms > 0 THEN average_ping_ms * 0.7 + ? * 0.3 ELSE ? END", pingMs, pingMs),
+		// 最大值
+		"max_ping_ms": gorm.Expr("CASE WHEN max_ping_ms = 0 OR max_ping_ms < ? THEN ? ELSE max_ping_ms END", pingMs, pingMs),
+		// 最小值
+		"min_ping_ms": gorm.Expr("CASE WHEN min_ping_ms = 0 OR min_ping_ms > ? THEN ? ELSE min_ping_ms END", pingMs, pingMs),
 	}
 
 	return r.getDB(ctx).

@@ -13,7 +13,6 @@ package hub
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
@@ -43,26 +42,37 @@ func (h *Hub) Run() {
 	cg.Table(config)
 
 	// 设置已启动标志并通知等待的goroutine
-	if h.started.CompareAndSwap(false, true) {
-		// 设置启动时间到 Redis
-		if h.statsRepo != nil {
-			syncx.Go().
-				WithTimeout(2 * time.Second).
-				OnError(func(err error) {
-					h.logger.ErrorKV("注册节点到Redis失败", "error", err)
-				}).
-				ExecWithContext(func(execCtx context.Context) error {
-					return h.statsRepo.RegisterNode(execCtx, h.nodeID, time.Now().Unix())
-				})
-		}
-
-		startTimer.End()
-		cg.Info("✅ Hub 启动成功")
-		cg.GroupEnd()
-
-		// 启动指标收集器（如果已配置）
-		close(h.startCh)
+	// 所有后台 goroutine 必须在此保护块内启动，避免 Run() 被重复调用时
+	// 启动多份心跳/订阅 goroutine，导致节点反复注册等问题
+	if !h.started.CompareAndSwap(false, true) {
+		// Hub 已经启动过，直接返回，避免重复启动后台 goroutine 和 EventLoop
+		h.logger.WarnKV("Hub 已经启动，跳过重复启动", "node_id", h.nodeID)
+		return
 	}
+
+	// 设置启动时间到 Redis
+	if h.statsRepo != nil {
+		syncx.Go().
+			WithTimeout(2 * time.Second).
+			OnError(func(err error) {
+				h.logger.ErrorKV("注册节点到Redis失败", "error", err)
+			}).
+			ExecWithContext(func(execCtx context.Context) error {
+				return h.statsRepo.RegisterNode(execCtx, h.nodeID, time.Now().Unix())
+			})
+	}
+
+	startTimer.End()
+	cg.Info("✅ Hub 启动成功")
+	cg.GroupEnd()
+
+	// 启动心跳统计批量聚合器
+	if h.heartbeatBatcher != nil {
+		h.heartbeatBatcher.Start()
+	}
+
+	// 启动指标收集器（如果已配置）
+	close(h.startCh)
 
 	// 启动待发送消息处理goroutine
 	syncx.Go().
@@ -278,6 +288,12 @@ func (h *Hub) SafeShutdown() error {
 
 	// 等待异步统计任务完成（避免统计丢失）
 	cg.Info("→ 等待异步统计任务完成...")
+
+	// 停止心跳统计批量聚合器，刷写剩余数据
+	if h.heartbeatBatcher != nil {
+		h.heartbeatBatcher.Stop()
+	}
+
 	time.Sleep(50 * time.Millisecond)
 
 	// 关闭所有客户端连接
@@ -366,11 +382,7 @@ func (h *Hub) processPendingMessages() {
 	h.wg.Add(1)
 	defer h.wg.Done()
 
-	// 记录待发送消息处理器启动
-	h.logger.InfoKV("待发送消息处理器启动",
-		"node_id", h.nodeID,
-		"check_interval", "100ms",
-	)
+	h.logger.InfoKV("待发送消息处理器启动", "node_id", h.nodeID)
 
 	processedCount := 0
 	timeoutCount := 0
@@ -379,11 +391,22 @@ func (h *Hub) processPendingMessages() {
 	syncx.NewEventLoop(h.ctx).
 		// 处理待发送消息
 		OnChannel(h.pendingMessages, func(msg *HubMessage) {
-			// 尝试将消息放入broadcast队列（带超时）
+			// 先非阻塞尝试，绝大多数情况下 broadcast 队列不会满
 			select {
 			case h.broadcast <- msg:
 				processedCount++
-			case <-time.After(5 * time.Second):
+				return
+			default:
+			}
+
+			// channel 满，带超时等待（仅在此路径才创建 Timer）
+			timer := time.NewTimer(5 * time.Second)
+			defer timer.Stop()
+
+			select {
+			case h.broadcast <- msg:
+				processedCount++
+			case <-timer.C:
 				timeoutCount++
 				h.logger.WarnKV("待发送消息处理超时",
 					"message_id", msg.MessageID,
@@ -391,16 +414,6 @@ func (h *Hub) processPendingMessages() {
 					"receiver", msg.Receiver,
 					"message_type", msg.MessageType,
 					"timeout", "5s",
-				)
-			}
-		}).
-		// 定期统计进度
-		OnTicker(100*time.Millisecond, func() {
-			if processedCount%100 == 0 && processedCount > 0 {
-				h.logger.InfoKV("待发送消息处理进度",
-					"processed_count", processedCount,
-					"timeout_count", timeoutCount,
-					"success_rate", fmt.Sprintf("%.2f%%", float64(processedCount)/float64(processedCount+timeoutCount)*100),
 				)
 			}
 		}).

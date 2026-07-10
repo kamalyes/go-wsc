@@ -28,6 +28,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/kamalyes/go-logger"
+	"github.com/kamalyes/go-toolbox/pkg/contextx"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/models"
@@ -356,10 +357,48 @@ func (h *Hub) handleBroadcastMessage(msg *HubMessage) {
 			})
 	}
 
-	clients := h.GetClientsCopy()
-	for _, client := range clients {
-		h.sendToClient(client, msg)
+	// 预序列化消息（仅一次）
+	data, err := json.Marshal(msg)
+	if err != nil {
+		h.logger.ErrorKV("广播消息序列化失败", "error", err)
+		return
 	}
 
+	msgID := mathx.IfNotEmpty(msg.MessageID, msg.ID)
+	dataLen := len(data)
+
+	// 遍历所有客户端，避免拷贝整个 clients 列表
+	successCount := 0
+	failCount := 0
+
+	h.shardedRegistry.ForEachClient(func(_ string, client *Client) bool {
+		if client.IsClosed() || client.ConnectionType == ConnectionTypeSSE {
+			return true
+		}
+		if client.TrySend(data) {
+			successCount++
+			h.trackReceiverMessageStats(client.ID, client.UserType, dataLen)
+		} else {
+			failCount++
+		}
+		return true
+	})
+
+	// 消息记录状态只更新一次（同一 msgID，无需每客户端都更新）
+	if h.messageRecordRepo != nil && successCount > 0 {
+		go contextx.WithTimeoutOrBackground(h.ctx, 2*time.Second, func(ctx context.Context) error {
+			return h.messageRecordRepo.UpdateStatus(ctx, msgID, MessageSendStatusSuccess, "", "")
+		})
+	}
+
+	if failCount > 0 {
+		h.logger.WarnKV("广播消息：部分客户端发送失败",
+			"success_count", successCount,
+			"fail_count", failCount,
+			"message_id", msg.MessageID,
+		)
+	}
+
+	// SSE 客户端通过专用通道发送
 	h.broadcastToSSEClients(msg)
 }

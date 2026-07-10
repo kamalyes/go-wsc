@@ -175,6 +175,7 @@ func (h *Hub) trackConnectionError(connectionID string, userType UserType, err e
 }
 
 // trackHeartbeatStats 追踪心跳和Ping统计
+// 优化：使用批量聚合器，避免每次心跳都启动 goroutine 写数据库
 func (h *Hub) trackHeartbeatStats(client *Client) {
 	if h.connectionRecordRepo == nil || client == nil {
 		return
@@ -185,26 +186,16 @@ func (h *Hub) trackHeartbeatStats(client *Client) {
 		return
 	}
 
-	now := time.Now()
-	syncx.Go().
-		WithTimeout(5 * time.Second).
-		OnPanic(func(r any) {
-			h.logger.ErrorKV("更新心跳统计崩溃", "panic", r, "user_id", client.UserID)
-		}).
-		ExecWithContext(func(ctx context.Context) error {
-			if err := h.connectionRecordRepo.UpdateHeartbeat(ctx, client.ID, &client.LastHeartbeat, &client.LastPong); err != nil {
-				h.logger.DebugKV("更新连接记录心跳失败", "user_id", client.UserID, "error", err)
-			}
+	// 计算Ping延迟
+	pingMs := float64(0)
+	if !client.LastHeartbeat.IsZero() {
+		pingMs = float64(time.Since(client.LastHeartbeat).Milliseconds())
+	}
 
-			// 计算Ping延迟（如果客户端有上次心跳时间）
-			if !client.LastHeartbeat.IsZero() {
-				pingMs := float64(now.Sub(client.LastHeartbeat).Milliseconds())
-				if err := h.connectionRecordRepo.UpdatePingStats(ctx, client.ID, pingMs); err != nil {
-					h.logger.DebugKV("更新Ping统计失败", "user_id", client.UserID, "error", err)
-				}
-			}
-			return nil
-		})
+	// 使用批量聚合器，避免每次心跳都启动 goroutine
+	if h.heartbeatBatcher != nil {
+		h.heartbeatBatcher.Add(client.ID, client.LastHeartbeat, client.LastPong, pingMs, client.LastHeartbeat)
+	}
 }
 
 // ============================================================================

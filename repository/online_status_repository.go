@@ -11,8 +11,11 @@
 package repository
 
 import (
+	"bytes"
+	"compress/zlib"
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
@@ -23,6 +26,39 @@ import (
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/redis/go-redis/v9"
 )
+
+const (
+	// maxBatchSize 单次 Lua 脚本处理的最大客户端数量，避免 Redis 阻塞
+	maxBatchSize = 100
+	// compressionThreshold 压缩阈值，低于此大小不压缩（小数据压缩反而增大）
+	compressionThreshold = 512
+)
+
+// zlibWriterPool 复用 zlib.Writer，避免每次压缩都分配新对象
+var zlibWriterPool = sync.Pool{
+	New: func() any {
+		return zlib.NewWriter(nil)
+	},
+}
+
+// zlibCompressWithPool 使用 sync.Pool 复用 zlib.Writer 进行压缩
+func zlibCompressWithPool(data []byte) ([]byte, error) {
+	buf := bytes.NewBuffer(make([]byte, 0, len(data)/2))
+	writer := zlibWriterPool.Get().(*zlib.Writer)
+	defer zlibWriterPool.Put(writer)
+
+	writer.Reset(buf)
+	if _, err := writer.Write(data); err != nil {
+		return nil, err
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+
+	result := make([]byte, buf.Len())
+	copy(result, buf.Bytes())
+	return result, nil
+}
 
 // luaBatchSetClientsOnline Lua 脚本：批量设置客户端在线（使用 ZSET 存储过期时间）
 //
@@ -565,6 +601,7 @@ func (r *RedisOnlineStatusRepository) GetNodeUsers(ctx context.Context, nodeID s
 // ============================================================================
 
 // BatchSetClientsOnline 批量设置客户端在线（使用 Lua 脚本）
+// 优化：使用 sync.Pool 复用 zlib.Writer + 条件压缩 + 分批处理
 func (r *RedisOnlineStatusRepository) BatchSetClientsOnline(ctx context.Context, clients []*Client) error {
 	if len(clients) == 0 {
 		return nil
@@ -572,6 +609,7 @@ func (r *RedisOnlineStatusRepository) BatchSetClientsOnline(ctx context.Context,
 
 	now := time.Now()
 	currentTime := now.Unix()
+	expireTime := now.Add(r.ttl).Unix()
 
 	// 准备批量数据
 	validClients := make([]string, 0, len(clients))
@@ -586,17 +624,18 @@ func (r *RedisOnlineStatusRepository) BatchSetClientsOnline(ctx context.Context,
 			continue
 		}
 
-		// 如果启用压缩且数据大小超过阈值，则压缩
+		// 优化：条件压缩 - 小数据不压缩，大数据使用 Pool 复用的 Writer
 		clientData := data
-		if r.enableCompression && len(data) >= r.compressionMinSize {
-			compressed, err := zipx.ZlibCompressWithPrefix(data)
-			if err == nil && len(compressed) < len(data) {
-				clientData = compressed
+		if r.enableCompression && len(data) >= compressionThreshold {
+			compressed, compressErr := zlibCompressWithPool(data)
+			if compressErr == nil && len(compressed)+zipx.ZlibPrefixLen < len(data) {
+				// 添加 ZLIB: 前缀
+				prefixed := make([]byte, zipx.ZlibPrefixLen+len(compressed))
+				copy(prefixed, []byte(zipx.ZlibPrefix))
+				copy(prefixed[zipx.ZlibPrefixLen:], compressed)
+				clientData = prefixed
 			}
 		}
-
-		// 计算过期时间戳（当前时间 + TTL）
-		expireTime := now.Add(r.ttl).Unix()
 
 		// 格式：clientID|userID|nodeID|userType|expireTime|clientData
 		batchData := fmt.Sprintf("%s|%s|%s|%s|%d|%s",
@@ -614,20 +653,27 @@ func (r *RedisOnlineStatusRepository) BatchSetClientsOnline(ctx context.Context,
 		return nil
 	}
 
-	// 构建参数：ttl, currentTime, clientCount, ...clientData
-	args := make([]any, 0, 3+len(validClients))
-	args = append(args, int(r.ttl.Seconds()))
-	args = append(args, currentTime)
-	args = append(args, len(validClients))
-	for _, clientData := range validClients {
-		args = append(args, clientData)
-	}
+	// 优化：分批处理，避免单次 Lua 脚本参数过多导致 Redis 阻塞
+	for batchStart := 0; batchStart < len(validClients); batchStart += maxBatchSize {
+		batchEnd := batchStart + maxBatchSize
+		if batchEnd > len(validClients) {
+			batchEnd = len(validClients)
+		}
+		batch := validClients[batchStart:batchEnd]
 
-	// 使用 Lua 脚本批量设置
-	keys := []string{r.keyPrefix}
-	_, err := r.client.Eval(ctx, luaBatchSetClientsOnline, keys, args...).Result()
-	if err != nil {
-		return errorx.WrapError("failed to execute batch lua script", err)
+		args := make([]any, 0, 3+len(batch))
+		args = append(args, int(r.ttl.Seconds()))
+		args = append(args, currentTime)
+		args = append(args, len(batch))
+		for _, clientData := range batch {
+			args = append(args, clientData)
+		}
+
+		// 使用 Lua 脚本批量设置
+		keys := []string{r.keyPrefix}
+		if _, err := r.client.Eval(ctx, luaBatchSetClientsOnline, keys, args...).Result(); err != nil {
+			return errorx.WrapError("failed to execute batch lua script", err)
+		}
 	}
 
 	return nil

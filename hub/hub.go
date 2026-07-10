@@ -338,6 +338,9 @@ type Hub struct {
 	syncActiveConnMutex   sync.Mutex
 	syncActiveConnPending atomic.Bool
 
+	// 心跳统计批量聚合器（优化：减少数据库写入频率和 goroutine 数量）
+	heartbeatBatcher *heartbeatStatsBatcher
+
 	welcomeProvider WelcomeMessageProvider
 	logger          WSCLogger
 	mutex           sync.RWMutex
@@ -437,6 +440,9 @@ func NewHub(config *wscconfig.WSC) *Hub {
 	hub.shardedRegistry = NewShardedRegistry(config.EnableAgent, config.EnableObserver, registryCapacity)
 	// WorkerPool（按任务类型分池控制并发，防止 goroutine 泛滥）
 	hub.workerPool = NewHubWorkerPool(DefaultWorkerPoolConfig(), hub.logger)
+
+	// 初始化心跳统计批量聚合器
+	hub.heartbeatBatcher = newHeartbeatStatsBatcher(hub)
 
 	return hub
 }

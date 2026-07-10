@@ -296,6 +296,7 @@ type Hub struct {
 	// 原子计数器：用于快速获取连接数，避免加锁
 	activeClientsCount atomic.Int64
 	sseClientsCount    atomic.Int64
+	observerCount      atomic.Int64 // 本节点观察者用户数（非设备数），用于 notifyObservers 快速判断
 
 	register        chan *Client
 	unregister      chan *Client
@@ -342,6 +343,13 @@ type Hub struct {
 
 	// 心跳统计批量聚合器（优化：减少数据库写入频率和 goroutine 数量）
 	heartbeatBatcher *heartbeatStatsBatcher
+
+	// 心跳 Redis 更新通道（替代每次心跳创建 goroutine）
+	heartbeatRedisCh chan string
+
+	// 消息统计原子计数器（替代每次消息创建 goroutine 更新 Redis）
+	msgSentCount       atomic.Int64
+	broadcastSentCount atomic.Int64
 
 	welcomeProvider WelcomeMessageProvider
 	logger          WSCLogger
@@ -410,6 +418,7 @@ func NewHub(config *wscconfig.WSC) *Hub {
 		ctx:             ctx,
 		cancel:          cancel,
 		startCh:         make(chan struct{}),
+		heartbeatRedisCh: make(chan string, 1024),
 		config:          config,
 		logger:          InitLogger(config),
 		msgPool: sync.Pool{

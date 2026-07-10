@@ -41,11 +41,9 @@ func (h *Hub) GetObserverClients() []*Client {
 	})
 }
 
-// GetObserverCount 获取观察者数量（用户数，非设备数）- O(1)
+// GetObserverCount 获取观察者数量（用户数，非设备数）- O(1) 无锁
 func (h *Hub) GetObserverCount() int {
-	return syncx.WithRLockReturnValue(&h.mutex, func() int {
-		return len(h.observerClients)
-	})
+	return int(h.observerCount.Load())
 }
 
 // GetObserverDeviceCount 获取观察者设备总数 - O(n) n=观察者数量
@@ -72,6 +70,7 @@ func (h *Hub) IsObserver(userID string) bool {
 func (h *Hub) addObserver(client *Client) {
 	if h.observerClients[client.UserID] == nil {
 		h.observerClients[client.UserID] = make(map[string]*Client)
+		h.observerCount.Add(1) // 新观察者用户
 	}
 	h.observerClients[client.UserID][client.ID] = client
 
@@ -94,6 +93,7 @@ func (h *Hub) removeObserver(client *Client) {
 		// 如果该观察者没有其他设备了，删除整个映射
 		if len(clientMap) == 0 {
 			delete(h.observerClients, client.UserID)
+			h.observerCount.Add(-1) // 观察者用户完全移除
 		}
 
 		h.logger.DebugKV("❌ 观察者已移除",
@@ -105,33 +105,26 @@ func (h *Hub) removeObserver(client *Client) {
 	}
 }
 
-// notifyObservers 通知所有观察者（内部方法）- O(n) 但 n 是观察者设备数，通常很小
+// notifyObservers 通知所有观察者（内部方法）
 // 在消息发送时自动调用，将消息推送给所有观察者的所有设备
 func (h *Hub) notifyObservers(msg *HubMessage) {
-	// 快速检查：无观察者时直接返回 - O(1)
-	observerCount := syncx.WithRLockReturnValue(&h.mutex, func() int {
-		return len(h.observerClients)
-	})
+	// 原子读取本节点观察者计数，无锁快速路径
+	localCount := h.observerCount.Load()
 
-	h.logger.DebugKV("开始通知观察者",
-		"message_id", msg.MessageID,
-		"sender", msg.Sender,
-		"receiver", msg.Receiver,
-		"message_type", msg.MessageType,
-		"observer_count", observerCount,
-	)
-
-	if observerCount == 0 {
-		h.logger.DebugKV("本节点无观察者，仅广播到其他节点",
-			"message_id", msg.MessageID,
-		)
-		// 即使本节点没有观察者，也要广播到其他节点
+	if localCount == 0 {
+		// 本节点无观察者，仅跨节点通知（其他节点可能有观察者）
+		// 跳过 DebugKV 日志，避免每条消息都做字符串求值
 		h.broadcastObserverNotification(msg)
 		return
 	}
 
 	// 获取所有观察者设备列表
 	observers := h.GetObserverClients()
+	if len(observers) == 0 {
+		h.broadcastObserverNotification(msg)
+		return
+	}
+
 	h.logger.DebugKV("准备通知本地观察者",
 		"message_id", msg.MessageID,
 		"observer_devices", len(observers),

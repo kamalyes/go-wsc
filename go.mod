@@ -6,15 +6,18 @@ require (
 	github.com/alicebob/miniredis/v2 v2.35.0
 	github.com/gorilla/websocket v1.4.2
 	github.com/jpillora/backoff v1.0.0
-	github.com/kamalyes/go-cachex v0.1.9-0.20260320162159-9ee0f598da5e
-	github.com/kamalyes/go-config v0.13.1-0.20260323025825-42ce60d483c0
-	github.com/kamalyes/go-logger v0.4.6-0.20260320160038-f1cdda12311b
-	github.com/kamalyes/go-sqlbuilder v0.3.6-0.20260320162016-aace3b571965
-	github.com/kamalyes/go-toolbox v0.11.87
-	github.com/redis/go-redis/v9 v9.18.0
+	github.com/kamalyes/go-argus v0.2.2-0.20250706162640-cc4ca426836d
+	github.com/kamalyes/go-cachex v0.2.4-0.20260707070038-14739977e540
+	github.com/kamalyes/go-config v0.21.5-0.20260629071806-990ad9d9b7f5
+	github.com/kamalyes/go-logger v0.5.3
+	github.com/kamalyes/go-pbmo v0.1.5-0.20260706095123-f6d04e0c255e
+	github.com/kamalyes/go-sqlbuilder v0.5.6
+	github.com/kamalyes/go-toolbox v0.15.4-0.20260714082244-75ef10b274e3
+	github.com/redis/go-redis/v9 v9.21.0
 	github.com/stretchr/testify v1.11.1
+	google.golang.org/protobuf v1.36.11
 	gorm.io/driver/mysql v1.6.0
-	gorm.io/gorm v1.31.1
+	gorm.io/gorm v1.31.2
 )
 
 require (
@@ -25,21 +28,15 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
-	github.com/dgraph-io/ristretto/v2 v2.4.0 // indirect
-	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
+	github.com/dgraph-io/ristretto/v2 v2.4.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/gabriel-vasile/mimetype v1.4.13 // indirect
-	github.com/go-playground/locales v0.14.1 // indirect
-	github.com/go-playground/universal-translator v0.18.1 // indirect
-	github.com/go-playground/validator/v10 v10.30.1 // indirect
 	github.com/go-sql-driver/mysql v1.8.1 // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jinzhu/now v1.1.5 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
-	github.com/kamalyes/go-jsonpath v0.0.0-20260129163507-0b67ed48bb28 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
-	github.com/leodido/go-urn v1.4.0 // indirect
+	github.com/kr/text v0.2.0 // indirect
 	github.com/lib/pq v1.10.9 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
@@ -49,11 +46,10 @@ require (
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/arch v0.24.0 // indirect
-	golang.org/x/crypto v0.49.0 // indirect
-	golang.org/x/sys v0.42.0 // indirect
-	golang.org/x/text v0.35.0 // indirect
-	google.golang.org/grpc v1.79.3 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
+	golang.org/x/crypto v0.53.0 // indirect
+	golang.org/x/sys v0.46.0 // indirect
+	golang.org/x/text v0.39.0 // indirect
+	google.golang.org/grpc v1.82.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
@@ -67,3 +63,5 @@ require (
 // replace github.com/kamalyes/go-toolbox => ../go-toolbox
 
 // replace github.com/kamalyes/go-sqlbuilder => ../go-sqlbuilder
+
+// replace github.com/kamalyes/go-argus => ../go-argus

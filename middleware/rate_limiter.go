@@ -14,8 +14,9 @@ package middleware
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
+
+	"github.com/kamalyes/go-toolbox/pkg/syncx"
 )
 
 // RateLimiterConfig 频率限制配置
@@ -55,13 +56,18 @@ func DefaultRateLimiterConfig() *RateLimiterConfig {
 	}
 }
 
+// rateShardCount 限流计数器的分片数量
+// 64 个分片将不同用户的计数器分散到不同 shard，消除全局锁竞争
+const rateShardCount = 64
+
 // RateLimiter 频率限制器
 type RateLimiter struct {
 	config *RateLimiterConfig
 
-	// 内存计数器（Redis未启用时使用）
-	memoryCounters map[string]*userCounter
-	mu             sync.RWMutex
+	// memoryCounters 内存计数器（分片存储，零全局锁）
+	// key: userID (string)，按 FNV-1a hash 分散到 64 个 shard
+	// Redis 未启用时使用
+	memoryCounters *syncx.ShardedMap[string, *userCounter]
 }
 
 // userCounter 用户消息计数器
@@ -70,7 +76,6 @@ type userCounter struct {
 	hourCount   int64
 	minuteTime  time.Time
 	hourTime    time.Time
-	mu          sync.Mutex
 }
 
 // NewRateLimiter 创建频率限制器
@@ -81,7 +86,7 @@ func NewRateLimiter(config *RateLimiterConfig) *RateLimiter {
 
 	limiter := &RateLimiter{
 		config:         config,
-		memoryCounters: make(map[string]*userCounter),
+		memoryCounters: syncx.NewShardedMap[string, *userCounter](rateShardCount),
 	}
 
 	// 如果使用内存计数器，启动清理协程
@@ -157,38 +162,41 @@ func (r *RateLimiter) checkRedisLimit(ctx context.Context, userID string) (int64
 }
 
 // checkMemoryLimit 使用内存进行限流检查
+// 在同一 shard 写锁内完成 LoadOrStore + 计数更新，无需二级锁
 func (r *RateLimiter) checkMemoryLimit(userID string) (int64, int64, error) {
-	r.mu.Lock()
-	counter, exists := r.memoryCounters[userID]
-	if !exists {
-		counter = &userCounter{
-			minuteTime: time.Now(),
-			hourTime:   time.Now(),
-		}
-		r.memoryCounters[userID] = counter
-	}
-	r.mu.Unlock()
-
-	counter.mu.Lock()
-	defer counter.mu.Unlock()
-
 	now := time.Now()
+	var minuteCount, hourCount int64
 
-	// 检查分钟窗口是否过期
-	if now.Sub(counter.minuteTime) > time.Minute {
-		counter.minuteCount = 0
-		counter.minuteTime = now
-	}
-	counter.minuteCount++
+	// WithShardLock 保证同一 userID 落同一 shard，写锁串行化该用户的所有操作
+	r.memoryCounters.WithShardLock(userID, func(data map[string]*userCounter) {
+		counter, exists := data[userID]
+		if !exists {
+			counter = &userCounter{
+				minuteTime: now,
+				hourTime:   now,
+			}
+			data[userID] = counter
+		}
 
-	// 检查小时窗口是否过期
-	if now.Sub(counter.hourTime) > time.Hour {
-		counter.hourCount = 0
-		counter.hourTime = now
-	}
-	counter.hourCount++
+		// 检查分钟窗口是否过期
+		if now.Sub(counter.minuteTime) > time.Minute {
+			counter.minuteCount = 0
+			counter.minuteTime = now
+		}
+		counter.minuteCount++
 
-	return counter.minuteCount, counter.hourCount, nil
+		// 检查小时窗口是否过期
+		if now.Sub(counter.hourTime) > time.Hour {
+			counter.hourCount = 0
+			counter.hourTime = now
+		}
+		counter.hourCount++
+
+		minuteCount = counter.minuteCount
+		hourCount = counter.hourCount
+	})
+
+	return minuteCount, hourCount, nil
 }
 
 // ResetUserLimit 重置用户限制
@@ -199,10 +207,7 @@ func (r *RateLimiter) ResetUserLimit(ctx context.Context, userID string) error {
 		return r.config.RedisClient.Del(ctx, minuteKey, hourKey)
 	}
 
-	r.mu.Lock()
-	delete(r.memoryCounters, userID)
-	r.mu.Unlock()
-
+	r.memoryCounters.Delete(userID)
 	return nil
 }
 
@@ -217,18 +222,14 @@ func (r *RateLimiter) GetUserMessageCount(ctx context.Context, userID string) (m
 		return
 	}
 
-	r.mu.RLock()
-	counter, exists := r.memoryCounters[userID]
-	r.mu.RUnlock()
-
-	if !exists {
-		return 0, 0
-	}
-
-	counter.mu.Lock()
-	minuteCount = counter.minuteCount
-	hourCount = counter.hourCount
-	counter.mu.Unlock()
+	r.memoryCounters.WithShardRLock(userID, func(data map[string]*userCounter) {
+		counter, exists := data[userID]
+		if !exists {
+			return
+		}
+		minuteCount = counter.minuteCount
+		hourCount = counter.hourCount
+	})
 
 	return
 }
@@ -250,21 +251,26 @@ func (r *RateLimiter) getRedisKey(userID, window string) string {
 }
 
 // cleanupMemoryCounters 定期清理过期的内存计数器
+// 使用 ShardedMap.Range 遍历（分片读锁），收集过期 key 后批量删除
 func (r *RateLimiter) cleanupMemoryCounters() {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		r.mu.Lock()
 		now := time.Now()
-		for userID, counter := range r.memoryCounters {
-			counter.mu.Lock()
-			// 如果两个窗口都已过期，删除计数器
+		var expired []string
+
+		r.memoryCounters.Range(func(userID string, counter *userCounter) bool {
+			// 如果两个窗口都已过期，标记为待删除
 			if now.Sub(counter.minuteTime) > 5*time.Minute && now.Sub(counter.hourTime) > 2*time.Hour {
-				delete(r.memoryCounters, userID)
+				expired = append(expired, userID)
 			}
-			counter.mu.Unlock()
+			return true
+		})
+
+		// 批量删除（Range 期间持有读锁，不能直接 delete）
+		for _, userID := range expired {
+			r.memoryCounters.Delete(userID)
 		}
-		r.mu.Unlock()
 	}
 }

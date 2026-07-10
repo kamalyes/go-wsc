@@ -37,16 +37,9 @@ func (h *Hub) Broadcast(ctx context.Context, msg *HubMessage) {
 		msg.CreateAt = time.Now()
 	}
 
-	// 增加广播发送统计（异步更新，避免阻塞广播操作）
+	// 增加广播发送统计（原子计数，由 flushStatsCounters 定时刷写到 Redis）
 	if h.statsRepo != nil {
-		syncx.Go().
-			WithTimeout(1 * time.Second).
-			OnError(func(err error) {
-				h.logger.ErrorKV("更新广播统计失败", "error", err, "node_id", h.nodeID)
-			}).
-			ExecWithContext(func(ctx context.Context) error {
-				return h.statsRepo.IncrementBroadcastsSent(ctx, h.nodeID, 1)
-			})
+		h.broadcastSentCount.Add(1)
 	}
 
 	// 🌐 分布式广播：发送到所有节点

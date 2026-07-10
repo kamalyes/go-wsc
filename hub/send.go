@@ -61,7 +61,7 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 			"message_id", msgCopy.MessageID,
 			"user_id", toUserID,
 		)
-		go h.recordMessageToDatabase(msgCopy, nil)
+		h.recordMessageToDatabase(msgCopy, nil)
 		return nil
 	}
 	// 用户在本节点或单机模式，正常发送
@@ -70,7 +70,7 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 	case h.broadcast <- msgCopy:
 		h.logger.DebugContextKV(ctx, "消息已广播", "message_id", msgCopy.MessageID, "from", msgCopy.Sender, "to", msgCopy.Receiver, "type", msgCopy.MessageType)
 		// 记录消息到数据库 - 创建时已标记为Sending状态
-		go h.recordMessageToDatabase(msgCopy, nil)
+		h.recordMessageToDatabase(msgCopy, nil)
 		return nil
 	default:
 		// broadcast队列满，尝试放入待发送队列
@@ -78,14 +78,14 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 		case h.pendingMessages <- msgCopy:
 			h.logger.DebugContextKV(ctx, "消息已放入待发送队列", "message_id", msgCopy.MessageID, "from", msgCopy.Sender, "to", msgCopy.Receiver, "type", msgCopy.MessageType)
 			// 记录消息到数据库 - 创建时已标记为Sending状态
-			go h.recordMessageToDatabase(msgCopy, nil)
+			h.recordMessageToDatabase(msgCopy, nil)
 			return nil
 		default:
 			err := ErrQueueAndPendingFull
 			// 记录消息发送失败日志
 			h.logger.DebugContextKV(ctx, "消息发送失败", "message_id", msgCopy.MessageID, "from", msgCopy.Sender, "to", msgCopy.Receiver, "type", msgCopy.MessageType, "error", err)
 			// 记录失败消息到数据库
-			go h.recordMessageToDatabase(msgCopy, err)
+			h.recordMessageToDatabase(msgCopy, err)
 			// 通知队列满处理器
 			h.notifyQueueFull(msgCopy, toUserID, QueueTypeAllQueues, err)
 			return err

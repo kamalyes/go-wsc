@@ -13,7 +13,6 @@ package hub
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
@@ -43,31 +42,46 @@ func (h *Hub) Run() {
 	cg.Table(config)
 
 	// 设置已启动标志并通知等待的goroutine
-	if h.started.CompareAndSwap(false, true) {
-		// 设置启动时间到 Redis
-		if h.statsRepo != nil {
-			syncx.Go().
-				WithTimeout(2 * time.Second).
-				OnError(func(err error) {
-					h.logger.ErrorKV("注册节点到Redis失败", "error", err)
-				}).
-				ExecWithContext(func(execCtx context.Context) error {
-					return h.statsRepo.RegisterNode(execCtx, h.nodeID, time.Now().Unix())
-				})
-		}
-
-		startTimer.End()
-		cg.Info("✅ Hub 启动成功")
-		cg.GroupEnd()
-
-		// 启动心跳统计批量聚合器
-		if h.heartbeatBatcher != nil {
-			h.heartbeatBatcher.Start()
-		}
-
-		// 启动指标收集器（如果已配置）
-		close(h.startCh)
+	// 所有后台 goroutine 必须在此保护块内启动，避免 Run() 被重复调用时
+	// 启动多份心跳/订阅 goroutine，导致节点反复注册等问题
+	if !h.started.CompareAndSwap(false, true) {
+		// Hub 已经启动过，直接返回，避免重复启动后台 goroutine 和 EventLoop
+		h.logger.WarnKV("Hub 已经启动，跳过重复启动", "node_id", h.nodeID)
+		return
 	}
+
+	// 设置启动时间到 Redis
+	if h.statsRepo != nil {
+		syncx.Go().
+			WithTimeout(2 * time.Second).
+			OnError(func(err error) {
+				h.logger.ErrorKV("注册节点到Redis失败", "error", err)
+			}).
+			ExecWithContext(func(execCtx context.Context) error {
+				return h.statsRepo.RegisterNode(execCtx, h.nodeID, time.Now().Unix())
+			})
+	}
+
+	startTimer.End()
+	cg.Info("✅ Hub 启动成功")
+	cg.GroupEnd()
+
+	// 启动心跳统计批量聚合器
+	if h.heartbeatBatcher != nil {
+		h.heartbeatBatcher.Start()
+	}
+
+	// 启动心跳 Redis 更新 worker（单 goroutine 处理所有客户端的心跳 Redis 更新）
+	if h.onlineStatusRepo != nil {
+		syncx.Go().
+			OnPanic(func(r any) {
+				h.logger.ErrorKV("心跳 Redis 更新 worker panic", "panic", r, "node_id", h.nodeID)
+			}).
+			Exec(h.processHeartbeatRedisUpdates)
+	}
+
+	// 启动指标收集器（如果已配置）
+	close(h.startCh)
 
 	// 启动待发送消息处理goroutine
 	syncx.Go().
@@ -134,6 +148,8 @@ func (h *Hub) Run() {
 		OnChannel(h.broadcast, h.handleBroadcast).
 		// 心跳检查定时器：定期检查客户端心跳，清理超时连接
 		OnTicker(h.config.HeartbeatInterval, h.checkHeartbeat).
+		// 统计计数器定时刷写：将原子计数器累积的统计批量写入 Redis
+		OnTicker(30*time.Second, h.flushStatsCounters).
 		// 性能监控定时器：定期报告性能指标
 		// 使用配置中的 PerformanceMetricsInterval (默认5分钟)
 		OnTicker(h.config.PerformanceMetricsInterval, h.reportPerformanceMetrics).
@@ -202,6 +218,75 @@ func (h *Hub) reportPerformanceMetrics() {
 	cg.Table(messageStats)
 
 	cg.GroupEnd()
+}
+
+// processHeartbeatRedisUpdates 单 goroutine 处理所有客户端的心跳 Redis 更新
+// 替代每次心跳创建独立 goroutine 的模式，大幅减少 goroutine 创建/GC 压力
+func (h *Hub) processHeartbeatRedisUpdates() {
+	h.wg.Add(1)
+	defer h.wg.Done()
+
+	// 批量收集 clientID，定时刷写
+	batch := make(map[string]struct{}, 256)
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		for clientID := range batch {
+			if err := h.onlineStatusRepo.UpdateClientHeartbeat(ctx, clientID); err != nil {
+				h.logger.DebugKV("更新 Redis 心跳失败", "client_id", clientID, "error", err)
+			}
+			delete(batch, clientID)
+		}
+		cancel()
+	}
+
+	for {
+		select {
+		case clientID := <-h.heartbeatRedisCh:
+			batch[clientID] = struct{}{}
+			// 批量到达阈值时提前刷写
+			if len(batch) >= 256 {
+				flush()
+			}
+		case <-ticker.C:
+			flush()
+		case <-h.ctx.Done():
+			flush()
+			return
+		}
+	}
+}
+
+// flushStatsCounters 将原子计数器累积的统计刷写到 Redis
+// 替代每次消息/广播创建 goroutine 更新 Redis 的模式
+func (h *Hub) flushStatsCounters() {
+	if h.statsRepo == nil {
+		return
+	}
+
+	// 原子读取并重置
+	msgs := h.msgSentCount.Swap(0)
+	bcasts := h.broadcastSentCount.Swap(0)
+
+	if msgs > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		if err := h.statsRepo.IncrementMessagesSent(ctx, h.nodeID, msgs); err != nil {
+			h.logger.DebugKV("批量更新消息统计失败", "error", err)
+		}
+		cancel()
+	}
+	if bcasts > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		if err := h.statsRepo.IncrementBroadcastsSent(ctx, h.nodeID, bcasts); err != nil {
+			h.logger.DebugKV("批量更新广播统计失败", "error", err)
+		}
+		cancel()
+	}
 }
 
 // cleanupExpiredAck 清理过期的ACK消息
@@ -377,11 +462,7 @@ func (h *Hub) processPendingMessages() {
 	h.wg.Add(1)
 	defer h.wg.Done()
 
-	// 记录待发送消息处理器启动
-	h.logger.InfoKV("待发送消息处理器启动",
-		"node_id", h.nodeID,
-		"check_interval", "100ms",
-	)
+	h.logger.InfoKV("待发送消息处理器启动", "node_id", h.nodeID)
 
 	processedCount := 0
 	timeoutCount := 0
@@ -390,11 +471,22 @@ func (h *Hub) processPendingMessages() {
 	syncx.NewEventLoop(h.ctx).
 		// 处理待发送消息
 		OnChannel(h.pendingMessages, func(msg *HubMessage) {
-			// 尝试将消息放入broadcast队列（带超时）
+			// 先非阻塞尝试，绝大多数情况下 broadcast 队列不会满
 			select {
 			case h.broadcast <- msg:
 				processedCount++
-			case <-time.After(5 * time.Second):
+				return
+			default:
+			}
+
+			// channel 满，带超时等待（仅在此路径才创建 Timer）
+			timer := time.NewTimer(5 * time.Second)
+			defer timer.Stop()
+
+			select {
+			case h.broadcast <- msg:
+				processedCount++
+			case <-timer.C:
 				timeoutCount++
 				h.logger.WarnKV("待发送消息处理超时",
 					"message_id", msg.MessageID,
@@ -402,16 +494,6 @@ func (h *Hub) processPendingMessages() {
 					"receiver", msg.Receiver,
 					"message_type", msg.MessageType,
 					"timeout", "5s",
-				)
-			}
-		}).
-		// 定期统计进度
-		OnTicker(100*time.Millisecond, func() {
-			if processedCount%100 == 0 && processedCount > 0 {
-				h.logger.InfoKV("待发送消息处理进度",
-					"processed_count", processedCount,
-					"timeout_count", timeoutCount,
-					"success_rate", fmt.Sprintf("%.2f%%", float64(processedCount)/float64(processedCount+timeoutCount)*100),
 				)
 			}
 		}).

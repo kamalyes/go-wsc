@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package wsc;
+
+option go_package = "github.com/kamalyes/go-wsc/models/pb;wscpb";
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+// HubMessageProto Hub 消息的 protobuf 表示（用于跨节点高效传输）
+// [EN] HubMessageProto is the protobuf representation of a Hub message.
+message HubMessageProto {
+  string id = 1; // 消息ID | [EN] Message ID
+  string message_type = 2; // 消息类型 | [EN] Message Type
+  string sender = 3; // 发送者 | [EN] Sender
+  string sender_name = 4; // 发送者名称 | [EN] Sender Name
+  string sender_type = 5; // 发送者类型 | [EN] Sender Type
+  string sender_client = 6; // 发送者客户端 | [EN] Sender Client
+  string receiver = 7; // 接收者 | [EN] Receiver
+  string receiver_name = 8; // 接收者名称 | [EN] Receiver Name
+  string receiver_type = 9; // 接收者类型 | [EN] Receiver Type
+  string receiver_client = 10; // 接收者客户端 | [EN] Receiver Client
+  string receiver_node = 11; // 接收者节点 | [EN] Receiver Node
+  string session_id = 12; // 会话ID | [EN] Session ID
+  string content = 13; // 消息内容 | [EN] Content
+  google.protobuf.Struct data = 14; // 数据 | [EN] Data
+  google.protobuf.Timestamp create_at = 15; // 创建时间 | [EN] Create At
+  string message_id = 16; // 消息ID | [EN] Message ID
+  int64 seq_no = 17; // 序列号 | [EN] Seq No
+  string priority = 18; // 优先级 | [EN] Priority
+  string reply_to_msg_id = 19; // 回复消息ID | [EN] Reply To Msg ID
+  bool require_ack = 20; // 是否需要确认 | [EN] Require Ack
+  string source = 21; // 源节点ID | [EN] Source Node ID
+  string push_type = 22; // 推送类型 | [EN] Push Type
+  string broadcast_type = 23; // 广播类型 | [EN] Broadcast Type
+  bool skip_database_storage = 24; // 是否跳过数据库存储 | [EN] Skip Database Storage
+  bool skip_send_to_client = 25; // 是否跳过发送到客户端 | [EN] Skip Send To Client
+}
+
+// DistributedMessageProto 分布式消息（跨节点传输包装）
+// [EN] DistributedMessageProto is the protobuf representation of a Distributed message.
+message DistributedMessageProto {
+  string type = 1;            // 操作类型 | [EN] Operation Type
+  string node_id = 2;         // 源节点ID | [EN] Source Node ID
+  string target_id = 3;       // 目标ID（用户ID、节点ID等） | [EN] Target ID
+  HubMessageProto message = 4; // 消息数据 | [EN] Message Data
+  string reason = 5;          // 原因 | [EN] Reason
+  google.protobuf.Timestamp timestamp = 6; // 时间戳 | [EN] Timestamp
+}
+
+// NodeInfoProto 节点信息（用于 Redis 存储和跨节点发现）
+// [EN] NodeInfoProto is the protobuf representation of a Node info.
+message NodeInfoProto {
+  string id = 1; // 节点ID | [EN] Node ID
+  string ip_address = 2; // IP地址 | [EN] IP Address
+  int32 port = 3; // 端口号 | [EN] Port
+  string status = 4; // 状态 | [EN] Status
+  double load_score = 5; // 负载分数 | [EN] Load Score
+  google.protobuf.Timestamp last_seen = 6; // 最后一次看到时间 | [EN] Last Seen
+  int64 connections = 7; // 连接数 | [EN] Connections
+}

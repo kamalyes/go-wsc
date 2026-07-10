@@ -54,15 +54,26 @@ type PendingMessage struct {
 	cancel    context.CancelFunc // 取消函数
 }
 
+// ackShardCount ACK 待确认消息的分片数量
+// 64 个分片将锁竞争降低 64 倍，适用于高并发消息确认场景
+const ackShardCount = 64
+
 // AckManager ACK管理器
+// 基于 syncx.ShardedMap 实现待确认消息的分片存储，替代单一 mutex + map
+// 高并发下 AddPending/Confirm/Remove 操作完全并行，锁竞争降低 64 倍
 type AckManager struct {
-	pending        map[string]*PendingMessage            // 待确认消息映射
-	mu             sync.RWMutex                          // 读写锁
+	// pending 待确认消息映射（分片存储，零全局锁）
+	// key: messageID (string)，按 FNV-1a hash 分散到 64 个 shard
+	pending *syncx.ShardedMap[string, *PendingMessage]
+
+	// cfgMu 仅保护配置字段的并发读写（初始化后基本不变）
+	// pending map 不受此锁保护（由 ShardedMap 内部分片锁保护）
+	cfgMu          sync.RWMutex
 	timeout        time.Duration                         // 默认ACK超时时间
 	maxRetry       int                                   // 最大重试次数
 	backoff        *backoff.Backoff                      // 重试退避策略
-	expireDuration time.Duration                         // 消息过期时间（超过此时间自动清理）
 	offlineRepo    repository.OfflineMessageDBRepository // 离线消息处理器
+	expireDuration time.Duration                         // 消息过期时间
 }
 
 // NewAckManager 创建ACK管理器
@@ -90,7 +101,7 @@ func NewAckManagerWithOptions(ackTimeout time.Duration, maxRetry int, expireDura
 	}
 
 	return &AckManager{
-		pending:        make(map[string]*PendingMessage),
+		pending:        syncx.NewShardedMap[string, *PendingMessage](ackShardCount),
 		timeout:        ackTimeout,
 		maxRetry:       maxRetry,
 		backoff:        b,
@@ -112,10 +123,15 @@ func (am *AckManager) AddPendingMessageWithExpire(msg *models.HubMessage, timeou
 	// 设置合理的最大重试次数
 	maxRetry = mathx.IF(maxRetry >= 0, maxRetry, am.maxRetry)
 
+	// 读取配置（加读锁）
+	am.cfgMu.RLock()
+	expireDuration := am.expireDuration
+	am.cfgMu.RUnlock()
+
 	// 计算 context 超时时间：timeout * (maxRetry + 1) + 额外缓冲时间
 	contextTimeout := timeout*time.Duration(maxRetry+1) + 1*time.Second
-	if am.expireDuration > 0 && contextTimeout > am.expireDuration {
-		contextTimeout = am.expireDuration
+	if expireDuration > 0 && contextTimeout > expireDuration {
+		contextTimeout = expireDuration
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), contextTimeout)
@@ -130,22 +146,15 @@ func (am *AckManager) AddPendingMessageWithExpire(msg *models.HubMessage, timeou
 		cancel:    cancel,
 	}
 
-	am.mu.Lock()
-	am.pending[msg.MessageID] = pm
-	am.mu.Unlock()
+	am.pending.Store(msg.MessageID, pm)
 
 	return pm
 }
 
 // ConfirmMessage 确认消息
 func (am *AckManager) ConfirmMessage(messageID string, ack *AckMessage) bool {
-	am.mu.Lock()
-	pm, exists := am.pending[messageID]
-	if exists {
-		delete(am.pending, messageID)
-	}
-	am.mu.Unlock()
-
+	// 原子加载并删除，仅持有单个 shard 的写锁
+	pm, exists := am.pending.LoadAndDelete(messageID)
 	if !exists {
 		return false
 	}
@@ -164,20 +173,15 @@ func (am *AckManager) ConfirmMessage(messageID string, ack *AckMessage) bool {
 
 // RemovePendingMessage 移除待确认消息
 func (am *AckManager) RemovePendingMessage(messageID string) {
-	am.mu.Lock()
-	if pm, exists := am.pending[messageID]; exists {
+	pm, exists := am.pending.LoadAndDelete(messageID)
+	if exists {
 		pm.cancel()
-		delete(am.pending, messageID)
 	}
-	am.mu.Unlock()
 }
 
 // GetPendingMessage 获取待确认消息
 func (am *AckManager) GetPendingMessage(messageID string) (*PendingMessage, bool) {
-	return syncx.WithRLockReturnWithE(&am.mu, func() (*PendingMessage, bool) {
-		pm, exists := am.pending[messageID]
-		return pm, exists
-	})
+	return am.pending.Load(messageID)
 }
 
 // WaitForAck 等待ACK确认
@@ -277,65 +281,65 @@ func (pm *PendingMessage) WaitForAckWithRetry(retryFunc func() error) (*AckMessa
 }
 
 // CleanupExpired 清理过期的待确认消息
+// 使用 ShardedMap.Range 遍历（分片读锁粒度），收集过期 key 后批量删除
 func (am *AckManager) CleanupExpired() int {
-	return syncx.WithLockReturnValue(&am.mu, func() int {
-		cleaned := 0
-
-		for msgID, pm := range am.pending {
-			// 检查context是否已经过期（使用 Err() 更可靠）
-			if pm.ctx.Err() != nil {
-				pm.cancel()
-				delete(am.pending, msgID)
-				cleaned++
-			}
+	var expired []string
+	am.pending.Range(func(msgID string, pm *PendingMessage) bool {
+		// 检查context是否已经过期（使用 Err() 更可靠）
+		if pm.ctx.Err() != nil {
+			pm.cancel()
+			expired = append(expired, msgID)
 		}
-
-		return cleaned
+		return true
 	})
+
+	// 批量删除（Range 期间持有读锁，不能直接 delete）
+	for _, msgID := range expired {
+		am.pending.Delete(msgID)
+	}
+	return len(expired)
 }
 
 // GetPendingCount 获取待确认消息数量
 func (am *AckManager) GetPendingCount() int {
-	return syncx.WithRLockReturnValue(&am.mu, func() int {
-		return len(am.pending)
-	})
+	return am.pending.Len()
 }
 
 // SetOfflineRepo 设置离线消息处理器
 // 用于统一使用 Hub 的离线消息处理器
 func (am *AckManager) SetOfflineRepo(handler repository.OfflineMessageDBRepository) {
-	syncx.WithLock(&am.mu, func() {
-		am.offlineRepo = handler
-	})
+	am.cfgMu.Lock()
+	am.offlineRepo = handler
+	am.cfgMu.Unlock()
 }
 
 // SetExpireDuration 设置消息过期时间
 func (am *AckManager) SetExpireDuration(duration time.Duration) {
-	syncx.WithLock(&am.mu, func() {
-		am.expireDuration = duration
-	})
+	am.cfgMu.Lock()
+	am.expireDuration = duration
+	am.cfgMu.Unlock()
 }
 
 // GetTimeout 获取ACK超时时间
 func (am *AckManager) GetTimeout() time.Duration {
-	return syncx.WithRLockReturnValue(&am.mu, func() time.Duration {
-		return am.timeout
-	})
+	am.cfgMu.RLock()
+	defer am.cfgMu.RUnlock()
+	return am.timeout
 }
 
 // GetMaxRetry 获取最大重试次数
 func (am *AckManager) GetMaxRetry() int {
-	return syncx.WithRLockReturnValue(&am.mu, func() int {
-		return am.maxRetry
-	})
+	am.cfgMu.RLock()
+	defer am.cfgMu.RUnlock()
+	return am.maxRetry
 }
 
 // Shutdown 关闭ACK管理器
+// 遍历所有待确认消息取消 context，然后清空分片存储
 func (am *AckManager) Shutdown() {
-	syncx.WithLock(&am.mu, func() {
-		for _, pm := range am.pending {
-			pm.cancel()
-		}
-		am.pending = make(map[string]*PendingMessage)
+	am.pending.Range(func(_ string, pm *PendingMessage) bool {
+		pm.cancel()
+		return true
 	})
+	am.pending.Clear()
 }

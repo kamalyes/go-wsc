@@ -698,34 +698,67 @@ func (h *Hub) normalizeMessageFields(client *Client, msg *HubMessage) {
 
 // checkHeartbeat 检查客户端心跳
 func (h *Hub) checkHeartbeat() {
-	allClients := h.GetClientsCopy()
+	// 一次性持读锁收集超时客户端信息，避免对每个客户端单独加解锁
+	type timeoutClient struct {
+		client     *Client
+		lastActive time.Time
+	}
+
+	var timedOut []timeoutClient
 	now := time.Now()
-	for _, client := range allClients {
-		// 加锁读取时间戳以避免数据竞争
-		h.mutex.RLock()
+
+	h.mutex.RLock()
+	for _, client := range h.clients {
 		// SSE 客户端使用 LastSeen，WebSocket 使用 LastHeartbeat
 		lastActive := mathx.IF(client.ConnectionType == ConnectionTypeSSE, client.LastSeen, client.LastHeartbeat)
-		h.mutex.RUnlock()
-
-		// 检查是否超时
-		inactiveDuration := now.Sub(lastActive)
-		if inactiveDuration > h.config.ClientTimeout {
-			h.logger.DebugKV("❤️ 检测到心跳超时，注销客户端",
-				"client_id", client.ID,
-				"user_id", client.UserID,
-				"user_type", client.UserType,
-				"connection_type", client.ConnectionType,
-				"last_active", lastActive,
-				"inactive_duration", inactiveDuration.String(),
-				"timeout_threshold", h.config.ClientTimeout.String(),
-			)
-
-			h.Unregister(client)
-
-			if h.heartbeatTimeoutCallback != nil {
-				h.heartbeatTimeoutCallback(client.ID, client.UserID, lastActive)
-			}
+		if now.Sub(lastActive) > h.config.ClientTimeout {
+			timedOut = append(timedOut, timeoutClient{client: client, lastActive: lastActive})
 		}
+	}
+	h.mutex.RUnlock()
+
+	if len(timedOut) == 0 {
+		return
+	}
+
+	h.logger.InfoKV("检测到心跳超时客户端", "count", len(timedOut), "node_id", h.nodeID)
+
+	droppedCount := 0
+	for _, tc := range timedOut {
+		client := tc.client
+		lastActive := tc.lastActive
+		inactiveDuration := now.Sub(lastActive)
+
+		h.logger.DebugKV("❤️ 检测到心跳超时，注销客户端",
+			"client_id", client.ID,
+			"user_id", client.UserID,
+			"user_type", client.UserType,
+			"connection_type", client.ConnectionType,
+			"last_active", lastActive,
+			"inactive_duration", inactiveDuration.String(),
+			"timeout_threshold", h.config.ClientTimeout.String(),
+		)
+
+		// 非阻塞发送到 unregister channel，避免 EventLoop 死锁
+		// 如果 channel 满了，说明 EventLoop 尚未来得及处理注销，
+		// 这些客户端会在下一轮心跳检查时再次被检测到
+		select {
+		case h.unregister <- client:
+		default:
+			droppedCount++
+		}
+
+		if h.heartbeatTimeoutCallback != nil {
+			h.heartbeatTimeoutCallback(client.ID, client.UserID, lastActive)
+		}
+	}
+
+	if droppedCount > 0 {
+		h.logger.WarnKV("心跳检查：unregister 队列已满，部分客户端推迟注销",
+			"dropped_count", droppedCount,
+			"total_timeout", len(timedOut),
+			"node_id", h.nodeID,
+		)
 	}
 }
 
@@ -751,16 +784,9 @@ func (h *Hub) handleDirectMessage(msg *HubMessage) {
 	receiverClients := h.GetClientsCopyForUser(msg.Receiver, msg.ReceiverClient)
 
 	if len(receiverClients) > 0 {
-		// 增加消息发送统计（异步更新，避免阻塞消息发送）
+		// 增加消息发送统计（原子计数，由 flushStatsCounters 定时刷写到 Redis）
 		if h.statsRepo != nil {
-			syncx.Go().
-				WithTimeout(1 * time.Second).
-				OnError(func(err error) {
-					h.logger.ErrorKV("更新消息统计失败", "error", err, "node_id", h.nodeID)
-				}).
-				ExecWithContext(func(ctx context.Context) error {
-					return h.statsRepo.IncrementMessagesSent(ctx, h.nodeID, 1)
-				})
+			h.msgSentCount.Add(1)
 		}
 
 		// 发送给接收者的所有客户端
@@ -779,22 +805,55 @@ func (h *Hub) handleDirectMessage(msg *HubMessage) {
 
 // handleBroadcastMessage 处理广播消息
 func (h *Hub) handleBroadcastMessage(msg *HubMessage) {
+	// 增加广播统计（原子计数，由 flushStatsCounters 定时刷写到 Redis）
 	if h.statsRepo != nil {
-		syncx.Go().
-			WithTimeout(1 * time.Second).
-			OnError(func(err error) {
-				h.logger.ErrorKV("更新广播统计失败", "error", err, "node_id", h.nodeID)
-			}).
-			ExecWithContext(func(ctx context.Context) error {
-				return h.statsRepo.IncrementBroadcastsSent(ctx, h.nodeID, 1)
-			})
+		h.broadcastSentCount.Add(1)
 	}
 
-	clients := h.GetClientsCopy()
-	for _, client := range clients {
-		h.sendToClient(client, msg)
+	// 预序列化消息（仅一次）
+	data, err := json.Marshal(msg)
+	if err != nil {
+		h.logger.ErrorKV("广播消息序列化失败", "error", err)
+		return
 	}
 
+	msgID := mathx.IfNotEmpty(msg.MessageID, msg.ID)
+	dataLen := len(data)
+
+	// 持读锁遍历，避免拷贝整个 clients map
+	successCount := 0
+	failCount := 0
+
+	h.mutex.RLock()
+	for _, client := range h.clients {
+		if client.IsClosed() || client.ConnectionType == ConnectionTypeSSE {
+			continue
+		}
+		if client.TrySend(data) {
+			successCount++
+			h.trackReceiverMessageStats(client.ID, client.UserType, dataLen)
+		} else {
+			failCount++
+		}
+	}
+	h.mutex.RUnlock()
+
+	// 消息记录状态只更新一次（同一 msgID，无需每客户端都更新）
+	if h.messageRecordRepo != nil && successCount > 0 {
+		go contextx.WithTimeoutOrBackground(h.ctx, 2*time.Second, func(ctx context.Context) error {
+			return h.messageRecordRepo.UpdateStatus(ctx, msgID, MessageSendStatusSuccess, "", "")
+		})
+	}
+
+	if failCount > 0 {
+		h.logger.WarnKV("广播消息：部分客户端发送失败",
+			"success_count", successCount,
+			"fail_count", failCount,
+			"message_id", msg.MessageID,
+		)
+	}
+
+	// SSE 客户端通过专用通道发送
 	h.broadcastToSSEClients(msg)
 }
 
@@ -859,18 +918,43 @@ func (h *Hub) GetClientsCopyForUser(userID, clientID string) []*Client {
 }
 
 // SendToAllClientsInMap 发送消息到映射中的所有客户端
+// 预序列化一次消息，避免对每个客户端重复 json.Marshal
 func (h *Hub) SendToAllClientsInMap(clientMap map[string]*Client, msg *HubMessage) {
 	// 复制客户端列表,避免在遍历时map被修改导致竞争
 	clients := CopyClientsFromMap(clientMap)
+	if len(clients) == 0 {
+		return
+	}
+
+	// 预序列化一次（WebSocket 客户端共用）
+	// SSE 客户端走 TrySendSSE(msg) 不需要 []byte，跳过序列化
+	var preSerialized []byte
+	for _, c := range clients {
+		if c.ConnectionType != ConnectionTypeSSE && !c.IsClosed() {
+			data, err := json.Marshal(msg)
+			if err != nil {
+				h.logger.ErrorKV("批量消息序列化失败", "error", err)
+			} else {
+				preSerialized = data
+			}
+			break // 只需序列化一次
+		}
+	}
 
 	// 遍历复制后的列表发送消息
 	for _, client := range clients {
-		h.sendToClient(client, msg)
+		h.sendToClientSerialized(client, msg, preSerialized)
 	}
 }
 
-// sendToClient 发送消息到客户端
+// sendToClient 发送消息到客户端（内部序列化）
 func (h *Hub) sendToClient(client *Client, msg *HubMessage) {
+	h.sendToClientSerialized(client, msg, nil)
+}
+
+// sendToClientSerialized 发送消息到客户端，支持预序列化数据
+// 当 preSerialized != nil 时跳过 json.Marshal，避免批量发送时重复序列化
+func (h *Hub) sendToClientSerialized(client *Client, msg *HubMessage, preSerialized []byte) {
 	// 检查客户端是否已关闭
 	if client.IsClosed() {
 		return
@@ -902,17 +986,23 @@ func (h *Hub) sendToClient(client *Client, msg *HubMessage) {
 		return
 	}
 
-	// WebSocket 客户端使用原有逻辑
-	data, err := json.Marshal(msg)
-	if err != nil {
-		h.logger.ErrorKV("消息序列化失败", "error", err)
-		// 更新为失败状态
-		if h.messageRecordRepo != nil {
-			go contextx.WithTimeoutOrBackground(h.ctx, 2*time.Second, func(ctx context.Context) error {
-				return h.messageRecordRepo.UpdateStatus(ctx, msgID, MessageSendStatusFailed, FailureReasonUnknown, err.Error())
-			})
+	// WebSocket 客户端：使用预序列化数据或现场序列化
+	var data []byte
+	if preSerialized != nil {
+		data = preSerialized
+	} else {
+		var err error
+		data, err = json.Marshal(msg)
+		if err != nil {
+			h.logger.ErrorKV("消息序列化失败", "error", err)
+			// 更新为失败状态
+			if h.messageRecordRepo != nil {
+				go contextx.WithTimeoutOrBackground(h.ctx, 2*time.Second, func(ctx context.Context) error {
+					return h.messageRecordRepo.UpdateStatus(ctx, msgID, MessageSendStatusFailed, FailureReasonUnknown, err.Error())
+				})
+			}
+			return
 		}
-		return
 	}
 
 	if client.TrySend(data) {

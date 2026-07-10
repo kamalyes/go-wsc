@@ -27,10 +27,11 @@ import (
 
 // UpdateHeartbeat 更新客户端心跳时间
 func (h *Hub) UpdateHeartbeat(clientID string) {
-	h.mutex.Lock()
-	defer h.mutex.Unlock()
+	h.mutex.RLock()
+	client, exists := h.clients[clientID]
+	h.mutex.RUnlock()
 
-	if client, exists := h.clients[clientID]; exists {
+	if exists {
 		now := time.Now()
 		client.LastHeartbeat = now
 		client.LastSeen = now
@@ -39,12 +40,12 @@ func (h *Hub) UpdateHeartbeat(clientID string) {
 
 // UpdatePongTime 更新客户端PONG响应时间（发送PONG时调用）
 func (h *Hub) UpdatePongTime(clientID string) {
-	h.mutex.Lock()
-	defer h.mutex.Unlock()
+	h.mutex.RLock()
+	client, exists := h.clients[clientID]
+	h.mutex.RUnlock()
 
-	if client, exists := h.clients[clientID]; exists {
-		now := time.Now()
-		client.LastPong = now
+	if exists {
+		client.LastPong = time.Now()
 	}
 }
 
@@ -129,15 +130,14 @@ func (h *Hub) handleHeartbeatMessage(client *Client) {
 	// 💓 记录心跳日志
 	h.logWithClient(logger.DEBUG, "💓 收到心跳消息", client)
 
-	// 同步更新 Redis 中的在线状态和心跳时间
+	// 异步更新 Redis 中的在线状态和心跳时间（不阻塞心跳主流程）
 	if h.onlineStatusRepo != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if err := h.onlineStatusRepo.UpdateClientHeartbeat(ctx, client.ID); err != nil {
-			h.logger.DebugKV("更新 Redis 心跳失败",
+		select {
+		case h.heartbeatRedisCh <- client.ID:
+		default:
+			h.logger.DebugKV("💓 更新 Redis 心跳 channel 满，跳过本次 Redis 更新（心跳下次还会来）",
 				"client_id", client.ID,
 				"user_id", client.UserID,
-				"error", err,
 			)
 		}
 	}

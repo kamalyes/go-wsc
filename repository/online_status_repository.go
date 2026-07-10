@@ -267,6 +267,10 @@ type OnlineStatusRepository interface {
 	// GetUserNodes 获取用户所在的所有节点（支持多设备）
 	GetUserNodes(ctx context.Context, userID string) ([]string, error)
 
+	// BatchGetUserNodes 批量获取多个用户所在的所有节点（Pipeline 优化，避免 N+1 查询）
+	// 返回 map[userID][]nodeIDs，未找到的 userID 不在 map 中
+	BatchGetUserNodes(ctx context.Context, userIDs []string) (map[string][]string, error)
+
 	// GetNodeClients 获取节点的所有在线客户端
 	GetNodeClients(ctx context.Context, nodeID string) ([]*Client, error)
 
@@ -531,6 +535,103 @@ func (r *RedisOnlineStatusRepository) GetUserNodes(ctx context.Context, userID s
 	}
 
 	return nodes, nil
+}
+
+// BatchGetUserNodes 批量获取多个用户所在的所有节点
+// 使用 Redis Pipeline 批量查询，将 N 次网络往返压缩为 1 次（Pipeline 模式）
+// 对每个 userID：ZRANGE 拿 clientIDs → HGETALL 或 GET 拿 NodeID → 去重
+// 实现策略：用 Pipeline 并发提交所有 ZRANGE，再 Pipeline 并发提交所有 GET
+func (r *RedisOnlineStatusRepository) BatchGetUserNodes(ctx context.Context, userIDs []string) (map[string][]string, error) {
+	if len(userIDs) == 0 {
+		return make(map[string][]string), nil
+	}
+
+	// Phase 1: Pipeline 并发 ZRANGE 拿到每个用户的 clientIDs
+	pipe1 := r.client.Pipeline()
+	zrangeCmds := make([]*redis.StringSliceCmd, len(userIDs))
+	for i, userID := range userIDs {
+		zrangeCmds[i] = pipe1.ZRange(ctx, r.GetUserClientsKey(userID), 0, -1)
+	}
+	if _, err := pipe1.Exec(ctx); err != nil && err != redis.Nil {
+		return nil, err
+	}
+
+	// 收集所有需要 GET 的 clientID → (userID, idx) 映射
+	type clientRef struct {
+		userID string
+		idx    int // 在 userIDs 中的索引
+	}
+	allClientIDs := make([]string, 0, len(userIDs)*2)
+	clientRefMap := make(map[string]clientRef, len(userIDs)*2)
+	// userClientIDs[idx] = 该用户的 clientIDs
+	userClientIDs := make([][]string, len(userIDs))
+
+	for i, cmd := range zrangeCmds {
+		clientIDs, err := cmd.Result()
+		if err != nil || len(clientIDs) == 0 {
+			userClientIDs[i] = nil
+			continue
+		}
+		userClientIDs[i] = clientIDs
+		for _, cid := range clientIDs {
+			if _, exists := clientRefMap[cid]; !exists {
+				clientRefMap[cid] = clientRef{userID: userIDs[i], idx: i}
+				allClientIDs = append(allClientIDs, cid)
+			}
+		}
+	}
+
+	if len(allClientIDs) == 0 {
+		return make(map[string][]string), nil
+	}
+
+	// Phase 2: Pipeline 并发 GET 拿到每个 client 的数据（含 NodeID）
+	pipe2 := r.client.Pipeline()
+	getCmds := make([]*redis.StringCmd, len(allClientIDs))
+	for i, cid := range allClientIDs {
+		getCmds[i] = pipe2.Get(ctx, r.GetClientKey(cid))
+	}
+	// pipeline.Exec 返回 redis.Nil 是正常的（某些 key 可能已过期）
+	if _, err := pipe2.Exec(ctx); err != nil && err != redis.Nil {
+		return nil, err
+	}
+
+	// 解析结果，按 userID 聚合去重 NodeID
+	result := make(map[string][]string, len(userIDs))
+	userNodeSets := make([]map[string]struct{}, len(userIDs))
+	for i := range userIDs {
+		userNodeSets[i] = make(map[string]struct{})
+	}
+
+	for i, cmd := range getCmds {
+		data, err := cmd.Result()
+		if err != nil {
+			continue // key 不存在或已过期，跳过
+		}
+		var client Client
+		if err := json.Unmarshal([]byte(data), &client); err != nil {
+			continue
+		}
+		if client.NodeID == "" {
+			continue
+		}
+		ref := clientRefMap[allClientIDs[i]]
+		userNodeSets[ref.idx][client.NodeID] = struct{}{}
+	}
+
+	// 转换 map[string]struct{} → []string
+	for i, nodeSet := range userNodeSets {
+		if len(nodeSet) == 0 {
+			continue
+		}
+		nodes := make([]string, 0, len(nodeSet))
+		for nodeID := range nodeSet {
+			nodes = append(nodes, nodeID)
+		}
+		result[userIDs[i]] = nodes
+	}
+
+	return result, nil
 }
 
 // GetNodeClients 获取节点的所有在线客户端

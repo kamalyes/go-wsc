@@ -73,20 +73,23 @@ func NewRouterCache(
 	}
 
 	// BatchLoader: 缓存未命中时，回源查询 online_status_repo
-	// 按 keys 批量查询用户的节点列表
+	// 使用 BatchGetUserNodes 批量查询（Pipeline 优化），避免 N+1 网络往返
 	batchLoader := func(ctx context.Context, userIDs []string) (map[string][]string, error) {
 		if onlineRepo == nil {
 			return nil, nil
 		}
 
-		result := make(map[string][]string, len(userIDs))
+		// 批量查询所有用户的节点列表（1 次 Pipeline 往返）
+		result, err := onlineRepo.BatchGetUserNodes(ctx, userIDs)
+		if err != nil {
+			return nil, err
+		}
+
+		// 为未找到的用户设置空切片（缓存空结果，防止缓存击穿）
+		// KVCache 的 Delete 会清除，这里 Set 空切片让 TTL 自然过期
 		for _, userID := range userIDs {
-			nodes, err := onlineRepo.GetUserNodes(ctx, userID)
-			if err != nil {
-				return nil, err
-			}
-			if len(nodes) > 0 {
-				result[userID] = nodes
+			if _, exists := result[userID]; !exists {
+				result[userID] = []string{}
 			}
 		}
 		return result, nil

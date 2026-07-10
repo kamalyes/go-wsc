@@ -30,6 +30,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/kamalyes/go-toolbox/pkg/syncx"
 )
 
 // MessageBatcherConfig 批处理器配置
@@ -154,16 +156,18 @@ func (b *MessageBatcher) flush() {
 	b.count = 0
 	b.mu.Unlock()
 
-	// 按用户并发发送（使用 sync.WaitGroup 等待完成）
+	// 按用户并发发送（使用 syncx.Go + WaitGroup，获得 panic 保护 + 统一的 goroutine 管理）
 	ctx := context.Background()
 	var wg sync.WaitGroup
 
 	for receiver, messages := range buffer {
-		wg.Add(1)
-		go func(recv string, msgs []*HubMessage) {
-			defer wg.Done()
-			b.flushHandler(ctx, recv, msgs)
-		}(receiver, messages)
+		recv := receiver
+		msgs := messages
+		syncx.Go(ctx).
+			WithWaitGroup(&wg).
+			Exec(func() {
+				b.flushHandler(ctx, recv, msgs)
+			})
 	}
 
 	wg.Wait()

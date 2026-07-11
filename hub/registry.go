@@ -296,8 +296,8 @@ func (h *Hub) KickUser(userID string, reason string, sendNotification bool, noti
 	if sendNotification {
 		notification := h.createKickNotification(userID, reason, notificationMsg, result.KickedAt)
 		result.NotificationSent = h.sendKickNotificationToClients(clients, notification)
-		// 等待一小段时间，确保通知消息送达
-		time.Sleep(100 * time.Millisecond)
+		// 消息已写入各客户端 SendChan，handleClientWrite 会异步发送
+		// 不再使用 time.Sleep 阻塞，后续 CloseAllClientsInMap 会触发连接关闭
 	}
 
 	// 3. 记录踢出操作
@@ -562,7 +562,8 @@ func (h *Hub) kickClientWithNotification(client *Client, reason DisconnectReason
 			SetContent(message)
 
 		h.sendToClient(client, forceOfflineMsg)
-		time.Sleep(100 * time.Millisecond) // 等待消息发送
+		// 不再使用 time.Sleep 阻塞等待，sendToClient 已将消息写入 SendChan，
+		// handleClientWrite 会异步发送 Unregister 后通道关闭前消息仍会被消费
 	}
 	h.Unregister(client)
 }

@@ -341,6 +341,13 @@ type Hub struct {
 	// 心跳统计批量聚合器（优化：减少数据库写入频率和 goroutine 数量）
 	heartbeatBatcher *heartbeatStatsBatcher
 
+	// 心跳 Redis 更新通道（替代每次心跳创建 goroutine）
+	heartbeatRedisCh chan string
+
+	// 消息统计原子计数器（替代每次消息创建 goroutine 更新 Redis）
+	msgSentCount       atomic.Int64
+	broadcastSentCount atomic.Int64
+
 	welcomeProvider WelcomeMessageProvider
 	logger          WSCLogger
 	mutex           sync.RWMutex
@@ -402,18 +409,19 @@ func NewHub(config *wscconfig.WSC) *Hub {
 			Status:    NodeStatusActive,
 			LastSeen:  time.Now(),
 		},
-		nodes:           make(map[string]*NodeInfo, config.CapacityEstimation.Nodes),
-		register:        make(chan *Client, config.MessageBufferSize),
-		unregister:      make(chan *Client, config.MessageBufferSize),
-		broadcast:       make(chan *HubMessage, config.MessageBufferSize*4),
-		nodeMessage:     make(chan *DistributedMessage, config.MessageBufferSize*4),
-		pendingMessages: make(chan *HubMessage, config.MaxPendingQueueSize),
-		ackManager:      NewAckManager(config.AckTimeout, config.AckMaxRetries),
-		ctx:             ctx,
-		cancel:          cancel,
-		startCh:         make(chan struct{}),
-		config:          config,
-		logger:          InitLogger(config),
+		nodes:            make(map[string]*NodeInfo, config.CapacityEstimation.Nodes),
+		register:         make(chan *Client, config.MessageBufferSize),
+		unregister:       make(chan *Client, config.MessageBufferSize),
+		broadcast:        make(chan *HubMessage, config.MessageBufferSize*4),
+		nodeMessage:      make(chan *DistributedMessage, config.MessageBufferSize*4),
+		pendingMessages:  make(chan *HubMessage, config.MaxPendingQueueSize),
+		ackManager:       NewAckManager(config.AckTimeout, config.AckMaxRetries),
+		ctx:              ctx,
+		cancel:           cancel,
+		startCh:          make(chan struct{}),
+		heartbeatRedisCh: make(chan string, 1024),
+		config:           config,
+		logger:           InitLogger(config),
 		msgPool: sync.Pool{
 			New: func() any {
 				b := make([]byte, 0, 1024)

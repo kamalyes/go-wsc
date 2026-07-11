@@ -15,13 +15,11 @@
 package hub
 
 import (
-	"context"
 	"encoding/json"
 	"time"
 
 	"github.com/kamalyes/go-logger"
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
-	"github.com/kamalyes/go-toolbox/pkg/syncx"
 )
 
 // ============================================================================
@@ -141,26 +139,13 @@ func (h *Hub) handleHeartbeatMessage(client *Client) {
 	h.logWithClient(logger.DEBUG, "💓 收到心跳消息", client)
 
 	// 异步更新 Redis 中的在线状态和心跳时间（不阻塞心跳主流程）
-	// 原同步调用在 Redis 慢或网络抖动时会阻塞心跳处理 up to 2s，影响所有客户端的心跳响应
+	// 使用单 goroutine worker 消费 channel，替代每次心跳创建独立 goroutine
 	if h.onlineStatusRepo != nil {
-		clientID := client.ID
-		userID := client.UserID
-		syncx.Go().
-			WithTimeout(2 * time.Second).
-			OnPanic(func(r any) {
-				h.logger.ErrorKV("异步更新 Redis 心跳 panic",
-					"client_id", clientID, "user_id", userID, "panic", r)
-			}).
-			ExecWithContext(func(ctx context.Context) error {
-				if err := h.onlineStatusRepo.UpdateClientHeartbeat(ctx, clientID); err != nil {
-					h.logger.DebugKV("更新 Redis 心跳失败",
-						"client_id", clientID,
-						"user_id", userID,
-						"error", err,
-					)
-				}
-				return nil
-			})
+		select {
+		case h.heartbeatRedisCh <- client.ID:
+		default:
+			// channel 满，跳过本次 Redis 更新（心跳下次还会来）
+		}
 	}
 
 	// 直接发送 pong 响应（使用已获取的客户端对象，避免竞态条件）

@@ -318,16 +318,9 @@ func (h *Hub) handleDirectMessage(msg *HubMessage) {
 	receiverClients := h.GetClientsCopyForUser(msg.Receiver, msg.ReceiverClient)
 
 	if len(receiverClients) > 0 {
-		// 增加消息发送统计（异步更新，避免阻塞消息发送）
+		// 增加消息发送统计（原子计数器，由 flushStatsCounters 定时刷写到 Redis）
 		if h.statsRepo != nil {
-			syncx.Go().
-				WithTimeout(1 * time.Second).
-				OnError(func(err error) {
-					h.logger.ErrorKV("更新消息统计失败", "error", err, "node_id", h.nodeID)
-				}).
-				ExecWithContext(func(ctx context.Context) error {
-					return h.statsRepo.IncrementMessagesSent(ctx, h.nodeID, 1)
-				})
+			h.msgSentCount.Add(1)
 		}
 
 		// 发送给接收者的所有客户端
@@ -347,14 +340,7 @@ func (h *Hub) handleDirectMessage(msg *HubMessage) {
 // handleBroadcastMessage 处理广播消息
 func (h *Hub) handleBroadcastMessage(msg *HubMessage) {
 	if h.statsRepo != nil {
-		syncx.Go().
-			WithTimeout(1 * time.Second).
-			OnError(func(err error) {
-				h.logger.ErrorKV("更新广播统计失败", "error", err, "node_id", h.nodeID)
-			}).
-			ExecWithContext(func(ctx context.Context) error {
-				return h.statsRepo.IncrementBroadcastsSent(ctx, h.nodeID, 1)
-			})
+		h.broadcastSentCount.Add(1)
 	}
 
 	// 预序列化消息（仅一次）

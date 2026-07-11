@@ -71,6 +71,15 @@ func (h *Hub) Run() {
 		h.heartbeatBatcher.Start()
 	}
 
+	// 启动心跳 Redis 更新 worker（单 goroutine 处理所有客户端的心跳 Redis 更新）
+	if h.onlineStatusRepo != nil {
+		syncx.Go().
+			OnPanic(func(r any) {
+				h.logger.ErrorKV("心跳 Redis 更新 worker panic", "panic", r, "node_id", h.nodeID)
+			}).
+			Exec(h.processHeartbeatRedisUpdates)
+	}
+
 	// 启动指标收集器（如果已配置）
 	close(h.startCh)
 
@@ -139,6 +148,8 @@ func (h *Hub) Run() {
 		OnChannel(h.broadcast, h.handleBroadcast).
 		// 心跳检查定时器：定期检查客户端心跳，清理超时连接
 		OnTicker(h.config.HeartbeatInterval, h.checkHeartbeat).
+		// 统计计数器定时刷写：将原子计数器累积的统计批量写入 Redis
+		OnTicker(30*time.Second, h.flushStatsCounters).
 		// 性能监控定时器：定期报告性能指标
 		// 使用配置中的 PerformanceMetricsInterval (默认5分钟)
 		OnTicker(h.config.PerformanceMetricsInterval, h.reportPerformanceMetrics).
@@ -207,6 +218,75 @@ func (h *Hub) reportPerformanceMetrics() {
 	cg.Table(messageStats)
 
 	cg.GroupEnd()
+}
+
+// processHeartbeatRedisUpdates 单 goroutine 处理所有客户端的心跳 Redis 更新
+// 替代每次心跳创建独立 goroutine 的模式，大幅减少 goroutine 创建/GC 压力
+func (h *Hub) processHeartbeatRedisUpdates() {
+	h.wg.Add(1)
+	defer h.wg.Done()
+
+	// 批量收集 clientID，定时刷写
+	batch := make(map[string]struct{}, 256)
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		for clientID := range batch {
+			if err := h.onlineStatusRepo.UpdateClientHeartbeat(ctx, clientID); err != nil {
+				h.logger.DebugKV("更新 Redis 心跳失败", "client_id", clientID, "error", err)
+			}
+			delete(batch, clientID)
+		}
+		cancel()
+	}
+
+	for {
+		select {
+		case clientID := <-h.heartbeatRedisCh:
+			batch[clientID] = struct{}{}
+			// 批量到达阈值时提前刷写
+			if len(batch) >= 256 {
+				flush()
+			}
+		case <-ticker.C:
+			flush()
+		case <-h.ctx.Done():
+			flush()
+			return
+		}
+	}
+}
+
+// flushStatsCounters 将原子计数器累积的统计刷写到 Redis
+// 替代每次消息/广播创建 goroutine 更新 Redis 的模式
+func (h *Hub) flushStatsCounters() {
+	if h.statsRepo == nil {
+		return
+	}
+
+	// 原子读取并重置
+	msgs := h.msgSentCount.Swap(0)
+	bcasts := h.broadcastSentCount.Swap(0)
+
+	if msgs > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		if err := h.statsRepo.IncrementMessagesSent(ctx, h.nodeID, msgs); err != nil {
+			h.logger.DebugKV("批量更新消息统计失败", "error", err)
+		}
+		cancel()
+	}
+	if bcasts > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		if err := h.statsRepo.IncrementBroadcastsSent(ctx, h.nodeID, bcasts); err != nil {
+			h.logger.DebugKV("批量更新广播统计失败", "error", err)
+		}
+		cancel()
+	}
 }
 
 // cleanupExpiredAck 清理过期的ACK消息

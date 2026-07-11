@@ -29,6 +29,9 @@ const (
 	heartbeatFlushInterval = 10 * time.Second
 	// heartbeatMaxBatchSize 单次刷写最大批量大小
 	heartbeatMaxBatchSize = 200
+	// heartbeatBufferSizeThreshold buffer 容量阈值，超过则触发立即 flush
+	// 防止数据库写入慢或客户端激增导致 buffer 无限增长
+	heartbeatBufferSizeThreshold = 1000
 )
 
 // heartbeatStatsEntry 心跳统计条目
@@ -42,18 +45,22 @@ type heartbeatStatsEntry struct {
 
 // heartbeatStatsBatcher 心跳统计批量聚合器
 type heartbeatStatsBatcher struct {
-	hub    *Hub
-	mu     sync.Mutex
-	buffer map[string]*heartbeatStatsEntry // key: clientID
-	stopCh chan struct{}
+	hub      *Hub
+	mu       sync.Mutex
+	buffer   map[string]*heartbeatStatsEntry // key: clientID
+	stopCh   chan struct{}
+	stopOnce sync.Once      // 保护 stopCh 不被重复 close
+	wg       sync.WaitGroup // 跟踪 writeBatch goroutine，确保 Stop 时所有写入完成
+	flushCh  chan struct{}  // 触发立即 flush 的信号通道
 }
 
 // newHeartbeatStatsBatcher 创建心跳统计批量聚合器
 func newHeartbeatStatsBatcher(hub *Hub) *heartbeatStatsBatcher {
 	b := &heartbeatStatsBatcher{
-		hub:    hub,
-		buffer: make(map[string]*heartbeatStatsEntry, 256),
-		stopCh: make(chan struct{}),
+		hub:     hub,
+		buffer:  make(map[string]*heartbeatStatsEntry, 256),
+		stopCh:  make(chan struct{}),
+		flushCh: make(chan struct{}, 1), // 缓冲 1，允许非阻塞发送
 	}
 	return b
 }
@@ -64,16 +71,23 @@ func (b *heartbeatStatsBatcher) Start() {
 }
 
 // Stop 停止聚合器，刷写剩余数据
+// 使用 sync.Once 防止重复 close panic，使用 WaitGroup 等待所有 writeBatch goroutine 完成
 func (b *heartbeatStatsBatcher) Stop() {
-	close(b.stopCh)
-	// 最后一次刷写
+	b.stopOnce.Do(func() {
+		close(b.stopCh)
+	})
+
+	// 最后一次同步刷写剩余数据
 	b.flush()
+
+	// 等待所有正在执行的 writeBatch goroutine 完成，避免数据丢失
+	b.wg.Wait()
 }
 
 // Add 添加心跳统计条目（非阻塞，线程安全）
+// 当 buffer 容量超过阈值时，触发异步 flush 防止内存堆积
 func (b *heartbeatStatsBatcher) Add(clientID string, pingTime, pongTime time.Time, pingMs float64, lastHeartbeat time.Time) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 
 	// 同一客户端只保留最新的统计（覆盖旧值）
 	b.buffer[clientID] = &heartbeatStatsEntry{
@@ -82,6 +96,18 @@ func (b *heartbeatStatsBatcher) Add(clientID string, pingTime, pongTime time.Tim
 		PongTime:      pongTime,
 		PingMs:        pingMs,
 		LastHeartbeat: lastHeartbeat,
+	}
+
+	// buffer 容量超过阈值，触发异步 flush（非阻塞，已有 pending 信号则跳过）
+	needFlush := len(b.buffer) >= heartbeatBufferSizeThreshold
+	b.mu.Unlock()
+
+	if needFlush {
+		select {
+		case b.flushCh <- struct{}{}:
+		default:
+			// 已有 pending flush 信号，跳过
+		}
 	}
 }
 
@@ -93,6 +119,9 @@ func (b *heartbeatStatsBatcher) flushLoop() {
 	for {
 		select {
 		case <-ticker.C:
+			b.flush()
+		case <-b.flushCh:
+			// buffer 容量触发，立即 flush
 			b.flush()
 		case <-b.stopCh:
 			return
@@ -110,12 +139,13 @@ func (b *heartbeatStatsBatcher) flush() {
 		return
 	}
 
-	// 取出所有数据，清空 buffer
+	// 取出所有数据，复用 map 减少 GC 压力
 	entries := make([]*heartbeatStatsEntry, 0, len(b.buffer))
 	for _, entry := range b.buffer {
 		entries = append(entries, entry)
 	}
-	b.buffer = make(map[string]*heartbeatStatsEntry, 256)
+	// 复用 map 而不是重新分配，减少 GC 压力
+	clear(b.buffer)
 	b.mu.Unlock()
 
 	// 分批写入数据库
@@ -137,6 +167,7 @@ func (b *heartbeatStatsBatcher) writeBatch(entries []*heartbeatStatsEntry) {
 	}
 
 	syncx.Go().
+		WithWaitGroup(&b.wg).
 		WithTimeout(5 * time.Second).
 		OnPanic(func(r any) {
 			b.hub.logger.ErrorKV("批量更新心跳统计崩溃", "panic", r, "batch_size", len(entries))

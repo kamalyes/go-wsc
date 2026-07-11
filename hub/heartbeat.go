@@ -21,6 +21,7 @@ import (
 
 	"github.com/kamalyes/go-logger"
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
+	"github.com/kamalyes/go-toolbox/pkg/syncx"
 )
 
 // ============================================================================
@@ -139,17 +140,27 @@ func (h *Hub) handleHeartbeatMessage(client *Client) {
 	// 💓 记录心跳日志
 	h.logWithClient(logger.DEBUG, "💓 收到心跳消息", client)
 
-	// 同步更新 Redis 中的在线状态和心跳时间
+	// 异步更新 Redis 中的在线状态和心跳时间（不阻塞心跳主流程）
+	// 原同步调用在 Redis 慢或网络抖动时会阻塞心跳处理 up to 2s，影响所有客户端的心跳响应
 	if h.onlineStatusRepo != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if err := h.onlineStatusRepo.UpdateClientHeartbeat(ctx, client.ID); err != nil {
-			h.logger.DebugKV("更新 Redis 心跳失败",
-				"client_id", client.ID,
-				"user_id", client.UserID,
-				"error", err,
-			)
-		}
+		clientID := client.ID
+		userID := client.UserID
+		syncx.Go().
+			WithTimeout(2 * time.Second).
+			OnPanic(func(r any) {
+				h.logger.ErrorKV("异步更新 Redis 心跳 panic",
+					"client_id", clientID, "user_id", userID, "panic", r)
+			}).
+			ExecWithContext(func(ctx context.Context) error {
+				if err := h.onlineStatusRepo.UpdateClientHeartbeat(ctx, clientID); err != nil {
+					h.logger.DebugKV("更新 Redis 心跳失败",
+						"client_id", clientID,
+						"user_id", userID,
+						"error", err,
+					)
+				}
+				return nil
+			})
 	}
 
 	// 直接发送 pong 响应（使用已获取的客户端对象，避免竞态条件）

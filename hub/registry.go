@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/kamalyes/go-toolbox/pkg/contextx"
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
@@ -496,10 +497,21 @@ func (h *Hub) closeClientChannel(client *Client) {
 }
 
 // closeClientConnection 关闭WebSocket连接
+// Hub 关闭（如 K8s 滚动更新）时先发送 1001 GoingAway 控制帧，
+// 让客户端识别为服务端主动离开并触发重连，而不是收到 1006 异常断开
 func (h *Hub) closeClientConnection(client *Client) {
-	if client.Conn != nil {
-		client.Conn.Close()
+	if client.Conn == nil {
+		return
 	}
+
+	// Hub 正在关闭时，先发送 1001 GoingAway 控制帧通知客户端
+	// WriteControl 内部加锁且并发安全，可与读循环并发执行
+	if h.shutdown.Load() {
+		msg := websocket.FormatCloseMessage(websocket.CloseGoingAway, "server is shutting down")
+		_ = client.Conn.WriteControl(websocket.CloseMessage, msg, time.Now().Add(2*time.Second))
+	}
+
+	client.Conn.Close()
 }
 
 // addNewClient 添加新客户端到注册表

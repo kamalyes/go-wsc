@@ -85,6 +85,14 @@ func (h *Hub) handleClientRead(client *Client) {
 	for {
 		messageType, data, err := client.Conn.ReadMessage()
 		if err != nil {
+			// Hub 正在关闭（SafeShutdown 触发），连接是被服务端主动关闭的
+			// 此时读循环会拿到 "use of closed network connection"，走 ClassifyCloseError
+			// 会被误判为 1006 异常断开，所以这里短路掉，单独记一条 INFO 日志
+			if h.shutdown.Load() {
+				h.logWithClient(logger.INFO, "服务关闭，断开客户端连接", client, "error", err.Error())
+				return
+			}
+
 			// 🔍 识别断开类型和原因
 			errStr := err.Error()
 			closeCode, isNormal := ClassifyCloseError(err)

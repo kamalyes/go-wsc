@@ -28,7 +28,6 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/kamalyes/go-logger"
-	"github.com/kamalyes/go-toolbox/pkg/contextx"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/models"
@@ -267,8 +266,11 @@ func (h *Hub) normalizeMessageFields(client *Client, msg *HubMessage) {
 	msg.SenderClient = mathx.IfEmpty(msg.SenderClient, client.ID)
 	msg.CreateAt = mathx.IF(msg.CreateAt.IsZero(), time.Now(), msg.CreateAt)
 	msg.MessageType = mathx.IfEmpty(msg.MessageType, MessageTypeText)
-	snowflakeId := h.idGenerator.GenerateRequestID()
-	msg.ID = mathx.IfNotEmpty(msg.ID, fmt.Sprintf("%s-%s", client.UserID, snowflakeId))
+	// 仅在 ID 为空时才生成雪花ID，避免每条消息都调用 idGenerator（热路径 CPU 浪费）
+	if msg.ID == "" {
+		snowflakeId := h.idGenerator.GenerateRequestID()
+		msg.ID = fmt.Sprintf("%s-%s", client.UserID, snowflakeId)
+	}
 }
 
 // ============================================================================
@@ -383,10 +385,8 @@ func (h *Hub) handleBroadcastMessage(msg *HubMessage) {
 	})
 
 	// 消息记录状态只更新一次（同一 msgID，无需每客户端都更新）
-	if h.messageRecordRepo != nil && successCount > 0 {
-		go contextx.WithTimeoutOrBackground(h.ctx, 2*time.Second, func(ctx context.Context) error {
-			return h.messageRecordRepo.UpdateStatus(ctx, msgID, MessageSendStatusSuccess, "", "")
-		})
+	if successCount > 0 {
+		h.updateMessageStatusAsync(msgID, MessageSendStatusSuccess, "", "")
 	}
 
 	if failCount > 0 {

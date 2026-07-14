@@ -13,17 +13,13 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"sync/atomic"
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 )
-
-// broadcastMaxConcurrency 分组广播的最大并发数
-// 限制同时向客户端发送消息的 goroutine 数量，避免广播给大量客户端时
-// goroutine 瞬时爆炸打爆 DB/Redis（1万客户端 → 50并发而非1万并发）
-const broadcastMaxConcurrency = 50
 
 // ============================================================================
 // 基础广播方法
@@ -89,104 +85,84 @@ func (h *Hub) Broadcast(ctx context.Context, msg *HubMessage) {
 // 分组广播方法
 // ============================================================================
 
-// BroadcastToGroup 发送消息给特定用户类型的所有客户端
-func (h *Hub) BroadcastToGroup(ctx context.Context, userType UserType, msg *HubMessage) int {
-	// 获取所有客户端副本
-	allClients := h.GetClientsCopy()
+// broadcastToFiltered 预序列化消息并直接发送给符合条件的客户端
+// 消除逐客户端 Clone/序列化/入队/DB 记录开销：
+//   - 消息只 json.Marshal 1 次（原方案每客户端 1 次）
+//   - 不走 SendToUserWithRetry（原方案每客户端 Clone×2 + 在线检查 + 入队 + DB 记录）
+//   - 零拷贝遍历（原方案 GetClientsCopy + FilterSlice 双重拷贝）
+func (h *Hub) broadcastToFiltered(condition func(*Client) bool, msg *HubMessage) int {
+	// 预序列化 WebSocket 消息（仅一次）
+	data, err := json.Marshal(msg)
+	if err != nil {
+		h.logger.ErrorKV("分组广播消息序列化失败", "error", err)
+		return 0
+	}
 
-	// 过滤指定类型的客户端
-	clients := mathx.FilterSlice(allClients, func(client *Client) bool {
-		return client.UserType == userType
+	msgID := mathx.IfNotEmpty(msg.MessageID, msg.ID)
+	dataLen := len(data)
+	var successCount int32
+
+	// WebSocket 客户端：直接 TrySend 预序列化数据
+	h.shardedRegistry.ForEachClient(func(_ string, client *Client) bool {
+		if client.IsClosed() || client.ConnectionType == ConnectionTypeSSE {
+			return true
+		}
+		if !condition(client) {
+			return true
+		}
+		if client.TrySend(data) {
+			atomic.AddInt32(&successCount, 1)
+			h.trackReceiverMessageStats(client.ID, client.UserType, dataLen)
+		}
+		return true
 	})
 
-	var successCount int32
-	syncx.NewParallelSliceExecutor[*Client, *SendResult](clients).
-		WithConcurrency(broadcastMaxConcurrency).
-		OnSuccess(func(idx int, client *Client, result *SendResult) {
-			if result.Success {
-				atomic.AddInt32(&successCount, 1)
-			}
-		}).
-		Execute(func(idx int, client *Client) (*SendResult, error) {
-			return h.SendToUserWithRetry(ctx, client.UserID, msg), nil
-		})
+	// SSE 客户端：通过专用通道发送 msg 对象（无需序列化）
+	h.shardedRegistry.ForEachSSEClient(func(_, _ string, client *Client) bool {
+		if client.IsClosed() || !condition(client) {
+			return true
+		}
+		if client.TrySendSSE(msg) {
+			atomic.AddInt32(&successCount, 1)
+		}
+		return true
+	})
 
-	return int(successCount)
+	// 消息记录状态只更新一次（同一 msgID）
+	totalSuccess := atomic.LoadInt32(&successCount)
+	if totalSuccess > 0 {
+		h.updateMessageStatusAsync(msgID, MessageSendStatusSuccess, "", "")
+	}
+
+	return int(totalSuccess)
+}
+
+// BroadcastToGroup 发送消息给特定用户类型的所有客户端
+func (h *Hub) BroadcastToGroup(ctx context.Context, userType UserType, msg *HubMessage) int {
+	return h.broadcastToFiltered(func(c *Client) bool {
+		return c.UserType == userType
+	}, msg)
 }
 
 // BroadcastToRole 发送消息给特定角色的所有用户
 func (h *Hub) BroadcastToRole(ctx context.Context, role UserRole, msg *HubMessage) int {
-	// 获取所有客户端副本
-	allClients := h.GetClientsCopy()
-
-	// 过滤指定角色的客户端
-	clients := mathx.FilterSlice(allClients, func(client *Client) bool {
-		return client.Role == role
-	})
-
-	var successCount int32
-	syncx.NewParallelSliceExecutor[*Client, *SendResult](clients).
-		WithConcurrency(broadcastMaxConcurrency).
-		OnSuccess(func(idx int, client *Client, result *SendResult) {
-			if result.Success {
-				atomic.AddInt32(&successCount, 1)
-			}
-		}).
-		Execute(func(idx int, client *Client) (*SendResult, error) {
-			return h.SendToUserWithRetry(ctx, client.UserID, msg), nil
-		})
-
-	return int(successCount)
+	return h.broadcastToFiltered(func(c *Client) bool {
+		return c.Role == role
+	}, msg)
 }
 
 // BroadcastToClientType 发送消息给特定客户端类型
 func (h *Hub) BroadcastToClientType(ctx context.Context, clientType ClientType, msg *HubMessage) int {
-	// 获取所有客户端副本
-	allClients := h.GetClientsCopy()
-
-	// 过滤指定客户端类型
-	clients := mathx.FilterSlice(allClients, func(client *Client) bool {
-		return client.ClientType == clientType
-	})
-
-	var successCount int32
-	syncx.NewParallelSliceExecutor[*Client, *SendResult](clients).
-		WithConcurrency(broadcastMaxConcurrency).
-		OnSuccess(func(idx int, client *Client, result *SendResult) {
-			if result.Success {
-				atomic.AddInt32(&successCount, 1)
-			}
-		}).
-		Execute(func(idx int, client *Client) (*SendResult, error) {
-			return h.SendToUserWithRetry(ctx, client.UserID, msg), nil
-		})
-
-	return int(successCount)
+	return h.broadcastToFiltered(func(c *Client) bool {
+		return c.ClientType == clientType
+	}, msg)
 }
 
 // BroadcastToDepartment 发送消息给特定部门的所有用户
 func (h *Hub) BroadcastToDepartment(ctx context.Context, department Department, msg *HubMessage) int {
-	// 获取所有客户端副本
-	allClients := h.GetClientsCopy()
-
-	// 过滤指定部门的客户端
-	clients := mathx.FilterSlice(allClients, func(client *Client) bool {
-		return client.Department == department
-	})
-
-	var successCount int32
-	syncx.NewParallelSliceExecutor[*Client, *SendResult](clients).
-		WithConcurrency(broadcastMaxConcurrency).
-		OnSuccess(func(idx int, client *Client, result *SendResult) {
-			if result.Success {
-				atomic.AddInt32(&successCount, 1)
-			}
-		}).
-		Execute(func(idx int, client *Client) (*SendResult, error) {
-			return h.SendToUserWithRetry(ctx, client.UserID, msg), nil
-		})
-
-	return int(successCount)
+	return h.broadcastToFiltered(func(c *Client) bool {
+		return c.Department == department
+	}, msg)
 }
 
 // ============================================================================

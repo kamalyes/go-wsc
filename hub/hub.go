@@ -341,8 +341,11 @@ type Hub struct {
 	syncActiveConnMutex   sync.Mutex
 	syncActiveConnPending atomic.Bool
 
-	// 心跳统计批量聚合器（优化：减少数据库写入频率和 goroutine 数量）
-	heartbeatBatcher *heartbeatStatsBatcher
+	// 心跳统计批量更新器（基于 syncx.BatchProcessor，单事务批量 UPDATE）
+	heartbeatBatcher *HeartbeatStatsUpdater
+
+	// 消息统计批量更新器（替代每消息 syncx.Go() goroutine）
+	messageStatsBatcher *MessageStatsBatcher
 
 	// 心跳 Redis 更新通道（替代每次心跳创建 goroutine）
 	heartbeatRedisCh chan string
@@ -456,8 +459,12 @@ func NewHub(config *wscconfig.WSC) *Hub {
 	// 广播 1 万人成功 = 1 次 UPDATE，而非 1 万次
 	hub.statusUpdater = NewMessageStatusUpdater(hub, 4096, 100, 500*time.Millisecond)
 
-	// 初始化心跳统计批量聚合器
-	hub.heartbeatBatcher = newHeartbeatStatsBatcher(hub)
+	// 初始化心跳统计批量更新器（队列 4096，批次 200，10s flush）
+	hub.heartbeatBatcher = NewHeartbeatStatsUpdater(hub, 4096, 200, 10*time.Second)
+
+	// 初始化消息统计批量更新器（队列 8192，批次 500，2s flush）
+	// 广播 939 人 = 939 次 Submit + 1 次事务（而非 939 个 goroutine + 1878 次 DB 调用）
+	hub.messageStatsBatcher = NewMessageStatsBatcher(hub, 8192, 500, 2*time.Second)
 
 	return hub
 }

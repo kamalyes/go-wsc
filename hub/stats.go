@@ -111,17 +111,13 @@ func (h *Hub) trackSenderMessageStats(connectionID string, senderType UserType) 
 		return
 	}
 
-	syncx.Go().
-		WithTimeout(5 * time.Second).
-		OnPanic(func(r any) {
-			h.logger.ErrorKV("更新发送统计崩溃", "panic", r, "connection_id", connectionID)
-		}).
-		ExecWithContext(func(ctx context.Context) error {
-			if err := h.connectionRecordRepo.IncrementMessageStats(ctx, connectionID, 1, 0); err != nil {
-				h.logger.DebugKV("更新发送消息统计失败", "connection_id", connectionID, "error", err)
-			}
-			return nil
+	// 使用批量更新器，避免每条消息创建 goroutine
+	if h.messageStatsBatcher != nil {
+		h.messageStatsBatcher.Submit(&statsIncrementItem{
+			ConnectionID: connectionID,
+			MessagesSent: 1,
 		})
+	}
 }
 
 // trackReceiverMessageStats 追踪接收者的消息和字节统计
@@ -135,22 +131,14 @@ func (h *Hub) trackReceiverMessageStats(connectionID string, receiverType UserTy
 		return
 	}
 
-	syncx.Go().
-		WithTimeout(5 * time.Second).
-		OnPanic(func(r any) {
-			h.logger.ErrorKV("更新接收统计崩溃", "panic", r, "connection_id", connectionID)
-		}).
-		ExecWithContext(func(ctx context.Context) error {
-			// 增加接收消息计数
-			if err := h.connectionRecordRepo.IncrementMessageStats(ctx, connectionID, 0, 1); err != nil {
-				h.logger.DebugKV("更新接收消息统计失败", "connection_id", connectionID, "error", err)
-			}
-			// 增加接收字节数
-			if err := h.connectionRecordRepo.IncrementBytesStats(ctx, connectionID, 0, int64(dataSize)); err != nil {
-				h.logger.DebugKV("更新接收字节统计失败", "connection_id", connectionID, "error", err)
-			}
-			return nil
+	// 使用批量更新器，避免每条消息创建 goroutine
+	if h.messageStatsBatcher != nil {
+		h.messageStatsBatcher.Submit(&statsIncrementItem{
+			ConnectionID:     connectionID,
+			MessagesReceived: 1,
+			BytesReceived:    int64(dataSize),
 		})
+	}
 }
 
 // trackConnectionError 追踪连接错误
@@ -192,9 +180,14 @@ func (h *Hub) trackHeartbeatStats(client *Client) {
 		pingMs = float64(time.Since(client.LastHeartbeat).Milliseconds())
 	}
 
-	// 使用批量聚合器，避免每次心跳都启动 goroutine
+	// 使用批量更新器，避免每次心跳都启动 goroutine
 	if h.heartbeatBatcher != nil {
-		h.heartbeatBatcher.Add(client.ID, client.LastHeartbeat, client.LastPong, pingMs, client.LastHeartbeat)
+		h.heartbeatBatcher.Submit(&heartbeatStatsEntry{
+			ClientID: client.ID,
+			PingTime: client.LastHeartbeat,
+			PongTime: client.LastPong,
+			PingMs:   pingMs,
+		})
 	}
 }
 

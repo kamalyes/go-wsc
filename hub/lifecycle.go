@@ -66,10 +66,7 @@ func (h *Hub) Run() {
 	cg.Info("✅ Hub 启动成功")
 	cg.GroupEnd()
 
-	// 启动心跳统计批量聚合器
-	if h.heartbeatBatcher != nil {
-		h.heartbeatBatcher.Start()
-	}
+	// 心跳统计批量更新器在构造时已自动启动（BatchProcessor 内部 worker）
 
 	// 启动心跳 Redis 更新 worker（单 goroutine 处理所有客户端的心跳 Redis 更新）
 	if h.onlineStatusRepo != nil {
@@ -369,9 +366,14 @@ func (h *Hub) SafeShutdown() error {
 	// 等待异步统计任务完成（避免统计丢失）
 	cg.Info("→ 等待异步统计任务完成...")
 
-	// 停止心跳统计批量聚合器，刷写剩余数据
+	// 停止心跳统计批量更新器，刷写剩余数据
 	if h.heartbeatBatcher != nil {
 		h.heartbeatBatcher.Stop()
+	}
+
+	// 停止消息统计批量更新器，刷写剩余数据
+	if h.messageStatsBatcher != nil {
+		h.messageStatsBatcher.Stop()
 	}
 
 	time.Sleep(50 * time.Millisecond)

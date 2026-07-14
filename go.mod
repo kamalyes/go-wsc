@@ -13,7 +13,7 @@ require (
 	github.com/kamalyes/go-logger v0.5.3
 	github.com/kamalyes/go-pbmo v0.1.5-0.20260706095123-f6d04e0c255e
 	github.com/kamalyes/go-sqlbuilder v0.5.6
-	github.com/kamalyes/go-toolbox v0.15.4-0.20260714082244-75ef10b274e3
+	github.com/kamalyes/go-toolbox v0.15.4-0.20260715030601-30bf7f2f7c3c
 	github.com/redis/go-redis/v9 v9.21.0
 	github.com/stretchr/testify v1.11.1
 	google.golang.org/protobuf v1.36.11
@@ -61,7 +61,7 @@ require (
 
 // replace github.com/kamalyes/go-logger => ../go-logger
 
-replace github.com/kamalyes/go-toolbox => ./go-toolbox
+// replace github.com/kamalyes/go-toolbox => ../go-toolbox
 
 // replace github.com/kamalyes/go-sqlbuilder => ../go-sqlbuilder
 

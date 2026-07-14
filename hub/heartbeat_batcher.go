@@ -4,12 +4,16 @@
  * @LastEditors: kamalyes 501893067@qq.com
  * @LastEditTime: 2026-07-11 15:15:17
  * @FilePath: \go-wsc\hub\heartbeat_batcher.go
- * @Description: 心跳统计批量聚合器
+ * @Description: 心跳统计批量更新器
+ *   基于 syncx.BatchProcessor 泛型批量处理器实现
+ *   收集心跳数据，按 batch flush 到 DB（单事务批量 UPDATE）
+ *   同一 clientID 的多条心跳在 flush 时去重，仅保留最新
  *
- * 优化目标：减少 trackHeartbeatStats 的 CPU 占用（从 22.54% 降至 5-8%）
- * - 每次心跳不再启动独立 goroutine 写数据库
- * - 聚合心跳数据到本地缓存，定时批量刷写
- * - 减少 goroutine 数量和数据库写入频率
+ * 工作流程：
+ *   1. 心跳路径调用 Submit（非阻塞，队列满时丢弃）
+ *   2. BatchProcessor 后台 worker 收集，满 batchSize 或每 flushInterval 触发 flush
+ *   3. flush 时按 clientID 去重，合并成一次 BatchUpdateHeartbeats 调用（单事务）
+ *   4. SafeShutdown 时调用 Stop，flush 剩余数据后退出
  *
  * Copyright (c) 2026 by kamalyes, All Rights Reserved.
  */
@@ -18,170 +22,81 @@ package hub
 
 import (
 	"context"
-	"sync"
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
-)
-
-const (
-	// heartbeatFlushInterval 心跳统计刷写间隔
-	heartbeatFlushInterval = 10 * time.Second
-	// heartbeatMaxBatchSize 单次刷写最大批量大小
-	heartbeatMaxBatchSize = 200
-	// heartbeatBufferSizeThreshold buffer 容量阈值，超过则触发立即 flush
-	// 防止数据库写入慢或客户端激增导致 buffer 无限增长
-	heartbeatBufferSizeThreshold = 1000
+	"github.com/kamalyes/go-wsc/repository"
 )
 
 // heartbeatStatsEntry 心跳统计条目
 type heartbeatStatsEntry struct {
-	ClientID      string
-	PingTime      time.Time
-	PongTime      time.Time
-	PingMs        float64
-	LastHeartbeat time.Time
+	ClientID string
+	PingTime time.Time
+	PongTime time.Time
+	PingMs   float64
 }
 
-// heartbeatStatsBatcher 心跳统计批量聚合器
-type heartbeatStatsBatcher struct {
-	hub      *Hub
-	mu       sync.Mutex
-	buffer   map[string]*heartbeatStatsEntry // key: clientID
-	stopCh   chan struct{}
-	stopOnce sync.Once      // 保护 stopCh 不被重复 close
-	wg       sync.WaitGroup // 跟踪 writeBatch goroutine，确保 Stop 时所有写入完成
-	flushCh  chan struct{}  // 触发立即 flush 的信号通道
+// HeartbeatStatsUpdater 心跳统计批量更新器
+type HeartbeatStatsUpdater struct {
+	hub       *Hub
+	processor *syncx.BatchProcessor[*heartbeatStatsEntry]
 }
 
-// newHeartbeatStatsBatcher 创建心跳统计批量聚合器
-func newHeartbeatStatsBatcher(hub *Hub) *heartbeatStatsBatcher {
-	b := &heartbeatStatsBatcher{
-		hub:     hub,
-		buffer:  make(map[string]*heartbeatStatsEntry, 256),
-		stopCh:  make(chan struct{}),
-		flushCh: make(chan struct{}, 1), // 缓冲 1，允许非阻塞发送
-	}
-	return b
+// NewHeartbeatStatsUpdater 创建心跳统计批量更新器
+func NewHeartbeatStatsUpdater(hub *Hub, queueSize, batchSize int, flushInterval time.Duration) *HeartbeatStatsUpdater {
+	u := &HeartbeatStatsUpdater{hub: hub}
+	u.processor = syncx.NewBatchProcessor(queueSize, batchSize, flushInterval, u.flush)
+	return u
 }
 
-// Start 启动定时刷写协程
-func (b *heartbeatStatsBatcher) Start() {
-	go b.flushLoop()
+// Submit 非阻塞提交心跳统计
+// 队列满时返回 false（心跳数据可丢弃，下次心跳会补上）
+func (u *HeartbeatStatsUpdater) Submit(entry *heartbeatStatsEntry) bool {
+	return u.processor.Submit(entry)
 }
 
-// Stop 停止聚合器，刷写剩余数据
-// 使用 sync.Once 防止重复 close panic，使用 WaitGroup 等待所有 writeBatch goroutine 完成
-func (b *heartbeatStatsBatcher) Stop() {
-	b.stopOnce.Do(func() {
-		close(b.stopCh)
-	})
-
-	// 最后一次同步刷写剩余数据
-	b.flush()
-
-	// 等待所有正在执行的 writeBatch goroutine 完成，避免数据丢失
-	b.wg.Wait()
+// Stop 停止更新器，flush 剩余数据后退出
+func (u *HeartbeatStatsUpdater) Stop() {
+	u.processor.Stop()
 }
 
-// Add 添加心跳统计条目（非阻塞，线程安全）
-// 当 buffer 容量超过阈值时，触发异步 flush 防止内存堆积
-func (b *heartbeatStatsBatcher) Add(clientID string, pingTime, pongTime time.Time, pingMs float64, lastHeartbeat time.Time) {
-	b.mu.Lock()
-
-	// 同一客户端只保留最新的统计（覆盖旧值）
-	b.buffer[clientID] = &heartbeatStatsEntry{
-		ClientID:      clientID,
-		PingTime:      pingTime,
-		PongTime:      pongTime,
-		PingMs:        pingMs,
-		LastHeartbeat: lastHeartbeat,
-	}
-
-	// buffer 容量超过阈值，触发异步 flush（非阻塞，已有 pending 信号则跳过）
-	needFlush := len(b.buffer) >= heartbeatBufferSizeThreshold
-	b.mu.Unlock()
-
-	if needFlush {
-		select {
-		case b.flushCh <- struct{}{}:
-		default:
-			// 已有 pending flush 信号，跳过
-		}
-	}
-}
-
-// flushLoop 定时刷写循环
-func (b *heartbeatStatsBatcher) flushLoop() {
-	ticker := time.NewTicker(heartbeatFlushInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			b.flush()
-		case <-b.flushCh:
-			// buffer 容量触发，立即 flush
-			b.flush()
-		case <-b.stopCh:
-			return
-		case <-b.hub.ctx.Done():
-			return
-		}
-	}
-}
-
-// flush 批量刷写心跳统计到数据库
-func (b *heartbeatStatsBatcher) flush() {
-	b.mu.Lock()
-	if len(b.buffer) == 0 {
-		b.mu.Unlock()
+// flush 批量更新 DB
+// 按 clientID 去重（同一客户端多条心跳仅保留最新），然后单事务批量写入
+func (u *HeartbeatStatsUpdater) flush(batch []*heartbeatStatsEntry) {
+	if len(batch) == 0 {
 		return
 	}
 
-	// 取出所有数据，复用 map 减少 GC 压力
-	entries := make([]*heartbeatStatsEntry, 0, len(b.buffer))
-	for _, entry := range b.buffer {
-		entries = append(entries, entry)
-	}
-	// 复用 map 而不是重新分配，减少 GC 压力
-	clear(b.buffer)
-	b.mu.Unlock()
-
-	// 分批写入数据库
-	for i := 0; i < len(entries); i += heartbeatMaxBatchSize {
-		end := i + heartbeatMaxBatchSize
-		if end > len(entries) {
-			end = len(entries)
-		}
-		batch := entries[i:end]
-		b.writeBatch(batch)
-	}
-}
-
-// writeBatch 写入一批心跳统计
-func (b *heartbeatStatsBatcher) writeBatch(entries []*heartbeatStatsEntry) {
-	repo := b.hub.connectionRecordRepo
-	if repo == nil {
-		return
+	// 按 clientID 去重，保留最新条目（后出现的覆盖先出现的）
+	deduped := make(map[string]*heartbeatStatsEntry, len(batch))
+	for _, entry := range batch {
+		deduped[entry.ClientID] = entry
 	}
 
-	syncx.Go().
-		WithWaitGroup(&b.wg).
-		WithTimeout(5 * time.Second).
-		OnPanic(func(r any) {
-			b.hub.logger.ErrorKV("批量更新心跳统计崩溃", "panic", r, "batch_size", len(entries))
-		}).
-		ExecWithContext(func(ctx context.Context) error {
-			for _, entry := range entries {
-				if err := repo.UpdateHeartbeat(ctx, entry.ClientID, &entry.PingTime, &entry.PongTime); err != nil {
-					// 单条失败不影响其他条目
-					continue
-				}
-				if entry.PingMs > 0 {
-					_ = repo.UpdatePingStats(ctx, entry.ClientID, entry.PingMs)
-				}
-			}
-			return nil
+	// 转换为仓储层条目
+	entries := make([]*repository.HeartbeatUpdateEntry, 0, len(deduped))
+	for _, entry := range deduped {
+		// 复制局部变量避免循环变量逃逸问题
+		pingTime := entry.PingTime
+		pongTime := entry.PongTime
+		entries = append(entries, &repository.HeartbeatUpdateEntry{
+			ConnectionID: entry.ClientID,
+			PingTime:     &pingTime,
+			PongTime:     &pongTime,
+			PingMs:       entry.PingMs,
 		})
+	}
+
+	// 用 context.Background() 而非 h.ctx
+	// SafeShutdown 中 Stop() 在 h.cancel() 之前调用，但 flush 可能耗时较长
+	// 用独立 context 避免被 Hub cancel 截断
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := u.hub.connectionRecordRepo.BatchUpdateHeartbeats(ctx, entries); err != nil {
+		u.hub.logger.ErrorKV("批量更新心跳统计失败",
+			"error", err,
+			"batch_size", len(entries),
+		)
+	}
 }

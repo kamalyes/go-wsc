@@ -16,7 +16,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
@@ -536,22 +535,9 @@ func (h *Hub) SendPriority(ctx context.Context, userID string, msg *HubMessage, 
 }
 
 // SendConditional 根据条件发送消息给符合条件的客户端
+// 复用 broadcastToFiltered：预序列化一次 + 直接 TrySend，避免逐客户端 Clone/序列化/入队/DB 记录
 func (h *Hub) SendConditional(ctx context.Context, condition func(*Client) bool, msg *HubMessage) int {
-	clients := h.GetClientsCopy()
-	matchedClients := mathx.FilterSlice(clients, condition)
-
-	var successCount int32
-	syncx.NewParallelSliceExecutor[*Client, *SendResult](matchedClients).
-		OnSuccess(func(idx int, client *Client, result *SendResult) {
-			if result.Success {
-				atomic.AddInt32(&successCount, 1)
-			}
-		}).
-		Execute(func(idx int, client *Client) (*SendResult, error) {
-			return h.SendToUserWithRetry(ctx, client.UserID, msg), nil
-		})
-
-	return int(successCount)
+	return h.broadcastToFiltered(condition, msg)
 }
 
 // SendToAllClientsInMap 发送消息到映射中的所有客户端

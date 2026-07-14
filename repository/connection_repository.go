@@ -22,6 +22,7 @@ import (
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/models"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ConnectionRecordRepository WebSocket连接记录仓储接口
@@ -60,6 +61,12 @@ type ConnectionRecordRepository interface {
 
 	// UpdateHeartbeat 更新心跳时间
 	UpdateHeartbeat(ctx context.Context, connectionID string, pingTime, pongTime *time.Time) error
+
+	// BatchUpdateHeartbeats 批量更新心跳时间和 Ping 统计（单事务，避免 N 次 BeginTx/Commit）
+	BatchUpdateHeartbeats(ctx context.Context, entries []*HeartbeatUpdateEntry) error
+
+	// BatchIncrementStats 批量递增消息/字节统计（单事务，聚合同一 connectionID 的增量）
+	BatchIncrementStats(ctx context.Context, entries []*StatsIncrementEntry) error
 
 	// ========== 查询操作 ==========
 
@@ -111,6 +118,23 @@ type ConnectionRecordRepository interface {
 }
 
 // ========== 统计结构体定义 ==========
+
+// HeartbeatUpdateEntry 心跳批量更新条目
+type HeartbeatUpdateEntry struct {
+	ConnectionID string
+	PingTime     *time.Time
+	PongTime     *time.Time
+	PingMs       float64 // >0 时更新 average/max/min_ping_ms
+}
+
+// StatsIncrementEntry 统计递增条目
+type StatsIncrementEntry struct {
+	ConnectionID     string
+	MessagesSent     int64
+	MessagesReceived int64
+	BytesSent        int64
+	BytesReceived    int64
+}
 
 // ConnectionQueryOptions 连接查询选项
 type ConnectionQueryOptions struct {
@@ -428,6 +452,91 @@ func (r *connectionRecordRepositoryImpl) UpdateHeartbeat(ctx context.Context, co
 	return r.getDB(ctx).
 		Where("connection_id = ?", connectionID).
 		Updates(updates).Error
+}
+
+// BatchUpdateHeartbeats 批量更新心跳时间和 Ping 统计
+// 使用单事务包裹所有更新，将 N 次 BeginTx/Commit 压缩为 1 次
+// 单条失败不影响其他条目（continue 跳过）
+func (r *connectionRecordRepositoryImpl) BatchUpdateHeartbeats(ctx context.Context, entries []*HeartbeatUpdateEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		query := tx
+		if r.tableName != "" {
+			query = tx.Table(r.tableName)
+		} else {
+			query = tx.Model(&models.ConnectionRecord{})
+		}
+
+		for _, entry := range entries {
+			// 更新心跳时间
+			updates := make(map[string]any)
+			if entry.PingTime != nil {
+				updates["last_ping_at"] = entry.PingTime
+			}
+			if entry.PongTime != nil {
+				updates["last_pong_at"] = entry.PongTime
+			}
+			if len(updates) > 0 {
+				if err := query.Where("connection_id = ?", entry.ConnectionID).Updates(updates).Error; err != nil {
+					continue // 单条失败不影响其他条目
+				}
+			}
+
+			// 更新 Ping 统计（移动平均）
+			if entry.PingMs > 0 {
+				pingUpdates := map[string]any{
+					"average_ping_ms": gorm.Expr("CASE WHEN average_ping_ms > 0 THEN average_ping_ms * 0.7 + ? * 0.3 ELSE ? END", entry.PingMs, entry.PingMs),
+					"max_ping_ms":     gorm.Expr("CASE WHEN max_ping_ms = 0 OR max_ping_ms < ? THEN ? ELSE max_ping_ms END", entry.PingMs, entry.PingMs),
+					"min_ping_ms":     gorm.Expr("CASE WHEN min_ping_ms = 0 OR min_ping_ms > ? THEN ? ELSE min_ping_ms END", entry.PingMs, entry.PingMs),
+				}
+				query.Where("connection_id = ?", entry.ConnectionID).Updates(pingUpdates)
+			}
+		}
+		return nil // 始终提交事务（单条失败已跳过）
+	})
+}
+
+// BatchIncrementStats 批量递增消息/字节统计
+// 使用单事务包裹所有更新，将 N 次 BeginTx/Commit 压缩为 1 次
+// 调用方应先按 connectionID 聚合增量，减少事务内 UPDATE 条数
+func (r *connectionRecordRepositoryImpl) BatchIncrementStats(ctx context.Context, entries []*StatsIncrementEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		query := tx
+		if r.tableName != "" {
+			query = tx.Table(r.tableName)
+		} else {
+			query = tx.Model(&models.ConnectionRecord{})
+		}
+
+		for _, entry := range entries {
+			updates := make(map[string]any)
+			if entry.MessagesSent > 0 {
+				updates["messages_sent"] = gorm.Expr("messages_sent + ?", entry.MessagesSent)
+			}
+			if entry.MessagesReceived > 0 {
+				updates["messages_received"] = gorm.Expr("messages_received + ?", entry.MessagesReceived)
+			}
+			if entry.BytesSent > 0 {
+				updates["bytes_sent"] = gorm.Expr("bytes_sent + ?", entry.BytesSent)
+			}
+			if entry.BytesReceived > 0 {
+				updates["bytes_received"] = gorm.Expr("bytes_received + ?", entry.BytesReceived)
+			}
+			if len(updates) > 0 {
+				if err := query.Where("connection_id = ?", entry.ConnectionID).Updates(updates).Error; err != nil {
+					continue // 单条失败不影响其他条目
+				}
+			}
+		}
+		return nil
+	})
 }
 
 // ========== 查询操作 ==========
@@ -815,18 +924,44 @@ func (r *connectionRecordRepositoryImpl) GetFrequentReconnectConnections(ctx con
 // ========== 批量操作 ==========
 
 // BatchUpsert 批量创建或更新连接记录
+// 使用 INSERT ... ON DUPLICATE KEY UPDATE 替代逐条 SELECT + INSERT/UPDATE
+// 将 2N 次 DB 调用压缩为 1 次批量 SQL
 func (r *connectionRecordRepositoryImpl) BatchUpsert(ctx context.Context, records []*models.ConnectionRecord) error {
 	if len(records) == 0 {
 		return nil
 	}
 
-	for _, record := range records {
-		if err := r.Upsert(ctx, record); err != nil {
-			return fmt.Errorf("批量更新失败 user_id=%s: %w", record.UserID, err)
-		}
+	// 冲突时更新重连相关字段（与 updateConnectionRecord 逻辑一致）
+	onConflict := clause.OnConflict{
+		Columns: []clause.Column{{Name: "connection_id"}},
+		DoUpdates: clause.Assignments(map[string]any{
+			"node_id":            gorm.Expr("VALUES(node_id)"),
+			"node_ip":            gorm.Expr("VALUES(node_ip)"),
+			"node_port":          gorm.Expr("VALUES(node_port)"),
+			"client_ip":          gorm.Expr("VALUES(client_ip)"),
+			"client_type":        gorm.Expr("VALUES(client_type)"),
+			"protocol":           gorm.Expr("VALUES(protocol)"),
+			"connected_at":       gorm.Expr("NOW()"),
+			"disconnected_at":    nil,
+			"duration":           0,
+			"is_active":          true,
+			"is_abnormal":        false,
+			"is_forced_offline":  false,
+			"reconnect_count":    gorm.Expr("reconnect_count + 1"),
+			"metadata":           gorm.Expr("VALUES(metadata)"),
+			"error_count":        0,
+			"last_error":         "",
+			"last_error_at":      nil,
+			"disconnect_reason":  "",
+			"disconnect_code":    0,
+			"disconnect_message": "",
+		}),
 	}
 
-	return nil
+	return r.getDB(ctx).
+		Clauses(onConflict).
+		Omit("").
+		CreateInBatches(records, 500).Error
 }
 
 // ========== 清理操作 ==========

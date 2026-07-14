@@ -20,6 +20,11 @@ import (
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 )
 
+// broadcastMaxConcurrency 分组广播的最大并发数
+// 限制同时向客户端发送消息的 goroutine 数量，避免广播给大量客户端时
+// goroutine 瞬时爆炸打爆 DB/Redis（1万客户端 → 50并发而非1万并发）
+const broadcastMaxConcurrency = 50
+
 // ============================================================================
 // 基础广播方法
 // ============================================================================
@@ -45,7 +50,10 @@ func (h *Hub) Broadcast(ctx context.Context, msg *HubMessage) {
 	// 🌐 分布式广播：发送到所有节点
 	if h.pubsub != nil {
 		go func() {
-			if err := h.broadcastToAllNodes(ctx, msg); err != nil {
+			// 用独立超时 context，避免调用方 ctx 无超时时 pubsub 慢导致 goroutine 堆积
+			publishCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if err := h.broadcastToAllNodes(publishCtx, msg); err != nil {
 				h.logger.ErrorKV("跨节点广播失败", "error", err, "message_id", msg.MessageID)
 			}
 		}()
@@ -93,6 +101,7 @@ func (h *Hub) BroadcastToGroup(ctx context.Context, userType UserType, msg *HubM
 
 	var successCount int32
 	syncx.NewParallelSliceExecutor[*Client, *SendResult](clients).
+		WithConcurrency(broadcastMaxConcurrency).
 		OnSuccess(func(idx int, client *Client, result *SendResult) {
 			if result.Success {
 				atomic.AddInt32(&successCount, 1)
@@ -117,6 +126,7 @@ func (h *Hub) BroadcastToRole(ctx context.Context, role UserRole, msg *HubMessag
 
 	var successCount int32
 	syncx.NewParallelSliceExecutor[*Client, *SendResult](clients).
+		WithConcurrency(broadcastMaxConcurrency).
 		OnSuccess(func(idx int, client *Client, result *SendResult) {
 			if result.Success {
 				atomic.AddInt32(&successCount, 1)
@@ -141,6 +151,7 @@ func (h *Hub) BroadcastToClientType(ctx context.Context, clientType ClientType, 
 
 	var successCount int32
 	syncx.NewParallelSliceExecutor[*Client, *SendResult](clients).
+		WithConcurrency(broadcastMaxConcurrency).
 		OnSuccess(func(idx int, client *Client, result *SendResult) {
 			if result.Success {
 				atomic.AddInt32(&successCount, 1)
@@ -165,6 +176,7 @@ func (h *Hub) BroadcastToDepartment(ctx context.Context, department Department, 
 
 	var successCount int32
 	syncx.NewParallelSliceExecutor[*Client, *SendResult](clients).
+		WithConcurrency(broadcastMaxConcurrency).
 		OnSuccess(func(idx int, client *Client, result *SendResult) {
 			if result.Success {
 				atomic.AddInt32(&successCount, 1)

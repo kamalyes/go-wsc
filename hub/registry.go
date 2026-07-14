@@ -38,7 +38,16 @@ func (h *Hub) Register(client *Client) {
 // Unregister 注销客户端
 func (h *Hub) Unregister(client *Client) {
 	h.logger.DebugKV("客户端注销请求", "client_id", client.ID, "user_id", client.UserID)
-	h.unregister <- client
+	select {
+	case h.unregister <- client:
+		// 成功放入注销队列，由 EventLoop 异步处理
+	default:
+		// 注销队列已满（大量并发断开），降级为同步处理
+		// 避免读 goroutine 的 defer 阻塞在 channel 发送上导致泄漏
+		h.logger.WarnKV("注销队列已满，同步处理客户端注销",
+			"client_id", client.ID, "user_id", client.UserID)
+		h.handleUnregister(client)
+	}
 }
 
 // handleRegister 处理客户端注册（内部方法）

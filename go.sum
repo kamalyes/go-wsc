@@ -58,8 +58,6 @@ github.com/kamalyes/go-pbmo v0.1.5-0.20260706095123-f6d04e0c255e h1:DC4jTFPOyOot
 github.com/kamalyes/go-pbmo v0.1.5-0.20260706095123-f6d04e0c255e/go.mod h1:D4uCJJjCu4Ke5YyqQEOU/mlRdnkHZcLbuKPF7TYMtbQ=
 github.com/kamalyes/go-sqlbuilder v0.5.6 h1:mxfVrhdHmKtr1rkR4ib6KkFTjHiNjOG6hKqnKkbSfV4=
 github.com/kamalyes/go-sqlbuilder v0.5.6/go.mod h1:/5ZdlgC71IBOC0QC3nEbdvQNt5s108XCOl5K5Wq/8KQ=
-github.com/kamalyes/go-toolbox v0.15.4-0.20260714082244-75ef10b274e3 h1:4UQ8w1mkW6HyVOYQt0oUQHTFqRSX1ajJxx3+mX71/ng=
-github.com/kamalyes/go-toolbox v0.15.4-0.20260714082244-75ef10b274e3/go.mod h1:eLXp9bjcnBY6eXNX32n52K1+dx1AG8HGWO0Y3A1Pacs=
 github.com/klauspost/cpuid/v2 v2.3.0 h1:S4CRMLnYUhGeDFDqkGriYKdfoFlDnMtqTiI/sFzhA9Y=
 github.com/klauspost/cpuid/v2 v2.3.0/go.mod h1:hqwkgyIinND0mEev00jJYCxPNVRVXFQeu1XKlok6oO0=
 github.com/kr/pretty v0.3.1 h1:flRD4NNwYAUpkphVc1HcthR4KEIFJ65n8Mw5qdRn3LE=

@@ -314,6 +314,9 @@ type Hub struct {
 	shardedRegistry *ShardedRegistry
 	// messageBatcher 消息批处理器，聚合短时间内的消息批量发送
 	messageBatcher *MessageBatcher
+	// statusUpdater 消息状态批量更新器
+	// 收集消息状态更新请求，按 batch flush 到 DB，减少广播场景下的 DB 压力
+	statusUpdater *MessageStatusUpdater
 
 	offlineMessagePushCallback OfflineMessagePushCallback
 	messageSendCallback        MessageSendCallback
@@ -448,6 +451,10 @@ func NewHub(config *wscconfig.WSC) *Hub {
 	hub.shardedRegistry = NewShardedRegistry(config.EnableAgent, config.EnableObserver, registryCapacity)
 	// WorkerPool（按任务类型分池控制并发，防止 goroutine 泛滥）
 	hub.workerPool = NewHubWorkerPool(DefaultWorkerPoolConfig(), hub.logger)
+
+	// 消息状态批量更新器（队列 4096，批次 100，500ms flush）
+	// 广播 1 万人成功 = 1 次 UPDATE，而非 1 万次
+	hub.statusUpdater = NewMessageStatusUpdater(hub, 4096, 100, 500*time.Millisecond)
 
 	// 初始化心跳统计批量聚合器
 	hub.heartbeatBatcher = newHeartbeatStatsBatcher(hub)

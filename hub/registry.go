@@ -366,6 +366,16 @@ func (h *Hub) removeClientUnsafe(client *Client) {
 		return
 	}
 
+	// shutdown 路径：精简清理，只关闭连接（含 1001 close frame）
+	// Redis 在线状态、DB 连接记录、逐条日志由 SafeShutdown 统一批量处理
+	// 避免大量串行写 Redis/DB 导致 shutdown 超时
+	if h.shutdown.Load() {
+		h.closeClientChannel(client)
+		h.closeClientConnection(client)
+		return
+	}
+
+	// 正常路径：完整清理流程
 	// 2. 日志
 	h.logClientDisconnection(client)
 

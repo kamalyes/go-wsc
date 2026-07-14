@@ -61,7 +61,7 @@ require (
 
 // replace github.com/kamalyes/go-logger => ../go-logger
 
-// replace github.com/kamalyes/go-toolbox => ../go-toolbox
+replace github.com/kamalyes/go-toolbox => ./go-toolbox
 
 // replace github.com/kamalyes/go-sqlbuilder => ../go-sqlbuilder
 

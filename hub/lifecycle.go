@@ -376,12 +376,21 @@ func (h *Hub) SafeShutdown() error {
 
 	time.Sleep(50 * time.Millisecond)
 
-	// 关闭所有客户端连接
-	// 使用 shardedRegistry 获取所有客户端快照，避免持锁关闭
-	cg.Info("→ 关闭所有客户端连接...")
+	// 并行关闭所有客户端连接
 	allClients := h.shardedRegistry.GetAllClients()
-	for _, client := range allClients {
-		h.removeClientUnsafe(client)
+	cg.Info("→ 并行关闭所有客户端连接...")
+	h.shutdownAllClientsParallel(allClients)
+
+	// 批量清理 Redis 在线状态和 DB 连接记录
+	// 替代 removeClientUnsafe 中的逐个调用，用 worker pool 限流避免 goroutine 爆炸
+	cg.Info("→ 批量清理 Redis 在线状态和连接记录...")
+	h.batchCleanupOnShutdown(allClients)
+
+	// 停止消息状态批量更新器，flush 剩余状态更新到 DB
+	// 在 h.cancel() 之前调用，确保 flush 时 h.ctx 仍然有效
+	if h.statusUpdater != nil {
+		cg.Info("→ flush 消息状态更新...")
+		h.statusUpdater.Stop()
 	}
 
 	// 取消context（通知所有 goroutine 停止）
@@ -398,8 +407,10 @@ func (h *Hub) SafeShutdown() error {
 	baseTimeout := mathx.IfNotZero(h.config.ShutdownBaseTimeout, 5*time.Second)
 	maxTimeout := mathx.IfNotZero(h.config.ShutdownMaxTimeout, 60*time.Second)
 
-	// 使用 shardedRegistry 原子计数器获取连接数（无需加锁）
-	totalClients := h.shardedRegistry.GetClientCount()
+	// 使用前面获取的 allClients 快照长度
+	// 注意：此时 registry 已被 shutdownAllClientsParallel 清空，
+	// 不能用 h.shardedRegistry.GetClientCount()（会返回 0 导致超时计算失效）
+	totalClients := len(allClients)
 
 	// 每个连接增加10ms超时时间，限制在最大超时范围内
 	calculatedTimeout := mathx.IfClamp(
@@ -533,4 +544,62 @@ func (h *Hub) cleanupExpiredOnlineStatus() {
 			"node_id", h.nodeID,
 		)
 	}
+}
+
+// shutdownAllClientsParallel 并行关闭所有客户端连接
+func (h *Hub) shutdownAllClientsParallel(clients []*Client) {
+	if len(clients) == 0 {
+		return
+	}
+	syncx.ParallelForEachSlice(clients, func(i int, client *Client) {
+		h.removeClientUnsafe(client)
+	})
+}
+
+// batchCleanupOnShutdown 批量清理 Redis 在线状态和 DB 连接记录
+func (h *Hub) batchCleanupOnShutdown(clients []*Client) {
+	if len(clients) == 0 {
+		return
+	}
+
+	// 统一设置活跃连接数为 0（只调一次，替代正常路径中每客户端一次的防抖同步）
+	if h.statsRepo != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		if err := h.statsRepo.SetActiveConnections(ctx, h.nodeID, 0); err != nil {
+			h.logger.WarnKV("shutdown: 设置活跃连接数为0失败", "error", err)
+		}
+		cancel()
+	}
+
+	// 批量清理 Redis 在线状态
+	if h.onlineStatusRepo != nil {
+		syncx.ParallelForEachSlice(clients, func(i int, client *Client) {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if err := h.onlineStatusRepo.SetClientOffline(ctx, client); err != nil {
+				h.logger.DebugKV("shutdown: 清理 Redis 在线状态失败",
+					"client_id", client.ID,
+					"user_id", client.UserID,
+					"error", err,
+				)
+			}
+		})
+	}
+
+	// 批量更新连接记录为断开
+	if h.connectionRecordRepo != nil {
+		syncx.ParallelForEachSlice(clients, func(i int, client *Client) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := h.connectionRecordRepo.MarkDisconnected(ctx, client.ID, DisconnectReasonServerShutdown, 1001, "server shutdown"); err != nil {
+				h.logger.DebugKV("shutdown: 更新连接断开记录失败",
+					"client_id", client.ID,
+					"user_id", client.UserID,
+					"error", err,
+				)
+			}
+		})
+	}
+
+	h.logger.InfoKV("shutdown: 批量清理完成", "client_count", len(clients))
 }

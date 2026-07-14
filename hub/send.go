@@ -19,7 +19,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/kamalyes/go-toolbox/pkg/contextx"
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/retry"
@@ -409,53 +408,71 @@ func (h *Hub) recordMessageToDatabase(msg *HubMessage, sendErr error) {
 		return
 	}
 
-	syncx.Go().
-		WithTimeout(3 * time.Second).
-		OnError(func(err error) {
+	h.workerPool.TrySubmitRecord(func() {
+		ctx, cancel := context.WithTimeout(h.ctx, 3*time.Second)
+		defer cancel()
+
+		now := time.Now()
+
+		// 计算过期时间
+		expiresAt := now.Add(mathx.IfNotZero(h.config.MessageRecordTTL, 24*time.Hour))
+
+		// 完整记录所有字段
+		record := &MessageSendRecord{
+			SessionID:    msg.SessionID,
+			MessageID:    msg.MessageID,
+			HubID:        msg.ID,
+			Sender:       msg.Sender,
+			Receiver:     msg.Receiver,
+			MessageType:  msg.MessageType,
+			Source:       msg.Source,
+			NodeIP:       h.nodeID,
+			CreateTime:   msg.CreateAt,
+			Status:       MessageSendStatusSending, // 消息已入队,标记为sending
+			RetryCount:   0,
+			MaxRetry:     h.config.RetryPolicy.MaxRetries,
+			RetryHistory: []RetryAttempt{},
+			ExpiresAt:    &expiresAt,
+		}
+
+		// 序列化消息数据
+		if msgData, err := json.Marshal(msg); err == nil {
+			record.MessageData = string(msgData)
+		}
+
+		if sendErr != nil {
+			record.Status = MessageSendStatusFailed
+			record.ErrorMessage = sendErr.Error()
+			record.FailureReason = FailureReason(sendErr.Error())
+			record.FirstSendTime = &now
+			record.LastSendTime = &now
+		}
+
+		if err := h.messageRecordRepo.Create(ctx, record); err != nil {
 			h.logger.DebugKV("记录消息到数据库失败",
 				"message_id", msg.MessageID,
 				"error", err,
 			)
-		}).
-		ExecWithContext(func(ctx context.Context) error {
-			now := time.Now()
+		}
+	})
+}
 
-			// 计算过期时间
-			expiresAt := now.Add(mathx.IfNotZero(h.config.MessageRecordTTL, 24*time.Hour))
-
-			// 完整记录所有字段
-			record := &MessageSendRecord{
-				SessionID:    msg.SessionID,
-				MessageID:    msg.MessageID,
-				HubID:        msg.ID,
-				Sender:       msg.Sender,
-				Receiver:     msg.Receiver,
-				MessageType:  msg.MessageType,
-				Source:       msg.Source,
-				NodeIP:       h.nodeID,
-				CreateTime:   msg.CreateAt,
-				Status:       MessageSendStatusSending, // 消息已入队,标记为sending
-				RetryCount:   0,
-				MaxRetry:     h.config.RetryPolicy.MaxRetries,
-				RetryHistory: []RetryAttempt{},
-				ExpiresAt:    &expiresAt,
-			}
-
-			// 序列化消息数据
-			if msgData, err := json.Marshal(msg); err == nil {
-				record.MessageData = string(msgData)
-			}
-
-			if sendErr != nil {
-				record.Status = MessageSendStatusFailed
-				record.ErrorMessage = sendErr.Error()
-				record.FailureReason = FailureReason(sendErr.Error())
-				record.FirstSendTime = &now
-				record.LastSendTime = &now
-			}
-
-			return h.messageRecordRepo.Create(ctx, record)
-		})
+// updateMessageStatusAsync 非阻塞更新消息状态到 DB
+func (h *Hub) updateMessageStatusAsync(msgID string, status MessageSendStatus, reason FailureReason, errMsg string) {
+	if h.messageRecordRepo == nil || h.statusUpdater == nil {
+		return
+	}
+	if !h.statusUpdater.Submit(&statusUpdateItem{
+		msgID:  msgID,
+		status: status,
+		reason: reason,
+		errMsg: errMsg,
+	}) {
+		h.logger.DebugKV("消息状态更新队列已满，丢弃",
+			"message_id", msgID,
+			"status", status,
+		)
+	}
 }
 
 // notifyQueueFull 通知队列满处理器
@@ -590,19 +607,11 @@ func (h *Hub) sendToClientSerialized(client *Client, msg *HubMessage, preSeriali
 			client.LastSeen = time.Now()
 			h.logger.DebugKV("SSE消息发送", "message_id", msg.MessageID, "client_id", client.ID, "user_id", client.UserID)
 			// SSE消息成功发送，更新为成功状态
-			if h.messageRecordRepo != nil {
-				go contextx.WithTimeoutOrBackground(h.ctx, 2*time.Second, func(ctx context.Context) error {
-					return h.messageRecordRepo.UpdateStatus(ctx, msgID, MessageSendStatusSuccess, "", "")
-				})
-			}
+			h.updateMessageStatusAsync(msgID, MessageSendStatusSuccess, "", "")
 		} else {
 			h.logger.WarnKV("SSE客户端消息通道已满或已关闭", "client_id", client.ID, "user_id", client.UserID)
 			// SSE通道已满或已关闭，更新为失败状态
-			if h.messageRecordRepo != nil {
-				go contextx.WithTimeoutOrBackground(h.ctx, 2*time.Second, func(ctx context.Context) error {
-					return h.messageRecordRepo.UpdateStatus(ctx, msgID, MessageSendStatusFailed, FailureReasonQueueFull, "SSE channel full or closed")
-				})
-			}
+			h.updateMessageStatusAsync(msgID, MessageSendStatusFailed, FailureReasonQueueFull, "SSE channel full or closed")
 		}
 		return
 	}
@@ -617,33 +626,21 @@ func (h *Hub) sendToClientSerialized(client *Client, msg *HubMessage, preSeriali
 		if err != nil {
 			h.logger.ErrorKV("消息序列化失败", "error", err)
 			// 更新为失败状态
-			if h.messageRecordRepo != nil {
-				go contextx.WithTimeoutOrBackground(h.ctx, 2*time.Second, func(ctx context.Context) error {
-					return h.messageRecordRepo.UpdateStatus(ctx, msgID, MessageSendStatusFailed, FailureReasonUnknown, err.Error())
-				})
-			}
+			h.updateMessageStatusAsync(msgID, MessageSendStatusFailed, FailureReasonUnknown, err.Error())
 			return
 		}
 	}
 
 	if client.TrySend(data) {
 		// 消息成功发送到客户端通道，更新为成功状态
-		if h.messageRecordRepo != nil {
-			go contextx.WithTimeoutOrBackground(h.ctx, 2*time.Second, func(ctx context.Context) error {
-				return h.messageRecordRepo.UpdateStatus(ctx, msgID, MessageSendStatusSuccess, "", "")
-			})
-		}
+		h.updateMessageStatusAsync(msgID, MessageSendStatusSuccess, "", "")
 
 		// 更新接收者的消息统计和字节统计
 		h.trackReceiverMessageStats(client.ID, client.UserType, len(data))
 	} else {
 		h.logger.WarnKV("客户端发送通道已满或已关闭", "client_id", client.ID)
 		// 发送通道已满或已关闭，更新为失败状态
-		if h.messageRecordRepo != nil {
-			go contextx.WithTimeoutOrBackground(h.ctx, 2*time.Second, func(ctx context.Context) error {
-				return h.messageRecordRepo.UpdateStatus(ctx, msgID, MessageSendStatusFailed, FailureReasonQueueFull, "client send channel full or closed")
-			})
-		}
+		h.updateMessageStatusAsync(msgID, MessageSendStatusFailed, FailureReasonQueueFull, "client send channel full or closed")
 	}
 }
 

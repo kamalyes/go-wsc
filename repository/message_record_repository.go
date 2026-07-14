@@ -75,6 +75,11 @@ type MessageRecordRepository interface {
 	// UpdateStatus 更新状态
 	UpdateStatus(ctx context.Context, messageID string, status MessageSendStatus, reason FailureReason, errorMsg string) error
 
+	// BatchUpdateStatus 批量更新消息状态
+	// 相同 status/reason/errorMsg 的消息用一条 SQL 批量更新（WHERE message_id IN (...)）
+	// 用于广播场景下大量消息同时成功/失败的状态更新，大幅减少 DB 压力
+	BatchUpdateStatus(ctx context.Context, messageIDs []string, status MessageSendStatus, reason FailureReason, errorMsg string) error
+
 	// IncrementRetry 增加重试次数
 	IncrementRetry(ctx context.Context, messageID string, attempt RetryAttempt) error
 
@@ -291,6 +296,38 @@ func (r *MessageRecordGormRepository) UpdateStatus(ctx context.Context, messageI
 		return result.Error
 	}
 	return nil
+}
+
+// BatchUpdateStatus 批量更新消息状态
+func (r *MessageRecordGormRepository) BatchUpdateStatus(ctx context.Context, messageIDs []string, status MessageSendStatus, reason FailureReason, errorMsg string) error {
+	if len(messageIDs) == 0 {
+		return nil
+	}
+
+	now := time.Now()
+
+	updates := map[string]interface{}{
+		"status":          status,
+		"last_send_time":  &now,
+		"first_send_time": gorm.Expr("CASE WHEN first_send_time IS NULL THEN ? ELSE first_send_time END", now),
+	}
+
+	if reason != "" {
+		updates["failure_reason"] = reason
+	}
+	if errorMsg != "" {
+		updates["error_message"] = errorMsg
+	}
+
+	if status == MessageSendStatusSuccess {
+		updates["success_time"] = &now
+	}
+
+	result := r.db.WithContext(ctx).Model(&MessageSendRecord{}).
+		Where("message_id IN ?", messageIDs).
+		Updates(updates)
+
+	return result.Error
 }
 
 // IncrementRetry 增加重试次数

@@ -61,6 +61,10 @@ func (h *Hub) handleClientWrite(client *Client) {
 				client.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 				if err := client.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
 					h.logWithClient(logger.ERROR, "客户端消息写入失败", client, "error", err)
+					// 主动关闭连接，让读 goroutine 的 ReadMessage 立即报错退出
+					// 否则读 goroutine 会卡在 IO wait 直到 TCP keepalive 超时，造成半死连接泄漏
+					// （读 goroutine 退出后会触发 defer Unregister 完成清理）
+					_ = client.Conn.Close()
 					return
 				}
 			}

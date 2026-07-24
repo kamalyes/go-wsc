@@ -15,7 +15,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/kamalyes/go-cachex"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-wsc/handler"
 	"github.com/kamalyes/go-wsc/repository"
@@ -105,7 +104,15 @@ func (h *Hub) InitializeRepositories(redisClient *redis.Client, db *gorm.DB) err
 	)
 	h.SetConnectionRecordRepository(connectionRecordRepo)
 
-	// 6. 离线消息处理器
+	// 6. 群组仓库 (Redis)
+	groupKeyPrefix := ""
+	if h.config.RedisRepository.Group != nil {
+		groupKeyPrefix = h.config.RedisRepository.Group.KeyPrefix
+	}
+	groupRepo := repository.NewRedisGroupRepository(redisClient, groupKeyPrefix)
+	h.SetGroupRepository(groupRepo)
+
+	// 7. 离线消息处理器
 	offlineHandler := handler.NewHybridOfflineMessageHandler(
 		redisClient,
 		db,
@@ -114,23 +121,11 @@ func (h *Hub) InitializeRepositories(redisClient *redis.Client, db *gorm.DB) err
 	)
 	h.SetOfflineMessageHandler(offlineHandler)
 
-	// 7. 初始化 PubSub（分布式消息订阅）
-	if h.config.RedisRepository.PubSub.GetEnabled() {
-		pubsubCfg := cachex.PubSubConfig{
-			Namespace:          h.config.RedisRepository.PubSub.GetNamespace(),
-			MaxRetries:         h.config.RedisRepository.PubSub.GetMaxRetries(),
-			RetryDelay:         h.config.RedisRepository.PubSub.GetRetryDelay(),
-			BufferSize:         h.config.RedisRepository.PubSub.GetBufferSize(),
-			Logger:             hubLogger,
-			PingInterval:       h.config.RedisRepository.PubSub.GetPingInterval(),
-			EnableCompression:  h.config.RedisRepository.PubSub.GetEnableCompression(),
-			CompressionMinSize: h.config.RedisRepository.PubSub.GetCompressionMinSize(),
-		}
-		pubsub := cachex.NewPubSub(redisClient, pubsubCfg)
-		h.SetPubSub(pubsub)
-	}
+	// 8. PubSub 传输层初始化已移至 SetPubSub()，由调用方显式注入
+	// InitializeRepositories 仅负责数据访问层（repository）初始化，职责单一
+	// SetPubSub 内部会自动触发 InitNodeGRPC（若 node-grpc.enabled=true）
 
-	// 8. 注入 Redis 客户端到连接 Token 解码器（若启用 Redis 白名单校验）
+	// 9. 注入 Redis 客户端到连接 Token 解码器（若启用 Redis 白名单校验）
 	// NewHub 中创建 decoder 时 redisCli 为 nil，这里补齐以启用跨节点会话校验
 	if h.connectionTokenDecoder != nil && h.config.Security != nil && h.config.Security.ConnectionToken.IsRedisEnabled() {
 		h.connectionTokenDecoder = NewConnectionTokenDecoder(h.config.Security.ConnectionToken, redisClient, hubLogger)
@@ -235,6 +230,12 @@ func (h *Hub) SetMessageRecordRepository(repo MessageRecordRepository) {
 func (h *Hub) SetConnectionRecordRepository(repo ConnectionRecordRepository) {
 	h.connectionRecordRepo = repo
 	h.logger.InfoKV("连接记录仓库已设置", "repository_type", "mysql")
+}
+
+// SetGroupRepository 设置群组仓库（Redis）
+func (h *Hub) SetGroupRepository(repo GroupRepository) {
+	h.groupRepo = repo
+	h.logger.InfoKV("群组仓库已设置", "repository_type", "redis")
 }
 
 // SetHubStatsRepository 设置 Hub 统计仓库（Redis）

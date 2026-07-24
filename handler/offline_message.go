@@ -219,6 +219,8 @@ func (h *HybridOfflineMessageHandler) storeToDatabase(ctx context.Context, msg *
 		MessageID:      msg.MessageID, // 业务消息ID
 		Sender:         msg.Sender,
 		Receiver:       msg.Receiver,
+		Namespace:      DefaultNamespace, // 默认命名空间
+		GroupID:        "",               // 点对点消息（空表示非群组消息）
 		SessionID:      msg.SessionID,
 		CompressedData: compressedData,
 		ScheduledAt:    msg.CreateAt,
@@ -317,10 +319,11 @@ func (h *HybridOfflineMessageHandler) GetOfflineMessages(ctx context.Context, us
 	)
 
 	records, err := h.dbRepo.QueryMessages(ctx, &OfflineMessageFilter{
-		UserID: userID,
-		Role:   MessageRoleReceiver,
-		Limit:  limit,
-		Cursor: cursor,
+		UserID:    userID,
+		Role:      MessageRoleReceiver,
+		Namespace: DefaultNamespace,
+		Limit:     limit,
+		Cursor:    cursor,
 	})
 	if err != nil {
 		h.logger.ErrorKV("从 MySQL 读取离线消息失败",
@@ -371,7 +374,7 @@ func (h *HybridOfflineMessageHandler) DeleteOfflineMessages(ctx context.Context,
 	// Redis 队列是先进先出，已经 Dequeue 的消息自动删除
 	// 这里主要处理 MySQL 的消息删除
 
-	if err := h.dbRepo.DeleteByMessageIDs(ctx, userID, messageIDs); err != nil {
+	if err := h.dbRepo.DeleteByMessageIDs(ctx, DefaultNamespace, userID, messageIDs); err != nil {
 		h.logger.ErrorKV("从 MySQL offline_messages 表删除离线消息失败",
 			"user_id", userID,
 			"count", len(messageIDs),
@@ -397,7 +400,7 @@ func (h *HybridOfflineMessageHandler) GetOfflineMessageCount(ctx context.Context
 	}
 
 	// Redis 无数据时从 MySQL 获取
-	mysqlCount, err := h.dbRepo.GetCountByReceiver(ctx, userID)
+	mysqlCount, err := h.dbRepo.GetCountByReceiver(ctx, DefaultNamespace, userID)
 	if err != nil {
 		h.logger.ErrorKV("从 MySQL 获取离线消息数量失败",
 			"user_id", userID,
@@ -423,7 +426,7 @@ func (h *HybridOfflineMessageHandler) ClearOfflineMessages(ctx context.Context, 
 	}
 
 	// 2. 清空 MySQL offline_messages 表
-	if err := h.dbRepo.ClearByReceiver(ctx, userID); err != nil {
+	if err := h.dbRepo.ClearByReceiver(ctx, DefaultNamespace, userID); err != nil {
 		errs = append(errs, errorx.WrapError("mysql", err))
 		h.logger.ErrorKV("清空 MySQL offline_messages 表失败",
 			"user_id", userID,

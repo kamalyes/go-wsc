@@ -102,9 +102,9 @@ func (h *Hub) SendToUserViaSSE(userID string, msg *HubMessage) bool {
 	for clientID, client := range clientMap {
 		select {
 		case client.SSEMessageCh <- msg:
-			client.LastSeen = time.Now()
+			client.SetLastSeen(time.Now())
 			successCount++
-			h.logger.DebugKV("SSE消息发送",
+			h.logger.DebugContextKV(h.ctx, "SSE消息发送",
 				"message_id", msg.MessageID,
 				"from", msg.Sender,
 				"to", userID,
@@ -142,7 +142,7 @@ func (h *Hub) broadcastToSSEClients(msg *HubMessage) {
 	h.shardedRegistry.ForEachSSEClient(func(userID, clientID string, client *Client) bool {
 		select {
 		case client.SSEMessageCh <- msg:
-			client.LastSeen = time.Now()
+			client.SetLastSeen(time.Now())
 		default:
 			// 消息通道满，跳过
 			h.logger.WarnKV("SSE客户端消息通道已满，跳过",

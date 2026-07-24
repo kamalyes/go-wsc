@@ -2,19 +2,18 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        v4.24.3
-// source: wsc.proto
+// source: proto/wsc.proto
 
 package wscpb
 
 import (
-	reflect "reflect"
-	sync "sync"
-	unsafe "unsafe"
-
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	structpb "google.golang.org/protobuf/types/known/structpb"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
+	reflect "reflect"
+	sync "sync"
+	unsafe "unsafe"
 )
 
 const (
@@ -59,7 +58,7 @@ type HubMessageProto struct {
 
 func (x *HubMessageProto) Reset() {
 	*x = HubMessageProto{}
-	mi := &file_wsc_proto_msgTypes[0]
+	mi := &file_proto_wsc_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -71,7 +70,7 @@ func (x *HubMessageProto) String() string {
 func (*HubMessageProto) ProtoMessage() {}
 
 func (x *HubMessageProto) ProtoReflect() protoreflect.Message {
-	mi := &file_wsc_proto_msgTypes[0]
+	mi := &file_proto_wsc_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -84,7 +83,7 @@ func (x *HubMessageProto) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HubMessageProto.ProtoReflect.Descriptor instead.
 func (*HubMessageProto) Descriptor() ([]byte, []int) {
-	return file_wsc_proto_rawDescGZIP(), []int{0}
+	return file_proto_wsc_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *HubMessageProto) GetId() string {
@@ -281,7 +280,7 @@ type DistributedMessageProto struct {
 
 func (x *DistributedMessageProto) Reset() {
 	*x = DistributedMessageProto{}
-	mi := &file_wsc_proto_msgTypes[1]
+	mi := &file_proto_wsc_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -293,7 +292,7 @@ func (x *DistributedMessageProto) String() string {
 func (*DistributedMessageProto) ProtoMessage() {}
 
 func (x *DistributedMessageProto) ProtoReflect() protoreflect.Message {
-	mi := &file_wsc_proto_msgTypes[1]
+	mi := &file_proto_wsc_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -306,7 +305,7 @@ func (x *DistributedMessageProto) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DistributedMessageProto.ProtoReflect.Descriptor instead.
 func (*DistributedMessageProto) Descriptor() ([]byte, []int) {
-	return file_wsc_proto_rawDescGZIP(), []int{1}
+	return file_proto_wsc_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *DistributedMessageProto) GetType() string {
@@ -382,7 +381,7 @@ type NodeInfoProto struct {
 
 func (x *NodeInfoProto) Reset() {
 	*x = NodeInfoProto{}
-	mi := &file_wsc_proto_msgTypes[2]
+	mi := &file_proto_wsc_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -394,7 +393,7 @@ func (x *NodeInfoProto) String() string {
 func (*NodeInfoProto) ProtoMessage() {}
 
 func (x *NodeInfoProto) ProtoReflect() protoreflect.Message {
-	mi := &file_wsc_proto_msgTypes[2]
+	mi := &file_proto_wsc_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -407,7 +406,7 @@ func (x *NodeInfoProto) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeInfoProto.ProtoReflect.Descriptor instead.
 func (*NodeInfoProto) Descriptor() ([]byte, []int) {
-	return file_wsc_proto_rawDescGZIP(), []int{2}
+	return file_proto_wsc_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *NodeInfoProto) GetId() string {
@@ -459,11 +458,11 @@ func (x *NodeInfoProto) GetConnections() int64 {
 	return 0
 }
 
-var File_wsc_proto protoreflect.FileDescriptor
+var File_proto_wsc_proto protoreflect.FileDescriptor
 
-const file_wsc_proto_rawDesc = "" +
+const file_proto_wsc_proto_rawDesc = "" +
 	"\n" +
-	"\twsc.proto\x12\x03wsc\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xef\x06\n" +
+	"\x0fproto/wsc.proto\x12\x03wsc\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xef\x06\n" +
 	"\x0fHubMessageProto\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12!\n" +
 	"\fmessage_type\x18\x02 \x01(\tR\vmessageType\x12\x16\n" +
@@ -517,26 +516,26 @@ const file_wsc_proto_rawDesc = "" +
 	"\vconnections\x18\a \x01(\x03R\vconnectionsB,Z*github.com/kamalyes/go-wsc/models/pb;wscpbb\x06proto3"
 
 var (
-	file_wsc_proto_rawDescOnce sync.Once
-	file_wsc_proto_rawDescData []byte
+	file_proto_wsc_proto_rawDescOnce sync.Once
+	file_proto_wsc_proto_rawDescData []byte
 )
 
-func file_wsc_proto_rawDescGZIP() []byte {
-	file_wsc_proto_rawDescOnce.Do(func() {
-		file_wsc_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_wsc_proto_rawDesc), len(file_wsc_proto_rawDesc)))
+func file_proto_wsc_proto_rawDescGZIP() []byte {
+	file_proto_wsc_proto_rawDescOnce.Do(func() {
+		file_proto_wsc_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_wsc_proto_rawDesc), len(file_proto_wsc_proto_rawDesc)))
 	})
-	return file_wsc_proto_rawDescData
+	return file_proto_wsc_proto_rawDescData
 }
 
-var file_wsc_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
-var file_wsc_proto_goTypes = []any{
+var file_proto_wsc_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
+var file_proto_wsc_proto_goTypes = []any{
 	(*HubMessageProto)(nil),         // 0: wsc.HubMessageProto
 	(*DistributedMessageProto)(nil), // 1: wsc.DistributedMessageProto
 	(*NodeInfoProto)(nil),           // 2: wsc.NodeInfoProto
 	(*structpb.Struct)(nil),         // 3: google.protobuf.Struct
 	(*timestamppb.Timestamp)(nil),   // 4: google.protobuf.Timestamp
 }
-var file_wsc_proto_depIdxs = []int32{
+var file_proto_wsc_proto_depIdxs = []int32{
 	3, // 0: wsc.HubMessageProto.data:type_name -> google.protobuf.Struct
 	4, // 1: wsc.HubMessageProto.create_at:type_name -> google.protobuf.Timestamp
 	0, // 2: wsc.DistributedMessageProto.message:type_name -> wsc.HubMessageProto
@@ -549,26 +548,26 @@ var file_wsc_proto_depIdxs = []int32{
 	0, // [0:5] is the sub-list for field type_name
 }
 
-func init() { file_wsc_proto_init() }
-func file_wsc_proto_init() {
-	if File_wsc_proto != nil {
+func init() { file_proto_wsc_proto_init() }
+func file_proto_wsc_proto_init() {
+	if File_proto_wsc_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_wsc_proto_rawDesc), len(file_wsc_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_wsc_proto_rawDesc), len(file_proto_wsc_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   3,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
-		GoTypes:           file_wsc_proto_goTypes,
-		DependencyIndexes: file_wsc_proto_depIdxs,
-		MessageInfos:      file_wsc_proto_msgTypes,
+		GoTypes:           file_proto_wsc_proto_goTypes,
+		DependencyIndexes: file_proto_wsc_proto_depIdxs,
+		MessageInfos:      file_proto_wsc_proto_msgTypes,
 	}.Build()
-	File_wsc_proto = out.File
-	file_wsc_proto_goTypes = nil
-	file_wsc_proto_depIdxs = nil
+	File_proto_wsc_proto = out.File
+	file_proto_wsc_proto_goTypes = nil
+	file_proto_wsc_proto_depIdxs = nil
 }

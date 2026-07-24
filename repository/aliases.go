@@ -43,6 +43,12 @@ type (
 
 	// WorkloadDimension 客服负载统计维度
 	WorkloadDimension = models.WorkloadDimension
+
+	// Group 群组模型
+	Group = models.Group
+
+	// GroupSendResult 群组消息投递结果
+	GroupSendResult = models.GroupSendResult
 )
 
 // 变量别名 - 待推送的离线消息状态列表
@@ -89,6 +95,14 @@ const (
 
 var (
 	ErrUserNotFound = models.ErrUserNotFound
+
+	// 群组相关错误
+	ErrGroupNotFound      = models.ErrGroupNotFound
+	ErrGroupMemberExisted = models.ErrGroupMemberExisted
+	ErrGroupFull          = models.ErrGroupFull
+	ErrGroupRepoNotSet    = models.ErrGroupRepoNotSet
+	ErrGroupExisted       = models.ErrGroupExisted
+	ErrGroupReserved      = models.ErrGroupReserved
 )
 
 // 常量别名 - 查询相关
@@ -98,3 +112,12 @@ const (
 	OrderByCreateTimeAsc  = models.OrderByCreateTimeAsc
 	OrderByExpiresAtAsc   = models.OrderByExpiresAtAsc
 )
+
+// 常量别名 - 群组系统保留组
+const (
+	SystemGroupAgents    = models.SystemGroupAgents
+	SystemGroupObservers = models.SystemGroupObservers
+)
+
+// 函数别名 - 群组相关
+var IsSystemGroup = models.IsSystemGroup

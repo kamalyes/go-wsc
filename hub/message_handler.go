@@ -118,7 +118,7 @@ func (h *Hub) handleClientRead(client *Client) {
 			return
 		}
 
-		client.LastSeen = time.Now()
+		client.SetLastSeen(time.Now())
 
 		switch messageType {
 		case websocket.TextMessage:
@@ -269,7 +269,7 @@ func (h *Hub) normalizeMessageFields(client *Client, msg *HubMessage) {
 	// 仅在 ID 为空时才生成雪花ID，避免每条消息都调用 idGenerator（热路径 CPU 浪费）
 	if msg.ID == "" {
 		snowflakeId := h.idGenerator.GenerateRequestID()
-		msg.ID = fmt.Sprintf("%s-%s", client.UserID, snowflakeId)
+		msg.ID = client.UserID + "-" + snowflakeId
 	}
 }
 
@@ -278,15 +278,12 @@ func (h *Hub) normalizeMessageFields(client *Client, msg *HubMessage) {
 // ============================================================================
 
 // checkHeartbeat 检查客户端心跳
+// 使用 ForEachClient 零拷贝遍历 + 原子读时间戳（替代 GetClientsCopy 全量拷贝 + Hub.mutex 误用）
 func (h *Hub) checkHeartbeat() {
-	allClients := h.GetClientsCopy()
 	now := time.Now()
-	for _, client := range allClients {
-		// 加锁读取时间戳以避免数据竞争
-		h.mutex.RLock()
-		// SSE 客户端使用 LastSeen，WebSocket 使用 LastHeartbeat
-		lastActive := mathx.IF(client.ConnectionType == ConnectionTypeSSE, client.LastSeen, client.LastHeartbeat)
-		h.mutex.RUnlock()
+	h.shardedRegistry.ForEachClient(func(_ string, client *Client) bool {
+		// 原子读时间戳（并发安全，无数据竞争）
+		lastActive := mathx.IF(client.ConnectionType == ConnectionTypeSSE, client.GetLastSeen(), client.GetLastHeartbeat())
 
 		// 检查是否超时
 		inactiveDuration := now.Sub(lastActive)
@@ -307,7 +304,8 @@ func (h *Hub) checkHeartbeat() {
 				h.heartbeatTimeoutCallback(client.ID, client.UserID, lastActive)
 			}
 		}
-	}
+		return true
+	})
 }
 
 // ============================================================================
@@ -317,7 +315,7 @@ func (h *Hub) checkHeartbeat() {
 // handleBroadcast 处理广播消息
 func (h *Hub) handleBroadcast(msg *HubMessage) {
 	// 🔍 通知所有观察者（异步，不阻塞主流程）
-	h.notifyObservers(msg)
+	h.notifyObservers(msg, "", "")
 
 	if msg.BroadcastType == BroadcastTypeGlobal {
 		h.handleBroadcastMessage(msg)
@@ -327,19 +325,36 @@ func (h *Hub) handleBroadcast(msg *HubMessage) {
 }
 
 // handleDirectMessage 处理点对点消息
+//
+// 性能：
+//   - 指定 ReceiverClient 时走 GetClient O(1) 查找，避免遍历
+//   - 未指定时走 ForEachUserClient 零拷贝遍历直接发送，避免 GetClientsCopyForUser 切片拷贝
+//   - 消息预序列化一次，多设备复用
 func (h *Hub) handleDirectMessage(msg *HubMessage) {
-	// 在锁内复制客户端列表，避免竞争
-	receiverClients := h.GetClientsCopyForUser(msg.Receiver, msg.ReceiverClient)
+	// 预序列化一次（接收者多设备复用，消除循环内重复 Marshal）
+	// 序列化失败时 data=nil，由 sendToClientSerialized 内部兜底
+	data, _ := json.Marshal(msg)
 
-	if len(receiverClients) > 0 {
+	sent := 0
+	if msg.ReceiverClient != "" {
+		// 指定客户端：O(1) 查找，避免遍历用户所有设备
+		if client, ok := h.shardedRegistry.GetClient(msg.ReceiverClient); ok {
+			h.sendToClientSerialized(client, msg, data)
+			sent = 1
+		}
+	} else {
+		// 未指定客户端：零拷贝遍历用户所有设备直接发送
+		h.shardedRegistry.ForEachUserClient(msg.Receiver, func(_ string, client *Client) bool {
+			h.sendToClientSerialized(client, msg, data)
+			sent++
+			return true
+		})
+	}
+
+	if sent > 0 {
 		// 增加消息发送统计（原子计数器，由 flushStatsCounters 定时刷写到 Redis）
 		if h.statsRepo != nil {
 			h.msgSentCount.Add(1)
-		}
-
-		// 发送给接收者的所有客户端
-		for _, receiverClient := range receiverClients {
-			h.sendToClient(receiverClient, msg)
 		}
 	} else if h.SendToUserViaSSE(msg.Receiver, msg) {
 		h.logger.DebugKV("消息已通过SSE发送", "message_id", msg.MessageID)

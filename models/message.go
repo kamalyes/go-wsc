@@ -380,15 +380,20 @@ func (m *HubMessage) Clone() *HubMessage {
 	return &msg
 }
 
+// GetMessageID 获取消息ID，空值返回默认消息ID
+func (m *HubMessage) GetMessageID() string {
+	return m.MessageID
+}
+
 // NewHubMessage 创建通用消息结构
 func NewHubMessage() *HubMessage {
 	return &HubMessage{
 		Sender:     UserTypeSystem.String(),
 		SenderType: UserTypeSystem,
-		CreateAt: time.Now(),
-		Data:     make(map[string]interface{}),
-		PushType: PushTypeDirect, // 默认直发
-		Priority: PriorityNormal,
-		Source:   MessageSourceOnline,
+		CreateAt:   time.Now(),
+		Data:       make(map[string]interface{}),
+		PushType:   PushTypeDirect, // 默认直发
+		Priority:   PriorityNormal,
+		Source:     MessageSourceOnline,
 	}
 }

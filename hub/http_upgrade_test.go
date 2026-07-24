@@ -166,7 +166,44 @@ func TestExtractClientAttributes(t *testing.T) {
 	assert.Equal(t, clientID, attrs.ClientID)
 	assert.Equal(t, userID, attrs.UserID)
 
-	// 场景8：配置为 nil 时的向后兼容
+	// 场景8：从 query 提取 namespace、group_id（默认配置来源）
+	config = wscconfig.Default()
+	hub = NewHub(config)
+	req = httptest.NewRequest("GET", "/ws?user_id="+userID+"&namespace=tenantA&group_id=groupA", nil)
+	attrs = hub.extractClientAttributes(req)
+	assert.Equal(t, "tenantA", attrs.Namespace, "应从 query 提取 Namespace")
+	assert.Equal(t, "groupA", attrs.GroupID, "应从 query 提取 GroupID")
+
+	// 场景9：从 Header 提取 X-Namespace、X-Group-ID（默认配置来源）
+	req = httptest.NewRequest("GET", "/ws?user_id="+userID, nil)
+	req.Header.Set("X-Namespace", "tenantB")
+	req.Header.Set("X-Group-ID", "groupB")
+	attrs = hub.extractClientAttributes(req)
+	assert.Equal(t, "tenantB", attrs.Namespace, "应从 Header 提取 Namespace")
+	assert.Equal(t, "groupB", attrs.GroupID, "应从 Header 提取 GroupID")
+
+	// 场景10：自定义 Namespace/GroupID 来源
+	config = wscconfig.Default()
+	config.ClientAttributes = &wscconfig.ClientAttributes{
+		UserIDSources: []gccommon.AttributeSource{
+			{Type: gccommon.SourceTypeQuery, Key: "user_id"},
+		},
+		NamespaceSources: []gccommon.AttributeSource{
+			{Type: gccommon.SourceTypeHeader, Key: "X-Custom-Namespace"},
+		},
+		GroupIDSources: []gccommon.AttributeSource{
+			{Type: gccommon.SourceTypeHeader, Key: "X-Custom-Group"},
+		},
+	}
+	hub = NewHub(config)
+	req = httptest.NewRequest("GET", "/ws?user_id="+userID, nil)
+	req.Header.Set("X-Custom-Namespace", "tenantC")
+	req.Header.Set("X-Custom-Group", "groupC")
+	attrs = hub.extractClientAttributes(req)
+	assert.Equal(t, "tenantC", attrs.Namespace, "应从自定义 Header 提取 Namespace")
+	assert.Equal(t, "groupC", attrs.GroupID, "应从自定义 Header 提取 GroupID")
+
+	// 场景11：配置为 nil 时的向后兼容
 	config = wscconfig.Default()
 	config.ClientAttributes = nil
 	hub = NewHub(config)

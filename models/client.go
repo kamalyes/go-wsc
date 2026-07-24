@@ -24,31 +24,38 @@ import (
 
 // Client 客户端连接（统一管理 WebSocket 和 SSE 连接）
 type Client struct {
-	ID             string                 `json:"id"`              // 客户端ID
-	UserID         string                 `json:"user_id"`         // 用户ID
-	UserType       UserType               `json:"user_type"`       // 用户类型
-	VIPLevel       VIPLevel               `json:"vip_level"`       // VIP等级
-	Role           UserRole               `json:"role"`            // 用户角色
-	ClientIP       string                 `json:"client_ip"`       // 客户端IP
-	Conn           *websocket.Conn        `json:"-"`               // WebSocket连接（不序列化，仅WS使用）
-	ConnectedAt    time.Time              `json:"connected_at"`    // 连接时间
-	LastSeen       time.Time              `json:"last_seen"`       // 最后活跃时间
-	LastHeartbeat  time.Time              `json:"last_heartbeat"`  // 最后心跳时间
-	LastPong       time.Time              `json:"last_pong"`       // 最后心跳响应时间
-	Status         UserStatus             `json:"status"`          // 用户状态
-	Department     Department             `json:"department"`      // 部门
-	Skills         []Skill                `json:"skills"`          // 技能列表
-	MaxTickets     int                    `json:"max_tickets"`     // 最大工单数
-	NodeID         string                 `json:"node_id"`         // 所在节点ID
-	NodeIP         string                 `json:"node_ip"`         // 所在节点IP
-	NodePort       int                    `json:"node_port"`       // 所在节点端口
-	ClientType     ClientType             `json:"client_type"`     // 客户端类型（web/mobile/desktop）
-	ConnectionType ConnectionType         `json:"connection_type"` // 连接类型（websocket/sse）
-	Metadata       map[string]interface{} `json:"metadata"`        // 元数据
-	SendChan       chan []byte            `json:"-"`               // 发送通道（不序列化，仅WS使用）
-	Context        context.Context        `json:"-"`               // 上下文（不序列化）
-	closed         atomic.Bool            `json:"-"`               // channel关闭标志（不序列化）
-	CloseMu        sync.Mutex             `json:"-"`               // 保护channel关闭的互斥锁（不序列化）
+	ID             string                 `json:"id"`                 // 客户端ID
+	UserID         string                 `json:"user_id"`            // 用户ID
+	Namespace      string                 `json:"namespace"`          // 命名空间ID（默认 "default"，类似 k8s namespace，用于观察者过滤与命名空间隔离）
+	GroupID        string                 `json:"group_id,omitempty"` // 默认群组ID（普通用户=连接后自动加入；观察者=订阅的观察群组，空=观察整个命名空间）
+	UserType       UserType               `json:"user_type"`          // 用户类型
+	VIPLevel       VIPLevel               `json:"vip_level"`          // VIP等级
+	Role           UserRole               `json:"role"`               // 用户角色
+	ClientIP       string                 `json:"client_ip"`          // 客户端IP
+	Conn           *websocket.Conn        `json:"-"`                  // WebSocket连接（不序列化，仅WS使用）
+	ConnectedAt    time.Time              `json:"connected_at"`       // 连接时间
+	LastSeen       time.Time              `json:"last_seen"`          // 最后活跃时间
+	LastHeartbeat  time.Time              `json:"last_heartbeat"`     // 最后心跳时间
+	LastPong       time.Time              `json:"last_pong"`          // 最后心跳响应时间
+	Status         UserStatus             `json:"status"`             // 用户状态
+	Department     Department             `json:"department"`         // 部门
+	Skills         []Skill                `json:"skills"`             // 技能列表
+	MaxTickets     int                    `json:"max_tickets"`        // 最大工单数
+	NodeID         string                 `json:"node_id"`            // 所在节点ID
+	NodeIP         string                 `json:"node_ip"`            // 所在节点IP
+	NodePort       int                    `json:"node_port"`          // 所在节点端口
+	ClientType     ClientType             `json:"client_type"`        // 客户端类型（web/mobile/desktop）
+	ConnectionType ConnectionType         `json:"connection_type"`    // 连接类型（websocket/sse）
+	Metadata       map[string]interface{} `json:"metadata"`           // 元数据
+	SendChan       chan []byte            `json:"-"`                  // 发送通道（不序列化，仅WS使用）
+	Context        context.Context        `json:"-"`                  // 上下文（不序列化）
+	closed         atomic.Bool            `json:"-"`                  // channel关闭标志（不序列化）
+	CloseMu        sync.Mutex             `json:"-"`                  // 保护channel关闭的互斥锁（不序列化）
+
+	// 原子时间戳（消除 LastHeartbeat/LastSeen 的并发读写数据竞争）
+	// 与 time.Time 字段同步更新，并发读通过原子读获取
+	lastHeartbeatUnix atomic.Int64 `json:"-"` // LastHeartbeat 的 UnixNano 原子镜像
+	lastSeenUnix      atomic.Int64 `json:"-"` // LastSeen 的 UnixNano 原子镜像
 
 	// SSE 专用字段（仅当 ConnectionType 为 SSE 时使用）
 	SSEWriter    http.ResponseWriter `json:"-"` // SSE Writer（不序列化）
@@ -60,7 +67,8 @@ type Client struct {
 // NewClient 创建新的客户端实例
 func NewClient(id, userID string, userType UserType) *Client {
 	now := time.Now()
-	return &Client{
+	unix := now.UnixNano()
+	c := &Client{
 		ID:            id,
 		UserID:        userID,
 		UserType:      userType,
@@ -72,12 +80,66 @@ func NewClient(id, userID string, userType UserType) *Client {
 		Metadata:      make(map[string]interface{}),
 		Context:       context.Background(),
 	}
+	c.lastHeartbeatUnix.Store(unix)
+	c.lastSeenUnix.Store(unix)
+	return c
+}
+
+// SetLastHeartbeat 原子更新最后心跳时间（同时更新 time.Time 字段和原子镜像）
+func (c *Client) SetLastHeartbeat(t time.Time) {
+	c.LastHeartbeat = t
+	c.lastHeartbeatUnix.Store(t.UnixNano())
+}
+
+// SetLastSeen 原子更新最后活跃时间（同时更新 time.Time 字段和原子镜像）
+func (c *Client) SetLastSeen(t time.Time) {
+	c.LastSeen = t
+	c.lastSeenUnix.Store(t.UnixNano())
+}
+
+// GetLastHeartbeat 原子读最后心跳时间（并发安全）
+func (c *Client) GetLastHeartbeat() time.Time {
+	return time.Unix(0, c.lastHeartbeatUnix.Load())
+}
+
+// GetLastSeen 原子读最后活跃时间（并发安全）
+func (c *Client) GetLastSeen() time.Time {
+	return time.Unix(0, c.lastSeenUnix.Load())
 }
 
 // WithVIPLevel 设置VIP等级
 func (c *Client) WithVIPLevel(level VIPLevel) *Client {
 	c.VIPLevel = level
 	return c
+}
+
+// WithNamespace 设置命名空间ID
+func (c *Client) WithNamespace(namespace string) *Client {
+	c.Namespace = namespace
+	return c
+}
+
+// GetNamespace 获取命名空间ID，空值返回默认命名空间
+func (c *Client) GetNamespace() string {
+	if c.Namespace == "" {
+		return DefaultNamespace
+	}
+	return c.Namespace
+}
+
+// WithGroupID 设置群组ID
+// 普通用户：连接后自动加入该群组；观察者：只接收指定命名空间+群组的消息通知
+func (c *Client) WithGroupID(groupID string) *Client {
+	c.GroupID = groupID
+	return c
+}
+
+// GetGroupID 获取群组ID，空值返回默认群组ID
+func (c *Client) GetGroupID() string {
+	if c.GroupID == "" {
+		return DefaultGroupID
+	}
+	return c.GroupID
 }
 
 // WithRole 设置用户角色

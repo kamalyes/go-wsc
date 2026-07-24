@@ -89,15 +89,7 @@ func (h *Hub) Run() {
 
 	// 🌐 启动分布式服务（如果启用了 PubSub）
 	if h.pubsub != nil {
-		// 启动节点心跳
-		syncx.Go(h.ctx).
-			OnPanic(func(r any) {
-				h.logger.ErrorKV("节点心跳 panic", "panic", r, "node_id", h.nodeID)
-			}).
-			Exec(func() {
-				h.StartNodeHeartbeat(h.ctx)
-			})
-
+		// 节点心跳已由 node_registry.go::NodeRegistry.refreshLoop 接管（gRPC 模式）
 		// 订阅节点间消息
 		syncx.Go(h.ctx).
 			OnPanic(func(r any) {
@@ -133,6 +125,10 @@ func (h *Hub) Run() {
 
 		h.logger.InfoKV("🌐 分布式服务已启动", "node_id", h.nodeID)
 	}
+
+	// 🔗 启动节点间 gRPC 通信（若启用 node-grpc 配置）
+	// gRPC 直连优先于 Redis PubSub 用于点对点路由，降低跨节点消息延迟
+	h.startNodeGRPC()
 
 	// 使用 EventLoop 管理事件循环
 	// 统一处理客户端注册/注销、消息广播和定时任务
@@ -394,6 +390,11 @@ func (h *Hub) SafeShutdown() error {
 		cg.Info("→ flush 消息状态更新...")
 		h.statusUpdater.Stop()
 	}
+
+	// 🔗 停止节点间 gRPC 通信（注销节点、关闭服务端与客户端连接池）
+	// 在 h.cancel() 之前调用，确保注销请求的 context 仍可用
+	cg.Info("→ 停止节点 gRPC 通信...")
+	h.stopNodeGRPC()
 
 	// 取消context（通知所有 goroutine 停止）
 	cg.Info("→ 取消所有上下文...")

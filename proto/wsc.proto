@@ -38,6 +38,7 @@ message HubMessageProto {
 }
 
 // DistributedMessageProto 分布式消息（跨节点传输包装）
+// 路由信封：携带路由元数据（namespace/group_ids），业务消息体（HubMessage）不承担路由职责
 // [EN] DistributedMessageProto is the protobuf representation of a Distributed message.
 message DistributedMessageProto {
   string type = 1;            // 操作类型 | [EN] Operation Type
@@ -46,6 +47,8 @@ message DistributedMessageProto {
   HubMessageProto message = 4; // 消息数据 | [EN] Message Data
   string reason = 5;          // 原因 | [EN] Reason
   google.protobuf.Timestamp timestamp = 6; // 时间戳 | [EN] Timestamp
+  string namespace = 7;      // 命名空间ID（路由信封携带，空=全命名空间广播） | [EN] Namespace ID
+  repeated string group_ids = 8; // 批量群组ID列表 | [EN] Group IDs
 }
 
 // NodeInfoProto 节点信息（用于 Redis 存储和跨节点发现）

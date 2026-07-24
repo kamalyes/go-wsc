@@ -90,6 +90,11 @@ type ShardedRegistry struct {
 	// 替代 Hub.observerClients，nil 表示该模块未启用（读写均跳过）
 	observerShards *syncx.ShardedMap[string, map[string]*Client]
 
+	// observerIdx 观察者三级二级索引（加速 namespace+group 级查找，消除 O(n) 全量扫描）
+	// observerShards 为主存储（userID 分片），observerIdx 为按观察范围的二级索引
+	// 三级：global（所有命名空间）/ byNamespace（指定命名空间）/ byGroup（指定命名空间+群组）
+	observerIdx observerIndex
+
 	// agentShards 客服/Bot 分类索引：userID → (clientID → Client)
 	// 替代 Hub.agentClients，nil 表示该模块未启用（读写均跳过）
 	agentShards *syncx.ShardedMap[string, map[string]*Client]
@@ -116,6 +121,7 @@ func NewShardedRegistry(agentEnabled, observerEnabled bool, capacity RegistryCap
 	}
 	if observerEnabled {
 		r.observerShards = newClientShardedMap(capacity.ObserverClients)
+		r.observerIdx = newObserverIndex()
 	}
 	return r
 }
@@ -271,6 +277,22 @@ func (r *ShardedRegistry) HasUser(userID string) bool {
 		_, exists = data[userID]
 	})
 	return exists
+}
+
+// ForEachUserClient 遍历指定用户的所有客户端（在读锁内执行，并发安全）
+// 回调返回 false 时停止遍历。回调不应执行阻塞操作（TrySend 等非阻塞操作可安全调用）
+func (r *ShardedRegistry) ForEachUserClient(userID string, fn func(clientID string, client *Client) bool) {
+	r.userShards.WithShardRLock(userID, func(data map[string]map[string]*Client) {
+		userClients, ok := data[userID]
+		if !ok {
+			return
+		}
+		for clientID, client := range userClients {
+			if !fn(clientID, client) {
+				return
+			}
+		}
+	})
 }
 
 // ============================================================================
@@ -482,6 +504,8 @@ func (r *ShardedRegistry) addObserverClient(client *Client) {
 		}
 		userClients[client.ID] = client
 	})
+	// 同步写入三级二级索引（O(1)，消除后续查找的全量扫描）
+	r.observerIdx.add(client)
 }
 
 // removeObserverClient 从分类索引移除观察者（私有，由 RemoveClient 调用）
@@ -499,6 +523,149 @@ func (r *ShardedRegistry) removeObserverClient(client *Client) {
 			delete(data, client.UserID)
 		}
 	})
+	// 同步从三级二级索引移除
+	r.observerIdx.remove(client)
+}
+
+// GetObserversForMessage 获取应接收指定命名空间+群组消息的观察者（O(k)，k=匹配的观察者数）
+// 合并三级：全局观察者 + 命名空间观察者 + 命名空间+群组观察者
+// groupID 为空时只返回全局+命名空间级观察者（不含群组级）
+func (r *ShardedRegistry) GetObserversForMessage(namespace, groupID string) []*Client {
+	if r.observerShards == nil {
+		return nil
+	}
+	return r.observerIdx.getForMessage(namespace, groupID)
+}
+
+// ============================================================================
+// observerIndex 观察者三级二级索引
+// 按观察范围分三级，O(1) 查找替代 ForEachObserver 的 O(n) 全量扫描
+// ============================================================================
+
+// observerIndex 观察者三级索引
+type observerIndex struct {
+	mu          sync.RWMutex
+	global      map[string]*Client            // clientID → Client（Namespace=="" 全局观察者）
+	byNamespace map[string]map[string]*Client // namespace → (clientID → Client)
+	byGroup     map[string]map[string]*Client // "namespace:groupID" → (clientID → Client)
+}
+
+// newObserverIndex 创建观察者三级索引
+func newObserverIndex() observerIndex {
+	return observerIndex{
+		global:      make(map[string]*Client),
+		byNamespace: make(map[string]map[string]*Client),
+		byGroup:     make(map[string]map[string]*Client),
+	}
+}
+
+// groupIndexKey 拼接命名空间+群组的索引键
+func groupIndexKey(namespace, groupID string) string {
+	return namespace + ":" + groupID
+}
+
+// add 添加观察者到对应级别的索引
+func (idx *observerIndex) add(client *Client) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+
+	if client.Namespace == "" {
+		// 全局观察者：观察所有命名空间
+		idx.global[client.ID] = client
+	} else if client.GroupID != "" {
+		// 群组级观察者：观察指定命名空间+群组
+		key := groupIndexKey(client.Namespace, client.GroupID)
+		group, ok := idx.byGroup[key]
+		if !ok {
+			group = make(map[string]*Client)
+			idx.byGroup[key] = group
+		}
+		group[client.ID] = client
+	} else {
+		// 命名空间级观察者：观察指定命名空间（所有群组）
+		ns, ok := idx.byNamespace[client.Namespace]
+		if !ok {
+			ns = make(map[string]*Client)
+			idx.byNamespace[client.Namespace] = ns
+		}
+		ns[client.ID] = client
+	}
+}
+
+// remove 从索引中移除观察者
+func (idx *observerIndex) remove(client *Client) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+
+	if client.Namespace == "" {
+		delete(idx.global, client.ID)
+	} else if client.GroupID != "" {
+		key := groupIndexKey(client.Namespace, client.GroupID)
+		if group, ok := idx.byGroup[key]; ok {
+			delete(group, client.ID)
+			if len(group) == 0 {
+				delete(idx.byGroup, key)
+			}
+		}
+	} else {
+		if ns, ok := idx.byNamespace[client.Namespace]; ok {
+			delete(ns, client.ID)
+			if len(ns) == 0 {
+				delete(idx.byNamespace, client.Namespace)
+			}
+		}
+	}
+}
+
+// getForMessage 合并三级索引，返回应接收消息的观察者列表
+// O(k) k=匹配的观察者设备数，替代 ForEachObserver 的 O(n) 全量扫描
+func (idx *observerIndex) getForMessage(namespace, groupID string) []*Client {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+
+	// 预估容量：全局 + 命名空间 + 群组
+	estimate := len(idx.global)
+	if ns, ok := idx.byNamespace[namespace]; ok {
+		estimate += len(ns)
+	}
+	if groupID != "" {
+		key := groupIndexKey(namespace, groupID)
+		if group, ok := idx.byGroup[key]; ok {
+			estimate += len(group)
+		}
+	}
+
+	result := make([]*Client, 0, estimate)
+
+	// 1. 全局观察者
+	for _, c := range idx.global {
+		if !c.IsClosed() {
+			result = append(result, c)
+		}
+	}
+
+	// 2. 命名空间级观察者
+	if ns, ok := idx.byNamespace[namespace]; ok {
+		for _, c := range ns {
+			if !c.IsClosed() {
+				result = append(result, c)
+			}
+		}
+	}
+
+	// 3. 群组级观察者（仅当 groupID 非空时）
+	if groupID != "" {
+		key := groupIndexKey(namespace, groupID)
+		if group, ok := idx.byGroup[key]; ok {
+			for _, c := range group {
+				if !c.IsClosed() {
+					result = append(result, c)
+				}
+			}
+		}
+	}
+
+	return result
 }
 
 // ============================================================================

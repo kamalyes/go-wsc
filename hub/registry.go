@@ -82,14 +82,19 @@ func (h *Hub) handleRegister(client *Client) {
 	client.NodeIP = h.config.NodeIP
 	client.NodePort = h.config.NodePort
 
+	// 命名空间归一化：空→"default"（观察者保留空，表示全局观察所有命名空间）
+	if client.UserType != models.UserTypeObserver && client.Namespace == "" {
+		client.Namespace = models.DefaultNamespace
+	}
+
 	// 初始化客户端 SendChan
 	h.initClientSendChan(client)
 
-	// 初始化客户端时间戳
+	// 初始化客户端时间戳（原子更新）
 	now := time.Now()
 	client.ConnectedAt = mathx.IfNotZero(client.ConnectedAt, now)
-	client.LastHeartbeat = mathx.IfNotZero(client.LastHeartbeat, now)
-	client.LastSeen = mathx.IfNotZero(client.LastSeen, now)
+	client.SetLastHeartbeat(mathx.IfNotZero(client.LastHeartbeat, now))
+	client.SetLastSeen(mathx.IfNotZero(client.LastSeen, now))
 
 	// ================================================================
 	// 临界区 - 仅 map 操作（shardedRegistry 分片锁，粒度细）
@@ -134,8 +139,9 @@ func (h *Hub) handleRegister(client *Client) {
 		}
 	})
 
-	// 在线状态同步 + 离线消息推送（提交到分布式池）
+	// 系统组加入 + 在线状态同步 + 离线消息推送（提交到分布式池）
 	h.workerPool.TrySubmitDistributed(func() {
+		h.joinSystemGroupsOnConnect(ctx, client)
 		h.syncOnlineStatus(client)
 		h.pushOfflineMessagesOnConnect(client)
 	})
@@ -172,6 +178,11 @@ func (h *Hub) handleUnregister(client *Client) {
 
 	// Phase 2: 非临界区 - IO 操作异步执行
 	ctx := context.Background()
+
+	// 系统组离开（提交到分布式池，与在线状态清理并行）
+	h.workerPool.TrySubmitDistributed(func() {
+		h.leaveSystemGroupsOnDisconnect(ctx, client)
+	})
 
 	// 调用断开回调（提交到回调池）
 	if h.clientDisconnectCallback != nil {
@@ -590,7 +601,8 @@ func (h *Hub) kickClientWithNotification(client *Client, reason DisconnectReason
 			SetSenderType(models.UserTypeSystem).
 			SetReceiver(client.UserID).
 			SetReceiverType(client.UserType).
-			SetContent(message)
+			SetContent(message).
+			WithContentExtra("reason", reason)
 
 		h.sendToClient(client, forceOfflineMsg)
 		// 不再使用 time.Sleep 阻塞等待，sendToClient 已将消息写入 SendChan，
@@ -603,7 +615,7 @@ func (h *Hub) kickClientWithNotification(client *Client, reason DisconnectReason
 func (h *Hub) createKickNotification(userID, reason, customMsg string, kickedAt time.Time) *HubMessage {
 	content := customMsg
 	if content == "" {
-		content = fmt.Sprintf("您已被踢出: %s", reason)
+		content = "您已被踢出: " + reason
 	}
 
 	return &HubMessage{

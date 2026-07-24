@@ -71,7 +71,7 @@ type WorkloadRepository interface {
 	//   - workload: 选中客服在选中前的 realtime 负载值（用于日志/监控）
 	//   - error: 执行失败的错误
 	//
-	// 业务失败回滚：调用方应在后续业务失败时调用 DecrementAgentWorkload 回滚此次预扣减。
+	// 业务失败回滚：调用方应在后续业务失败时调用 DecrementAgentWorkload 回滚此次预扣减
 	AcquireLeastLoadedAgent(ctx context.Context, onlineAgents []string, dimension WorkloadDimension) (string, int64, error)
 
 	// RemoveAgentWorkload 移除客服负载记录（客服下线时调用）
@@ -783,7 +783,7 @@ func (r *RedisWorkloadRepository) AcquireLeastLoadedAgent(ctx context.Context, o
 //  2. 时间分片维度（hourly/daily/monthly/yearly）的 ZSet key 依赖当前时间戳，
 //     客服跨小时/跨天下线时，time.Now() 只能命中“当前”时间片的 ZSet，
 //     前一时间片 ZSet 中残留的该客服记录无法被清理；同时这些维度本就是
-//     用于统计的累计数据，不应在下线时清除。
+//     用于统计的累计数据，不应在下线时清除
 func (r *RedisWorkloadRepository) RemoveAgentWorkload(ctx context.Context, agentID string) error {
 	now := time.Now()
 

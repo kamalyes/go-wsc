@@ -569,7 +569,7 @@ func TestHeartbeatTimeoutCallback(t *testing.T) {
 	t.Run("HeartbeatTimeout_Triggered", func(t *testing.T) {
 		// 使用辅助函数创建客户端
 		client := createTestClientWithIDGen(UserTypeCustomer)
-		client.LastHeartbeat = time.Now()
+		client.SetLastHeartbeat(time.Now())
 		hub.Register(client)
 
 		// 等待心跳超时

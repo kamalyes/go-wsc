@@ -179,6 +179,11 @@ var (
 		OperationTypeHeartbeat,
 		OperationTypeAuth,
 		OperationTypeSync,
+		OperationTypeSendMessage,
+		OperationTypeKickUser,
+		OperationTypeNodeRegister,
+		OperationTypeObserverNotify,
+		OperationTypeGroupsBroadcast,
 	)
 
 	// ClientTypeValidator 客户端类型验证器

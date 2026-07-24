@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # ============================================================================
-# protoc 生成脚本 - 由 wsc.proto 生成 Go protobuf 代码
-# ============================================================================
+# @Author: kamalyes 501893067@qq.com
+# @Date: 2026-07-18 00:00:00
+# @LastEditTime: 2026-07-18 00:00:00
+# @FilePath: \go-wsc\proto\gen.sh
+# @Description: protoc 生成脚本 - 由 wsc.proto 生成 Go protobuf 代码
+#
 # 用法:
 #   ./gen.sh              # 生成代码
 #   ./gen.sh --check      # 仅检查工具链，不生成
@@ -9,6 +13,8 @@
 # 依赖:
 #   - protoc          (protobuf 编译器)
 #   - protoc-gen-go   (Go protobuf 插件，缺失时自动安装)
+#
+# Copyright (c) 2026 by kamalyes, All Rights Reserved.
 # ============================================================================
 
 set -euo pipefail

@@ -75,10 +75,12 @@ func (h *Hub) createOriginChecker() func(*http.Request) bool {
 //
 // ClientAttributes 客户端属性
 type ClientAttributes struct {
-	ClientID string   // 客户端ID
-	UserID   string   // 用户ID
-	UserType UserType // 用户类型
-	DeviceID string   // 设备ID
+	ClientID  string   // 客户端ID
+	UserID    string   // 用户ID
+	UserType  UserType // 用户类型
+	DeviceID  string   // 设备ID
+	Namespace string   // 命名空间ID（默认 "default"，用于命名空间隔离与消息过滤）
+	GroupID   string   // 默认群组ID（连接后自动加入，为空表示不自动加入）
 }
 
 // CreateClientFromRequest 从 HTTP 请求创建 WebSocket 客户端
@@ -105,6 +107,8 @@ func (h *Hub) CreateClientFromRequest(r *http.Request, conn *websocket.Conn, att
 		WithClientType(MapDeviceTypeToClientType(requestMeta.DeviceType)).
 		WithWebSocketConn(conn).
 		WithNodeInfo(h.nodeID, h.config.NodeIP, h.config.NodePort).
+		WithNamespace(attrs.Namespace).
+		WithGroupID(attrs.GroupID).
 		WithMetadataMap(metaMap).
 		WithContext(context.WithValue(r.Context(), ContextKeySenderID, attrs.UserID))
 
@@ -139,6 +143,8 @@ func (h *Hub) extractClientAttributes(r *http.Request) *ClientAttributes {
 			userID := claims.UserID
 			userType := claims.UserType
 			deviceID := claims.DeviceID
+			namespace := claims.Namespace
+			groupID := claims.GroupID
 			// UserType 默认值为 visitor
 			if userType == "" {
 				userType = string(UserTypeVisitor)
@@ -146,10 +152,12 @@ func (h *Hub) extractClientAttributes(r *http.Request) *ClientAttributes {
 			// 基于 UserID + DeviceID + UserType 时间窗口哈希生成 ClientID
 			clientID := h.temporalHasher.Hash(userID, deviceID, userType)
 			return &ClientAttributes{
-				ClientID: clientID,
-				UserID:   userID,
-				UserType: UserType(userType),
-				DeviceID: deviceID,
+				ClientID:  clientID,
+				UserID:    userID,
+				UserType:  UserType(userType),
+				DeviceID:  deviceID,
+				Namespace: namespace,
+				GroupID:   groupID,
 			}
 		}
 	}
@@ -159,6 +167,9 @@ func (h *Hub) extractClientAttributes(r *http.Request) *ClientAttributes {
 	userID := gccommon.ExtractAttribute(r, h.config.ClientAttributes.UserIDSources)
 	deviceID := gccommon.ExtractAttribute(r, h.config.ClientAttributes.DeviceIdSources)
 	userType := gccommon.ExtractAttribute(r, h.config.ClientAttributes.UserTypeSources)
+	// 命名空间与群组从配置来源提取（与 ClientID/UserID 等一致的提取机制）
+	namespace := gccommon.ExtractAttribute(r, h.config.ClientAttributes.NamespaceSources)
+	groupID := gccommon.ExtractAttribute(r, h.config.ClientAttributes.GroupIDSources)
 
 	// UserType 默认值为 visitor
 	userType = mathx.IfEmpty(userType, string(UserTypeVisitor))
@@ -167,10 +178,12 @@ func (h *Hub) extractClientAttributes(r *http.Request) *ClientAttributes {
 	clientID = h.temporalHasher.Hash(userID, deviceID, userType)
 
 	return &ClientAttributes{
-		ClientID: clientID,
-		UserID:   userID,
-		UserType: UserType(userType),
-		DeviceID: deviceID,
+		ClientID:  clientID,
+		UserID:    userID,
+		UserType:  UserType(userType),
+		DeviceID:  deviceID,
+		Namespace: namespace,
+		GroupID:   groupID,
 	}
 }
 
@@ -281,6 +294,27 @@ func (h *Hub) HandleWebSocketUpgrade(w http.ResponseWriter, r *http.Request) {
 	client = h.CreateClientFromRequest(r, conn, attrs)
 	h.Register(client)
 	success = true
+
+	// 自动加入默认群组（token 或 query 参数中指定了 group_id）
+	// 观察者不自动加群，GroupID 仅用于观察范围过滤
+	// 群组不存在时仅记录 warn，不影响连接
+	if attrs.GroupID != "" && h.groupRepo != nil && attrs.UserType != UserTypeObserver {
+		namespace := attrs.Namespace
+		if err := h.AddGroupMembers(r.Context(), namespace, attrs.GroupID, []string{attrs.UserID}); err != nil {
+			h.logger.WarnContextKV(r.Context(), "[WebSocket] 自动加入默认群组失败",
+				"user_id", attrs.UserID,
+				"namespace", namespace,
+				"group_id", attrs.GroupID,
+				"error", err,
+			)
+		} else {
+			h.logger.DebugContextKV(r.Context(), "[WebSocket] 已自动加入默认群组",
+				"user_id", attrs.UserID,
+				"namespace", namespace,
+				"group_id", attrs.GroupID,
+			)
+		}
+	}
 
 	// 发送客户端注册成功确认消息（如果配置启用）
 	if h.config.ResponseHeaders.SendRegisteredMessage {

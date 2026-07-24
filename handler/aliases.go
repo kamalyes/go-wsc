@@ -96,3 +96,9 @@ var (
 	// 消息发送失败
 	MessageSendStatusFailed = models.MessageSendStatusFailed
 )
+
+// 常量别名 - 命名空间
+const (
+	// DefaultNamespace 默认命名空间ID（类似 k8s default namespace）
+	DefaultNamespace = models.DefaultNamespace
+)

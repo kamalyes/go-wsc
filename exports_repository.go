@@ -201,11 +201,11 @@ var NewRedisWorkloadRepository = repository.NewRedisWorkloadRepository
 // 离线消息管理方法：
 // - Save(ctx context.Context, record *OfflineMessageRecord) error: 保存离线消息
 // - BatchSave(ctx context.Context, records []*OfflineMessageRecord) error: 批量保存离线消息
-// - QueryMessages(ctx context.Context, filter *OfflineMessageFilter) ([]*OfflineMessageRecord, error): 查询离线消息（支持按接收者/发送者、分页、状态过滤）
-// - DeleteByMessageIDs(ctx context.Context, receiverID string, messageIDs []string) error: 按消息ID删除
-// - GetCountByReceiver(ctx context.Context, receiverID string) (int64, error): 获取接收者消息数
-// - GetCountBySender(ctx context.Context, senderID string) (int64, error): 获取发送者消息数
-// - ClearByReceiver(ctx context.Context, receiverID string) error: 清除接收者所有消息
+// - QueryMessages(ctx context.Context, filter *OfflineMessageFilter) ([]*OfflineMessageRecord, error): 查询离线消息（支持按命名空间/接收者/发送者/群组、分页、状态过滤）
+// - DeleteByMessageIDs(ctx context.Context, namespace, receiverID string, messageIDs []string) error: 按命名空间+消息ID删除
+// - GetCountByReceiver(ctx context.Context, namespace, receiverID string) (int64, error): 获取命名空间下接收者消息数
+// - GetCountBySender(ctx context.Context, namespace, senderID string) (int64, error): 获取命名空间下发送者消息数
+// - ClearByReceiver(ctx context.Context, namespace, receiverID string) error: 清除命名空间下接收者所有消息
 // - DeleteExpired(ctx context.Context) (int64, error): 删除过期消息
 // - MarkAsPushed(ctx context.Context, messageIDs []string) error: 标记为已推送
 

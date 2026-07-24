@@ -72,6 +72,9 @@ type (
 	MessageSendRecord          = models.MessageSendRecord
 	WorkloadInfo               = repository.WorkloadInfo
 	MessageClassification      = models.MessageClassification
+	GroupRepository            = repository.GroupRepository
+	Group                      = repository.Group
+	GroupSendResult            = repository.GroupSendResult
 	Priority                   = models.Priority
 	AckMessage                 = protocol.AckMessage
 	AckStatus                  = protocol.AckStatus
@@ -161,12 +164,18 @@ const (
 	BroadcastTypeGlobal = models.BroadcastTypeGlobal
 )
 
+const (
+	DefaultNamespace = models.DefaultNamespace
+	DefaultGroupID   = models.DefaultGroupID
+)
+
 var (
-	OperationTypeSendMessage    = models.OperationTypeSendMessage
-	OperationTypeKickUser       = models.OperationTypeKickUser
-	OperationTypeBroadcast      = models.OperationTypeBroadcast
-	OperationTypeObserverNotify = models.OperationTypeObserverNotify
-	MapDeviceTypeToClientType   = models.MapDeviceTypeToClientType
+	OperationTypeSendMessage     = models.OperationTypeSendMessage
+	OperationTypeKickUser        = models.OperationTypeKickUser
+	OperationTypeBroadcast       = models.OperationTypeBroadcast
+	OperationTypeObserverNotify  = models.OperationTypeObserverNotify
+	OperationTypeGroupsBroadcast = models.OperationTypeGroupsBroadcast
+	MapDeviceTypeToClientType    = models.MapDeviceTypeToClientType
 )
 
 // NewHubMessage 创建新的 HubMessage
@@ -196,6 +205,12 @@ var (
 	ErrPubSubPublishFailed          = models.ErrPubSubPublishFailed
 	ErrClientNotFound               = models.ErrClientNotFound
 	ErrClientDisconnected           = models.ErrClientDisconnected
+
+	// 群组相关错误
+	ErrGroupNotFound      = models.ErrGroupNotFound
+	ErrGroupMemberExisted = models.ErrGroupMemberExisted
+	ErrGroupFull          = models.ErrGroupFull
+	ErrGroupRepoNotSet    = models.ErrGroupRepoNotSet
 
 	// ErrorType 常量
 	ErrTypeUserNotFound   = models.ErrTypeUserNotFound
@@ -280,7 +295,6 @@ type (
 type Hub struct {
 	nodeID    string
 	nodeInfo  *NodeInfo
-	nodes     map[string]*NodeInfo
 	startTime time.Time
 
 	register        chan *Client
@@ -296,6 +310,7 @@ type Hub struct {
 	workloadRepo           WorkloadRepository
 	offlineMessageHandler  OfflineMessageHandler
 	connectionRecordRepo   ConnectionRecordRepository
+	groupRepo              GroupRepository
 	connectionTokenDecoder ConnectionTokenDecoder // 连接 Token 解码器（可选启用，nil 时走明文参数）
 	idGenerator            IDGenerator
 	temporalHasher         *safe.TemporalHasher
@@ -303,6 +318,13 @@ type Hub struct {
 
 	// 📡 事件发布订阅
 	pubsub *cachex.PubSub
+
+	// 🔗 节点间 gRPC 通信（主从直连，优先于 Redis PubSub 用于点对点路由）
+	// nodeRegistry 基于 Redis 维护节点→gRPC 地址映射，支持节点发现与心跳
+	// grpcServer 接收远端节点请求，grpcClientPool 复用到各节点的连接
+	nodeRegistry   *NodeRegistry
+	grpcServer     *GRPCServer
+	grpcClientPool *GRPCClientPool
 
 	// 🚀 性能优化组件（v2 新增）
 	// workerPool 按任务类型分池控制并发，防止 goroutine 泛滥
@@ -356,7 +378,6 @@ type Hub struct {
 
 	welcomeProvider WelcomeMessageProvider
 	logger          WSCLogger
-	mutex           sync.RWMutex
 	ctx             context.Context
 	cancel          context.CancelFunc
 	config          *wscconfig.WSC
@@ -415,7 +436,6 @@ func NewHub(config *wscconfig.WSC) *Hub {
 			Status:    NodeStatusActive,
 			LastSeen:  time.Now(),
 		},
-		nodes:            make(map[string]*NodeInfo, config.CapacityEstimation.Nodes),
 		register:         make(chan *Client, config.MessageBufferSize),
 		unregister:       make(chan *Client, config.MessageBufferSize),
 		broadcast:        make(chan *HubMessage, config.MessageBufferSize*4),
@@ -493,6 +513,7 @@ func (h *Hub) IsStarted() bool                             { return h.started.Lo
 func (h *Hub) IsShutdown() bool                            { return h.shutdown.Load() }
 func (h *Hub) GetConfig() *wscconfig.WSC                   { return h.config }
 func (h *Hub) GetOnlineStatusRepo() OnlineStatusRepository { return h.onlineStatusRepo }
+func (h *Hub) GetGroupRepository() GroupRepository         { return h.groupRepo }
 func (h *Hub) Context() context.Context                    { return h.ctx }
 
 func (h *Hub) SetIDGenerator(generator IDGenerator) {
@@ -522,6 +543,10 @@ func (h *Hub) SetPubSub(pubsub *cachex.PubSub) {
 		h.logger.InfoKV("路由缓存已启用", "type", "KVCache三层兜底")
 	}
 
+	// 🔗 自动初始化节点间 gRPC 通信（若启用 node-grpc 配置）
+	// 节点发现依赖 Redis，因此必须在 PubSub 设置后初始化
+	h.InitNodeGRPC()
+
 	h.logger.InfoKV("PubSub已设置", "enabled", true)
 }
 
@@ -534,6 +559,17 @@ func (h *Hub) GetWorkerPool() *HubWorkerPool        { return h.workerPool }
 func (h *Hub) GetRouterCache() *RouterCache         { return h.routerCache }
 func (h *Hub) GetShardedRegistry() *ShardedRegistry { return h.shardedRegistry }
 func (h *Hub) GetMessageBatcher() *MessageBatcher   { return h.messageBatcher }
+
+// 🔗 gRPC 节点通信 Getter 方法
+func (h *Hub) GetNodeRegistry() *NodeRegistry     { return h.nodeRegistry }
+func (h *Hub) GetGRPCServer() *GRPCServer         { return h.grpcServer }
+func (h *Hub) GetGRPCClientPool() *GRPCClientPool { return h.grpcClientPool }
+
+// IsGRPCEnabled 是否启用了节点间 gRPC 直连通信
+// 启用后 SendToUser/SendToGroup 会优先走 gRPC 直连，降低 Redis PubSub 延迟
+func (h *Hub) IsGRPCEnabled() bool {
+	return h.nodeRegistry != nil && h.grpcClientPool != nil
+}
 
 // ============================================================================
 // K8s 兼容的节点ID生成

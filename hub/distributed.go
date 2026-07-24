@@ -4,7 +4,12 @@
  * @LastEditors: kamalyes 501893067@qq.com
  * @LastEditTime: 2025-01-30 11:20:15
  * @FilePath: \go-wsc\hub\distributed.go
- * @Description: Hub 分布式功能 - 跨节点消息路由
+ * @Description: Hub 分布式消息订阅与处理
+ *
+ * 本文件职责单一：订阅跨节点消息并分发到本地处理函数
+ * 跨节点路由（gRPC 直连 + PubSub 兜底）统一由 cluster_dispatch.go::routeToCluster 处理，
+ * 节点注册与发现由 node_registry.go::NodeRegistry 负责，
+ * 消除了历史上分散在此的 RegisterNode/DiscoverNodes/broadcastToAllNodes 等重复实现
  *
  * Copyright (c) 2025 by kamalyes, All Rights Reserved.
  */
@@ -23,33 +28,36 @@ import (
 )
 
 // ============================================================================
-// 分布式消息路由
+// 用户消息跨节点路由
 // ============================================================================
 
 // checkAndRouteToNode 检查用户是否在其他节点，如果是则路由过去
-// 优化：
-//  1. 使用 routerCache（KVCache 三层兜底）加速用户节点查询，减少 Redis 往返
-//  2. 使用 protobuf 序列化跨节点消息（相比 JSON 体积减少 50%+，速度提升 3-5x）
+//
+// 统一走 routeToCluster 入口，由其集中决策 gRPC 直连与 PubSub 兜底，
+// 消除历史上分散在各方法中的重复路由逻辑
 //
 // 返回: (是否在其他节点, 错误)
+//   - routed=true:  消息已路由到其他节点，调用方无需本地发送
+//   - routed=false: 用户在本节点或离线，调用方应本地发送
 func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMessage) (bool, error) {
-	// 如果没有启用 PubSub，说明是单机模式
-	if h.pubsub == nil || h.onlineStatusRepo == nil {
+	// 单机模式：无 PubSub 且无 gRPC，不跨节点
+	if h.pubsub == nil && !h.IsGRPCEnabled() {
+		return false, nil
+	}
+	if h.onlineStatusRepo == nil {
 		return false, nil
 	}
 
-	// 1. 查询用户在哪些节点（优先走 routerCache 三层兜底）
+	// 1. 查询用户所在节点（优先走 routerCache 三层兜底）
 	var nodeIDs []string
 	var err error
 	if h.routerCache != nil {
 		nodeIDs, err = h.routerCache.GetUserNodes(ctx, userID)
 	} else {
-		// 降级：直接查 Redis
 		nodeIDs, err = h.onlineStatusRepo.GetUserNodes(ctx, userID)
 	}
 	if err != nil {
 		// 查询失败，假设用户在本节点或离线，继续本地发送流程
-		// 不标记消息为失败：本地发送可能成功
 		return false, err
 	}
 
@@ -61,60 +69,30 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMe
 		}
 	}
 
-	// 3. 如果没有其他节点，返回 false（用户在本节点或离线）
+	// 3. 没有其他节点 → 本地发送
 	if len(otherNodes) == 0 {
 		return false, nil
 	}
 
-	// 4. 向所有其他节点转发消息
 	h.logger.DebugKV("跨节点路由消息",
 		"message_id", msg.MessageID,
 		"user_id", userID,
 		"from_node", h.nodeID,
 		"to_nodes", otherNodes,
+		"grpc_enabled", h.IsGRPCEnabled(),
 	)
 
-	distMsg := &DistributedMessage{
-		Type:      OperationTypeSendMessage,
-		NodeID:    h.nodeID,
-		TargetID:  userID,
-		Message:   msg,
-		Timestamp: time.Now(),
+	// 4. 统一跨节点路由：gRPC 直连优先，PubSub 兜底（由 routeToCluster 集中决策）
+	opts := ClusterDispatchOptions{
+		Operation:     OperationTypeSendMessage,
+		Namespace:     "", // 点对点消息不需要命名空间隔离路由
+		TargetNodeIDs: otherNodes,
+		TargetUserID:  userID,
 	}
-
-	// 🚀 使用 protobuf 序列化（高性能、低体积）
-	data := h.marshalDistributedMessage(distMsg, msg.MessageID)
-
-	// 向每个节点发送消息
-	// 统计成功与失败，只要有一个节点发布成功就认为路由成功
-	publishedCount := 0
-	var lastPublishErr error
-	for _, nodeID := range otherNodes {
-		channel := fmt.Sprintf("wsc:node:%s", nodeID)
-		if err := h.pubsub.Publish(ctx, channel, string(data)); err != nil {
-			lastPublishErr = err
-			h.logger.ErrorKV("跨节点消息发布失败",
-				"error", err,
-				"target_node", nodeID,
-				"message_id", msg.MessageID,
-			)
-			// 继续向其他节点发送，不因为一个节点失败而中断
-			continue
-		}
-		publishedCount++
+	if err := h.routeToCluster(ctx, msg, opts); err != nil {
+		// 路由失败，返回 false 让上层 fallback 到本地发送
+		return false, err
 	}
-
-	// 所有节点都发布失败 → 返回错误，让上层 fallback 到本地发送
-	if publishedCount == 0 && lastPublishErr != nil {
-		h.logger.ErrorKV("跨节点消息发布全部失败，尝试本地发送",
-			"message_id", msg.MessageID,
-			"user_id", userID,
-			"target_node_count", len(otherNodes),
-			"last_error", lastPublishErr,
-		)
-		return false, lastPublishErr
-	}
-
 	return true, nil
 }
 
@@ -168,7 +146,7 @@ func (h *Hub) SubscribeNodeMessages(ctx context.Context) error {
 		return ErrPubSubNotSet
 	}
 
-	channel := fmt.Sprintf("wsc:node:%s", h.nodeID)
+	channel := "wsc:node:" + h.nodeID
 
 	h.logger.InfoKV("订阅节点消息通道", "channel", channel)
 
@@ -225,6 +203,9 @@ func (h *Hub) handleDistributedMessage(ctx context.Context, distMsg *Distributed
 
 	case OperationTypeBroadcast:
 		return h.handleDistributedBroadcast(ctx, distMsg)
+
+	case OperationTypeGroupsBroadcast:
+		return h.handleDistributedGroupsBroadcast(ctx, distMsg)
 
 	case OperationTypeObserverNotify:
 		return h.handleDistributedObserverNotify(ctx, distMsg)
@@ -294,7 +275,12 @@ func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *Distrib
 	)
 
 	// 🔔 通知观察者（跨节点消息也需要通知观察者）
-	h.notifyObservers(distMsg.Message)
+	// 从 GroupIDs 提取 groupID（群组级观察者通知）
+	observerGroupID := ""
+	if len(distMsg.GroupIDs) > 0 {
+		observerGroupID = distMsg.GroupIDs[0]
+	}
+	h.notifyObservers(distMsg.Message, distMsg.Namespace, observerGroupID)
 
 	return nil
 }
@@ -321,152 +307,38 @@ func (h *Hub) handleDistributedKickUser(ctx context.Context, distMsg *Distribute
 }
 
 // handleDistributedBroadcast 处理跨节点广播
+// 命名空间隔离：distMsg.Namespace 为空表示全命名空间广播，非空仅广播给同命名空间客户端
 func (h *Hub) handleDistributedBroadcast(ctx context.Context, distMsg *DistributedMessage) error {
 	if distMsg.Message == nil {
 		return fmt.Errorf("message data not found")
 	}
 
-	// 广播给本节点的所有客户端
-	select {
-	case h.broadcast <- distMsg.Message:
-		return nil
-	case <-ctx.Done():
-		return fmt.Errorf("context cancelled: %w", ctx.Err())
-	default:
-		h.logger.WarnKV("广播队列已满", "message_id", distMsg.Message.MessageID)
-		return nil
-	}
-}
+	namespace := distMsg.Namespace
 
-// ============================================================================
-// 节点注册与健康检查
-// ============================================================================
-
-// RegisterNode 注册节点到 Redis
-func (h *Hub) RegisterNode(ctx context.Context) error {
-	if h.pubsub == nil {
-		return ErrPubSubNotSet
-	}
-
-	nodeInfo := &NodeInfo{
-		ID:          h.nodeID,
-		IPAddress:   h.config.NodeIP,
-		Port:        h.config.NodePort,
-		Status:      NodeStatusActive,
-		LastSeen:    time.Now(),
-		Connections: h.shardedRegistry.GetClientCount(),
-	}
-
-	key := fmt.Sprintf("wsc:nodes:%s", h.nodeID)
-	data, _ := json.Marshal(nodeInfo)
-
-	h.logger.InfoKV("注册节点", "key", key, "nodeID", h.nodeID, "data", string(data))
-
-	// 使用 Lua 脚本设置节点信息和过期时间
-	script := `
-		redis.call("set", KEYS[1], ARGV[1])
-		redis.call("expire", KEYS[1], ARGV[2])
-		return 1
-	`
-
-	err := h.pubsub.GetClient().Eval(ctx, script, []string{key}, string(data), 30).Err()
-	if err != nil {
-		h.logger.ErrorKV("注册节点失败", "error", err, "key", key)
-	} else {
-		h.logger.InfoKV("注册节点成功", "key", key)
-	}
-	return err
-}
-
-// StartNodeHeartbeat 启动节点心跳 (在 Hub.Run 中调用)
-func (h *Hub) StartNodeHeartbeat(ctx context.Context) {
-	if h.pubsub == nil {
-		return
-	}
-
-	syncx.NewEventLoop(ctx).
-		OnTicker(10*time.Second, func() {
-			if err := h.RegisterNode(ctx); err != nil {
-				h.logger.ErrorKV("节点心跳失败", "error", err)
-			}
-		}).
-		OnPanic(func(r any) {
-			h.logger.ErrorKV("节点心跳 panic", "panic", r)
-		}).
-		Run()
-}
-
-// DiscoverNodes 发现其他节点（使用 Lua 脚本）
-func (h *Hub) DiscoverNodes(ctx context.Context) ([]*NodeInfo, error) {
-	if h.pubsub == nil {
-		return nil, ErrPubSubNotSet
-	}
-
-	// 使用 Lua 脚本扫描并获取所有节点信息
-	script := `
-		local pattern = ARGV[1]
-		local cursor = "0"
-		local nodes = {}
-		
-		repeat
-			local result = redis.call("SCAN", cursor, "MATCH", pattern, "COUNT", 100)
-			cursor = result[1]
-			local keys = result[2]
-			
-			for i, key in ipairs(keys) do
-				local data = redis.call("GET", key)
-				if data then
-					table.insert(nodes, data)
-				end
-			end
-		until cursor == "0"
-		
-		return nodes
-	`
-
-	pattern := "wsc:nodes:*"
-	h.logger.InfoKV("开始发现节点", "pattern", pattern, "currentNodeID", h.nodeID)
-
-	result, err := h.pubsub.GetClient().Eval(ctx, script, []string{}, pattern).Result()
-	if err != nil {
-		h.logger.ErrorKV("发现节点失败", "error", err)
-		return nil, fmt.Errorf("failed to discover nodes: %w", err)
-	}
-
-	// 解析结果
-	nodeDataList, ok := result.([]any)
-	if !ok {
-		h.logger.ErrorKV("Lua 脚本返回类型错误", "type", fmt.Sprintf("%T", result))
-		return nil, fmt.Errorf("unexpected result type from lua script")
-	}
-
-	h.logger.InfoKV("Lua 脚本返回节点数量", "count", len(nodeDataList))
-
-	nodes := make([]*NodeInfo, 0, len(nodeDataList))
-	for _, nodeData := range nodeDataList {
-		dataStr, ok := nodeData.(string)
-		if !ok {
-			h.logger.WarnKV("节点数据类型错误", "type", fmt.Sprintf("%T", nodeData))
-			continue
-		}
-
-		var node NodeInfo
-		if err := json.Unmarshal([]byte(dataStr), &node); err != nil {
-			h.logger.WarnKV("解析节点信息失败", "error", err, "data", dataStr)
-			continue
-		}
-
-		h.logger.InfoKV("解析到节点", "nodeID", node.ID, "currentNodeID", h.nodeID)
-
-		// 排除自己
-		if node.ID != h.nodeID {
-			nodes = append(nodes, &node)
+	// 全命名空间广播（Namespace 为空）→ 走 broadcast 队列广播给所有客户端
+	if namespace == "" {
+		select {
+		case h.broadcast <- distMsg.Message:
+			return nil
+		case <-ctx.Done():
+			return fmt.Errorf("context cancelled: %w", ctx.Err())
+		default:
+			h.logger.WarnKV("广播队列已满", "message_id", distMsg.Message.MessageID)
+			return nil
 		}
 	}
 
-	h.logger.InfoKV("发现节点完成", "totalFound", len(nodeDataList), "excludeSelf", len(nodes))
+	// 命名空间广播 → 仅发送给同命名空间客户端
+	count := h.broadcastToFiltered(func(c *Client) bool {
+		return c.Namespace == namespace
+	}, distMsg.Message)
 
-	return nodes, nil
+	h.logger.DebugKV("跨节点命名空间广播已处理",
+		"namespace", namespace,
+		"message_id", distMsg.Message.MessageID,
+		"local_delivered", count,
+	)
+	return nil
 }
 
 // ============================================================================
@@ -527,31 +399,83 @@ func (h *Hub) ReleaseDistributedLock(ctx context.Context, key string) error {
 }
 
 // ============================================================================
-// 跨节点广播
+// 跨节点群组广播与观察者通知处理
 // ============================================================================
 
-// broadcastToAllNodes 广播消息到所有节点
-// 使用 protobuf 序列化（相比 JSON 体积减少 50%+，速度提升 3-5x）
-func (h *Hub) broadcastToAllNodes(ctx context.Context, msg *HubMessage) error {
-	if h.pubsub == nil {
-		return nil // 单机模式，不需要跨节点广播
+// handleDistributedGroupsBroadcast 处理跨节点群组广播（单群组与批量统一入口）
+//
+// 高性能：一次 Pipeline 获取所有群组成员 → 合并去重 → 一次本地过滤广播
+// 相比逐群组处理，N 个群组从 N 次 GetMembers + N 次 broadcastToFiltered 降为 1 + 1
+//
+// 兼容两种来源：
+//   - 批量广播：distMsg.GroupIDs 携带多个群组ID
+//   - 单群组广播：distMsg.GroupIDs 为空时回退到 distMsg.TargetID（单群组场景）
+func (h *Hub) handleDistributedGroupsBroadcast(ctx context.Context, distMsg *DistributedMessage) error {
+	// SubscribeBroadcastChannel 已过滤自身消息，此处二次防御
+	if distMsg.NodeID == h.nodeID {
+		return nil
 	}
 
-	distMsg := &DistributedMessage{
-		Type:      OperationTypeBroadcast,
-		NodeID:    h.nodeID,
-		Message:   msg,
-		Timestamp: time.Now(),
+	if distMsg.Message == nil {
+		return fmt.Errorf("message data not found")
 	}
 
-	// 发布到全局广播频道
-	channel := "wsc:broadcast"
-	data := h.marshalDistributedMessage(distMsg, msg.MessageID)
+	if h.groupRepo == nil {
+		return fmt.Errorf("group repository is not set")
+	}
 
-	return h.pubsub.Publish(ctx, channel, string(data))
+	// 统一群组ID列表：优先 GroupIDs，回退 TargetID（单群组兼容）
+	groupIDs := distMsg.GroupIDs
+	if len(groupIDs) == 0 && distMsg.TargetID != "" {
+		groupIDs = []string{distMsg.TargetID}
+	}
+	if len(groupIDs) == 0 {
+		return fmt.Errorf("groupIDs is empty in distributed message")
+	}
+
+	namespace := distMsg.Namespace
+
+	// Pipeline 批量获取所有群组成员（1 次 RTT，单群组场景等价于单次 SMEMBERS）
+	groupMembers, err := h.groupRepo.GetMultiGroupMembers(ctx, namespace, groupIDs)
+	if err != nil {
+		h.logger.WarnKV("跨节点群组广播：获取群组成员失败",
+			"namespace", namespace, "group_count", len(groupIDs), "error", err)
+		return err
+	}
+
+	// 合并去重为一个 memberSet（用户在多个群组只收一条消息）
+	memberSet := make(map[string]struct{})
+	for _, members := range groupMembers {
+		for _, uid := range members {
+			memberSet[uid] = struct{}{}
+		}
+	}
+
+	if len(memberSet) == 0 {
+		return nil
+	}
+
+	// 按成员ID查找本地连接并投递（O(m) 替代 O(n) 全连接扫描）
+	memberList := make([]string, 0, len(memberSet))
+	for uid := range memberSet {
+		memberList = append(memberList, uid)
+	}
+	count := h.broadcastToUserIDs(memberList, distMsg.Message)
+
+	h.logger.DebugKV("跨节点群组广播已处理",
+		"namespace", namespace,
+		"group_count", len(groupIDs),
+		"unique_members", len(memberSet),
+		"from_node", distMsg.NodeID,
+		"message_id", distMsg.Message.MessageID,
+		"local_delivered", count,
+	)
+
+	return nil
 }
 
 // handleDistributedObserverNotify 处理跨节点观察者通知
+// 命名空间隔离：仅通知全局观察者和同命名空间观察者
 func (h *Hub) handleDistributedObserverNotify(ctx context.Context, distMsg *DistributedMessage) error {
 	// 忽略自己发出的通知（本地观察者已经在 notifyObservers 中收到了）
 	if distMsg.NodeID == h.nodeID {
@@ -562,17 +486,21 @@ func (h *Hub) handleDistributedObserverNotify(ctx context.Context, distMsg *Dist
 	}
 
 	if distMsg.Message == nil {
-		h.logger.ErrorContextKV(ctx, "观察者通知缺少消息数据",
+		h.logger.WarnContextKV(ctx, "观察者通知缺少消息数据",
 			"from_node", distMsg.NodeID,
 		)
 		return fmt.Errorf("message data not found")
 	}
 
-	// 获取本节点的所有观察者
-	observers := h.GetObserverClients()
+	// 获取消息命名空间ID用于过滤
+	namespace := distMsg.Namespace
+
+	// 获取本节点同命名空间的观察者（含全局观察者）
+	observers := h.GetObserverClientsByNamespace(namespace)
 	if len(observers) == 0 {
-		h.logger.DebugContextKV(ctx, "本节点无观察者，跳过通知",
+		h.logger.DebugContextKV(ctx, "本节点无匹配观察者，跳过通知",
 			"message_id", distMsg.Message.MessageID,
+			"namespace", namespace,
 			"from_node", distMsg.NodeID,
 		)
 		return nil
@@ -580,9 +508,25 @@ func (h *Hub) handleDistributedObserverNotify(ctx context.Context, distMsg *Dist
 
 	h.logger.DebugContextKV(ctx, "开始处理跨节点观察者通知",
 		"message_id", distMsg.Message.MessageID,
+		"namespace", namespace,
 		"from_node", distMsg.NodeID,
 		"observer_count", len(observers),
 	)
+
+	// 预构建观察者专用消息（Clone + metadata），所有观察者共享同一份
+	observerMsg := distMsg.Message.Clone()
+	observerMsg.WithMetadata("observer_mode", "true")
+	observerMsg.WithMetadata("original_sender", distMsg.Message.Sender)
+	observerMsg.WithMetadata("original_receiver", distMsg.Message.Receiver)
+
+	// 预序列化一次（所有观察者复用同一份 msgData，消除逐个 Clone+Marshal）
+	msgData, err := json.Marshal(observerMsg)
+	if err != nil {
+		h.logger.ErrorContextKV(ctx, "跨节点观察者消息序列化失败",
+			"message_id", distMsg.Message.MessageID, "error", err)
+		return err
+	}
+	msgID := observerMsg.MessageID
 
 	// 通知本节点的所有观察者
 	var successCount atomic.Int32
@@ -594,7 +538,7 @@ func (h *Hub) handleDistributedObserverNotify(ctx context.Context, distMsg *Dist
 			h.logger.WarnContextKV(ctx, "跨节点通知观察者失败",
 				"observer_id", client.UserID,
 				"client_id", client.ID,
-				"message_id", distMsg.Message.MessageID,
+				"message_id", msgID,
 				"error", err,
 			)
 		}).
@@ -602,12 +546,12 @@ func (h *Hub) handleDistributedObserverNotify(ctx context.Context, distMsg *Dist
 			h.logger.WarnKV("跨节点通知观察者时发生 panic(通道可能已关闭)",
 				"observer_id", client.UserID,
 				"client_id", client.ID,
-				"message_id", distMsg.Message.MessageID,
+				"message_id", msgID,
 				"panic", panicVal,
 			)
 		}).
 		Execute(func(idx int, observer *Client) (error, error) {
-			return h.sendToObserver(observer, distMsg.Message), nil
+			return h.sendToObserver(observer, msgID, msgData), nil
 		})
 
 	h.logger.DebugContextKV(ctx, "已处理跨节点观察者通知",

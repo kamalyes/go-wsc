@@ -16,6 +16,7 @@ require (
 	github.com/kamalyes/go-toolbox v0.15.4
 	github.com/redis/go-redis/v9 v9.21.0
 	github.com/stretchr/testify v1.11.1
+	google.golang.org/grpc v1.82.0
 	google.golang.org/protobuf v1.36.11
 	gorm.io/driver/mysql v1.6.0
 	gorm.io/gorm v1.31.2
@@ -46,16 +47,17 @@ require (
 	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/arch v0.24.0 // indirect
 	golang.org/x/crypto v0.53.0 // indirect
+	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/text v0.39.0 // indirect
-	google.golang.org/grpc v1.82.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
 // 本地开发替换
 // replace github.com/kamalyes/go-cachex => ../go-cachex
 
-// replace github.com/kamalyes/go-config => ../go-config
+replace github.com/kamalyes/go-config => ../go-config
 
 // replace github.com/kamalyes/go-logger => ../go-logger
 

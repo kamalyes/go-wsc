@@ -459,8 +459,8 @@ func (r *RedisOnlineStatusRepository) UpdateClientHeartbeat(ctx context.Context,
 	}
 
 	now := time.Now()
-	client.LastHeartbeat = now
-	client.LastSeen = now
+	client.SetLastHeartbeat(now)
+	client.SetLastSeen(now)
 
 	return r.SetClientOnline(ctx, client)
 }

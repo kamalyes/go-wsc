@@ -4,7 +4,15 @@
  * @LastEditors: kamalyes 501893067@qq.com
  * @LastEditTime: 2025-02-03 11:58:55
  * @FilePath: \go-wsc\hub\observer.go
- * @Description: Hub 观察者功能 - 支持多端登录的高性能实时消息监听（O(1)）
+ * @Description: Hub 观察者功能 - 三级索引 O(k) 查找，支持多端登录
+ *
+ * 观察者三级模型（类似 k8s namespace 隔离）：
+ *   1. 全局观察者（Namespace=""）：接收所有命名空间的消息
+ *   2. 命名空间观察者（Namespace="ns1"）：接收指定命名空间的所有消息
+ *   3. 群组观察者（Namespace="ns1", GroupID="g1"）：仅接收指定命名空间+群组的消息
+ *
+ * 性能：通过 observerIdx 三级索引 O(k) 查找（k=匹配的观察者数），
+ * 替代旧版 ForEachObserver O(n) 全量扫描
  *
  * Copyright (c) 2025 by kamalyes, All Rights Reserved.
  */
@@ -21,12 +29,11 @@ import (
 )
 
 // ============================================================================
-// 观察者管理 - O(1) 性能，支持多端登录
-// 全部通过 shardedRegistry.observerShards 分片读写，无外置锁
+// 观察者查询 - 基于 observerIdx 三级索引，O(k) 查找
 // ============================================================================
 
 // GetObserverClients 获取所有观察者客户端（所有设备）- O(n) n=观察者设备数
-// 自动过滤已关闭的客户端，避免并发场景下的 "send on closed channel" panic
+// 仅用于统计场景，消息通知走 GetObserversForMessage
 func (h *Hub) GetObserverClients() []*Client {
 	observers := make([]*Client, 0)
 	h.shardedRegistry.ForEachObserver(func(_, _ string, client *Client) bool {
@@ -36,6 +43,19 @@ func (h *Hub) GetObserverClients() []*Client {
 		return true
 	})
 	return observers
+}
+
+// GetObserverClientsByNamespace 获取指定命名空间的观察者客户端（兼容接口）
+// 使用三级索引查找：全局观察者 + 命名空间级观察者（不含群组级）
+// 群组级观察者请使用 GetObserversForMessage(namespace, groupID)
+func (h *Hub) GetObserverClientsByNamespace(namespace string) []*Client {
+	return h.shardedRegistry.GetObserversForMessage(namespace, "")
+}
+
+// GetObserversForMessage 获取应接收指定命名空间+群组消息的观察者
+// 合并三级：全局 + 命名空间 + 命名空间+群组，O(k) k=匹配的观察者数
+func (h *Hub) GetObserversForMessage(namespace, groupID string) []*Client {
+	return h.shardedRegistry.GetObserversForMessage(namespace, groupID)
 }
 
 // GetObserverCount 获取观察者数量（用户数，非设备数）- O(1)
@@ -53,10 +73,15 @@ func (h *Hub) IsObserver(userID string) bool {
 	return h.shardedRegistry.HasObserver(userID)
 }
 
-// notifyObservers 通知所有观察者（内部方法）- O(n) 但 n 是观察者设备数，通常很小
-// 在消息发送时自动调用，将消息推送给所有观察者的所有设备
-func (h *Hub) notifyObservers(msg *HubMessage) {
-	// 观察者模块未启用时直接返回，跳过本地通知与跨节点广播
+// ============================================================================
+// 观察者通知 - 基于 observerIdx 三级索引
+// ============================================================================
+
+// notifyObservers 通知观察者（内部方法）
+// namespace+groupID 定位观察范围，通过三级索引 O(k) 查找匹配的观察者
+// 异步并发投递，不阻塞主流程
+func (h *Hub) notifyObservers(msg *HubMessage, namespace, groupID string) {
+	// 观察者模块未启用时直接返回
 	if !h.shardedRegistry.ObserverEnabled() {
 		return
 	}
@@ -66,6 +91,8 @@ func (h *Hub) notifyObservers(msg *HubMessage) {
 
 	h.logger.DebugKV("开始通知观察者",
 		"message_id", msg.MessageID,
+		"namespace", namespace,
+		"group_id", groupID,
 		"sender", msg.Sender,
 		"receiver", msg.Receiver,
 		"message_type", msg.MessageType,
@@ -76,15 +103,16 @@ func (h *Hub) notifyObservers(msg *HubMessage) {
 		h.logger.DebugKV("本节点无观察者，仅广播到其他节点",
 			"message_id", msg.MessageID,
 		)
-		// 即使本节点没有观察者，也要广播到其他节点
-		h.broadcastObserverNotification(msg)
+		h.broadcastObserverNotification(msg, namespace, groupID)
 		return
 	}
 
-	// 获取所有观察者设备列表
-	observers := h.GetObserverClients()
+	// 三级索引查找：O(k) k=匹配的观察者设备数
+	observers := h.shardedRegistry.GetObserversForMessage(namespace, groupID)
 	h.logger.DebugKV("准备通知本地观察者",
 		"message_id", msg.MessageID,
+		"namespace", namespace,
+		"group_id", groupID,
 		"observer_devices", len(observers),
 	)
 
@@ -94,6 +122,22 @@ func (h *Hub) notifyObservers(msg *HubMessage) {
 			h.logger.ErrorKV("通知观察者 panic", "panic", r, "message_id", msg.MessageID)
 		}).
 		Exec(func() {
+			// 预构建观察者专用消息（Clone + metadata），所有观察者共享同一份
+			// 替代旧版每个观察者 Clone+Marshal 的 N 次开销
+			observerMsg := msg.Clone()
+			observerMsg.WithMetadata("observer_mode", "true")
+			observerMsg.WithMetadata("original_sender", msg.Sender)
+			observerMsg.WithMetadata("original_receiver", msg.Receiver)
+
+			// 预序列化一次（所有观察者复用同一份 msgData）
+			msgData, err := json.Marshal(observerMsg)
+			if err != nil {
+				h.logger.ErrorKV("序列化观察者消息失败",
+					"message_id", msg.MessageID, "error", err)
+				return
+			}
+			msgID := observerMsg.MessageID
+
 			var successCount atomic.Int32
 
 			syncx.NewParallelSliceExecutor[*Client, error](observers).
@@ -104,7 +148,7 @@ func (h *Hub) notifyObservers(msg *HubMessage) {
 					h.logger.WarnKV("通知观察者失败",
 						"observer_id", client.UserID,
 						"client_id", client.ID,
-						"message_id", msg.MessageID,
+						"message_id", msgID,
 						"error", err,
 					)
 				}).
@@ -112,16 +156,16 @@ func (h *Hub) notifyObservers(msg *HubMessage) {
 					h.logger.WarnKV("向观察者发送消息时发生 panic(通道可能已关闭)",
 						"observer_id", client.UserID,
 						"client_id", client.ID,
-						"message_id", msg.MessageID,
+						"message_id", msgID,
 						"panic", panicVal,
 					)
 				}).
 				Execute(func(idx int, observer *Client) (error, error) {
-					return h.sendToObserver(observer, msg), nil
+					return h.sendToObserver(observer, msgID, msgData), nil
 				})
 
 			h.logger.DebugKV("已通知本地观察者",
-				"message_id", msg.MessageID,
+				"message_id", msgID,
 				"sender", msg.Sender,
 				"receiver", msg.Receiver,
 				"message_type", msg.MessageType,
@@ -131,13 +175,16 @@ func (h *Hub) notifyObservers(msg *HubMessage) {
 		})
 
 	// 广播观察者通知到其他节点
-	h.broadcastObserverNotification(msg)
+	h.broadcastObserverNotification(msg, namespace, groupID)
 }
 
 // broadcastObserverNotification 广播观察者通知到其他节点
-func (h *Hub) broadcastObserverNotification(msg *HubMessage) {
-	// 如果没有启用 PubSub，说明是单机模式，不需要广播
-	if h.pubsub == nil {
+//
+// 统一走 routeToCluster 入口，由其集中决策 gRPC 直连与 PubSub 兜底
+// groupID 通过 GroupIDs 字段传递，接收端从 distMsg.GroupIDs 提取
+func (h *Hub) broadcastObserverNotification(msg *HubMessage, namespace, groupID string) {
+	// 单机模式：无 PubSub 且无 gRPC，不跨节点
+	if h.pubsub == nil && !h.IsGRPCEnabled() {
 		return
 	}
 
@@ -147,36 +194,34 @@ func (h *Hub) broadcastObserverNotification(msg *HubMessage) {
 			h.logger.ErrorKV("广播观察者通知 panic", "panic", r, "message_id", msg.MessageID)
 		}).
 		Exec(func() {
-			distMsg := &DistributedMessage{
-				Type:      OperationTypeObserverNotify,
-				NodeID:    h.nodeID,
-				Message:   msg,
-				Timestamp: time.Now(),
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+
+			opts := ClusterDispatchOptions{
+				Operation: OperationTypeObserverNotify,
+				Namespace: namespace,
+			}
+			// 通过 GroupIDs 携带 groupID，接收端从 distMsg.GroupIDs[0] 提取
+			if groupID != "" {
+				opts.GroupIDs = []string{groupID}
 			}
 
-			// 发布到观察者专用频道
-			channel := "wsc:observers"
-			data, _ := json.Marshal(distMsg)
-
-			ctx := context.Background()
-			if err := h.pubsub.Publish(ctx, channel, string(data)); err != nil {
-				h.logger.ErrorKV("广播观察者通知失败",
+			if err := h.routeToCluster(ctx, msg, opts); err != nil {
+				h.logger.WarnKV("广播观察者通知失败",
 					"error", err,
 					"message_id", msg.MessageID,
-					"channel", channel,
 				)
 			} else {
 				h.logger.DebugKV("已广播观察者通知",
 					"message_id", msg.MessageID,
-					"channel", channel,
 				)
 			}
 		})
 }
 
-// sendToObserver 发送消息给单个观察者设备 - O(1)
-func (h *Hub) sendToObserver(observer *Client, msg *HubMessage) error {
-	// 参数验证
+// sendToObserver 发送预序列化消息给单个观察者设备 - O(1)
+// msgData 由调用方预序列化一次，所有观察者共享，消除逐个 Clone+Marshal 开销
+func (h *Hub) sendToObserver(observer *Client, msgID string, msgData []byte) error {
 	if observer == nil {
 		return ErrClientNotFound
 	}
@@ -185,50 +230,28 @@ func (h *Hub) sendToObserver(observer *Client, msg *HubMessage) error {
 		h.logger.WarnKV("观察者发送通道为空",
 			"observer_id", observer.UserID,
 			"client_id", observer.ID,
-			"message_id", msg.MessageID,
+			"message_id", msgID,
 		)
 		return ErrClientNotFound
 	}
 
-	// 检查客户端是否已关闭
 	if observer.IsClosed() {
 		h.logger.DebugKV("观察者已关闭，跳过发送",
 			"observer_id", observer.UserID,
 			"client_id", observer.ID,
-			"message_id", msg.MessageID,
+			"message_id", msgID,
 		)
 		return ErrClientNotFound
 	}
 
-	// 创建观察者专用消息副本
-	observerMsg := msg.Clone()
-
-	// 添加观察者标识（保留原始发送者和接收者信息）
-	observerMsg.WithMetadata("observer_mode", "true")
-	observerMsg.WithMetadata("original_sender", msg.Sender)
-	observerMsg.WithMetadata("original_receiver", msg.Receiver)
-
-	// 序列化消息
-	msgData, err := json.Marshal(observerMsg)
-	if err != nil {
-		h.logger.ErrorKV("序列化观察者消息失败",
-			"observer_id", observer.UserID,
-			"message_id", msg.MessageID,
-			"error", err,
-		)
-		return err
-	}
-
-	// 使用 TrySend 方法发送，它内部有锁保护，避免竞态条件
 	if observer.TrySend(msgData) {
 		return nil
 	}
 
-	// 观察者缓冲区满或已关闭，丢弃消息（观察者不应阻塞正常业务）
 	h.logger.WarnKV("观察者缓冲区已满或已关闭，丢弃消息",
 		"observer_id", observer.UserID,
 		"client_id", observer.ID,
-		"message_id", msg.MessageID,
+		"message_id", msgID,
 		"buffer_size", cap(observer.SendChan),
 	)
 	return ErrQueueAndPendingFull
@@ -263,18 +286,17 @@ func (h *Hub) GetObserverStats() []*ObserverStats {
 func (h *Hub) GetObserverManagerStats() *ObserverManagerStats {
 	observerStats := h.GetObserverStats()
 
-	// 转换为 []any 类型
 	statsAny := make([]any, len(observerStats))
 	for i, stat := range observerStats {
 		statsAny[i] = stat
 	}
 
 	return &ObserverManagerStats{
-		TotalObservers:      h.GetObserverCount(),       // 观察者用户数
-		TotalDevices:        h.GetObserverDeviceCount(), // 观察者设备总数
-		TotalNotifications:  0,                          // 可以从全局计数器获取
-		FailedNotifications: 0,                          // 可以从全局计数器获取
-		DroppedMessages:     0,                          // 可以从全局计数器获取
+		TotalObservers:      h.GetObserverCount(),
+		TotalDevices:        h.GetObserverDeviceCount(),
+		TotalNotifications:  0,
+		FailedNotifications: 0,
+		DroppedMessages:     0,
 		ObserverStats:       statsAny,
 	}
 }

@@ -60,6 +60,6 @@ func (h *Hub) SetClientLastHeartbeatForTest(clientID string, lastHeartbeat time.
 	if !exists {
 		return false
 	}
-	client.LastHeartbeat = lastHeartbeat
+	client.SetLastHeartbeat(lastHeartbeat)
 	return true
 }

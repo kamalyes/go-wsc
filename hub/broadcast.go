@@ -26,7 +26,8 @@ import (
 // ============================================================================
 
 // Broadcast 广播消息给所有客户端
-// 自动支持分布式：会同时广播到所有节点
+// 自动支持分布式：统一走 routeToCluster（gRPC 直连优先，PubSub 兜底）
+// 全命名空间广播（不按命名空间过滤）
 func (h *Hub) Broadcast(ctx context.Context, msg *HubMessage) {
 	// 创建消息副本，避免并发修改
 	msg = msg.Clone()
@@ -43,17 +44,19 @@ func (h *Hub) Broadcast(ctx context.Context, msg *HubMessage) {
 		h.broadcastSentCount.Add(1)
 	}
 
-	// 🌐 分布式广播：发送到所有节点
-	if h.pubsub != nil {
-		go func() {
-			// 用独立超时 context，避免调用方 ctx 无超时时 pubsub 慢导致 goroutine 堆积
-			publishCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
-			if err := h.broadcastToAllNodes(publishCtx, msg); err != nil {
-				h.logger.ErrorKV("跨节点广播失败", "error", err, "message_id", msg.MessageID)
-			}
-		}()
-	}
+	// 🌐 分布式广播：统一走 routeToCluster
+	// 全命名空间广播（routeToCluster 对 Broadcast 操作不 normalize）
+	go func() {
+		publishCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		opts := ClusterDispatchOptions{
+			Operation: OperationTypeBroadcast,
+			Namespace: "", // 全命名空间广播
+		}
+		if err := h.routeToCluster(publishCtx, msg, opts); err != nil {
+			h.logger.WarnKV("跨节点广播失败", "error", err, "message_id", msg.MessageID)
+		}
+	}()
 
 	// 本地广播
 	select {
@@ -137,8 +140,58 @@ func (h *Hub) broadcastToFiltered(condition func(*Client) bool, msg *HubMessage)
 	return int(totalSuccess)
 }
 
-// BroadcastToGroup 发送消息给特定用户类型的所有客户端
-func (h *Hub) BroadcastToGroup(ctx context.Context, userType UserType, msg *HubMessage) int {
+// broadcastToUserIDs 预序列化消息并直接发送给指定用户ID列表的在线客户端
+// O(m) 复杂度（m=用户数），按成员ID反查 shardedRegistry，仅锁定相关 shard
+// 相比 broadcastToFiltered 的 O(n)（n=总连接数），群组广播场景大幅减少遍历与锁范围
+// 适用于已知目标用户ID列表的场景（群组广播、多群组广播）
+func (h *Hub) broadcastToUserIDs(userIDs []string, msg *HubMessage) int {
+	if len(userIDs) == 0 {
+		return 0
+	}
+
+	// 预序列化 WebSocket 消息（仅一次）
+	data, err := json.Marshal(msg)
+	if err != nil {
+		h.logger.ErrorKV("群组广播消息序列化失败", "error", err)
+		return 0
+	}
+
+	msgID := mathx.IfNotEmpty(msg.MessageID, msg.ID)
+	dataLen := len(data)
+	var successCount int32
+
+	// 按用户ID查找客户端（O(m)，仅锁定相关 shard，不遍历全部连接）
+	for _, userID := range userIDs {
+		h.shardedRegistry.ForEachUserClient(userID, func(_ string, client *Client) bool {
+			if client.IsClosed() {
+				return true
+			}
+			if client.ConnectionType == ConnectionTypeSSE {
+				// SSE 客户端发送 msg 对象
+				if client.TrySendSSE(msg) {
+					atomic.AddInt32(&successCount, 1)
+				}
+			} else {
+				// WebSocket 客户端发送预序列化数据
+				if client.TrySend(data) {
+					atomic.AddInt32(&successCount, 1)
+					h.trackReceiverMessageStats(client.ID, client.UserType, dataLen)
+				}
+			}
+			return true
+		})
+	}
+
+	totalSuccess := atomic.LoadInt32(&successCount)
+	if totalSuccess > 0 {
+		h.updateMessageStatusAsync(msgID, MessageSendStatusSuccess, "", "")
+	}
+
+	return int(totalSuccess)
+}
+
+// BroadcastByUserType 发送消息给特定用户类型的所有客户端
+func (h *Hub) BroadcastByUserType(ctx context.Context, userType UserType, msg *HubMessage) int {
 	return h.broadcastToFiltered(func(c *Client) bool {
 		return c.UserType == userType
 	}, msg)
@@ -200,42 +253,27 @@ func (h *Hub) BroadcastExclude(ctx context.Context, msg *HubMessage, excludeUser
 // 获取客户端列表方法
 // ============================================================================
 
-// GetClientsByUserType 获取特定用户类型的所有客户端
+// GetClientsByUserType 获取特定用户类型的所有客户端（委托 FilterClients 零拷贝）
 func (h *Hub) GetClientsByUserType(userType UserType) []*Client {
-	allClients := h.GetClientsCopy()
-	return mathx.FilterSlice(allClients, func(client *Client) bool {
-		return client.UserType == userType
-	})
+	return h.FilterClients(func(c *Client) bool { return c.UserType == userType })
 }
 
-// GetClientsByRole 获取特定角色的所有客户端
+// GetClientsByRole 获取特定角色的所有客户端（委托 FilterClients 零拷贝）
 func (h *Hub) GetClientsByRole(role UserRole) []*Client {
-	allClients := h.GetClientsCopy()
-	return mathx.FilterSlice(allClients, func(client *Client) bool {
-		return client.Role == role
-	})
+	return h.FilterClients(func(c *Client) bool { return c.Role == role })
 }
 
-// GetClientsByClientType 按客户端类型获取客户端
+// GetClientsByClientType 按客户端类型获取客户端（委托 FilterClients 零拷贝）
 func (h *Hub) GetClientsByClientType(clientType ClientType) []*Client {
-	allClients := h.GetClientsCopy()
-	return mathx.FilterSlice(allClients, func(client *Client) bool {
-		return client.ClientType == clientType
-	})
+	return h.FilterClients(func(c *Client) bool { return c.ClientType == clientType })
 }
 
-// GetClientsByDepartment 获取特定部门的所有客户端
+// GetClientsByDepartment 获取特定部门的所有客户端（委托 FilterClients 零拷贝）
 func (h *Hub) GetClientsByDepartment(department Department) []*Client {
-	allClients := h.GetClientsCopy()
-	return mathx.FilterSlice(allClients, func(client *Client) bool {
-		return client.Department == department
-	})
+	return h.FilterClients(func(c *Client) bool { return c.Department == department })
 }
 
-// GetClientsByVIPLevel 获取特定VIP等级及以上的客户端
+// GetClientsByVIPLevel 获取特定VIP等级及以上的客户端（委托 FilterClients 零拷贝）
 func (h *Hub) GetClientsByVIPLevel(minVIPLevel VIPLevel) []*Client {
-	allClients := h.GetClientsCopy()
-	return mathx.FilterSlice(allClients, func(client *Client) bool {
-		return client.VIPLevel.GetLevel() >= minVIPLevel.GetLevel()
-	})
+	return h.FilterClients(func(c *Client) bool { return c.VIPLevel.GetLevel() >= minVIPLevel.GetLevel() })
 }

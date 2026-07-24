@@ -20,8 +20,8 @@ import (
 	"testing"
 	"time"
 
-	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/alicebob/miniredis/v2"
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -117,7 +117,7 @@ func TestLua_SetActiveConnections(t *testing.T) {
 }
 
 // TestLua_ConditionalExpire_SkipWhenTTLHigh 验证 TTL 高于阈值时不续期（减少冗余 EXPIRE 写）
-// statsExpire=24h，threshold=12h。设置 TTL=20h > 12h，Increment 后 TTL 不应被重置
+// statsExpire=24h，threshold=12h设置 TTL=20h > 12h，Increment 后 TTL 不应被重置
 func TestLua_ConditionalExpire_SkipWhenTTLHigh(t *testing.T) {
 	repo, client := newTestStatsRepo(t)
 	ctx := context.Background()

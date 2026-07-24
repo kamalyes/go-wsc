@@ -71,7 +71,7 @@ func (h *Hub) syncOnlineStatus(client *Client) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	h.logger.DebugKV("开始同步在线状态到Redis",
+	h.logger.DebugContextKV(ctx, "开始同步在线状态到Redis",
 		"user_id", client.UserID,
 		"client_id", client.ID,
 	)
@@ -82,7 +82,7 @@ func (h *Hub) syncOnlineStatus(client *Client) {
 			"error", err,
 		)
 	} else {
-		h.logger.DebugKV("同步在线状态到Redis成功",
+		h.logger.DebugContextKV(ctx, "同步在线状态到Redis成功",
 			"user_id", client.UserID,
 			"client_id", client.ID,
 		)
@@ -207,12 +207,12 @@ func (h *Hub) logWithClient(level logger.LogLevel, msg string, client *Client, e
 
 	switch level {
 	case logger.INFO:
-		h.logger.InfoKV(msg, fields...)
+		h.logger.InfoContextKV(h.ctx, msg, fields...)
 	case logger.WARN:
-		h.logger.WarnKV(msg, fields...)
+		h.logger.WarnContextKV(h.ctx, msg, fields...)
 	case logger.ERROR:
-		h.logger.ErrorKV(msg, fields...)
+		h.logger.ErrorContextKV(h.ctx, msg, fields...)
 	case logger.DEBUG:
-		h.logger.DebugKV(msg, fields...)
+		h.logger.DebugContextKV(h.ctx, msg, fields...)
 	}
 }

@@ -27,6 +27,9 @@ const (
 	// DefaultStatsKeyPrefix 统计信息默认 key 前缀
 	DefaultStatsKeyPrefix = "wsc:stats:"
 
+	// DefaultGroupKeyPrefix 群组默认 key 前缀
+	DefaultGroupKeyPrefix = "wsc:group:"
+
 	// ============================================================================
 	// Redis Hash 字段名常量 - 统计信息
 	// ============================================================================

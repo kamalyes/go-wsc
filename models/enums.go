@@ -253,18 +253,19 @@ func (s ConnectionStatus) IsValid() bool {
 type OperationType string
 
 const (
-	OperationTypeJoin           OperationType = "join"            // 加入
-	OperationTypeLeave          OperationType = "leave"           // 离开
-	OperationTypeMessage        OperationType = "message"         // 消息
-	OperationTypeBroadcast      OperationType = "broadcast"       // 广播
-	OperationTypeNotify         OperationType = "notify"          // 通知
-	OperationTypeHeartbeat      OperationType = "heartbeat"       // 心跳
-	OperationTypeAuth           OperationType = "auth"            // 认证
-	OperationTypeSync           OperationType = "sync"            // 同步
-	OperationTypeSendMessage    OperationType = "send_message"    // 跨节点发送消息
-	OperationTypeKickUser       OperationType = "kick_user"       // 跨节点踢人
-	OperationTypeNodeRegister   OperationType = "node_register"   // 节点注册
-	OperationTypeObserverNotify OperationType = "observer_notify" // 跨节点观察者通知
+	OperationTypeJoin            OperationType = "join"             // 加入
+	OperationTypeLeave           OperationType = "leave"            // 离开
+	OperationTypeMessage         OperationType = "message"          // 消息
+	OperationTypeBroadcast       OperationType = "broadcast"        // 广播
+	OperationTypeNotify          OperationType = "notify"           // 通知
+	OperationTypeHeartbeat       OperationType = "heartbeat"        // 心跳
+	OperationTypeAuth            OperationType = "auth"             // 认证
+	OperationTypeSync            OperationType = "sync"             // 同步
+	OperationTypeSendMessage     OperationType = "send_message"     // 跨节点发送消息
+	OperationTypeKickUser        OperationType = "kick_user"        // 跨节点踢人
+	OperationTypeNodeRegister    OperationType = "node_register"    // 节点注册
+	OperationTypeObserverNotify  OperationType = "observer_notify"  // 跨节点观察者通知
+	OperationTypeGroupsBroadcast OperationType = "groups_broadcast" // 跨节点群组广播（单群组或批量统一走 Pipeline 批量路径）
 )
 
 // String 实现Stringer接口

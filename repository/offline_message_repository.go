@@ -50,17 +50,17 @@ type OfflineMessageDBRepository interface {
 	// QueryMessages 查询离线消息（支持按接收者/发送者、分页、状态过滤）
 	QueryMessages(ctx context.Context, filter *OfflineMessageFilter) ([]*OfflineMessageRecord, error)
 
-	// DeleteByMessageIDs 批量删除离线消息（按接收者）
-	DeleteByMessageIDs(ctx context.Context, receiverID string, messageIDs []string) error
+	// DeleteByMessageIDs 批量删除离线消息（按命名空间+接收者）
+	DeleteByMessageIDs(ctx context.Context, namespace, receiverID string, messageIDs []string) error
 
-	// GetCountByReceiver 获取用户作为接收者的离线消息数量
-	GetCountByReceiver(ctx context.Context, receiverID string) (int64, error)
+	// GetCountByReceiver 获取用户作为接收者的离线消息数量（按命名空间隔离）
+	GetCountByReceiver(ctx context.Context, namespace, receiverID string) (int64, error)
 
-	// GetCountBySender 获取用户作为发送者的离线消息数量
-	GetCountBySender(ctx context.Context, senderID string) (int64, error)
+	// GetCountBySender 获取用户作为发送者的离线消息数量（按命名空间隔离）
+	GetCountBySender(ctx context.Context, namespace, senderID string) (int64, error)
 
-	// ClearByReceiver 清空用户作为接收者的所有离线消息
-	ClearByReceiver(ctx context.Context, receiverID string) error
+	// ClearByReceiver 清空用户作为接收者的所有离线消息（按命名空间隔离）
+	ClearByReceiver(ctx context.Context, namespace, receiverID string) error
 
 	// DeleteExpired 删除过期的离线消息
 	DeleteExpired(ctx context.Context) (int64, error)
@@ -83,6 +83,10 @@ type OfflineMessageFilter struct {
 	UserID string
 	// Role 角色
 	Role MessageRole
+	// Namespace 命名空间ID（空表示所有命名空间）
+	Namespace string
+	// GroupID 群组ID（空表示非群组消息或所有消息）
+	GroupID string
 	// Limit 数量限制
 	Limit int
 	// Cursor 分页游标（message_id）
@@ -121,6 +125,7 @@ func NewGormOfflineMessageRepository(db *gorm.DB, config *wscconfig.OfflineMessa
 }
 
 // Save 保存离线消息到数据库
+// namespace 由调用方（注册时归一化）保证，本层不再重复归一化
 func (r *GormOfflineMessageRepository) Save(ctx context.Context, record *OfflineMessageRecord) error {
 	return r.db.WithContext(ctx).Create(record).Error
 }
@@ -150,6 +155,12 @@ func (r *GormOfflineMessageRepository) QueryMessages(ctx context.Context, filter
 		query.AddFilterIfNotEmpty("receiver", filter.UserID)
 	case MessageRoleSender:
 		query.AddFilterIfNotEmpty("sender", filter.UserID)
+	}
+
+	// 命名空间过滤：空表示查询所有命名空间（由 AddFilterIfNotEmpty 处理）
+	query.AddFilterIfNotEmpty("namespace", filter.Namespace)
+	if filter.GroupID != "" {
+		query.AddFilterIfNotEmpty("group_id", filter.GroupID)
 	}
 
 	// 状态过滤：如果指定了状态则使用指定状态，否则使用默认的待处理状态
@@ -193,42 +204,41 @@ func (r *GormOfflineMessageRepository) QueryMessages(ctx context.Context, filter
 	return records, err
 }
 
-// DeleteByMessageIDs 批量删除离线消息（按接收者）
-func (r *GormOfflineMessageRepository) DeleteByMessageIDs(ctx context.Context, receiverID string, messageIDs []string) error {
+// DeleteByMessageIDs 批量删除离线消息（按命名空间+接收者）
+func (r *GormOfflineMessageRepository) DeleteByMessageIDs(ctx context.Context, namespace, receiverID string, messageIDs []string) error {
 	if len(messageIDs) == 0 {
 		return nil
 	}
 	return r.db.WithContext(ctx).
-		Where("receiver = ? AND message_id IN ?", receiverID, messageIDs).
+		Where("namespace = ? AND receiver = ? AND message_id IN ?", namespace, receiverID, messageIDs).
 		Delete(&OfflineMessageRecord{}).Error
 }
 
-// GetCountByReceiver 获取用户作为接收者的离线消息数量
-func (r *GormOfflineMessageRepository) GetCountByReceiver(ctx context.Context, receiverID string) (int64, error) {
+// GetCountByReceiver 获取用户作为接收者的离线消息数量（按命名空间隔离）
+func (r *GormOfflineMessageRepository) GetCountByReceiver(ctx context.Context, namespace, receiverID string) (int64, error) {
 	var count int64
 	err := r.db.WithContext(ctx).
 		Model(&OfflineMessageRecord{}).
-		Where("receiver = ? AND expire_at > ?", receiverID, time.Now()).
+		Where("namespace = ? AND receiver = ? AND expire_at > ?", namespace, receiverID, time.Now()).
 		Where("status IN ?", PendingOfflineStatuses).
 		Count(&count).Error
 	return count, err
 }
 
-// GetCountBySender 获取用户作为发送者的离线消息数量
-func (r *GormOfflineMessageRepository) GetCountBySender(ctx context.Context, senderID string) (int64, error) {
-	var count int64
+// GetCountBySender 获取用户作为发送者的离线消息数量（按命名空间隔离）
+func (r *GormOfflineMessageRepository) GetCountBySender(ctx context.Context, namespace, senderID string) (int64, error) {	var count int64
 	err := r.db.WithContext(ctx).
 		Model(&OfflineMessageRecord{}).
-		Where("sender = ? AND expire_at > ?", senderID, time.Now()).
+		Where("namespace = ? AND sender = ? AND expire_at > ?", namespace, senderID, time.Now()).
 		Where("status IN ?", PendingOfflineStatuses).
 		Count(&count).Error
 	return count, err
 }
 
-// ClearByReceiver 清空用户作为接收者的所有离线消息
-func (r *GormOfflineMessageRepository) ClearByReceiver(ctx context.Context, receiverID string) error {
+// ClearByReceiver 清空用户作为接收者的所有离线消息（按命名空间隔离）
+func (r *GormOfflineMessageRepository) ClearByReceiver(ctx context.Context, namespace, receiverID string) error {
 	return r.db.WithContext(ctx).
-		Where("receiver = ?", receiverID).
+		Where("namespace = ? AND receiver = ?", namespace, receiverID).
 		Delete(&OfflineMessageRecord{}).Error
 }
 

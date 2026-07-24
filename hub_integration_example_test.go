@@ -563,10 +563,11 @@ waitLoop:
 
 	// 验证离线消息表字段
 	offlineMsgs, err := offlineMessageDBRepo.QueryMessages(ctx, &OfflineMessageFilter{
-		UserID: testUserID,
-		Role:   MessageRoleReceiver,
-		Limit:  10,
-		Cursor: "",
+		UserID:    testUserID,
+		Role:      MessageRoleReceiver,
+		Namespace: DefaultNamespace,
+		Limit:     10,
+		Cursor:    "",
 	})
 	if assert.NoError(t, err) && len(offlineMsgs) > 0 {
 		found := false
@@ -620,10 +621,11 @@ waitLoop2:
 	// 验证离线消息已被成功推送并删除
 	// 注意：推送成功后消息会被自动删除，所以查询不到是正常的
 	offlineMsgs2, err := offlineMessageDBRepo.QueryMessages(ctx, &OfflineMessageFilter{
-		UserID: testUserID,
-		Role:   MessageRoleReceiver,
-		Limit:  10,
-		Cursor: "",
+		UserID:    testUserID,
+		Role:      MessageRoleReceiver,
+		Namespace: DefaultNamespace,
+		Limit:     10,
+		Cursor:    "",
 	})
 	if assert.NoError(t, err) {
 		found := false

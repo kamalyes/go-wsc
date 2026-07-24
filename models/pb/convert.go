@@ -43,8 +43,11 @@ func init() {
 
 	// DistributedMessage ↔ DistributedMessageProto
 	// 嵌套的 Message 字段会自动递归转换（已注册 HubMessage 转换器）
+	// NodeID/GroupIDs 字段名差异通过 WithFieldMapping 显式映射（ID→Id, GroupIDs→GroupIds）
+	// Namespace 字段名一致，自动匹配
 	pbmo.RegisterWith[models.DistributedMessage, DistributedMessageProto]().
-		WithFieldMapping("NodeID", "NodeId")
+		WithFieldMapping("NodeID", "NodeId").
+		WithFieldMapping("GroupIDs", "GroupIds")
 }
 
 // ============================================================================

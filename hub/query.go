@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
-	"github.com/kamalyes/go-toolbox/pkg/mathx"
 )
 
 // ============================================================================
@@ -210,45 +209,39 @@ func (h *Hub) UpdateClientMetadata(clientID string, key string, value interface{
 // 分组查询方法
 // ============================================================================
 
-// GetClientsByDepartmentGrouped 按部门分组获取客户端
+// GetClientsByDepartmentGrouped 按部门分组获取客户端（零拷贝遍历）
 func (h *Hub) GetClientsByDepartmentGrouped() map[Department][]*Client {
 	result := make(map[Department][]*Client)
-	allClients := h.GetClientsCopy()
-
-	for _, client := range allClients {
+	h.shardedRegistry.ForEachClient(func(_ string, client *Client) bool {
 		result[client.Department] = append(result[client.Department], client)
-	}
+		return true
+	})
 	return result
 }
 
-// GetClientsByUserTypeGrouped 按用户类型分组获取客户端
+// GetClientsByUserTypeGrouped 按用户类型分组获取客户端（零拷贝遍历）
 func (h *Hub) GetClientsByUserTypeGrouped() map[UserType][]*Client {
 	result := make(map[UserType][]*Client)
-	allClients := h.GetClientsCopy()
-
-	for _, client := range allClients {
+	h.shardedRegistry.ForEachClient(func(_ string, client *Client) bool {
 		result[client.UserType] = append(result[client.UserType], client)
-	}
+		return true
+	})
 	return result
 }
 
-// GetClientsByStatusGrouped 按状态分组获取客户端
+// GetClientsByStatusGrouped 按状态分组获取客户端（零拷贝遍历）
 func (h *Hub) GetClientsByStatusGrouped() map[UserStatus][]*Client {
 	result := make(map[UserStatus][]*Client)
-	allClients := h.GetClientsCopy()
-
-	for _, client := range allClients {
+	h.shardedRegistry.ForEachClient(func(_ string, client *Client) bool {
 		result[client.Status] = append(result[client.Status], client)
-	}
+		return true
+	})
 	return result
 }
 
-// GetClientsWithStatus 获取指定状态的所有客户端
+// GetClientsWithStatus 获取指定状态的所有客户端（委托 FilterClients 零拷贝）
 func (h *Hub) GetClientsWithStatus(status UserStatus) []*Client {
-	allClients := h.GetClientsCopy()
-	return mathx.FilterSlice(allClients, func(client *Client) bool {
-		return client.Status == status
-	})
+	return h.FilterClients(func(c *Client) bool { return c.Status == status })
 }
 
 // ============================================================================
@@ -281,13 +274,19 @@ func (h *Hub) GetClientStats(clientID string) map[string]interface{} {
 // 过滤和搜索方法
 // ============================================================================
 
-// FilterClients 按条件过滤客户端
+// FilterClients 按条件过滤客户端（零拷贝：ForEachClient 遍历 + 条件收集，避免 GetClientsCopy 全量拷贝）
 func (h *Hub) FilterClients(predicate func(*Client) bool) []*Client {
 	if predicate == nil {
 		return []*Client{}
 	}
-	allClients := h.GetClientsCopy()
-	return mathx.FilterSlice(allClients, predicate)
+	result := make([]*Client, 0, 16)
+	h.shardedRegistry.ForEachClient(func(_ string, client *Client) bool {
+		if predicate(client) {
+			result = append(result, client)
+		}
+		return true
+	})
+	return result
 }
 
 // ============================================================================

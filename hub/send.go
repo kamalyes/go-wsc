@@ -14,7 +14,6 @@ package hub
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"sync"
 	"time"
 
@@ -127,7 +126,7 @@ func (h *Hub) SendToUserWithRetry(ctx context.Context, toUserID string, msg *Hub
 
 	// 确保消息ID存在
 	snowflakeId := h.idGenerator.GenerateRequestID()
-	msg.ID = mathx.IfNotEmpty(msg.ID, fmt.Sprintf("%s-%s", toUserID, snowflakeId))
+	msg.ID = mathx.IfNotEmpty(msg.ID, toUserID+"-"+snowflakeId)
 	// 若业务消息ID为空，则使用Hub生成的ID
 	msg.MessageID = mathx.IfNotEmpty(msg.MessageID, snowflakeId)
 
@@ -153,6 +152,7 @@ func (h *Hub) SendToUserWithRetry(ctx context.Context, toUserID string, msg *Hub
 				"message_id", msg.MessageID,
 			)
 			result.Success = true
+			result.StoredOffline = true
 			result.TotalDuration = time.Since(startTime)
 			h.invokeMessageSendCallback(msg, result)
 			return result
@@ -294,16 +294,27 @@ func (h *Hub) isRetryableError(err error) bool {
 // 批量发送方法
 // ============================================================================
 
-// SendToMultipleUsers 发送消息给多个用户
+// SendToMultipleUsers 并发发送消息给多个用户
+// 使用 ParallelSliceExecutor 并行投递，替代原序列循环
 func (h *Hub) SendToMultipleUsers(ctx context.Context, userIDs []string, msg *HubMessage) map[string]error {
-	errors := make(map[string]error)
-	for _, userID := range userIDs {
-		result := h.SendToUserWithRetry(ctx, userID, msg)
-		if result.FinalError != nil {
-			errors[userID] = result.FinalError
-		}
+	errs := make(map[string]error)
+	if len(userIDs) == 0 {
+		return errs
 	}
-	return errors
+	var mu sync.Mutex
+
+	syncx.NewParallelSliceExecutor[string, *SendResult](userIDs).
+		Execute(func(idx int, userID string) (*SendResult, error) {
+			result := h.SendToUserWithRetry(ctx, userID, msg)
+			if result.FinalError != nil {
+				mu.Lock()
+				errs[userID] = result.FinalError
+				mu.Unlock()
+			}
+			return result, nil
+		})
+
+	return errs
 }
 
 // SendToGroupMembers 向会话成员批量发送消息（兼容旧版本接口）
@@ -380,19 +391,30 @@ func (h *Hub) SendToGroupMembers(ctx context.Context, memberIDs []string, msg *H
 }
 
 // SendToClientsWithRetry 发送消息给多个客户端（带重试）
+// 使用预分配 slice + 索引定位写入，消除 mutex（每个 goroutine 写不同索引，无竞争）
 func (h *Hub) SendToClientsWithRetry(ctx context.Context, clients []*Client, msg *HubMessage, maxRetries int) map[string]*SendResult {
 	results := make(map[string]*SendResult, len(clients))
-	var resultsMutex sync.Mutex
+	if len(clients) == 0 {
+		return results
+	}
+
+	// 预分配结果 slice，每个 goroutine 只写自己的索引（无数据竞争）
+	resultsSlice := make([]*SendResult, len(clients))
 
 	syncx.NewParallelSliceExecutor[*Client, *SendResult](clients).
 		OnSuccess(func(idx int, client *Client, result *SendResult) {
-			resultsMutex.Lock()
-			results[client.UserID] = result
-			resultsMutex.Unlock()
+			resultsSlice[idx] = result // 各 goroutine 写不同索引，无需锁
 		}).
 		Execute(func(idx int, client *Client) (*SendResult, error) {
 			return h.SendToUserWithRetry(ctx, client.UserID, msg), nil
 		})
+
+	// Execute 同步返回后，所有写入已完成，无竞争地转为 map
+	for i, client := range clients {
+		if resultsSlice[i] != nil {
+			results[client.UserID] = resultsSlice[i]
+		}
+	}
 
 	return results
 }
@@ -549,20 +571,9 @@ func (h *Hub) SendToAllClientsInMap(clientMap map[string]*Client, msg *HubMessag
 		return
 	}
 
-	// 预序列化一次（WebSocket 客户端共用）
-	// SSE 客户端走 TrySendSSE(msg) 不需要 []byte，跳过序列化
-	var preSerialized []byte
-	for _, c := range clients {
-		if c.ConnectionType != ConnectionTypeSSE && !c.IsClosed() {
-			data, err := json.Marshal(msg)
-			if err != nil {
-				h.logger.ErrorKV("批量消息序列化失败", "error", err)
-			} else {
-				preSerialized = data
-			}
-			break // 只需序列化一次
-		}
-	}
+	// 预序列化一次（WebSocket 客户端共用；SSE 走 TrySendSSE(msg) 不用 []byte）
+	// 序列化失败时 preSerialized=nil，由 sendToClientSerialized 内部兜底
+	preSerialized, _ := json.Marshal(msg)
 
 	// 遍历复制后的列表发送消息
 	for _, client := range clients {
@@ -590,7 +601,7 @@ func (h *Hub) sendToClientSerialized(client *Client, msg *HubMessage, preSeriali
 	// SSE 客户端使用专用的消息通道
 	if client.ConnectionType == ConnectionTypeSSE {
 		if client.TrySendSSE(msg) {
-			client.LastSeen = time.Now()
+			client.SetLastSeen(time.Now())
 			h.logger.DebugKV("SSE消息发送", "message_id", msg.MessageID, "client_id", client.ID, "user_id", client.UserID)
 			// SSE消息成功发送，更新为成功状态
 			h.updateMessageStatusAsync(msgID, MessageSendStatusSuccess, "", "")
@@ -632,24 +643,34 @@ func (h *Hub) sendToClientSerialized(client *Client, msg *HubMessage, preSeriali
 
 // syncToSenderDevices 同步消息给发送者的其他设备（多端同步）
 // 场景：用户A在设备B、C、D登录，设备B发送消息给用户F，设备C和D应该收到此消息
+//
+// 性能：使用 ForEachUserClient 零拷贝遍历 + 内联过滤，
+// 替代旧版 GetClientsCopyForUser（拷贝1）+ FilterSlice（拷贝2）双重拷贝
 func (h *Hub) syncToSenderDevices(msg *HubMessage) {
 	if msg.Sender == "" {
 		return
 	}
 
-	// 获取发送者的所有在线设备
-	senderClients := h.GetClientsCopyForUser(msg.Sender, "")
-	if len(senderClients) <= 1 {
-		// 只有一个设备或没有设备，无需同步
+	// 零拷贝遍历：一次遍历完成计数+收集其他设备，避免中间切片拷贝
+	var otherDevices []*Client
+	deviceCount := 0
+	h.shardedRegistry.ForEachUserClient(msg.Sender, func(_ string, client *Client) bool {
+		deviceCount++
+		if client.ID != msg.SenderClient {
+			otherDevices = append(otherDevices, client)
+		}
+		return true
+	})
+
+	// 只有发送者自己一个设备（或无设备），无需同步
+	if deviceCount <= 1 || len(otherDevices) == 0 {
 		return
 	}
 
-	// 过滤掉发送消息的设备（排除自己）
-	otherDevices := mathx.FilterSlice(senderClients, func(client *Client) bool {
-		return client.ID != msg.SenderClient
-	})
-
-	if len(otherDevices) == 0 {
+	// 预序列化一次（所有设备复用，消除循环内重复 Marshal）
+	data, err := json.Marshal(msg)
+	if err != nil {
+		h.logger.ErrorKV("多端同步消息序列化失败", "error", err, "message_id", msg.MessageID)
 		return
 	}
 
@@ -662,6 +683,6 @@ func (h *Hub) syncToSenderDevices(msg *HubMessage) {
 
 	// 发送给发送者的其他设备
 	for _, device := range otherDevices {
-		h.sendToClient(device, msg)
+		h.sendToClientSerialized(device, msg, data)
 	}
 }

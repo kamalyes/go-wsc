@@ -34,8 +34,8 @@ func (h *Hub) UpdateHeartbeat(clientID string) {
 		return
 	}
 	now := time.Now()
-	client.LastHeartbeat = now
-	client.LastSeen = now
+	client.SetLastHeartbeat(now)
+	client.SetLastSeen(now)
 }
 
 // UpdatePongTime 更新客户端PONG响应时间（发送PONG时调用）

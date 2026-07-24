@@ -51,7 +51,7 @@ func newTestOfflineMessageRepoContext(t *testing.T) *testOfflineMessageRepoConte
 // cleanup 清理测试数据
 func (c *testOfflineMessageRepoContext) cleanup() {
 	for _, receiverID := range c.cleanupIDs {
-		_ = c.repo.ClearByReceiver(c.ctx, receiverID)
+		_ = c.repo.ClearByReceiver(c.ctx, DefaultNamespace, receiverID)
 	}
 }
 
@@ -81,6 +81,8 @@ func (c *testOfflineMessageRepoContext) createTestRecord(customReceiver ...strin
 		MessageID:      msgID,
 		Sender:         senderID,
 		Receiver:       receiverID,
+		Namespace:      DefaultNamespace,
+		GroupID:        "",
 		SessionID:      sessionID,
 		CompressedData: compressedData,
 		Status:         MessageSendStatusUserOffline,
@@ -177,10 +179,11 @@ func TestOfflineMessageRepository_GetByReceiver(t *testing.T) {
 
 		// 查询前3条
 		messages, err := tc.repo.QueryMessages(tc.ctx, &OfflineMessageFilter{
-			UserID: receiverID,
-			Role:   MessageRoleReceiver,
-			Limit:  3,
-			Cursor: "",
+			UserID:    receiverID,
+			Role:      MessageRoleReceiver,
+			Namespace: DefaultNamespace,
+			Limit:     3,
+			Cursor:    "",
 		})
 		assert.NoError(t, err)
 		assert.Len(t, messages, 3)
@@ -205,10 +208,11 @@ func TestOfflineMessageRepository_GetByReceiver(t *testing.T) {
 
 		// 第一页
 		page1, err := tc.repo.QueryMessages(tc.ctx, &OfflineMessageFilter{
-			UserID: receiverID2,
-			Role:   MessageRoleReceiver,
-			Limit:  5,
-			Cursor: "",
+			UserID:    receiverID2,
+			Role:      MessageRoleReceiver,
+			Namespace: DefaultNamespace,
+			Limit:     5,
+			Cursor:    "",
 		})
 		assert.NoError(t, err)
 		assert.Len(t, page1, 5)
@@ -216,10 +220,11 @@ func TestOfflineMessageRepository_GetByReceiver(t *testing.T) {
 		// 第二页 - 使用游标
 		cursor := page1[len(page1)-1].MessageID
 		page2, err := tc.repo.QueryMessages(tc.ctx, &OfflineMessageFilter{
-			UserID: receiverID2,
-			Role:   MessageRoleReceiver,
-			Limit:  5,
-			Cursor: cursor,
+			UserID:    receiverID2,
+			Role:      MessageRoleReceiver,
+			Namespace: DefaultNamespace,
+			Limit:     5,
+			Cursor:    cursor,
 		})
 		assert.NoError(t, err)
 		assert.Len(t, page2, 5)
@@ -234,10 +239,11 @@ func TestOfflineMessageRepository_GetByReceiver(t *testing.T) {
 
 	t.Run("查询不存在的接收者", func(t *testing.T) {
 		messages, err := tc.repo.QueryMessages(tc.ctx, &OfflineMessageFilter{
-			UserID: "non-existent-user",
-			Role:   MessageRoleReceiver,
-			Limit:  10,
-			Cursor: "",
+			UserID:    "non-existent-user",
+			Role:      MessageRoleReceiver,
+			Namespace: DefaultNamespace,
+			Limit:     10,
+			Cursor:    "",
 		})
 		assert.NoError(t, err)
 		assert.Empty(t, messages)
@@ -261,10 +267,11 @@ func TestOfflineMessageRepository_GetBySender(t *testing.T) {
 		}
 
 		messages, err := tc.repo.QueryMessages(tc.ctx, &OfflineMessageFilter{
-			UserID: senderID,
-			Role:   MessageRoleSender,
-			Limit:  10,
-			Cursor: "",
+			UserID:    senderID,
+			Role:      MessageRoleSender,
+			Namespace: DefaultNamespace,
+			Limit:     10,
+			Cursor:    "",
 		})
 		assert.NoError(t, err)
 		assert.GreaterOrEqual(t, len(messages), 3)
@@ -276,7 +283,7 @@ func TestOfflineMessageRepository_GetBySender(t *testing.T) {
 
 	t.Run("使用cursor分页查询", func(t *testing.T) {
 		// 清空之前的测试数据
-		_ = tc.repo.ClearByReceiver(tc.ctx, tc.idGen.GenerateCorrelationID())
+		_ = tc.repo.ClearByReceiver(tc.ctx, DefaultNamespace, tc.idGen.GenerateCorrelationID())
 
 		senderID2 := tc.idGen.GenerateCorrelationID()
 		// 创建5条消息
@@ -290,10 +297,11 @@ func TestOfflineMessageRepository_GetBySender(t *testing.T) {
 
 		// 第一页：获取2条
 		page1, err := tc.repo.QueryMessages(tc.ctx, &OfflineMessageFilter{
-			UserID: senderID2,
-			Role:   MessageRoleSender,
-			Limit:  2,
-			Cursor: "",
+			UserID:    senderID2,
+			Role:      MessageRoleSender,
+			Namespace: DefaultNamespace,
+			Limit:     2,
+			Cursor:    "",
 		})
 		assert.NoError(t, err)
 		assert.Len(t, page1, 2)
@@ -301,10 +309,11 @@ func TestOfflineMessageRepository_GetBySender(t *testing.T) {
 		// 第二页：使用第一页最后一条的ID作为cursor
 		cursor := page1[len(page1)-1].MessageID
 		page2, err := tc.repo.QueryMessages(tc.ctx, &OfflineMessageFilter{
-			UserID: senderID2,
-			Role:   MessageRoleSender,
-			Limit:  2,
-			Cursor: cursor,
+			UserID:    senderID2,
+			Role:      MessageRoleSender,
+			Namespace: DefaultNamespace,
+			Limit:     2,
+			Cursor:    cursor,
 		})
 		assert.NoError(t, err)
 		assert.GreaterOrEqual(t, len(page2), 1) // 至少还有1条
@@ -333,11 +342,12 @@ func TestOfflineMessageRepository_GetBySender(t *testing.T) {
 
 		// 只查询成功状态的消息
 		messages, err := tc.repo.QueryMessages(tc.ctx, &OfflineMessageFilter{
-			UserID:   senderID3,
-			Role:     MessageRoleSender,
-			Limit:    10,
-			Cursor:   "",
-			Statuses: []MessageSendStatus{MessageSendStatusSuccess},
+			UserID:    senderID3,
+			Role:      MessageRoleSender,
+			Namespace: DefaultNamespace,
+			Limit:     10,
+			Cursor:    "",
+			Statuses:  []MessageSendStatus{MessageSendStatusSuccess},
 		})
 		assert.NoError(t, err)
 
@@ -375,22 +385,23 @@ func TestOfflineMessageRepository_DeleteByMessageIDs(t *testing.T) {
 		}
 
 		// 删除前3条
-		err := tc.repo.DeleteByMessageIDs(tc.ctx, receiverID, messageIDs[:3])
+		err := tc.repo.DeleteByMessageIDs(tc.ctx, DefaultNamespace, receiverID, messageIDs[:3])
 		assert.NoError(t, err)
 
 		// 验证剩余2条
 		remaining, err := tc.repo.QueryMessages(tc.ctx, &OfflineMessageFilter{
-			UserID: receiverID,
-			Role:   MessageRoleReceiver,
-			Limit:  10,
-			Cursor: "",
+			UserID:    receiverID,
+			Role:      MessageRoleReceiver,
+			Namespace: DefaultNamespace,
+			Limit:     10,
+			Cursor:    "",
 		})
 		assert.NoError(t, err)
 		assert.Len(t, remaining, 2)
 	})
 
 	t.Run("删除空列表", func(t *testing.T) {
-		err := tc.repo.DeleteByMessageIDs(tc.ctx, receiverID, []string{})
+		err := tc.repo.DeleteByMessageIDs(tc.ctx, DefaultNamespace, receiverID, []string{})
 		assert.NoError(t, err)
 	})
 }
@@ -411,16 +422,16 @@ func TestOfflineMessageRepository_ClearByReceiver(t *testing.T) {
 		}
 
 		// 验证有消息
-		before, err := tc.repo.GetCountByReceiver(tc.ctx, receiverID)
+		before, err := tc.repo.GetCountByReceiver(tc.ctx, DefaultNamespace, receiverID)
 		require.NoError(t, err)
 		assert.GreaterOrEqual(t, before, int64(10))
 
 		// 清空
-		err = tc.repo.ClearByReceiver(tc.ctx, receiverID)
+		err = tc.repo.ClearByReceiver(tc.ctx, DefaultNamespace, receiverID)
 		assert.NoError(t, err)
 
 		// 验证已清空
-		after, err := tc.repo.GetCountByReceiver(tc.ctx, receiverID)
+		after, err := tc.repo.GetCountByReceiver(tc.ctx, DefaultNamespace, receiverID)
 		assert.NoError(t, err)
 		assert.Zero(t, after)
 	})
@@ -446,7 +457,7 @@ func TestOfflineMessageRepository_GetCount(t *testing.T) {
 			require.NoError(t, err)
 		}
 
-		count, err := tc.repo.GetCountByReceiver(tc.ctx, receiverID)
+		count, err := tc.repo.GetCountByReceiver(tc.ctx, DefaultNamespace, receiverID)
 		assert.NoError(t, err)
 		assert.GreaterOrEqual(t, count, int64(8))
 	})
@@ -460,7 +471,7 @@ func TestOfflineMessageRepository_GetCount(t *testing.T) {
 			require.NoError(t, err)
 		}
 
-		count, err := tc.repo.GetCountBySender(tc.ctx, senderID)
+		count, err := tc.repo.GetCountBySender(tc.ctx, DefaultNamespace, senderID)
 		assert.NoError(t, err)
 		assert.GreaterOrEqual(t, count, int64(5))
 	})
@@ -486,11 +497,12 @@ func TestOfflineMessageRepository_UpdatePushStatus(t *testing.T) {
 
 		// 验证状态 - 指定查询成功状态的消息
 		messages, err := tc.repo.QueryMessages(tc.ctx, &OfflineMessageFilter{
-			UserID:   record.Receiver,
-			Role:     MessageRoleReceiver,
-			Limit:    1,
-			Cursor:   "",
-			Statuses: []MessageSendStatus{MessageSendStatusSuccess},
+			UserID:    record.Receiver,
+			Role:      MessageRoleReceiver,
+			Namespace: DefaultNamespace,
+			Limit:     1,
+			Cursor:    "",
+			Statuses:  []MessageSendStatus{MessageSendStatusSuccess},
 		})
 		require.NoError(t, err)
 		require.Len(t, messages, 1)
@@ -510,10 +522,11 @@ func TestOfflineMessageRepository_UpdatePushStatus(t *testing.T) {
 
 		// 验证状态 - 失败状态的消息仍在待推送队列中
 		messages, err := tc.repo.QueryMessages(tc.ctx, &OfflineMessageFilter{
-			UserID: record.Receiver,
-			Role:   MessageRoleReceiver,
-			Limit:  1,
-			Cursor: "",
+			UserID:    record.Receiver,
+			Role:      MessageRoleReceiver,
+			Namespace: DefaultNamespace,
+			Limit:     1,
+			Cursor:    "",
 		})
 		require.NoError(t, err)
 		require.Len(t, messages, 1)
@@ -551,10 +564,11 @@ func TestOfflineMessageRepository_DeleteExpired(t *testing.T) {
 
 		// 验证未过期的消息仍然存在
 		remaining, err := tc.repo.QueryMessages(tc.ctx, &OfflineMessageFilter{
-			UserID: validRecord.Receiver,
-			Role:   MessageRoleReceiver,
-			Limit:  10,
-			Cursor: "",
+			UserID:    validRecord.Receiver,
+			Role:      MessageRoleReceiver,
+			Namespace: DefaultNamespace,
+			Limit:     10,
+			Cursor:    "",
 		})
 		assert.NoError(t, err)
 		assert.NotEmpty(t, remaining)

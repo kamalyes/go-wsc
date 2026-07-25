@@ -14,6 +14,7 @@ package handler
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
@@ -133,6 +134,12 @@ func NewHybridOfflineMessageHandler(redisClient redis.UniversalClient, db *gorm.
 // 去重机制：
 // - 通过message_id保证消息唯一性（数据库unique索引）
 // - 如果同一条消息重复存储，数据库层面会报错，但不影响功能
+//
+// 性能优化：Redis 和 MySQL 双写并行化
+//   - 原实现：顺序执行 storeToRedis + storeToDatabase，延迟 = T(Redis) + T(MySQL)
+//   - 现实现：并行执行，延迟 = max(T(Redis), T(MySQL))
+//   - msg 为只读（两个 goroutine 仅读取字段，无并发修改）
+//   - queueRepo（Redis 客户端）和 dbRepo（GORM 连接池）均为并发安全
 func (h *HybridOfflineMessageHandler) StoreOfflineMessage(ctx context.Context, userID string, msg *HubMessage) error {
 	if msg == nil {
 		return errorx.WrapError("message is nil")
@@ -143,21 +150,26 @@ func (h *HybridOfflineMessageHandler) StoreOfflineMessage(ctx context.Context, u
 		return nil
 	}
 
-	var errs []error
+	// 并行执行 Redis + MySQL 双写（无共享状态，各写各的错误变量）
+	var redisErr, dbErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
 
-	// 1. 存储到 Redis 队列
-	if err := h.storeToRedis(ctx, userID, msg); err != nil {
-		errs = append(errs, err)
-	}
+	go func() {
+		defer wg.Done()
+		redisErr = h.storeToRedis(ctx, userID, msg)
+	}()
 
-	// 2. 持久化到 MySQL
-	if err := h.storeToDatabase(ctx, msg); err != nil {
-		errs = append(errs, err)
-	}
+	go func() {
+		defer wg.Done()
+		dbErr = h.storeToDatabase(ctx, msg)
+	}()
 
-	// 至少有一个存储成功即可
-	if len(errs) >= 2 {
-		return errorx.WrapError("both storage failed", fmt.Errorf("%v", errs))
+	wg.Wait()
+
+	// 至少有一个存储成功即可（与原逻辑一致）
+	if redisErr != nil && dbErr != nil {
+		return errorx.WrapError("both storage failed", fmt.Errorf("%v", []error{redisErr, dbErr}))
 	}
 
 	return nil
@@ -282,19 +294,17 @@ func (h *HybridOfflineMessageHandler) GetOfflineMessages(ctx context.Context, us
 	if length > 0 {
 		count := mathx.IF(limit > 0, min(int(length), limit), int(length))
 
-		for i := 0; i < count; i++ {
-			msg, err := h.queueRepo.Dequeue(ctx, userID, 1*time.Second)
-			if err != nil {
-				h.logger.ErrorKV("从队列读取离线消息失败",
-					"user_id", userID,
-					"error", err,
-				)
-				break
-			}
-			if msg != nil {
-				messages = append(messages, msg)
-			}
+		// 批量出队：单次 Redis 往返替代 N 次 BLPOP
+		batchMessages, err := h.queueRepo.DequeueBatch(ctx, userID, count)
+		if err != nil {
+			h.logger.ErrorKV("批量读取离线消息失败",
+				"user_id", userID,
+				"count", count,
+				"error", err,
+			)
+			return messages, nextCursor, err
 		}
+		messages = append(messages, batchMessages...)
 
 		// Redis 队列还有剩余，返回特殊游标 "redis:continue"
 		remaining := length - int64(len(messages))

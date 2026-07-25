@@ -93,11 +93,11 @@ func (h *Hub) Broadcast(ctx context.Context, msg *HubMessage) {
 //   - 消息只 json.Marshal 1 次（原方案每客户端 1 次）
 //   - 不走 SendToUserWithRetry（原方案每客户端 Clone×2 + 在线检查 + 入队 + DB 记录）
 //   - 零拷贝遍历（原方案 GetClientsCopy + FilterSlice 双重拷贝）
-func (h *Hub) broadcastToFiltered(condition func(*Client) bool, msg *HubMessage) int {
+func (h *Hub) broadcastToFiltered(ctx context.Context, condition func(*Client) bool, msg *HubMessage) int {
 	// 预序列化 WebSocket 消息（仅一次）
 	data, err := json.Marshal(msg)
 	if err != nil {
-		h.logger.ErrorKV("分组广播消息序列化失败", "error", err)
+		h.logger.ErrorContextKV(ctx, "分组广播消息序列化失败", "error", err)
 		return 0
 	}
 
@@ -144,7 +144,7 @@ func (h *Hub) broadcastToFiltered(condition func(*Client) bool, msg *HubMessage)
 // O(m) 复杂度（m=用户数），按成员ID反查 shardedRegistry，仅锁定相关 shard
 // 相比 broadcastToFiltered 的 O(n)（n=总连接数），群组广播场景大幅减少遍历与锁范围
 // 适用于已知目标用户ID列表的场景（群组广播、多群组广播）
-func (h *Hub) broadcastToUserIDs(userIDs []string, msg *HubMessage) int {
+func (h *Hub) broadcastToUserIDs(ctx context.Context, userIDs []string, msg *HubMessage) int {
 	if len(userIDs) == 0 {
 		return 0
 	}
@@ -152,7 +152,7 @@ func (h *Hub) broadcastToUserIDs(userIDs []string, msg *HubMessage) int {
 	// 预序列化 WebSocket 消息（仅一次）
 	data, err := json.Marshal(msg)
 	if err != nil {
-		h.logger.ErrorKV("群组广播消息序列化失败", "error", err)
+		h.logger.ErrorContextKV(ctx, "群组广播消息序列化失败", "error", err)
 		return 0
 	}
 
@@ -192,28 +192,28 @@ func (h *Hub) broadcastToUserIDs(userIDs []string, msg *HubMessage) int {
 
 // BroadcastByUserType 发送消息给特定用户类型的所有客户端
 func (h *Hub) BroadcastByUserType(ctx context.Context, userType UserType, msg *HubMessage) int {
-	return h.broadcastToFiltered(func(c *Client) bool {
+	return h.broadcastToFiltered(ctx, func(c *Client) bool {
 		return c.UserType == userType
 	}, msg)
 }
 
 // BroadcastToRole 发送消息给特定角色的所有用户
 func (h *Hub) BroadcastToRole(ctx context.Context, role UserRole, msg *HubMessage) int {
-	return h.broadcastToFiltered(func(c *Client) bool {
+	return h.broadcastToFiltered(ctx, func(c *Client) bool {
 		return c.Role == role
 	}, msg)
 }
 
 // BroadcastToClientType 发送消息给特定客户端类型
 func (h *Hub) BroadcastToClientType(ctx context.Context, clientType ClientType, msg *HubMessage) int {
-	return h.broadcastToFiltered(func(c *Client) bool {
+	return h.broadcastToFiltered(ctx, func(c *Client) bool {
 		return c.ClientType == clientType
 	}, msg)
 }
 
 // BroadcastToDepartment 发送消息给特定部门的所有用户
 func (h *Hub) BroadcastToDepartment(ctx context.Context, department Department, msg *HubMessage) int {
-	return h.broadcastToFiltered(func(c *Client) bool {
+	return h.broadcastToFiltered(ctx, func(c *Client) bool {
 		return c.Department == department
 	}, msg)
 }

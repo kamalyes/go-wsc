@@ -19,6 +19,7 @@ package hub
 
 import (
 	"context"
+	"runtime/debug"
 	"time"
 
 	"github.com/kamalyes/go-sqlbuilder"
@@ -32,6 +33,10 @@ import (
 
 // CreateConnectionRecord 从 Client 创建连接记录
 func (h *Hub) CreateConnectionRecord(client *Client) *ConnectionRecord {
+	// 原子读取时间戳快照，避免取字段地址后与 SetLastHeartbeat/SetLastPong 并发写产生数据竞争
+	lastHeartbeat := client.GetLastHeartbeat()
+	lastPong := client.GetLastPong()
+
 	record := &ConnectionRecord{
 		ConnectionID: client.ID,
 		UserID:       client.UserID,
@@ -39,8 +44,8 @@ func (h *Hub) CreateConnectionRecord(client *Client) *ConnectionRecord {
 		NodeIP:       client.NodeIP,
 		NodePort:     client.NodePort,
 		ClientIP:     client.GetClientIP(),
-		LastPingAt:   &client.LastHeartbeat,
-		LastPongAt:   &client.LastPong,
+		LastPingAt:   &lastHeartbeat,
+		LastPongAt:   &lastPong,
 		Protocol:     client.ConnectionType,
 		ClientType:   client.ClientType,
 		ConnectedAt:  client.ConnectedAt,
@@ -62,7 +67,7 @@ func (h *Hub) saveConnectionRecord(record *ConnectionRecord) {
 	syncx.Go().
 		WithTimeout(10 * time.Second).
 		OnPanic(func(r interface{}) {
-			h.logger.ErrorKV("保存连接记录崩溃", "panic", r, "user_id", record.UserID)
+			h.logger.ErrorKV("保存连接记录崩溃", "panic", r, "stack", string(debug.Stack()), "user_id", record.UserID)
 		}).
 		OnError(func(err error) {
 			h.logger.ErrorKV("保存连接记录失败",
@@ -85,7 +90,7 @@ func (h *Hub) updateConnectionOnDisconnect(client *Client, reason DisconnectReas
 	syncx.Go().
 		WithTimeout(5 * time.Second).
 		OnPanic(func(r interface{}) {
-			h.logger.ErrorKV("更新连接断开记录崩溃", "panic", r, "user_id", client.UserID)
+			h.logger.ErrorKV("更新连接断开记录崩溃", "panic", r, "stack", string(debug.Stack()), "user_id", client.UserID)
 		}).
 		ExecWithContext(func(ctx context.Context) error {
 			return h.connectionRecordRepo.MarkDisconnected(ctx, client.ID, reason, 1000, string(reason))
@@ -135,7 +140,7 @@ func (h *Hub) sendWelcomeMessage(client *Client) {
 	}
 	msg.Data["title"] = welcomeMsg.Title
 
-	h.sendToClient(client, msg)
+	h.sendToClient(h.ctx, client, msg)
 }
 
 // ============================================================================

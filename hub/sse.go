@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 )
 
@@ -37,7 +38,7 @@ func (h *Hub) RegisterSSE(userID string, w http.ResponseWriter, userType UserTyp
 
 	// 创建 SSE 客户端（使用统一的 Client 结构）
 	client := &Client{
-		ID:             fmt.Sprintf("sse-%s-%d", userID, time.Now().UnixNano()),
+		ID:             "sse-" + userID + "-" + strconv.FormatInt(time.Now().UnixNano(), 10),
 		UserID:         userID,
 		UserType:       userType,
 		ConnectionType: ConnectionTypeSSE,

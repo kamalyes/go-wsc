@@ -84,13 +84,13 @@ func NewAckManager(ackTimeout time.Duration, maxRetry int) *AckManager {
 // NewAckManagerWithOptions 创建ACK管理器（带选项）
 func NewAckManagerWithOptions(ackTimeout time.Duration, maxRetry int, expireDuration time.Duration, offlineRepo repository.OfflineMessageDBRepository) *AckManager {
 	// 设置合理的默认ACK超时时间
-	ackTimeout = mathx.IF(ackTimeout > 0, ackTimeout, 5*time.Second)
+	ackTimeout = mathx.IfLeZero(ackTimeout, 5*time.Second)
 
 	// 设置合理的最大重试次数
-	maxRetry = mathx.IF(maxRetry >= 0, maxRetry, 3)
+	maxRetry = mathx.IfLeZero(maxRetry, 3)
 
 	// 设置合理的消息过期时间（默认 5 分钟）
-	expireDuration = mathx.IF(expireDuration > 0, expireDuration, 5*time.Minute)
+	expireDuration = mathx.IfLeZero(expireDuration, 5*time.Minute)
 
 	// 创建退避策略
 	b := &backoff.Backoff{
@@ -118,10 +118,10 @@ func (am *AckManager) AddPendingMessage(msg *models.HubMessage) *PendingMessage 
 // AddPendingMessageWithExpire 添加待确认消息(带过期时间)
 func (am *AckManager) AddPendingMessageWithExpire(msg *models.HubMessage, timeout time.Duration, maxRetry int) *PendingMessage {
 	// 设置合理的默认ACK超时时间
-	timeout = mathx.IF(timeout > 0, timeout, am.timeout)
+	timeout = mathx.IfLeZero(timeout, am.timeout)
 
 	// 设置合理的最大重试次数
-	maxRetry = mathx.IF(maxRetry >= 0, maxRetry, am.maxRetry)
+	maxRetry = mathx.IfLeZero(maxRetry, am.maxRetry)
 
 	// 读取配置（加读锁）
 	am.cfgMu.RLock()

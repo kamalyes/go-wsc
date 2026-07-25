@@ -30,6 +30,9 @@ type MessageQueueRepository interface {
 	// Dequeue 出队消息(阻塞式,带看门狗锁)
 	Dequeue(ctx context.Context, queueName string, timeout time.Duration) (*models.HubMessage, error)
 
+	// DequeueBatch 批量出队消息(非阻塞,单次 Redis 往返)
+	DequeueBatch(ctx context.Context, queueName string, count int) ([]*models.HubMessage, error)
+
 	// GetLength 获取队列长度
 	GetLength(ctx context.Context, queueName string) (int64, error)
 
@@ -111,6 +114,52 @@ func (r *RedisMessageQueueRepository) Dequeue(ctx context.Context, queueName str
 	}
 
 	return msg, nil
+}
+
+// DequeueBatch 批量出队消息(非阻塞)
+//
+// 使用 LRANGE + LTRIM 管道一次性读取并移除 count 条消息，
+// 将 N 次 BLPOP 的 N 次 Redis 往返降为 1 次管道调用
+// 适用场景：用户上线拉取离线消息、批量消费等已知队列长度的场景
+//
+// 注意：LRANGE + LTRIM 非原子操作，但离线消息队列按用户隔离（每用户独立队列），
+// 不存在并发消费者，因此管道级别的一致性已足够
+func (r *RedisMessageQueueRepository) DequeueBatch(ctx context.Context, queueName string, count int) ([]*models.HubMessage, error) {
+	if count <= 0 {
+		return nil, nil
+	}
+	key := r.prefix + queueName
+
+	// 管道：LRANGE 读取前 count 条 + LTRIM 移除已读条目
+	pipe := r.client.Pipeline()
+	rangeCmd := pipe.LRange(ctx, key, 0, int64(count-1))
+	pipe.LTrim(ctx, key, int64(count), -1)
+
+	if _, err := pipe.Exec(ctx); err != nil {
+		// LRANGE/LTRIM 不会返回 redis.Nil，管道错误视为真实错误
+		return nil, fmt.Errorf("dequeue batch failed: %w", err)
+	}
+
+	results, err := rangeCmd.Result()
+	if err != nil {
+		return nil, fmt.Errorf("lrange result failed: %w", err)
+	}
+
+	if len(results) == 0 {
+		return nil, nil
+	}
+
+	// 预分配切片，逐条解压
+	messages := make([]*models.HubMessage, 0, len(results))
+	for _, data := range results {
+		msg, err := zipx.ZlibDecompressObject[*models.HubMessage]([]byte(data))
+		if err != nil {
+			return nil, fmt.Errorf(models.ErrMsgDecompressFailed, err)
+		}
+		messages = append(messages, msg)
+	}
+
+	return messages, nil
 }
 
 // GetLength 获取队列长度

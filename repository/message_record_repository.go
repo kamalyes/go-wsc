@@ -12,6 +12,9 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"runtime/debug"
 	"time"
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
@@ -331,60 +334,76 @@ func (r *MessageRecordGormRepository) BatchUpdateStatus(ctx context.Context, mes
 }
 
 // IncrementRetry 增加重试次数
+//
+// 优化说明：原实现 SELECT + UPDATE 两次数据库往返，且 SELECT 读取整行数据仅为
+// 获取 retry_history/first_send_time/max_retry。现合并为单条 UPDATE：
+//   - retry_history 使用 MySQL JSON_ARRAY_APPEND 追加（无需读取已有数组）
+//   - first_send_time/status/success_time/failure_reason 全部用 CASE WHEN 条件更新
+//   - 状态判定依据 attempt.Success 与 retry_count vs max_retry 列
+//
+// 数据库往返从 2 次降为 1 次，消除 SELECT 整行读取与 Go 侧 retry_history 反序列化
 func (r *MessageRecordGormRepository) IncrementRetry(ctx context.Context, messageID string, attempt RetryAttempt) error {
-	var record MessageSendRecord
-	err := r.db.WithContext(ctx).Where(QueryMessageIDWhere, messageID).First(&record).Error
-	if err != nil {
-		return err
-	}
-
 	now := time.Now()
-	record.RetryHistory = append(record.RetryHistory, attempt)
-	record.RetryCount = attempt.AttemptNumber
 
-	updates := map[string]interface{}{
-		"retry_count":    record.RetryCount,
-		"retry_history":  record.RetryHistory,
-		"status":         MessageSendStatusRetrying,
-		"last_send_time": &now, // 🔥 每次重试都更新最后发送时间
+	// 序列化重试记录为 JSON，用于 JSON_ARRAY_APPEND
+	attemptJSON, err := json.Marshal(attempt)
+	if err != nil {
+		return fmt.Errorf("序列化重试记录失败: %w", err)
 	}
 
-	// 🔥 如果是首次重试（first_send_time 为 NULL）,设置首次发送时间
-	if record.FirstSendTime == nil {
-		updates["first_send_time"] = &now
-	}
-
+	// 布尔转 0/1 供 SQL CASE WHEN 判定（避免驱动对 bool 参数的歧义）
+	successFlag := 0
 	if attempt.Success {
-		// 🔥 重试成功,设置成功时间
-		updates["status"] = MessageSendStatusSuccess
-		updates["success_time"] = &now
-	} else if record.RetryCount >= record.MaxRetry {
-		// 🔥 超过最大重试次数,设置失败状态和原因
-		updates["status"] = MessageSendStatusFailed
-		updates["failure_reason"] = FailureReasonMaxRetry
-		if attempt.Error != "" {
-			updates["error_message"] = attempt.Error
-		}
-	} else {
-		// 🔥 重试中但未达到最大次数,记录错误信息
-		if attempt.Error != "" {
-			updates["error_message"] = attempt.Error
-		}
+		successFlag = 1
+	}
+	hasError := 0
+	if attempt.Error != "" {
+		hasError = 1
 	}
 
-	return r.db.WithContext(ctx).Model(&record).Updates(updates).Error
+	// 单条 UPDATE 完成所有更新，WHERE message_id = ? 与 UpdateStatus 保持一致
+	result := r.db.WithContext(ctx).Exec(
+		`UPDATE `+MessageSendRecord{}.TableName()+` SET
+			retry_count = ?,
+			retry_history = JSON_ARRAY_APPEND(IFNULL(retry_history, JSON_ARRAY()), '$', CAST(? AS JSON)),
+			last_send_time = ?,
+			first_send_time = CASE WHEN first_send_time IS NULL THEN ? ELSE first_send_time END,
+			status = CASE
+				WHEN ? = 1 THEN ?
+				WHEN ? >= max_retry THEN ?
+				ELSE ?
+			END,
+			success_time = CASE WHEN ? = 1 THEN ? ELSE success_time END,
+			failure_reason = CASE WHEN ? = 0 AND ? >= max_retry THEN ? ELSE failure_reason END,
+			error_message = CASE WHEN ? = 0 AND ? = 1 THEN ? ELSE error_message END,
+			updated_at = ?
+		WHERE message_id = ?`,
+		attempt.AttemptNumber,
+		string(attemptJSON),
+		now,
+		now,
+		successFlag, MessageSendStatusSuccess,
+		attempt.AttemptNumber, MessageSendStatusFailed,
+		MessageSendStatusRetrying,
+		successFlag, now,
+		successFlag, attempt.AttemptNumber, FailureReasonMaxRetry,
+		successFlag, hasError, attempt.Error,
+		now,
+		messageID,
+	)
+
+	return result.Error
 }
 
 // GetStatistics 获取统计信息
+//
+// 优化说明：原实现先做 1 次总数 COUNT，再对 8 种状态各做 1 次 COUNT，共 9 次数据库往返。
+// 现合并为单条 GROUP BY 查询，数据库往返从 9 次降为 1 次。
+// 所有状态预初始化为 0，保证返回结构与原实现一致（未出现的状态也返回 0）。
 func (r *MessageRecordGormRepository) GetStatistics(ctx context.Context) (map[string]int64, error) {
 	stats := make(map[string]int64)
 
-	// 总数
-	var total int64
-	r.db.WithContext(ctx).Model(&MessageSendRecord{}).Count(&total)
-	stats["total"] = total
-
-	// 按状态统计
+	// 预初始化所有状态为 0，保持与原实现一致的返回结构
 	statuses := []MessageSendStatus{
 		MessageSendStatusPending,
 		MessageSendStatusSending,
@@ -395,12 +414,32 @@ func (r *MessageRecordGormRepository) GetStatistics(ctx context.Context) (map[st
 		MessageSendStatusUserOffline,
 		MessageSendStatusExpired,
 	}
-
-	for _, status := range statuses {
-		var count int64
-		r.db.WithContext(ctx).Model(&MessageSendRecord{}).Where("status = ?", status).Count(&count)
-		stats[string(status)] = count
+	for _, s := range statuses {
+		stats[string(s)] = 0
 	}
+
+	// 单条 GROUP BY 查询替代 9 次独立 COUNT 查询
+	type statusCount struct {
+		Status string
+		Count  int64
+	}
+	var results []statusCount
+
+	err := r.db.WithContext(ctx).
+		Model(&MessageSendRecord{}).
+		Select("status as status, COUNT(*) as count").
+		Group("status").
+		Scan(&results).Error
+	if err != nil {
+		return nil, err
+	}
+
+	var total int64
+	for _, sc := range results {
+		stats[sc.Status] = sc.Count
+		total += sc.Count
+	}
+	stats["total"] = total
 
 	return stats, nil
 }
@@ -434,7 +473,7 @@ func (r *MessageRecordGormRepository) startCleanupScheduler(ctx context.Context,
 		}).
 		// Panic 处理
 		OnPanic(func(rec any) {
-			r.logger.Errorf("⚠️ 消息发送记录清理任务 panic: %v", rec)
+			r.logger.Errorf("⚠️ 消息发送记录清理任务 panic: %v, stack: %s", rec, debug.Stack())
 		}).
 		// 优雅关闭
 		OnShutdown(func() {

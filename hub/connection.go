@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"runtime/debug"
 
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
@@ -59,7 +60,7 @@ func (h *Hub) disconnectKickedClient(ctx context.Context, client *Client, reason
 	if h.clientDisconnectCallback != nil {
 		syncx.Go().
 			OnPanic(func(r any) {
-				h.logger.ErrorKV("踢出用户断开回调 panic", "panic", r, "client_id", client.ID)
+				h.logger.ErrorKV("踢出用户断开回调 panic", "panic", r, "stack", string(debug.Stack()), "client_id", client.ID)
 			}).
 			OnError(func(err error) {
 				h.logger.ErrorKV("踢出用户时断开回调执行失败",

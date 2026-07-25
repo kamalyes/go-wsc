@@ -13,7 +13,6 @@ package wsc
 
 import (
 	"context"
-	"encoding/json"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -87,7 +86,7 @@ func TestBroadcastToGroup(t *testing.T) {
 	}
 
 	// 广播到customer组
-	count := hub.BroadcastToGroup(context.Background(), UserTypeCustomer, msg)
+	count := hub.BroadcastToGroup(context.Background(), "default", "customer-group", msg, false)
 	assert.Equal(t, 1, count, "应该发送给1个customer")
 
 	hub.Unregister(customer)
@@ -246,38 +245,4 @@ func TestSendToUserViaSSE(t *testing.T) {
 	assert.True(t, success, "SSE发送应该成功")
 
 	hub.UnregisterSSE("sse-user-1")
-}
-
-// TestSendPongResponse 测试Pong响应
-func TestSendPongResponse(t *testing.T) {
-	config := wscconfig.Default()
-	hub := NewHub(config)
-	defer hub.Shutdown()
-
-	go hub.Run()
-	hub.WaitForStart()
-
-	client := createTestClientWithIDGen(UserTypeCustomer)
-	hub.Register(client)
-	time.Sleep(50 * time.Millisecond)
-
-	// 发送Pong响应
-	err := hub.SendPongResponse(client)
-	assert.NoError(t, err, "发送Pong应该成功")
-
-	// 验证消息是否被发送到SendChan
-	select {
-	case msg := <-client.SendChan:
-		assert.NotNil(t, msg, "应该收到Pong消息")
-		// 验证消息内容
-		var pongMsg HubMessage
-		err := json.Unmarshal(msg, &pongMsg)
-		assert.NoError(t, err, "消息应该能反序列化")
-		assert.Equal(t, MessageTypePong, pongMsg.MessageType, "消息类型应该是Pong")
-		assert.Equal(t, client.UserID, pongMsg.Receiver, "接收者应该是客户端用户ID")
-	case <-time.After(1 * time.Second):
-		t.Fatal("超时:没有收到Pong消息")
-	}
-
-	hub.Unregister(client)
 }

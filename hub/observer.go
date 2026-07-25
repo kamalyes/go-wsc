@@ -22,6 +22,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"runtime/debug"
 	"sync/atomic"
 	"time"
 
@@ -80,7 +81,7 @@ func (h *Hub) IsObserver(userID string) bool {
 // notifyObservers 通知观察者（内部方法）
 // namespace+groupID 定位观察范围，通过三级索引 O(k) 查找匹配的观察者
 // 异步并发投递，不阻塞主流程
-func (h *Hub) notifyObservers(msg *HubMessage, namespace, groupID string) {
+func (h *Hub) notifyObservers(ctx context.Context, msg *HubMessage, namespace, groupID string) {
 	// 观察者模块未启用时直接返回
 	if !h.shardedRegistry.ObserverEnabled() {
 		return
@@ -89,7 +90,7 @@ func (h *Hub) notifyObservers(msg *HubMessage, namespace, groupID string) {
 	// 快速检查：无观察者时直接返回 - O(1)
 	observerCount := h.shardedRegistry.GetObserverUserCount()
 
-	h.logger.DebugKV("开始通知观察者",
+	h.logger.DebugContextKV(ctx, "开始通知观察者",
 		"message_id", msg.MessageID,
 		"namespace", namespace,
 		"group_id", groupID,
@@ -100,16 +101,16 @@ func (h *Hub) notifyObservers(msg *HubMessage, namespace, groupID string) {
 	)
 
 	if observerCount == 0 {
-		h.logger.DebugKV("本节点无观察者，仅广播到其他节点",
+		h.logger.DebugContextKV(ctx, "本节点无观察者，仅广播到其他节点",
 			"message_id", msg.MessageID,
 		)
-		h.broadcastObserverNotification(msg, namespace, groupID)
+		h.broadcastObserverNotification(ctx, msg, namespace, groupID)
 		return
 	}
 
 	// 三级索引查找：O(k) k=匹配的观察者设备数
 	observers := h.shardedRegistry.GetObserversForMessage(namespace, groupID)
-	h.logger.DebugKV("准备通知本地观察者",
+	h.logger.DebugContextKV(ctx, "准备通知本地观察者",
 		"message_id", msg.MessageID,
 		"namespace", namespace,
 		"group_id", groupID,
@@ -119,7 +120,7 @@ func (h *Hub) notifyObservers(msg *HubMessage, namespace, groupID string) {
 	// 异步并发通知所有观察者，不阻塞主流程
 	syncx.Go().
 		OnPanic(func(r any) {
-			h.logger.ErrorKV("通知观察者 panic", "panic", r, "message_id", msg.MessageID)
+			h.logger.ErrorContextKV(ctx, "通知观察者 panic", "panic", r, "stack", string(debug.Stack()), "message_id", msg.MessageID)
 		}).
 		Exec(func() {
 			// 预构建观察者专用消息（Clone + metadata），所有观察者共享同一份
@@ -132,7 +133,7 @@ func (h *Hub) notifyObservers(msg *HubMessage, namespace, groupID string) {
 			// 预序列化一次（所有观察者复用同一份 msgData）
 			msgData, err := json.Marshal(observerMsg)
 			if err != nil {
-				h.logger.ErrorKV("序列化观察者消息失败",
+				h.logger.ErrorContextKV(ctx, "序列化观察者消息失败",
 					"message_id", msg.MessageID, "error", err)
 				return
 			}
@@ -145,7 +146,7 @@ func (h *Hub) notifyObservers(msg *HubMessage, namespace, groupID string) {
 					successCount.Add(1)
 				}).
 				OnError(func(idx int, client *Client, err error) {
-					h.logger.WarnKV("通知观察者失败",
+					h.logger.WarnContextKV(ctx, "通知观察者失败",
 						"observer_id", client.UserID,
 						"client_id", client.ID,
 						"message_id", msgID,
@@ -153,18 +154,19 @@ func (h *Hub) notifyObservers(msg *HubMessage, namespace, groupID string) {
 					)
 				}).
 				OnPanic(func(idx int, client *Client, panicVal any) {
-					h.logger.WarnKV("向观察者发送消息时发生 panic(通道可能已关闭)",
+					h.logger.WarnContextKV(ctx, "向观察者发送消息时发生 panic(通道可能已关闭)",
 						"observer_id", client.UserID,
 						"client_id", client.ID,
 						"message_id", msgID,
 						"panic", panicVal,
+						"stack", string(debug.Stack()),
 					)
 				}).
 				Execute(func(idx int, observer *Client) (error, error) {
-					return h.sendToObserver(observer, msgID, msgData), nil
+					return h.sendToObserver(ctx, observer, msgID, msgData), nil
 				})
 
-			h.logger.DebugKV("已通知本地观察者",
+			h.logger.DebugContextKV(ctx, "已通知本地观察者",
 				"message_id", msgID,
 				"sender", msg.Sender,
 				"receiver", msg.Receiver,
@@ -175,14 +177,14 @@ func (h *Hub) notifyObservers(msg *HubMessage, namespace, groupID string) {
 		})
 
 	// 广播观察者通知到其他节点
-	h.broadcastObserverNotification(msg, namespace, groupID)
+	h.broadcastObserverNotification(ctx, msg, namespace, groupID)
 }
 
 // broadcastObserverNotification 广播观察者通知到其他节点
 //
 // 统一走 routeToCluster 入口，由其集中决策 gRPC 直连与 PubSub 兜底
 // groupID 通过 GroupIDs 字段传递，接收端从 distMsg.GroupIDs 提取
-func (h *Hub) broadcastObserverNotification(msg *HubMessage, namespace, groupID string) {
+func (h *Hub) broadcastObserverNotification(ctx context.Context, msg *HubMessage, namespace, groupID string) {
 	// 单机模式：无 PubSub 且无 gRPC，不跨节点
 	if h.pubsub == nil && !h.IsGRPCEnabled() {
 		return
@@ -191,7 +193,7 @@ func (h *Hub) broadcastObserverNotification(msg *HubMessage, namespace, groupID 
 	// 异步广播，不阻塞主流程
 	syncx.Go().
 		OnPanic(func(r any) {
-			h.logger.ErrorKV("广播观察者通知 panic", "panic", r, "message_id", msg.MessageID)
+			h.logger.ErrorContextKV(ctx, "广播观察者通知 panic", "panic", r, "stack", string(debug.Stack()), "message_id", msg.MessageID)
 		}).
 		Exec(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -207,12 +209,12 @@ func (h *Hub) broadcastObserverNotification(msg *HubMessage, namespace, groupID 
 			}
 
 			if err := h.routeToCluster(ctx, msg, opts); err != nil {
-				h.logger.WarnKV("广播观察者通知失败",
+				h.logger.WarnContextKV(ctx, "广播观察者通知失败",
 					"error", err,
 					"message_id", msg.MessageID,
 				)
 			} else {
-				h.logger.DebugKV("已广播观察者通知",
+				h.logger.DebugContextKV(ctx, "已广播观察者通知",
 					"message_id", msg.MessageID,
 				)
 			}
@@ -221,13 +223,13 @@ func (h *Hub) broadcastObserverNotification(msg *HubMessage, namespace, groupID 
 
 // sendToObserver 发送预序列化消息给单个观察者设备 - O(1)
 // msgData 由调用方预序列化一次，所有观察者共享，消除逐个 Clone+Marshal 开销
-func (h *Hub) sendToObserver(observer *Client, msgID string, msgData []byte) error {
+func (h *Hub) sendToObserver(ctx context.Context, observer *Client, msgID string, msgData []byte) error {
 	if observer == nil {
 		return ErrClientNotFound
 	}
 
 	if observer.SendChan == nil {
-		h.logger.WarnKV("观察者发送通道为空",
+		h.logger.WarnContextKV(ctx, "观察者发送通道为空",
 			"observer_id", observer.UserID,
 			"client_id", observer.ID,
 			"message_id", msgID,
@@ -236,7 +238,7 @@ func (h *Hub) sendToObserver(observer *Client, msgID string, msgData []byte) err
 	}
 
 	if observer.IsClosed() {
-		h.logger.DebugKV("观察者已关闭，跳过发送",
+		h.logger.DebugContextKV(ctx, "观察者已关闭，跳过发送",
 			"observer_id", observer.UserID,
 			"client_id", observer.ID,
 			"message_id", msgID,
@@ -248,7 +250,7 @@ func (h *Hub) sendToObserver(observer *Client, msgID string, msgData []byte) err
 		return nil
 	}
 
-	h.logger.WarnKV("观察者缓冲区已满或已关闭，丢弃消息",
+	h.logger.WarnContextKV(ctx, "观察者缓冲区已满或已关闭，丢弃消息",
 		"observer_id", observer.UserID,
 		"client_id", observer.ID,
 		"message_id", msgID,

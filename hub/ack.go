@@ -13,6 +13,7 @@ package hub
 
 import (
 	"context"
+	"runtime/debug"
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/contextx"
@@ -169,7 +170,7 @@ func (h *Hub) recordAckRetryAttempt(messageID string, attemptNum int, err error)
 
 	syncx.Go().
 		OnPanic(func(r interface{}) {
-			h.logger.ErrorKV("ACK重试记录更新崩溃", "panic", r, "message_id", messageID)
+			h.logger.ErrorKV("ACK重试记录更新崩溃", "panic", r, "stack", string(debug.Stack()), "message_id", messageID)
 		}).
 		ExecWithContext(func(ctx context.Context) error {
 			return h.messageRecordRepo.IncrementRetry(ctx, messageID, retryAttempt)

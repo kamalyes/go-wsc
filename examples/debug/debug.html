@@ -1,0 +1,399 @@
+<!--
+ * @Author: kamalyes 501893067@qq.com
+ * @Date: 2026-07-26 02:00:32
+ * @LastEditors: kamalyes 501893067@qq.com
+ * @LastEditTime: 2026-07-27 20:10:00
+ * @FilePath: \go-wsc\examples\debug\debug.html
+ * @Description: go-wsc 可视化调试台（多主题版）
+ *
+ * Copyright (c) 2026 by kamalyes, All Rights Reserved.
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="aurora">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>go-wsc 调试台</title>
+<style>
+/* ============ 主题：极光白（默认浅色）============ */
+:root,[data-theme="aurora"]{
+  --bg:#eef2f7;--bg-grad1:rgba(59,130,246,.10);--bg-grad2:rgba(139,92,246,.10);
+  --panel:#ffffff;--panel-2:#f8fafc;--panel-glass:rgba(255,255,255,.75);
+  --bd:#e2e8f0;--bd-2:#cbd5e1;
+  --tx:#0f172a;--td:#475569;--td-2:#94a3b8;
+  --ac:#3b82f6;--ac-2:#2563eb;--pp:#8b5cf6;--pp-2:#7c3aed;
+  --gn:#10b981;--rd:#ef4444;--yl:#f59e0b;--or:#f97316;
+  --grad:linear-gradient(135deg,#3b82f6 0%,#8b5cf6 100%);
+  --grad-text:linear-gradient(135deg,#2563eb 0%,#7c3aed 100%);
+  --on-grad:#ffffff;
+  --shadow:0 10px 30px rgba(15,23,42,.10);--shadow-sm:0 4px 14px rgba(15,23,42,.06);
+  --glow:0 0 0 3px rgba(59,130,246,.15);
+  --input-bg:#ffffff;--log-bg:#f8fafc;--log-hover:rgba(59,130,246,.05);
+  --th-1:#3b82f6;--th-2:#8b5cf6;
+}
+/* ============ 主题：薄荷青（浅色）============ */
+[data-theme="mint"]{
+  --bg:#ecfdf5;--bg-grad1:rgba(16,185,129,.10);--bg-grad2:rgba(6,182,212,.10);
+  --panel:#ffffff;--panel-2:#f0fdfa;--panel-glass:rgba(255,255,255,.78);
+  --bd:#d1fae5;--bd-2:#a7f3d0;
+  --tx:#064e3b;--td:#4b5563;--td-2:#9ca3af;
+  --ac:#10b981;--ac-2:#059669;--pp:#06b6d4;--pp-2:#0891b2;
+  --gn:#10b981;--rd:#ef4444;--yl:#f59e0b;--or:#f97316;
+  --grad:linear-gradient(135deg,#10b981 0%,#06b6d4 100%);
+  --grad-text:linear-gradient(135deg,#059669 0%,#0891b2 100%);
+  --on-grad:#ffffff;
+  --shadow:0 10px 30px rgba(6,78,59,.10);--shadow-sm:0 4px 14px rgba(6,78,59,.06);
+  --glow:0 0 0 3px rgba(16,185,129,.18);
+  --input-bg:#ffffff;--log-bg:#f0fdfa;--log-hover:rgba(16,185,129,.06);
+  --th-1:#10b981;--th-2:#06b6d4;
+}
+/* ============ 主题：暖阳（浅色）============ */
+[data-theme="warm"]{
+  --bg:#fff7ed;--bg-grad1:rgba(249,115,22,.10);--bg-grad2:rgba(236,72,153,.10);
+  --panel:#ffffff;--panel-2:#fffbeb;--panel-glass:rgba(255,255,255,.78);
+  --bd:#fed7aa;--bd-2:#fdba74;
+  --tx:#7c2d12;--td:#7c3a2c;--td-2:#a8a29e;
+  --ac:#f97316;--ac-2:#ea580c;--pp:#ec4899;--pp-2:#db2777;
+  --gn:#10b981;--rd:#ef4444;--yl:#f59e0b;--or:#f97316;
+  --grad:linear-gradient(135deg,#f97316 0%,#ec4899 100%);
+  --grad-text:linear-gradient(135deg,#ea580c 0%,#db2777 100%);
+  --on-grad:#ffffff;
+  --shadow:0 10px 30px rgba(124,45,18,.10);--shadow-sm:0 4px 14px rgba(124,45,18,.06);
+  --glow:0 0 0 3px rgba(249,115,22,.18);
+  --input-bg:#ffffff;--log-bg:#fffbeb;--log-hover:rgba(249,115,22,.06);
+  --th-1:#f97316;--th-2:#ec4899;
+}
+/* ============ 主题：午夜深（深色）============ */
+[data-theme="dark"]{
+  --bg:#0a0e1a;--bg-grad1:rgba(34,211,238,.10);--bg-grad2:rgba(168,85,247,.10);
+  --panel:rgba(22,28,46,.85);--panel-2:rgba(30,38,60,.7);--panel-glass:rgba(22,28,46,.72);
+  --bd:rgba(148,163,184,.16);--bd-2:rgba(148,163,184,.28);
+  --tx:#e2e8f0;--td:#94a3b8;--td-2:#64748b;
+  --ac:#22d3ee;--ac-2:#67e8f9;--pp:#a855f7;--pp-2:#c084fc;
+  --gn:#34d399;--rd:#f43f5e;--yl:#fbbf24;--or:#fb923c;
+  --grad:linear-gradient(135deg,#22d3ee 0%,#a855f7 100%);
+  --grad-text:linear-gradient(135deg,#22d3ee 0%,#a855f7 100%);
+  --on-grad:#0a0e1a;
+  --shadow:0 12px 40px rgba(0,0,0,.45);--shadow-sm:0 4px 16px rgba(0,0,0,.35);
+  --glow:0 0 0 3px rgba(34,211,238,.15);
+  --input-bg:rgba(10,14,26,.6);--log-bg:rgba(5,8,16,.6);--log-hover:rgba(34,211,238,.05);
+  --th-1:#22d3ee;--th-2:#a855f7;
+}
+
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:
+    radial-gradient(ellipse 80% 50% at 20% 0%,var(--bg-grad1),transparent 60%),
+    radial-gradient(ellipse 60% 50% at 80% 0%,var(--bg-grad2),transparent 60%),
+    var(--bg);
+  color:var(--tx);
+  font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  font-size:14px;line-height:1.5;overflow:hidden;transition:background .3s,color .3s;
+}
+.app{display:grid;grid-template-rows:auto 1fr;height:100vh}
+
+/* ========== Header ========== */
+.header{padding:14px 18px 12px;border-bottom:1px solid var(--bd);background:var(--panel-glass);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px)}
+.header-top{display:flex;align-items:center;gap:14px;margin-bottom:12px}
+.brand{display:flex;align-items:center;gap:10px}
+.brand .logo{width:38px;height:38px;border-radius:11px;background:var(--grad);display:flex;align-items:center;justify-content:center;font-size:20px;box-shadow:var(--shadow-sm)}
+.brand h1{font-size:17px;font-weight:700;letter-spacing:.2px;background:var(--grad-text);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.brand .sub{font-size:11px;color:var(--td-2);letter-spacing:.8px;text-transform:uppercase}
+.guide{flex:1;background:linear-gradient(135deg,var(--bg-grad1),var(--bg-grad2));border:1px solid var(--bd);border-radius:10px;padding:8px 14px;font-size:12px;color:var(--td);line-height:1.6}
+.guide b{color:var(--ac-2)}
+.guide .arrow{color:var(--pp);margin:0 4px}
+
+/* ========== 主题切换器 ========== */
+.theme-switcher{display:flex;gap:5px;padding:5px;background:var(--panel-2);border:1px solid var(--bd);border-radius:24px;box-shadow:var(--shadow-sm)}
+.th-btn{width:24px;height:24px;border-radius:50%;border:2px solid transparent;cursor:pointer;padding:0;transition:all .2s;background:linear-gradient(135deg,var(--c1),var(--c2));position:relative}
+.th-btn:hover{transform:scale(1.15)}
+.th-btn.active{border-color:var(--tx);box-shadow:0 0 0 2px var(--panel)}
+.th-btn[data-th="aurora"]{--c1:#3b82f6;--c2:#8b5cf6}
+.th-btn[data-th="mint"]{--c1:#10b981;--c2:#06b6d4}
+.th-btn[data-th="warm"]{--c1:#f97316;--c2:#ec4899}
+.th-btn[data-th="dark"]{--c1:#22d3ee;--c2:#a855f7}
+
+/* ========== Stats 仪表盘 ========== */
+.stats{display:grid;grid-template-columns:repeat(6,1fr);gap:10px}
+.stat{background:var(--panel);border:1px solid var(--bd);border-radius:11px;padding:10px 12px;position:relative;overflow:hidden;transition:all .2s;box-shadow:var(--shadow-sm)}
+.stat:hover{border-color:var(--ac);transform:translateY(-2px);box-shadow:var(--shadow)}
+.stat::before{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:var(--grad);opacity:.85}
+.stat .v{font-size:22px;font-weight:700;background:var(--grad-text);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;line-height:1.2;font-family:"JetBrains Mono","Cascadia Code",Consolas,monospace}
+.stat .l{font-size:11px;color:var(--td);margin-top:3px;letter-spacing:.3px}
+.stat .ic{position:absolute;top:8px;right:10px;font-size:14px;opacity:.45}
+
+/* ========== 主体布局 ========== */
+.main{display:grid;grid-template-columns:minmax(680px,1.4fr) 1fr;gap:14px;padding:14px;overflow:hidden;min-height:0}
+.ops{display:grid;grid-template-columns:1fr 1fr;gap:12px;overflow-y:auto;align-content:start;padding-right:4px}
+.ops::-webkit-scrollbar,.log-area::-webkit-scrollbar,.tok-disp::-webkit-scrollbar{width:8px;height:8px}
+.ops::-webkit-scrollbar-thumb,.log-area::-webkit-scrollbar-thumb,.tok-disp::-webkit-scrollbar-thumb{background:var(--bd-2);border-radius:4px}
+.ops::-webkit-scrollbar-thumb:hover,.log-area::-webkit-scrollbar-thumb:hover{background:var(--td-2)}
+.pn{background:var(--panel);border:1px solid var(--bd);border-radius:14px;padding:14px;box-shadow:var(--shadow-sm);transition:border-color .2s,box-shadow .2s}
+.pn:hover{border-color:var(--bd-2);box-shadow:var(--shadow)}
+.pn.span2{grid-column:1 / -1}
+.pn h2{font-size:13px;color:var(--tx);font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.pn h2 .step{background:var(--grad);color:var(--on-grad);width:22px;height:22px;border-radius:7px;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:700}
+.pn h2 .tag{margin-left:auto;background:color-mix(in srgb,var(--ac) 14%,transparent);color:var(--ac-2);border:1px solid color-mix(in srgb,var(--ac) 30%,transparent);padding:2px 8px;border-radius:6px;font-size:10px;font-weight:600;letter-spacing:.5px}
+
+/* ========== 表单 ========== */
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+.row:last-child{margin-bottom:0}
+label{color:var(--td);min-width:72px;font-size:12px;font-weight:500}
+input,select,textarea{
+  background:var(--input-bg);border:1px solid var(--bd);color:var(--tx);
+  padding:7px 11px;border-radius:8px;font-family:inherit;font-size:13px;transition:all .15s;
+}
+input:hover,select:hover,textarea:hover{border-color:var(--bd-2)}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--ac);box-shadow:var(--glow)}
+input[type=text],input[type=number],select{width:160px}
+input[type=password]{width:200px}
+textarea{width:100%;resize:vertical;min-height:48px;font-family:"JetBrains Mono","Cascadia Code",Consolas,monospace}
+input::placeholder,textarea::placeholder{color:var(--td-2)}
+
+/* ========== 按钮 ========== */
+button{
+  background:var(--panel-2);border:1px solid var(--bd);color:var(--tx);
+  padding:7px 14px;border-radius:8px;cursor:pointer;font-family:inherit;font-size:13px;font-weight:500;
+  transition:all .15s;display:inline-flex;align-items:center;gap:5px;white-space:nowrap;
+}
+button:hover{border-color:var(--ac);color:var(--ac-2);transform:translateY(-1px);box-shadow:var(--shadow-sm)}
+button:active{transform:translateY(0)}
+button.primary{background:var(--grad);color:var(--on-grad);border:none;font-weight:600;box-shadow:0 4px 14px color-mix(in srgb,var(--ac) 35%,transparent)}
+button.primary:hover{color:var(--on-grad);box-shadow:0 6px 20px color-mix(in srgb,var(--pp) 40%,transparent)}
+button.danger{border-color:color-mix(in srgb,var(--rd) 50%,transparent);color:var(--rd)}
+button.danger:hover{background:var(--rd);color:#fff;border-color:var(--rd);box-shadow:0 4px 14px color-mix(in srgb,var(--rd) 35%,transparent)}
+button.success{border-color:color-mix(in srgb,var(--gn) 50%,transparent);color:var(--gn)}
+button.success:hover{background:var(--gn);color:#fff;border-color:var(--gn);box-shadow:0 4px 14px color-mix(in srgb,var(--gn) 35%,transparent)}
+button.icon-only{padding:6px 9px}
+.btn-grp{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:10px}
+
+/* ========== 状态徽章 ========== */
+.badge{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:20px;font-size:12px;font-weight:600}
+.badge.on{background:color-mix(in srgb,var(--gn) 16%,transparent);color:var(--gn);border:1px solid color-mix(in srgb,var(--gn) 40%,transparent)}
+.badge.on::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--gn);box-shadow:0 0 0 0 color-mix(in srgb,var(--gn) 60%,transparent);animation:pulse 2s infinite}
+.badge.off{background:color-mix(in srgb,var(--td) 12%,transparent);color:var(--td);border:1px solid var(--bd)}
+.badge.off::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--td-2)}
+@keyframes pulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--gn) 60%,transparent)}70%{box-shadow:0 0 0 8px transparent}100%{box-shadow:0 0 0 0 transparent}}
+
+/* ========== 统计小卡 ========== */
+.mini-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}
+.mini{background:var(--panel-2);border:1px solid var(--bd);border-radius:9px;padding:9px 10px;text-align:center;transition:all .2s}
+.mini:hover{border-color:var(--ac);transform:translateY(-1px)}
+.mini .v{font-size:18px;font-weight:700;background:var(--grad-text);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;font-family:"JetBrains Mono",monospace;line-height:1.2}
+.mini .l{font-size:10px;color:var(--td);margin-top:2px;letter-spacing:.2px}
+
+/* ========== Tabs ========== */
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--bd);margin-bottom:12px}
+.tab{padding:8px 16px;cursor:pointer;border-bottom:2px solid transparent;color:var(--td);font-size:13px;font-weight:500;border-radius:8px 8px 0 0;transition:all .15s}
+.tab:hover{color:var(--tx);background:color-mix(in srgb,var(--ac) 6%,transparent)}
+.tab.active{color:var(--ac-2);border-bottom-color:var(--ac);background:color-mix(in srgb,var(--ac) 10%,transparent)}
+.tc{display:none}.tc.active{display:block;animation:fadeIn .2s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+
+/* ========== Token 显示 ========== */
+.tok-disp{background:var(--panel-2);border:1px solid var(--bd);border-radius:8px;padding:8px 10px;word-break:break-all;font-family:"JetBrains Mono",monospace;font-size:12px;max-height:80px;overflow-y:auto;line-height:1.5;color:var(--ac-2)}
+.hint{color:var(--td);font-size:11px;margin-top:8px;padding:7px 11px;background:color-mix(in srgb,var(--pp) 8%,transparent);border-left:2px solid var(--pp);border-radius:0 6px 6px 0;line-height:1.6}
+.cb{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.cb label{min-width:auto;cursor:pointer;display:flex;align-items:center;gap:5px;font-size:12px}
+.cb input[type=checkbox]{width:15px;height:15px;accent-color:var(--ac);cursor:pointer}
+
+/* ========== 进度条 ========== */
+.progress{height:6px;background:var(--panel-2);border-radius:3px;margin-top:10px;overflow:hidden;border:1px solid var(--bd)}
+.progress > div{height:100%;background:var(--grad);transition:width .3s;border-radius:3px}
+
+/* ========== 日志区 ========== */
+.log-side{display:flex;flex-direction:column;gap:12px;overflow:hidden;min-width:0}
+.log-panel{background:var(--panel);border:1px solid var(--bd);border-radius:14px;padding:14px;box-shadow:var(--shadow-sm);display:flex;flex-direction:column;flex:1;overflow:hidden;min-height:0}
+.log-head{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.log-head h2{font-size:13px;font-weight:600;flex:1;display:flex;align-items:center;gap:8px}
+.log-head .dot{width:8px;height:8px;border-radius:50%;background:var(--gn);box-shadow:0 0 8px var(--gn);animation:pulse 2s infinite}
+.log-area{background:var(--log-bg);border:1px solid var(--bd);border-radius:10px;padding:10px;overflow-y:auto;flex:1;font-family:"JetBrains Mono","Cascadia Code",Consolas,monospace;font-size:12px;line-height:1.75;min-height:0}
+.ll{padding:2px 6px;border-bottom:1px solid color-mix(in srgb,var(--bd) 60%,transparent);white-space:pre-wrap;word-break:break-all;border-radius:4px;transition:background .1s}
+.ll:hover{background:var(--log-hover)}
+.li{color:var(--gn)}.lo{color:var(--ac-2)}.le{color:var(--rd)}.lf{color:var(--td)}.ls{color:var(--pp-2)}
+
+/* ========== 响应式 ========== */
+@media (max-width:1100px){.main{grid-template-columns:1fr}.stats{grid-template-columns:repeat(3,1fr)}}
+</style>
+</head>
+<body>
+<div class="app">
+
+<!-- ============ Header ============ -->
+<div class="header">
+<div class="header-top">
+  <div class="brand">
+    <div class="logo">🔌</div>
+    <div>
+      <h1>go-wsc 调试台</h1>
+      <div class="sub">WebSocket Visual Debugger</div>
+    </div>
+  </div>
+  <div class="guide">
+    <b>🚀 快速开始</b> ① 配置服务<span class="arrow">→</span>② 生成 Token<span class="arrow">→</span>③ 填入连接<span class="arrow">→</span>④ 建立连接<span class="arrow">→</span>⑤ 发送消息
+  </div>
+  <div class="theme-switcher" title="切换主题">
+    <button class="th-btn" data-th="aurora" title="极光白" onclick="setTheme('aurora')"></button>
+    <button class="th-btn" data-th="mint" title="薄荷青" onclick="setTheme('mint')"></button>
+    <button class="th-btn" data-th="warm" title="暖阳" onclick="setTheme('warm')"></button>
+  </div>
+</div>
+<div class="stats">
+  <div class="stat"><div class="ic">📤</div><div class="v" id="stSent">0</div><div class="l">总发送</div></div>
+  <div class="stat"><div class="ic">📥</div><div class="v" id="stRecv">0</div><div class="l">总接收</div></div>
+  <div class="stat"><div class="ic">⚠</div><div class="v" id="stErr">0</div><div class="l">总错误</div></div>
+  <div class="stat"><div class="ic">🔗</div><div class="v" id="stConn">0</div><div class="l">活跃连接</div></div>
+  <div class="stat"><div class="ic">💓</div><div class="v" id="rttV">—</div><div class="l">RTT(ms)</div></div>
+  <div class="stat"><div class="ic">⏱</div><div class="v" id="stUp">0s</div><div class="l">运行时间</div></div>
+</div>
+</div>
+
+<!-- ============ 主体 ============ -->
+<div class="main">
+
+<div class="ops">
+
+  <div class="pn">
+    <h2><span class="step">1</span>服务配置</h2>
+    <div class="row"><label>服务地址</label><input type="text" id="srvHost" value="127.0.0.1:8080"></div>
+    <div class="row"><label>WS 路径</label><input type="text" id="wsPath" value="/ws"></div>
+    <div class="row"><label>协议</label><select id="scheme" style="width:90px"><option value="ws">ws://</option><option value="wss">wss://</option></select></div>
+  </div>
+
+  <div class="pn">
+    <h2><span class="step">2</span>Token 生成<span class="tag">JWT</span></h2>
+    <div class="row"><label>User ID</label><input type="text" id="tkUid" value="user_001"></div>
+    <div class="row"><label>用户类型</label><select id="tkUtp"><option value="visitor">visitor</option><option value="customer" selected>customer</option><option value="agent">agent</option><option value="admin">admin</option><option value="bot">bot</option><option value="vip">vip</option><option value="observer">observer</option></select></div>
+    <div class="row"><label>Device ID</label><input type="text" id="tkDid" value="web_debug"></div>
+    <div class="row"><label>Namespace</label><input type="text" id="tkTid" value="default"></div>
+    <div class="row"><label>Group ID</label><input type="text" id="tkGid" placeholder="留空 = 不自动加群"></div>
+    <div class="row"><label>签发者 iss</label><input type="text" id="tkIss" value="kamalyes"></div>
+    <div class="row"><label>受众 aud</label><input type="text" id="tkAud" value="123567"></div>
+    <div class="row"><label>签名密钥</label><input type="password" id="tkKey" value="local-ws-connection-secret"><button class="icon-only" onclick="togglePwd('tkKey')">👁</button></div>
+    <div class="row"><label>算法</label><select id="tkAlg" style="width:90px"><option value="HS256">HS256</option><option value="HS384">HS384</option><option value="HS512">HS512</option></select></div>
+    <div class="row"><label>有效期</label><select id="tkExp" style="width:100px"><option value="300" selected>5 分钟</option><option value="3600">1 小时</option><option value="86400">24 小时</option><option value="604800">7 天</option></select></div>
+    <div class="btn-grp"><button class="primary" onclick="genToken()">⚡ 生成</button><button onclick="copyToken()">📋 复制</button><button onclick="fillToken()">→ 填入连接</button></div>
+    <div class="tok-disp" id="tokDisp" style="margin-top:8px">（点击「生成」按钮）</div>
+  </div>
+
+  <div class="pn span2">
+    <h2><span class="step">3</span>连接管理</h2>
+    <div class="tabs"><div class="tab active" onclick="swTab(this,'single')">🔗 单连接</div><div class="tab" onclick="swTab(this,'stress')">📊 压测</div></div>
+
+    <div id="tc-single" class="tc active">
+      <div class="row"><label>连接方式</label><select id="connMode" onchange="toggleMode()"><option value="token">Token</option><option value="plaintext">明文参数</option></select></div>
+      <div id="modeToken"><div class="row"><label>Token</label><input type="text" id="connToken" placeholder="上方生成后点「填入连接」" style="width:320px"></div></div>
+      <div id="modePlain" style="display:none">
+        <div class="row"><label>User ID</label><input type="text" id="connUid" value="user_001"><label>用户类型</label><select id="connUtp"><option value="visitor">visitor</option><option value="customer" selected>customer</option><option value="agent">agent</option><option value="observer">observer</option></select></div>
+        <div class="row"><label>Device ID</label><input type="text" id="connDid" value="web_debug"><label>Namespace</label><input type="text" id="connTid" value="default"></div>
+        <div class="row"><label>Group ID</label><input type="text" id="connGid" placeholder="可选"></div>
+      </div>
+      <div class="btn-grp"><button class="success" onclick="connSingle()">🔗 连接</button><button class="danger" onclick="discSingle()">❌ 断开</button><span style="flex:1"></span><span id="connSt" class="badge off">未连接</span></div>
+    </div>
+
+    <div id="tc-stress" class="tc">
+      <div class="row"><label>连接数</label><input type="number" id="sConn" value="50" min="1" max="500" style="width:80px"><label>消息/秒</label><input type="number" id="sRate" value="5" min="0" style="width:70px"><label>持续(秒)</label><input type="number" id="sDur" value="30" min="1" style="width:70px"></div>
+      <div class="row"><label>消息大小</label><input type="number" id="sSize" value="64" min="1" style="width:80px"><span style="font-size:11px;color:var(--td)">B</span><label>目标用户</label><input type="text" id="sTarget" value="server" style="width:120px"></div>
+      <div class="btn-grp"><button class="primary" onclick="startStress()">🚀 开始压测</button><button class="danger" onclick="stopStress()">⏹ 停止</button></div>
+      <div class="progress"><div id="sProg" style="width:0"></div></div>
+      <div class="mini-stats">
+        <div class="mini"><div class="v" id="sSent">0</div><div class="l">已发送</div></div>
+        <div class="mini"><div class="v" id="sRecv">0</div><div class="l">已接收</div></div>
+        <div class="mini"><div class="v" id="sErr">0</div><div class="l">错误</div></div>
+        <div class="mini"><div class="v" id="sRtt">0</div><div class="l">RTT(ms)</div></div>
+        <div class="mini"><div class="v" id="pingN">0</div><div class="l">收到 Ping</div></div>
+        <div class="mini"><div class="v" id="pongN">0</div><div class="l">发出 Pong</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="pn">
+    <h2><span class="step">4</span>消息发送</h2>
+    <div class="row"><label>消息类型</label><select id="msgType" style="width:150px"><option value="text" selected>text 文本</option><option value="image">image 图片</option><option value="file">file 文件</option><option value="system">system 系统</option><option value="notice">notice 通知</option><option value="event">event 事件</option><option value="command">command 命令</option><option value="markdown">markdown</option><option value="json">json</option><option value="ping">ping 心跳</option><option value="pong">pong</option><option value="ack">ack 确认</option><option value="typing">typing 输入中</option><option value="read">read 已读</option><option value="recall">recall 撤回</option><option value="custom">custom 自定义</option></select></div>
+    <div class="row"><label>接收者</label><input type="text" id="msgRecv" value="server"></div>
+    <div class="row"><label>优先级</label><select id="msgPri" style="width:90px"><option value="1">low</option><option value="2" selected>normal</option><option value="3">high</option><option value="4">urgent</option><option value="5">critical</option></select></div>
+    <div class="row"><label>内容</label><textarea id="msgBody" rows="2">你好，这是调试消息</textarea></div>
+    <div class="cb"><label><input type="checkbox" id="msgAck">需要 ACK</label><label><input type="checkbox" id="msgSkipDb">跳过 DB</label></div>
+    <div class="btn-grp"><button class="primary" onclick="sendMsg()">📤 发送</button><button onclick="sendBatch()">📤×10</button><button onclick="$('msgBody').value=''">🗑 清空</button></div>
+  </div>
+
+  <div class="pn">
+    <h2><span class="step">5</span>心跳监控</h2>
+    <div class="cb"><label><input type="checkbox" id="autoPong" checked>自动 Pong 响应</label><label><input type="checkbox" id="showHb" checked>显示心跳日志</label></div>
+    <div class="mini-stats">
+      <div class="mini"><div class="v" id="hbPing">0</div><div class="l">收到 Ping</div></div>
+      <div class="mini"><div class="v" id="hbPong">0</div><div class="l">发出 Pong</div></div>
+      <div class="mini"><div class="v" id="hbRtt">—</div><div class="l">RTT(ms)</div></div>
+    </div>
+    <div class="hint">💓 心跳统计实时更新，RTT 基于 ping/pong 往返时延</div>
+  </div>
+
+</div>
+
+<div class="log-side">
+  <div class="log-panel">
+    <div class="log-head">
+      <h2><span class="dot"></span>实时消息日志</h2>
+      <select id="logFilter" style="width:120px" onchange="applyFilter()"><option value="all">全部</option><option value="in">仅接收</option><option value="out">仅发送</option><option value="err">仅错误</option><option value="nohb">排除心跳</option></select>
+      <button onclick="clearLog()">🧹 清空</button>
+      <button onclick="toggleAS()" id="asBtn">📜 自动滚动: ON</button>
+    </div>
+    <div class="log-area" id="logArea"></div>
+  </div>
+</div>
+
+</div>
+</div>
+
+<script>
+var mainWs=null,stressConns=[],stressTimer=null,stressEndTimer=null,progTimer=null;
+var st={sent:0,recv:0,err:0,pingN:0,pongN:0,rttSum:0,rttN:0};
+var startT=Date.now(),autoScroll=true,curToken='';
+function $(id){return document.getElementById(id)}
+// 主题切换
+function setTheme(t){document.documentElement.dataset.theme=t;localStorage.setItem('dbg-theme',t);var btns=document.querySelectorAll('.th-btn');for(var i=0;i<btns.length;i++)btns[i].classList.toggle('active',btns[i].dataset.th==t)}
+(function(){var s=localStorage.getItem('dbg-theme');if(s!=='aurora'&&s!=='mint'&&s!=='warm')s='aurora';setTheme(s)})();
+function log(msg,type){var a=$('logArea'),l=document.createElement('div');l.className='ll l'+(type||'f');var t=new Date().toLocaleTimeString('zh-CN',{hour12:false})+'.'+String(Date.now()%1000).padStart(3,'0');var p={i:'→',o:'←',e:'✖',f:'ℹ',s:'⚙'}[type||'f']||'ℹ';l.textContent='['+t+'] '+p+' '+msg;a.appendChild(l);while(a.children.length>2000)a.removeChild(a.firstChild);if(autoScroll)a.scrollTop=a.scrollHeight;applyFilter()}
+function applyFilter(){var f=$('logFilter').value,a=$('logArea');for(var i=0;i<a.children.length;i++){var c=a.children[i],s=true,cl=c.className;if(f=='in')s=cl.indexOf('li')>=0;else if(f=='out')s=cl.indexOf('lo')>=0;else if(f=='err')s=cl.indexOf('le')>=0;else if(f=='nohb'){if(c.textContent.indexOf('"ping"')>=0||c.textContent.indexOf('"pong"')>=0)s=false}c.style.display=s?'':'none'}}
+function clearLog(){$('logArea').innerHTML=''}
+function toggleAS(){autoScroll=!autoScroll;$('asBtn').textContent='📜 自动滚动: '+(autoScroll?'ON':'OFF')}
+function togglePwd(id){var e=$(id);e.type=e.type=='password'?'text':'password'}
+function buildUrl(extra){var h=$('srvHost').value,p=$('wsPath').value,s=$('scheme').value,u=s+'://'+h+p;if(extra)u+=(u.indexOf('?')>=0?'&':'?')+extra;return u}
+function updSt(){
+  $('stSent').textContent=st.sent;$('stRecv').textContent=st.recv;$('stErr').textContent=st.err;
+  $('stConn').textContent=(mainWs&&mainWs.readyState==1?1:0)+stressConns.filter(function(c){return c.ws.readyState==1}).length;
+  $('stUp').textContent=Math.floor((Date.now()-startT)/1000)+'s';
+  $('hbPing').textContent=st.pingN;$('hbPong').textContent=st.pongN;
+  var rtt=st.rttN>0?Math.round(st.rttSum/st.rttN):'—';
+  $('hbRtt').textContent=rtt;$('rttV').textContent=rtt;
+}
+setInterval(updSt,500);
+// JWT
+function b64u(bytes){var s='';for(var i=0;i<bytes.length;i++)s+=String.fromCharCode(bytes[i]);return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')}
+async function issueToken(uid){var utp=$('tkUtp').value,did=$('tkDid').value,tid=$('tkTid').value,gid=$('tkGid').value,iss=$('tkIss').value,aud=$('tkAud').value,key=$('tkKey').value,alg=$('tkAlg').value,exp=parseInt($('tkExp').value);var hd={typ:'JWT',alg:alg};var now=Math.floor(Date.now()/1000);var pl={uid:uid,utp:utp};if(did)pl.did=did;if(tid)pl.tid=tid;if(gid)pl.gid=gid;if(iss)pl.iss=iss;if(aud)pl.aud=aud;pl.iat=now;pl.exp=now+exp;var ha={'HS256':'SHA-256','HS384':'SHA-384','HS512':'SHA-512'}[alg];var enc=new TextEncoder();var hb=b64u(enc.encode(JSON.stringify(hd))),pb=b64u(enc.encode(JSON.stringify(pl))),si=hb+'.'+pb;var ck=await crypto.subtle.importKey('raw',enc.encode(key),{name:'HMAC',hash:ha},false,['sign']);var sig=await crypto.subtle.sign('HMAC',ck,enc.encode(si));return si+'.'+b64u(new Uint8Array(sig))}
+async function genToken(){var uid=$('tkUid').value;if(!uid){log('User ID不能为空','e');return}var key=$('tkKey').value;if(!key){log('签名密钥不能为空','e');return}try{curToken=await issueToken(uid);$('tokDisp').innerHTML='<span style="color:var(--gn)">✓ 生成成功</span><br>'+curToken;log('Token生成成功','s')}catch(e){log('Token生成失败: '+e.message,'e')}}
+function copyToken(){if(!curToken){log('请先生成Token','e');return}navigator.clipboard.writeText(curToken).then(function(){log('Token已复制','s')})}
+function fillToken(){if(!curToken){log('请先生成Token','e');return}$('connToken').value=curToken;$('connMode').value='token';toggleMode();log('Token已填入连接面板','s')}
+// 连接
+function toggleMode(){var m=$('connMode').value;$('modeToken').style.display=m=='token'?'':'none';$('modePlain').style.display=m=='plaintext'?'':'none'}
+function swTab(el,tab){var p=el.parentElement;for(var i=0;i<p.children.length;i++)p.children[i].classList.remove('active');el.classList.add('active');$('tc-single').classList.toggle('active',tab=='single');$('tc-stress').classList.toggle('active',tab=='stress')}
+function buildConnUrl(){var m=$('connMode').value;if(m=='token'){var t=$('connToken').value.trim();if(!t){log('Token为空','e');return null}return buildUrl('token='+encodeURIComponent(t))}var p=new URLSearchParams();var u=$('connUid').value;if(!u){log('User ID不能为空','e');return null}p.set('user_id',u);p.set('user_type',$('connUtp').value);if($('connDid').value)p.set('device_id',$('connDid').value);if($('connTid').value)p.set('namespace',$('connTid').value);if($('connGid').value)p.set('group_id',$('connGid').value);return buildUrl(p.toString())}
+function connSingle(){if(mainWs&&mainWs.readyState==1){log('已存在活跃连接','e');return}var u=buildConnUrl();if(!u)return;log('正在连接: '+u.replace(/token=[^&]+/,'token=***'),'s');try{mainWs=new WebSocket(u)}catch(e){log('连接失败: '+e.message,'e');return}mainWs.onopen=function(){$('connSt').textContent='已连接';$('connSt').className='badge on';log('WebSocket连接已建立','s')};mainWs.onmessage=function(ev){handleIn(ev.data)};mainWs.onerror=function(){log('WebSocket错误','e');st.err++};mainWs.onclose=function(ev){$('connSt').textContent='已断开';$('connSt').className='badge off';log('连接关闭(code='+ev.code+',reason='+(ev.reason||'无')+')','s')}}
+function discSingle(){if(mainWs){mainWs.onclose=null;mainWs.close();mainWs=null;$('connSt').textContent='已断开';$('connSt').className='badge off';log('主动断开连接','s')}}
+// 消息
+function handleIn(data){st.recv++;var msg;try{msg=JSON.parse(data)}catch(e){log('收到非JSON: '+data.substring(0,200),'i');return}var mt=msg.message_type||'';if(mt=='ping'){st.pingN++;if($('autoPong').checked)sendPong();if(!$('showHb').checked)return}if(mt=='pong'){if(msg._ts){var r=Date.now()-msg._ts;st.rttSum+=r;st.rttN++}if(!$('showHb').checked)return}var disp=mt+' | from='+(msg.sender||'')+' | id='+(msg.id||msg.message_id||'')+' | '+(msg.content||'').substring(0,200);log(disp,'i')}
+function buildMsg(type,recv,content){return{id:'dbg-'+Date.now()+'-'+Math.random().toString(36).substr(2,6),message_type:type,sender:'',receiver:recv||'',content:content||'',create_at:new Date().toISOString(),priority:parseInt($('msgPri').value),require_ack:$('msgAck').checked,skip_database_storage:$('msgSkipDb').checked}}
+function sendRaw(ws,obj){if(!ws||ws.readyState!=1)return false;ws.send(JSON.stringify(obj));st.sent++;return true}
+function sendMsg(){if(!mainWs||mainWs.readyState!=1){log('未连接','e');return}var t=$('msgType').value,r=$('msgRecv').value,c=$('msgBody').value;if(sendRaw(mainWs,buildMsg(t,r,c)))log(t+' → '+r+' | '+c.substring(0,100),'o')}
+function sendBatch(){if(!mainWs||mainWs.readyState!=1){log('未连接','e');return}var t=$('msgType').value,r=$('msgRecv').value,b=$('msgBody').value;for(var i=0;i<10;i++)sendRaw(mainWs,buildMsg(t,r,b+' #'+i));log('批量发送10条 '+t+' → '+r,'o')}
+function sendPong(){if(!mainWs||mainWs.readyState!=1)return;var p={id:'pong-'+Date.now(),message_type:'pong',content:'',create_at:new Date().toISOString()};if(sendRaw(mainWs,p))st.pongN++}
+// 压测
+function toggleStressMode(){var m=$('sMode').value;$('stressHb').style.display=m=='heartbeat'?'':'none';$('stressHbStats').style.display=m=='heartbeat'?'':'none'}
+async function startStress(){if(stressConns.length>0){log('压测进行中','e');return}var mode=$('sMode').value,n=parseInt($('sConn').value),dur=parseInt($('sDur').value),key=$('tkKey').value;if(!key){log('签名密钥不能为空','e');return}var hbInt=mode=='heartbeat'?(parseFloat($('sHbInterval').value)||30):0;var modeName=mode=='heartbeat'?'心跳':'连接注册';log('🚀 开始'+modeName+'压测: '+n+'连接,持续'+dur+'秒'+(mode=='heartbeat'?'(心跳间隔'+hbInt+'s)':''),'s');log('正在签发 '+n+' 个 token...','s');var baseUid=$('tkUid').value||'stress';var tokens=[];for(var i=0;i<n;i++){try{tokens.push(await issueToken(baseUid+'_'+i))}catch(e){log('token签发失败: '+e.message,'e');return}}log('✓ '+n+' 个 token 签发完成','s');var ss={conned:0,disconned:0,err:0,pingSent:0,pongRecv:0};function mkConn(i,token){var u=buildUrl('token='+encodeURIComponent(token)),ws;try{ws=new WebSocket(u)}catch(e){ss.err++;return null}var c={ws:ws,idx:i,iv:null};ws.onopen=function(){ss.conned++;if(mode=='heartbeat'){c.iv=setInterval(function(){if(ws.readyState!=1)return;var p={id:'hb-'+Date.now()+'-'+i,message_type:'ping',content:'',create_at:new Date().toISOString(),_ts:Date.now()};ws.send(JSON.stringify(p));ss.pingSent++},hbInt*1000)}};ws.onmessage=function(ev){try{var m=JSON.parse(ev.data);if(m.message_type=='pong')ss.pongRecv++}catch(e){}};ws.onerror=function(){ss.err++};ws.onclose=function(){if(c.iv)clearInterval(c.iv);ss.disconned++};return c}for(var i=0;i<n;i++)setTimeout(function(idx){var c=mkConn(idx,tokens[idx]);if(c)stressConns.push(c)},i*20,i);stressTimer=setInterval(function(){$('sConned').textContent=ss.conned;$('sDisconned').textContent=ss.disconned;$('sErr').textContent=ss.err;if(mode=='heartbeat'){$('sPingSent').textContent=ss.pingSent;$('sPongRecv').textContent=ss.pongRecv}},500);stressEndTimer=setTimeout(function(){stopStress();log('✅'+modeName+'压测结束: 连接'+ss.conned+' 断开'+ss.disconned+' 错误'+ss.err+(mode=='heartbeat'?' Ping发送'+ss.pingSent+' Pong接收'+ss.pongRecv:''),'s')},dur*1000);var sMs=Date.now();progTimer=setInterval(function(){var pct=Math.min(100,((Date.now()-sMs)/(dur*1000))*100);$('sProg').style.width=pct+'%';if(pct>=100)clearInterval(progTimer)},200)}
+function stopStress(){if(stressTimer){clearInterval(stressTimer);stressTimer=null}if(stressEndTimer){clearTimeout(stressEndTimer);stressEndTimer=null}if(progTimer){clearInterval(progTimer);progTimer=null}for(var i=0;i<stressConns.length;i++){var c=stressConns[i];if(c.iv)clearInterval(c.iv);try{c.ws.onclose=null;c.ws.close()}catch(e){}}stressConns=[];$('sProg').style.width='0';log('压测已停止','s')}
+// init
+log('go-wsc 调试台已就绪','s');log('提示: 1.填签名密钥 2.生成Token 3.填入连接 4.点击连接','f');updSt();
+</script>
+</body>
+</html>

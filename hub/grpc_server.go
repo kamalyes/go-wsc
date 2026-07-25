@@ -1,13 +1,3 @@
-/*
- * @Author: kamalyes 501893067@qq.com
- * @Date: 2026-07-16 12:06:56
- * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-07-15 23:20:30
- * @FilePath: \go-wsc\hub\grpc_server.go
- * @Description:
- *
- * Copyright (c) 2026 by kamalyes, All Rights Reserved.
- */
 /**
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-07-18 00:00:00
@@ -110,7 +100,7 @@ func (s *GRPCServer) SendToUser(ctx context.Context, req *wscpb.SendToUserReques
 
 	// 发送到该用户的所有客户端连接（多端登录）
 	for _, client := range clients {
-		s.hub.sendToClient(client, msg)
+		s.hub.sendToClient(ctx, client, msg)
 	}
 
 	return &wscpb.SendToUserResponse{
@@ -164,7 +154,7 @@ func (s *GRPCServer) BroadcastGroup(ctx context.Context, req *wscpb.BroadcastGro
 	// 过滤广播：只投递给群组成员，按需排除发送者
 	excludeSender := req.GetExcludeSender()
 	senderID := req.GetSenderId()
-	delivered := s.hub.broadcastToFiltered(func(client *Client) bool {
+	delivered := s.hub.broadcastToFiltered(ctx, func(client *Client) bool {
 		// 只投递给群组成员
 		if _, ok := memberSet[client.UserID]; !ok {
 			return false
@@ -196,7 +186,7 @@ func (s *GRPCServer) NotifyObservers(ctx context.Context, req *wscpb.NotifyObser
 	// 逐个投递
 	var notified int32
 	for _, client := range observers {
-		s.hub.sendToClient(client, msg)
+		s.hub.sendToClient(ctx, client, msg)
 		notified++
 	}
 

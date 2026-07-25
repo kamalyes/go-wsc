@@ -258,8 +258,10 @@ func TestSSEClientHeartbeat(t *testing.T) {
 	require.NoError(t, err)
 	time.Sleep(50 * time.Millisecond)
 
-	// 更新心跳
-	hub.UpdateHeartbeat("sse-hb-user")
+	// 更新心跳（直接操作 client 字段，零冗余查询）
+	now := time.Now()
+	client.SetLastHeartbeat(now)
+	client.SetLastSeen(now)
 	time.Sleep(50 * time.Millisecond)
 
 	// 验证客户端仍在线

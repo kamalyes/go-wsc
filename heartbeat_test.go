@@ -165,8 +165,10 @@ func TestHeartbeatUpdate(t *testing.T) {
 	// 等待一段时间
 	time.Sleep(500 * time.Millisecond)
 
-	// 更新心跳
-	hub.UpdateHeartbeat(client.ID)
+	// 更新心跳（直接操作 client 字段，零冗余查询）
+	now := time.Now()
+	client.SetLastHeartbeat(now)
+	client.SetLastSeen(now)
 
 	// 验证心跳时间已更新
 	updatedClient := hub.GetClientByID(client.ID)
@@ -269,7 +271,9 @@ func TestHeartbeatNoTimeout(t *testing.T) {
 		for {
 			select {
 			case <-ticker.C:
-				hub.UpdateHeartbeat(clientID)
+				now := time.Now()
+				client.SetLastHeartbeat(now)
+				client.SetLastSeen(now)
 			case <-done:
 				return
 			}
@@ -340,8 +344,11 @@ func TestMultipleClientsHeartbeat(t *testing.T) {
 		defer ticker.Stop()
 		for i := 0; i < 6; i++ {
 			<-ticker.C
-			hub.UpdateHeartbeat(clients[0].ID)
-			hub.UpdateHeartbeat(clients[2].ID)
+			now := time.Now()
+			clients[0].SetLastHeartbeat(now)
+			clients[0].SetLastSeen(now)
+			clients[2].SetLastHeartbeat(now)
+			clients[2].SetLastSeen(now)
 		}
 	}()
 
@@ -479,7 +486,9 @@ func BenchmarkHeartbeatUpdate(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		hub.UpdateHeartbeat(client.ID)
+		now := time.Now()
+		client.SetLastHeartbeat(now)
+		client.SetLastSeen(now)
 	}
 }
 
@@ -499,6 +508,7 @@ func BenchmarkHeartbeatCheck(b *testing.B) {
 	time.Sleep(100 * time.Millisecond)
 
 	// 注册1000个客户端
+	clients := make([]*Client, 1000)
 	for i := 0; i < 1000; i++ {
 		client := &Client{
 			ID:       "bench-client-" + string(rune(i)),
@@ -506,15 +516,18 @@ func BenchmarkHeartbeatCheck(b *testing.B) {
 			UserType: UserTypeCustomer,
 			SendChan: make(chan []byte, 10),
 		}
+		clients[i] = client
 		hub.Register(client)
 	}
 	time.Sleep(500 * time.Millisecond)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		// 基准测试：更新所有客户端的心跳
+		// 基准测试：更新前100个客户端的心跳（直接操作 client 字段，对齐生产热路径）
+		now := time.Now()
 		for j := 0; j < 100; j++ {
-			hub.UpdateHeartbeat("bench-client-" + string(rune(j)))
+			clients[j].SetLastHeartbeat(now)
+			clients[j].SetLastSeen(now)
 		}
 	}
 }

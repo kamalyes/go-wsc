@@ -14,7 +14,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
-	"sync"
+	"runtime/debug"
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
@@ -38,8 +38,11 @@ const (
 // sendToUser 发送消息给指定用户（内部方法）
 // 自动支持分布式：如果用户在其他节点，会自动路由过去
 func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) error {
-	// 克隆消息以避免并发修改原始消息（特别是在重试场景中）
-	msgCopy := msg.Clone()
+	// 不 Clone：调用者负责消息独立性
+	// - SendToUserWithRetry 已 Clone（主发送路径）
+	// - ack.go/离线推送的 msg 是独立消息
+	// 移除冗余 Clone：原实现每次重试都 Clone 一次，N 次重试 = N 次拷贝
+	msgCopy := msg
 	msgCopy.ReceiverNode = mathx.IfEmpty(msgCopy.ReceiverNode, h.nodeID)
 	msgCopy.CreateAt = mathx.IfNotZero(msgCopy.CreateAt, time.Now())
 
@@ -273,6 +276,7 @@ func (h *Hub) invokeMessageSendCallback(msg *HubMessage, result *SendResult) {
 			h.logger.ErrorKV("消息发送回调panic",
 				"message_id", msg.MessageID,
 				"panic", r,
+				"stack", string(debug.Stack()),
 			)
 		}).
 		Exec(func() {
@@ -295,24 +299,31 @@ func (h *Hub) isRetryableError(err error) bool {
 // ============================================================================
 
 // SendToMultipleUsers 并发发送消息给多个用户
-// 使用 ParallelSliceExecutor 并行投递，替代原序列循环
+// 使用 ParallelSliceExecutor 并行投递 + 预分配 slice + 索引写入，消除 mutex 竞争
 func (h *Hub) SendToMultipleUsers(ctx context.Context, userIDs []string, msg *HubMessage) map[string]error {
-	errs := make(map[string]error)
+	errs := make(map[string]error, len(userIDs))
 	if len(userIDs) == 0 {
 		return errs
 	}
-	var mu sync.Mutex
+
+	// 预分配结果 slice，每个 goroutine 只写自己的索引（无数据竞争）
+	errList := make([]error, len(userIDs))
 
 	syncx.NewParallelSliceExecutor[string, *SendResult](userIDs).
 		Execute(func(idx int, userID string) (*SendResult, error) {
 			result := h.SendToUserWithRetry(ctx, userID, msg)
 			if result.FinalError != nil {
-				mu.Lock()
-				errs[userID] = result.FinalError
-				mu.Unlock()
+				errList[idx] = result.FinalError // 索引写入，无需锁
 			}
 			return result, nil
 		})
+
+	// Execute 同步返回后，无竞争地转为 map
+	for i, userID := range userIDs {
+		if errList[i] != nil {
+			errs[userID] = errList[i]
+		}
+	}
 
 	return errs
 }
@@ -361,12 +372,23 @@ func (h *Hub) SendToGroupMembers(ctx context.Context, memberIDs []string, msg *H
 	syncx.NewParallelSliceExecutor[string, *SendResult](filteredIDs).
 		OnComplete(func(results []*SendResult, errors []error) {
 			for i, sendResult := range results {
-				if errors[i] == nil && sendResult.Success {
-					result.Success++
-				} else if sendResult.FinalError != nil {
+				// 优先判失败（FinalError != nil 即为失败）
+				if sendResult.FinalError != nil {
 					result.Failed++
 					result.FailedIDs = append(result.FailedIDs, filteredIDs[i])
 					result.Errors[filteredIDs[i]] = sendResult.FinalError
+					continue
+				}
+				// 成功路径需区分在线送达 vs 离线存储
+				if sendResult.Success {
+					if sendResult.StoredOffline {
+						// 离线存储成功（用户不在线，消息入离线队列）
+						result.Offline++
+						result.OfflineIDs = append(result.OfflineIDs, filteredIDs[i])
+					} else {
+						// 在线送达成功
+						result.Success++
+					}
 				}
 			}
 		}).
@@ -507,6 +529,7 @@ func (h *Hub) notifyQueueFull(msg *HubMessage, recipient string, queueType Queue
 			h.logger.ErrorKV("队列满回调panic",
 				"message_id", msg.MessageID,
 				"panic", r,
+				"stack", string(debug.Stack()),
 			)
 		}).
 		Exec(func() {
@@ -528,6 +551,7 @@ func (h *Hub) SendWithCallback(ctx context.Context, userID string, msg *HubMessa
 				"user_id", userID,
 				"message_id", msg.MessageID,
 				"panic", r,
+				"stack", string(debug.Stack()),
 			)
 		}).
 		Exec(func() {
@@ -559,7 +583,7 @@ func (h *Hub) SendPriority(ctx context.Context, userID string, msg *HubMessage, 
 // SendConditional 根据条件发送消息给符合条件的客户端
 // 复用 broadcastToFiltered：预序列化一次 + 直接 TrySend，避免逐客户端 Clone/序列化/入队/DB 记录
 func (h *Hub) SendConditional(ctx context.Context, condition func(*Client) bool, msg *HubMessage) int {
-	return h.broadcastToFiltered(condition, msg)
+	return h.broadcastToFiltered(ctx, condition, msg)
 }
 
 // SendToAllClientsInMap 发送消息到映射中的所有客户端
@@ -577,19 +601,19 @@ func (h *Hub) SendToAllClientsInMap(clientMap map[string]*Client, msg *HubMessag
 
 	// 遍历复制后的列表发送消息
 	for _, client := range clients {
-		h.sendToClientSerialized(client, msg, preSerialized)
+		h.sendToClientSerialized(h.ctx, client, msg, preSerialized)
 	}
 }
 
 // sendToClient 发送消息到客户端（内部序列化）
-func (h *Hub) sendToClient(client *Client, msg *HubMessage) {
-	h.sendToClientSerialized(client, msg, nil)
+func (h *Hub) sendToClient(ctx context.Context, client *Client, msg *HubMessage) {
+	h.sendToClientSerialized(ctx, client, msg, nil)
 }
 
 // sendToClientSerialized 发送消息到客户端（支持预序列化数据）
 // preSerialized 为预序列化的 []byte，为 nil 时内部序列化
 // SSE 客户端忽略 preSerialized，直接发送 msg 对象
-func (h *Hub) sendToClientSerialized(client *Client, msg *HubMessage, preSerialized []byte) {
+func (h *Hub) sendToClientSerialized(ctx context.Context, client *Client, msg *HubMessage, preSerialized []byte) {
 	// 检查客户端是否已关闭
 	if client.IsClosed() {
 		return
@@ -602,11 +626,11 @@ func (h *Hub) sendToClientSerialized(client *Client, msg *HubMessage, preSeriali
 	if client.ConnectionType == ConnectionTypeSSE {
 		if client.TrySendSSE(msg) {
 			client.SetLastSeen(time.Now())
-			h.logger.DebugKV("SSE消息发送", "message_id", msg.MessageID, "client_id", client.ID, "user_id", client.UserID)
+			h.logger.DebugContextKV(ctx, "SSE消息发送", "message_id", msg.MessageID, "client_id", client.ID, "user_id", client.UserID)
 			// SSE消息成功发送，更新为成功状态
 			h.updateMessageStatusAsync(msgID, MessageSendStatusSuccess, "", "")
 		} else {
-			h.logger.WarnKV("SSE客户端消息通道已满或已关闭", "client_id", client.ID, "user_id", client.UserID)
+			h.logger.WarnContextKV(ctx, "SSE客户端消息通道已满或已关闭", "client_id", client.ID, "user_id", client.UserID)
 			// SSE通道已满或已关闭，更新为失败状态
 			h.updateMessageStatusAsync(msgID, MessageSendStatusFailed, FailureReasonQueueFull, "SSE channel full or closed")
 		}
@@ -621,7 +645,7 @@ func (h *Hub) sendToClientSerialized(client *Client, msg *HubMessage, preSeriali
 		var err error
 		data, err = json.Marshal(msg)
 		if err != nil {
-			h.logger.ErrorKV("消息序列化失败", "error", err)
+			h.logger.ErrorContextKV(ctx, "消息序列化失败", "error", err)
 			// 更新为失败状态
 			h.updateMessageStatusAsync(msgID, MessageSendStatusFailed, FailureReasonUnknown, err.Error())
 			return
@@ -635,7 +659,7 @@ func (h *Hub) sendToClientSerialized(client *Client, msg *HubMessage, preSeriali
 		// 更新接收者的消息统计和字节统计
 		h.trackReceiverMessageStats(client.ID, client.UserType, len(data))
 	} else {
-		h.logger.WarnKV("客户端发送通道已满或已关闭", "client_id", client.ID)
+		h.logger.WarnContextKV(ctx, "客户端发送通道已满或已关闭", "client_id", client.ID)
 		// 发送通道已满或已关闭，更新为失败状态
 		h.updateMessageStatusAsync(msgID, MessageSendStatusFailed, FailureReasonQueueFull, "client send channel full or closed")
 	}
@@ -646,7 +670,7 @@ func (h *Hub) sendToClientSerialized(client *Client, msg *HubMessage, preSeriali
 //
 // 性能：使用 ForEachUserClient 零拷贝遍历 + 内联过滤，
 // 替代旧版 GetClientsCopyForUser（拷贝1）+ FilterSlice（拷贝2）双重拷贝
-func (h *Hub) syncToSenderDevices(msg *HubMessage) {
+func (h *Hub) syncToSenderDevices(ctx context.Context, msg *HubMessage) {
 	if msg.Sender == "" {
 		return
 	}
@@ -670,11 +694,11 @@ func (h *Hub) syncToSenderDevices(msg *HubMessage) {
 	// 预序列化一次（所有设备复用，消除循环内重复 Marshal）
 	data, err := json.Marshal(msg)
 	if err != nil {
-		h.logger.ErrorKV("多端同步消息序列化失败", "error", err, "message_id", msg.MessageID)
+		h.logger.ErrorContextKV(ctx, "多端同步消息序列化失败", "error", err, "message_id", msg.MessageID)
 		return
 	}
 
-	h.logger.DebugKV("🔄 多端同步消息给发送者的其他设备",
+	h.logger.DebugContextKV(ctx, "🔄 多端同步消息给发送者的其他设备",
 		"sender", msg.Sender,
 		"sender_client", msg.SenderClient,
 		"other_devices_count", len(otherDevices),
@@ -683,6 +707,6 @@ func (h *Hub) syncToSenderDevices(msg *HubMessage) {
 
 	// 发送给发送者的其他设备
 	for _, device := range otherDevices {
-		h.sendToClientSerialized(device, msg, data)
+		h.sendToClientSerialized(ctx, device, msg, data)
 	}
 }

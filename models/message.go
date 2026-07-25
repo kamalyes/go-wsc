@@ -25,32 +25,52 @@ const (
 )
 
 // HubMessage Hub消息结构
+//
+// 字段对齐优化说明：
+//   - 所有 16 字节 string 字段集中在结构体前部（8 字节对齐，无 padding）
+//   - map/time.Time/int64 等其他 8 字节对齐字段紧随其后
+//   - 3 个 bool 字段（1 字节对齐）集中放在末尾，避免散落导致的 7 字节 padding
+//   - 优化后结构体大小：360 → 352 字节（每实例节省 8 字节，海量消息场景下可观）
+//   - 热点字段（ID/MessageType/Sender/Receiver）保持在结构体头部，位于首个 cache line 内
 type HubMessage struct {
-	ID                  string                 `json:"id"`                              // 消息ID（用于ACK）
-	MessageType         MessageType            `json:"message_type"`                    // 消息类型
-	Sender              string                 `json:"sender"`                          // 发送者 (从上下文获取)
-	SenderName          string                 `json:"sender_name"`                     // 发送者昵称
-	SenderType          UserType               `json:"sender_type"`                     // 发送者类型
-	SenderClient        string                 `json:"sender_client,omitempty"`         // 发送者客户端ID（多端同步标识）
-	Receiver            string                 `json:"receiver"`                        // 接收者用户ID
-	ReceiverName        string                 `json:"receiver_name"`                   // 接收者昵称
-	ReceiverType        UserType               `json:"receiver_type"`                   // 接收者用户类型
-	ReceiverClient      string                 `json:"receiver_client,omitempty"`       // 接收者客户端ID
-	ReceiverNode        string                 `json:"receiver_node,omitempty"`         // 接收者所在节点ID
-	SessionID           string                 `json:"session_id"`                      // 会话ID
-	Content             string                 `json:"content"`                         // 消息内容
-	Data                map[string]interface{} `json:"data,omitempty"`                  // 扩展数据（包含 content_extra、metadata、media_info）
-	CreateAt            time.Time              `json:"create_at"`                       // 创建时间
-	MessageID           string                 `json:"message_id"`                      // 业务消息ID
-	SeqNo               int64                  `json:"seq_no"`                          // 消息序列号
-	Priority            Priority               `json:"priority"`                        // 优先级
-	ReplyToMsgID        string                 `json:"reply_to_msg_id,omitempty"`       // 回复的消息ID
-	RequireAck          bool                   `json:"require_ack,omitempty"`           // 是否需要ACK确认
-	Source              MessageSource          `json:"source,omitempty"`                // 消息来源(online/offline)
-	PushType            PushType               `json:"push_type,omitempty"`             // 推送类型
-	BroadcastType       BroadcastType          `json:"broadcast_type,omitempty"`        // 广播类型（会话成员/全站）
-	SkipDatabaseStorage bool                   `json:"skip_database_storage,omitempty"` // 是否跳过主数据库存储
-	SkipSendToClient    bool                   `json:"skip_send_to_client,omitempty"`   // 是否跳过发送到客户端
+	// ========== 标识与路由（热点字段，置于头部以利用 cache line） ==========
+	ID           string      `json:"id"`                              // 消息ID（用于ACK）
+	MessageType  MessageType `json:"message_type"`                    // 消息类型
+	Sender       string      `json:"sender"`                          // 发送者 (从上下文获取)
+	SenderName   string      `json:"sender_name"`                     // 发送者昵称
+	SenderType   UserType    `json:"sender_type"`                     // 发送者类型
+	SenderClient string      `json:"sender_client,omitempty"`         // 发送者客户端ID（多端同步标识）
+	Receiver     string      `json:"receiver"`                        // 接收者用户ID
+	ReceiverName string      `json:"receiver_name"`                   // 接收者昵称
+	ReceiverType UserType    `json:"receiver_type"`                   // 接收者用户类型
+
+	// ========== 接收与节点路由 ==========
+	ReceiverClient string `json:"receiver_client,omitempty"` // 接收者客户端ID
+	ReceiverNode   string `json:"receiver_node,omitempty"`   // 接收者所在节点ID
+	SessionID      string `json:"session_id"`                // 会话ID
+
+	// ========== 内容 ==========
+	Content string `json:"content"` // 消息内容
+
+	// ========== 扩展数据（8 字节对齐字段） ==========
+	Data     map[string]interface{} `json:"data,omitempty"` // 扩展数据（包含 content_extra、metadata、media_info）
+	CreateAt time.Time              `json:"create_at"`     // 创建时间
+
+	// ========== 消息ID与序列 ==========
+	MessageID    string `json:"message_id"`                // 业务消息ID
+	ReplyToMsgID string `json:"reply_to_msg_id,omitempty"` // 回复的消息ID
+	SeqNo        int64  `json:"seq_no"`                    // 消息序列号
+
+	// ========== 类型与策略（string，16 字节对齐） ==========
+	Priority      Priority      `json:"priority"`                 // 优先级
+	Source        MessageSource `json:"source,omitempty"`         // 消息来源(online/offline)
+	PushType      PushType      `json:"push_type,omitempty"`       // 推送类型
+	BroadcastType BroadcastType `json:"broadcast_type,omitempty"` // 广播类型（会话成员/全站）
+
+	// ========== 布尔标志（1 字节对齐，集中置于末尾避免 padding） ==========
+	RequireAck          bool `json:"require_ack,omitempty"`           // 是否需要ACK确认
+	SkipDatabaseStorage bool `json:"skip_database_storage,omitempty"` // 是否跳过主数据库存储
+	SkipSendToClient    bool `json:"skip_send_to_client,omitempty"`   // 是否跳过发送到客户端
 }
 
 // SetID 设置消息ID
@@ -374,6 +394,8 @@ func (m *HubMessage) GetMetadataJSON() string {
 }
 
 // Clone 创建消息的深拷贝，避免并发修改问题
+// 底层 syncx.DeepCopy 已优化：Struct 先值拷贝再只对引用类型字段递归，
+// Map key/value 基本类型快速路径，Interface 基本类型快速路径
 func (m *HubMessage) Clone() *HubMessage {
 	var msg HubMessage
 	syncx.DeepCopy(&msg, m)

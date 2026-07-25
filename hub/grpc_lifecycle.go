@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"runtime/debug"
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
@@ -40,7 +41,10 @@ func (h *Hub) InitNodeGRPC() {
 	grpcAddr := h.config.NodeGRPC.GetAddress()
 	redisClient := h.pubsub.GetClient()
 
-	h.nodeRegistry = NewNodeRegistry(redisClient, h.nodeID, grpcAddr)
+	h.nodeRegistry = NewNodeRegistry(redisClient, h.nodeID, grpcAddr,
+		h.config.NodeGRPC.GetNodeGRPCKey(),
+		h.config.NodeGRPC.GetNodeHeartbeatKey(),
+	)
 	h.grpcServer = NewGRPCServer(h)
 	h.grpcClientPool = NewGRPCClientPool()
 
@@ -75,7 +79,7 @@ func (h *Hub) startNodeGRPC() {
 	syncx.Go(h.ctx).
 		WithTimeout(5 * time.Second).
 		OnPanic(func(r any) {
-			h.logger.ErrorKV("注册节点到 Redis panic", "panic", r, "node_id", h.nodeID)
+			h.logger.ErrorKV("注册节点到 Redis panic", "panic", r, "stack", string(debug.Stack()), "node_id", h.nodeID)
 		}).
 		OnError(func(err error) {
 			h.logger.ErrorKV("注册节点到 Redis 失败，gRPC 路由可能受影响",

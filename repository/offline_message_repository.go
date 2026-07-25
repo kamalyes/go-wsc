@@ -13,6 +13,7 @@ package repository
 
 import (
 	"context"
+	"runtime/debug"
 	"time"
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
@@ -303,7 +304,7 @@ func (r *GormOfflineMessageRepository) startCleanupScheduler(ctx context.Context
 		}).
 		// Panic 处理
 		OnPanic(func(rec any) {
-			r.logger.Errorf("⚠️ 离线消息清理任务 panic: %v", rec)
+			r.logger.Errorf("⚠️ 离线消息清理任务 panic: %v, stack: %s", rec, debug.Stack())
 		}).
 		// 优雅关闭
 		OnShutdown(func() {

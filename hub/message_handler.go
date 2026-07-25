@@ -23,7 +23,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"runtime/debug"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -85,6 +85,9 @@ func (h *Hub) handleClientRead(client *Client) {
 
 	h.logWithClient(logger.INFO, "客户端读取协程启动", client)
 
+	// 使用 client.Context（从 Hub 生命周期 h.ctx 派生的连接级 ctx，Hub 关闭时自动取消）
+	reqCtx := client.Context
+
 	for {
 		messageType, data, err := client.Conn.ReadMessage()
 		if err != nil {
@@ -122,19 +125,21 @@ func (h *Hub) handleClientRead(client *Client) {
 
 		switch messageType {
 		case websocket.TextMessage:
-			h.handleTextMessage(client, data)
+			h.handleTextMessage(reqCtx, client, data)
 		case websocket.BinaryMessage:
 			h.handleBinaryMessage(client, data)
 		case websocket.CloseMessage:
 			return
 		case websocket.PingMessage:
+			// 设置写超时，避免恶意客户端通过频繁 Ping 阻塞写 goroutine
+			_ = client.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			_ = client.Conn.WriteMessage(websocket.PongMessage, nil)
 		}
 	}
 }
 
 // handleTextMessage 处理文本消息
-func (h *Hub) handleTextMessage(client *Client, data []byte) {
+func (h *Hub) handleTextMessage(ctx context.Context, client *Client, data []byte) {
 	var msg *HubMessage
 	if err := json.Unmarshal(data, &msg); err != nil {
 		msg = NewHubMessage().
@@ -171,7 +176,7 @@ func (h *Hub) handleTextMessage(client *Client, data []byte) {
 		syncx.Go().
 			WithTimeout(5 * time.Second).
 			OnPanic(func(r interface{}) {
-				h.logger.ErrorKV("转发消息panic", "panic", r, "message_id", msg.MessageID)
+				h.logger.ErrorContextKV(ctx, "转发消息panic", "panic", r, "stack", string(debug.Stack()), "message_id", msg.MessageID)
 			}).
 			ExecWithContext(func(ctx context.Context) error {
 				return h.handleForwardableMessage(ctx, msg)
@@ -180,9 +185,8 @@ func (h *Hub) handleTextMessage(client *Client, data []byte) {
 	}
 
 	// 调用消息接收回调（其他类型消息交给业务层处理）
-	ctx := context.Background()
 	if err := h.InvokeMessageReceivedCallback(ctx, client, msg); err != nil {
-		h.logger.WarnKV("消息接收回调执行失败",
+		h.logger.WarnContextKV(ctx, "消息接收回调执行失败",
 			"client_id", client.ID,
 			"error", err,
 		)
@@ -194,7 +198,7 @@ func (h *Hub) handleTextMessage(client *Client, data []byte) {
 func (h *Hub) handleForwardableMessage(ctx context.Context, msg *HubMessage) error {
 	emoji := msg.MessageType.GetEmoji()
 
-	h.logger.DebugKV(fmt.Sprintf("%s 自动转发消息", emoji),
+	h.logger.DebugKV(emoji+" 自动转发消息",
 		"message_type", msg.MessageType,
 		"from", msg.Sender,
 		"to", msg.Receiver,
@@ -215,7 +219,7 @@ func (h *Hub) handleForwardableMessage(ctx context.Context, msg *HubMessage) err
 	result := h.SendToUserWithRetry(ctx, msg.Receiver, msg)
 
 	if !result.Success {
-		h.logger.ErrorKV(fmt.Sprintf("%s 转发失败", emoji), "from", msg.Sender, "to", msg.Receiver, "error", result.FinalError)
+		h.logger.ErrorKV(emoji+" 转发失败", "from", msg.Sender, "to", msg.Receiver, "error", result.FinalError)
 		return result.FinalError
 	}
 	return nil
@@ -279,8 +283,21 @@ func (h *Hub) normalizeMessageFields(client *Client, msg *HubMessage) {
 
 // checkHeartbeat 检查客户端心跳
 // 使用 ForEachClient 零拷贝遍历 + 原子读时间戳（替代 GetClientsCopy 全量拷贝 + Hub.mutex 误用）
+//
+// ⚠️ 死锁防御：ForEachClient 持有 shard 读锁，若在 callback 中直接调用 Unregister，
+// 当 unregister channel 满时会走 default 同步分支 → handleUnregister → RemoveClient → WithShardLock，
+// 同一 shard 持读锁等写锁 → 死锁。
+// 修复：先收集超时客户端到本地 slice，遍历结束后在锁外统一调用 Unregister。
 func (h *Hub) checkHeartbeat() {
 	now := time.Now()
+
+	// Phase 1：持读锁收集超时客户端（不调用任何会获取写锁的方法）
+	type timeoutClient struct {
+		client     *Client
+		lastActive time.Time
+	}
+	var timeouts []timeoutClient
+
 	h.shardedRegistry.ForEachClient(func(_ string, client *Client) bool {
 		// 原子读时间戳（并发安全，无数据竞争）
 		lastActive := mathx.IF(client.ConnectionType == ConnectionTypeSSE, client.GetLastSeen(), client.GetLastHeartbeat())
@@ -288,24 +305,29 @@ func (h *Hub) checkHeartbeat() {
 		// 检查是否超时
 		inactiveDuration := now.Sub(lastActive)
 		if inactiveDuration > h.config.ClientTimeout {
-			h.logger.DebugKV("❤️ 检测到心跳超时，注销客户端",
-				"client_id", client.ID,
-				"user_id", client.UserID,
-				"user_type", client.UserType,
-				"connection_type", client.ConnectionType,
-				"last_active", lastActive,
-				"inactive_duration", inactiveDuration.String(),
-				"timeout_threshold", h.config.ClientTimeout.String(),
-			)
-
-			h.Unregister(client)
-
-			if h.heartbeatTimeoutCallback != nil {
-				h.heartbeatTimeoutCallback(client.ID, client.UserID, lastActive)
-			}
+			timeouts = append(timeouts, timeoutClient{client: client, lastActive: lastActive})
 		}
 		return true
 	})
+
+	// Phase 2：锁外批量注销（Unregister 内部走 channel 异步或 default 同步均安全）
+	for _, tc := range timeouts {
+		h.logger.DebugKV("❤️ 检测到心跳超时，注销客户端",
+			"client_id", tc.client.ID,
+			"user_id", tc.client.UserID,
+			"user_type", tc.client.UserType,
+			"connection_type", tc.client.ConnectionType,
+			"last_active", tc.lastActive,
+			"inactive_duration", now.Sub(tc.lastActive).String(),
+			"timeout_threshold", h.config.ClientTimeout.String(),
+		)
+
+		h.Unregister(tc.client)
+
+		if h.heartbeatTimeoutCallback != nil {
+			h.heartbeatTimeoutCallback(tc.client.ID, tc.client.UserID, tc.lastActive)
+		}
+	}
 }
 
 // ============================================================================
@@ -315,13 +337,13 @@ func (h *Hub) checkHeartbeat() {
 // handleBroadcast 处理广播消息
 func (h *Hub) handleBroadcast(msg *HubMessage) {
 	// 🔍 通知所有观察者（异步，不阻塞主流程）
-	h.notifyObservers(msg, "", "")
+	h.notifyObservers(h.ctx, msg, "", "")
 
 	if msg.BroadcastType == BroadcastTypeGlobal {
-		h.handleBroadcastMessage(msg)
+		h.handleBroadcastMessage(h.ctx, msg)
 		return
 	}
-	h.handleDirectMessage(msg)
+	h.handleDirectMessage(h.ctx, msg)
 }
 
 // handleDirectMessage 处理点对点消息
@@ -330,7 +352,7 @@ func (h *Hub) handleBroadcast(msg *HubMessage) {
 //   - 指定 ReceiverClient 时走 GetClient O(1) 查找，避免遍历
 //   - 未指定时走 ForEachUserClient 零拷贝遍历直接发送，避免 GetClientsCopyForUser 切片拷贝
 //   - 消息预序列化一次，多设备复用
-func (h *Hub) handleDirectMessage(msg *HubMessage) {
+func (h *Hub) handleDirectMessage(ctx context.Context, msg *HubMessage) {
 	// 预序列化一次（接收者多设备复用，消除循环内重复 Marshal）
 	// 序列化失败时 data=nil，由 sendToClientSerialized 内部兜底
 	data, _ := json.Marshal(msg)
@@ -339,13 +361,13 @@ func (h *Hub) handleDirectMessage(msg *HubMessage) {
 	if msg.ReceiverClient != "" {
 		// 指定客户端：O(1) 查找，避免遍历用户所有设备
 		if client, ok := h.shardedRegistry.GetClient(msg.ReceiverClient); ok {
-			h.sendToClientSerialized(client, msg, data)
+			h.sendToClientSerialized(ctx, client, msg, data)
 			sent = 1
 		}
 	} else {
 		// 未指定客户端：零拷贝遍历用户所有设备直接发送
 		h.shardedRegistry.ForEachUserClient(msg.Receiver, func(_ string, client *Client) bool {
-			h.sendToClientSerialized(client, msg, data)
+			h.sendToClientSerialized(ctx, client, msg, data)
 			sent++
 			return true
 		})
@@ -357,17 +379,17 @@ func (h *Hub) handleDirectMessage(msg *HubMessage) {
 			h.msgSentCount.Add(1)
 		}
 	} else if h.SendToUserViaSSE(msg.Receiver, msg) {
-		h.logger.DebugKV("消息已通过SSE发送", "message_id", msg.MessageID)
+		h.logger.DebugContextKV(ctx, "消息已通过SSE发送", "message_id", msg.MessageID)
 	}
 
 	// 🔥 多端同步：如果发送者有多个设备在线，同步给发送者的其他设备（排除当前发送设备）
 	if msg.Sender != "" && msg.SenderClient != "" {
-		h.syncToSenderDevices(msg)
+		h.syncToSenderDevices(ctx, msg)
 	}
 }
 
 // handleBroadcastMessage 处理广播消息
-func (h *Hub) handleBroadcastMessage(msg *HubMessage) {
+func (h *Hub) handleBroadcastMessage(ctx context.Context, msg *HubMessage) {
 	if h.statsRepo != nil {
 		h.broadcastSentCount.Add(1)
 	}
@@ -375,7 +397,7 @@ func (h *Hub) handleBroadcastMessage(msg *HubMessage) {
 	// 预序列化消息（仅一次）
 	data, err := json.Marshal(msg)
 	if err != nil {
-		h.logger.ErrorKV("广播消息序列化失败", "error", err)
+		h.logger.ErrorContextKV(ctx, "广播消息序列化失败", "error", err)
 		return
 	}
 
@@ -405,7 +427,7 @@ func (h *Hub) handleBroadcastMessage(msg *HubMessage) {
 	}
 
 	if failCount > 0 {
-		h.logger.WarnKV("广播消息：部分客户端发送失败",
+		h.logger.WarnContextKV(ctx, "广播消息：部分客户端发送失败",
 			"success_count", successCount,
 			"fail_count", failCount,
 			"message_id", msg.MessageID,

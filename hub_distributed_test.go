@@ -14,13 +14,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/kamalyes/go-cachex"
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-wsc/models"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -40,9 +43,27 @@ func setupClientWithMessageReceiver(client *Client) chan *HubMessage {
 	return receivedMsg
 }
 
+// newSharedMiniRedisClient 创建一个基于 miniredis 的 Redis 客户端，供需要多 Hub 共享 Redis 的测试使用
+// miniredis 实例通过 t.Cleanup 自动释放
+func newSharedMiniRedisClient(t *testing.T) *redis.Client {
+	t.Helper()
+	mr := miniredis.RunT(t)
+	return redis.NewClient(&redis.Options{Addr: mr.Addr()})
+}
+
 // createTestHubWithDistributed 创建带分布式功能的测试 Hub
-func createTestHubWithDistributed(t *testing.T, nodeID string) *Hub {
-	redisClient := NewTestRedisClient(t)
+//
+// sharedClient 用于让同一测试中的多个 Hub 共享同一个 Redis 实例（节点发现/分布式锁等需要）
+// 若传入 nil，则自动创建独立的 miniredis 实例
+func createTestHubWithDistributed(t *testing.T, nodeID string, sharedClient ...*redis.Client) *Hub {
+	var redisClient *redis.Client
+	if len(sharedClient) > 0 && sharedClient[0] != nil {
+		redisClient = sharedClient[0]
+	} else {
+		// 使用 miniredis 提供独立的内存 Redis 实例，避免依赖外部 Redis 服务
+		mr := miniredis.RunT(t)
+		redisClient = redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	}
 	pubsub := cachex.NewPubSub(redisClient)
 
 	// 清除所有可能影响节点 ID 生成的环境变量
@@ -71,6 +92,18 @@ func createTestHubWithDistributed(t *testing.T, nodeID string) *Hub {
 	config := wscconfig.Default()
 	config.NodeIP = "127.0.0.1"
 	config.NodePort = 8080
+
+	// 启用节点间 gRPC 通信（NodeRegistry 在 SetPubSub 时自动初始化）
+	// 使用系统分配的空闲端口，避免多 Hub 端口冲突
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	grpcPort := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+	config.NodeGRPC = &wscconfig.NodeGRPC{
+		Enabled: true,
+		Host:    "127.0.0.1",
+		Port:    grpcPort,
+	}
 
 	hub := NewHub(config)
 	hub.SetPubSub(pubsub)
@@ -104,79 +137,84 @@ func TestRegisterNode(t *testing.T) {
 
 	ctx := context.Background()
 
-	err := hub.RegisterNode(ctx)
+	registry := hub.GetNodeRegistry()
+	require.NotNil(t, registry, "NodeRegistry 应已初始化")
+
+	err := registry.Register(ctx)
 	assert.NoError(t, err)
 
-	// 验证节点信息已存储
-	key := fmt.Sprintf("wsc:nodes:%s", hub.GetNodeID())
+	// 验证节点 gRPC 地址已写入 Redis Hash
 	client := hub.GetPubSub().GetClient()
-	data, err := client.Get(ctx, key).Result()
+	grpcAddr, err := client.HGet(ctx, "wsc:nodes:grpc", hub.GetNodeID()).Result()
 	assert.NoError(t, err)
+	assert.NotEmpty(t, grpcAddr, "gRPC 地址应该已存储")
 
-	var nodeInfo NodeInfo
-	err = json.Unmarshal([]byte(data), &nodeInfo)
+	// 验证心跳时间戳已写入 Redis Hash
+	heartbeat, err := client.HGet(ctx, "wsc:nodes:heartbeat", hub.GetNodeID()).Result()
 	assert.NoError(t, err)
-	// 验证节点 ID 是经过 ShortHash 处理后的值
-	assert.Equal(t, hub.GetNodeID(), nodeInfo.ID, "节点 ID 应该匹配")
-	assert.Equal(t, models.NodeStatusActive, nodeInfo.Status)
+	assert.NotEmpty(t, heartbeat, "心跳时间戳应该已存储")
 }
 
 // TestDiscoverNodes 测试节点发现
 func TestDiscoverNodes(t *testing.T) {
-	hub1 := createTestHubWithDistributed(t, "node-1")
+	redisClient := newSharedMiniRedisClient(t)
+
+	hub1 := createTestHubWithDistributed(t, "node-1", redisClient)
 	defer hub1.SafeShutdown()
 
-	hub2 := createTestHubWithDistributed(t, "node-2")
+	hub2 := createTestHubWithDistributed(t, "node-2", redisClient)
 	defer hub2.SafeShutdown()
 
 	ctx := context.Background()
 
+	registry1 := hub1.GetNodeRegistry()
+	require.NotNil(t, registry1)
+	registry2 := hub2.GetNodeRegistry()
+	require.NotNil(t, registry2)
+
 	// 注册两个节点
-	err := hub1.RegisterNode(ctx)
+	err := registry1.Register(ctx)
 	require.NoError(t, err)
 
-	err = hub2.RegisterNode(ctx)
+	err = registry2.Register(ctx)
 	require.NoError(t, err)
 
-	// 等待一小段时间确保 Redis 写入完成
-	time.Sleep(100 * time.Millisecond)
+	// registry2.Register 内部的 refreshNodes 能看到 hub1（hub1 已先注册）
+	// 但 registry1 注册时 hub2 尚未写入 Redis，需重新触发刷新以发现 hub2
+	// 再次调用 Register 会重新执行 refreshNodes（同时刷新心跳，幂等写入）
+	err = registry1.Register(ctx)
+	require.NoError(t, err)
 
 	// 直接查询 Redis 验证数据是否存在
-	redisClient := hub1.GetPubSub().GetClient()
-	keys, err := redisClient.Keys(ctx, "wsc:nodes:*").Result()
-	t.Logf("Redis 中的节点 keys: %v, err: %v", keys, err)
+	redisClient = hub1.GetPubSub().GetClient()
+	grpcAddrs, err := redisClient.HGetAll(ctx, "wsc:nodes:grpc").Result()
+	t.Logf("Redis 中的节点 gRPC 地址: %+v, err: %v", grpcAddrs, err)
+	assert.Contains(t, grpcAddrs, hub1.GetNodeID(), "Redis 中应包含 hub1")
+	assert.Contains(t, grpcAddrs, hub2.GetNodeID(), "Redis 中应包含 hub2")
 
-	// 手动获取每个 key 的值
-	for _, key := range keys {
-		val, err := redisClient.Get(ctx, key).Result()
-		t.Logf("Key: %s, Value: %s, Err: %v", key, val, err)
-	}
-
-	// 从 node-1 发现其他节点
-	nodes, err := hub1.DiscoverNodes(ctx)
-	t.Logf("node-1 发现的节点: %+v, err: %v", nodes, err)
-	assert.NoError(t, err)
+	// 从 node-1 发现其他节点（GetAllNodes 返回 map[nodeID]grpcAddr，不含本节点）
+	nodes := registry1.GetAllNodes()
+	t.Logf("node-1 发现的节点: %+v", nodes)
 	if assert.Len(t, nodes, 1, "node-1 应该发现 1 个其他节点") {
-		// 验证发现的节点是 hub2（通过节点 ID 匹配）
-		assert.Equal(t, hub2.GetNodeID(), nodes[0].ID, "应该发现 hub2 的节点")
+		assert.Contains(t, nodes, hub2.GetNodeID(), "应该发现 hub2 的节点")
 	}
 
 	// 从 node-2 发现其他节点
-	nodes, err = hub2.DiscoverNodes(ctx)
-	t.Logf("node-2 发现的节点: %+v, err: %v", nodes, err)
-	assert.NoError(t, err)
+	nodes = registry2.GetAllNodes()
+	t.Logf("node-2 发现的节点: %+v", nodes)
 	if assert.Len(t, nodes, 1, "node-2 应该发现 1 个其他节点") {
-		// 验证发现的节点是 hub1（通过节点 ID 匹配）
-		assert.Equal(t, hub1.GetNodeID(), nodes[0].ID, "应该发现 hub1 的节点")
+		assert.Contains(t, nodes, hub1.GetNodeID(), "应该发现 hub1 的节点")
 	}
 }
 
 // TestCheckAndRouteToNode 测试跨节点消息路由
 func TestCheckAndRouteToNode(t *testing.T) {
-	hub1 := createTestHubWithDistributed(t, "node-1")
+	redisClient := newSharedMiniRedisClient(t)
+
+	hub1 := createTestHubWithDistributed(t, "node-1", redisClient)
 	defer hub1.SafeShutdown()
 
-	hub2 := createTestHubWithDistributed(t, "node-2")
+	hub2 := createTestHubWithDistributed(t, "node-2", redisClient)
 	defer hub2.SafeShutdown()
 
 	ctx := context.Background()
@@ -249,10 +287,12 @@ func TestAcquireDistributedLock(t *testing.T) {
 
 // TestReleaseDistributedLock 测试释放分布式锁
 func TestReleaseDistributedLock(t *testing.T) {
-	hub1 := createTestHubWithDistributed(t, "node-1")
+	redisClient := newSharedMiniRedisClient(t)
+
+	hub1 := createTestHubWithDistributed(t, "node-1", redisClient)
 	defer hub1.SafeShutdown()
 
-	hub2 := createTestHubWithDistributed(t, "node-2")
+	hub2 := createTestHubWithDistributed(t, "node-2", redisClient)
 	defer hub2.SafeShutdown()
 
 	ctx := context.Background()
@@ -284,10 +324,12 @@ func TestReleaseDistributedLock(t *testing.T) {
 
 // TestBroadcastToAllNodes 测试跨节点广播
 func TestBroadcastToAllNodes(t *testing.T) {
-	hub1 := createTestHubWithDistributed(t, "node-1")
+	redisClient := newSharedMiniRedisClient(t)
+
+	hub1 := createTestHubWithDistributed(t, "node-1", redisClient)
 	defer hub1.SafeShutdown()
 
-	hub2 := createTestHubWithDistributed(t, "node-2")
+	hub2 := createTestHubWithDistributed(t, "node-2", redisClient)
 	defer hub2.SafeShutdown()
 
 	ctx := context.Background()
@@ -407,26 +449,32 @@ func TestSubscribeBroadcastChannel(t *testing.T) {
 }
 
 // TestStartNodeHeartbeat 测试节点心跳
+//
+// 新 API 中 NodeRegistry.Register 内部已启动 refreshLoop 自动刷新心跳，
+// 本测试验证：注册后节点 gRPC 地址与心跳在 Redis 中可见并持续存在
 func TestStartNodeHeartbeat(t *testing.T) {
 	hub := createTestHubWithDistributed(t, "node-1")
 	defer hub.SafeShutdown()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
+	ctx := context.Background()
 
-	// 先手动注册一次节点（心跳的第一次执行要等 10 秒）
-	err := hub.RegisterNode(ctx)
+	registry := hub.GetNodeRegistry()
+	require.NotNil(t, registry)
+
+	// Register 内部启动 refreshLoop 自动刷新心跳
+	err := registry.Register(ctx)
 	require.NoError(t, err)
 
-	// 启动心跳
-	go hub.StartNodeHeartbeat(ctx)
-
-	// 验证节点信息存在
-	key := fmt.Sprintf("wsc:nodes:%s", hub.GetNodeID())
+	// 验证节点 gRPC 地址与心跳均存在于 Redis Hash 中
 	client := hub.GetPubSub().GetClient()
-	exists, err := client.Exists(ctx, key).Result()
+
+	exists, err := client.HExists(ctx, "wsc:nodes:grpc", hub.GetNodeID()).Result()
 	assert.NoError(t, err)
-	assert.Equal(t, int64(1), exists, "节点信息应该存在于 Redis 中")
+	assert.True(t, exists, "节点 gRPC 地址应该存在于 Redis 中")
+
+	exists, err = client.HExists(ctx, "wsc:nodes:heartbeat", hub.GetNodeID()).Result()
+	assert.NoError(t, err)
+	assert.True(t, exists, "节点心跳应该存在于 Redis 中")
 }
 
 // TestDistributedMessageTypes 测试不同类型的分布式消息
@@ -468,15 +516,6 @@ func TestDistributedMessageTypes(t *testing.T) {
 			},
 		},
 		{
-			name:    "踢出用户",
-			msgType: models.OperationTypeKickUser,
-			verifyFunc: func(t *testing.T) {
-				// 验证连接状态应该改变
-				time.Sleep(200 * time.Millisecond)
-				t.Log("踢出用户消息已发送")
-			},
-		},
-		{
 			name:    "广播消息",
 			msgType: models.OperationTypeBroadcast,
 			verifyFunc: func(t *testing.T) {
@@ -492,6 +531,16 @@ func TestDistributedMessageTypes(t *testing.T) {
 				}
 			},
 		},
+		{
+			// 踢出用户放在最后：KickUser 会从注册表移除客户端，影响后续子测试
+			name:    "踢出用户",
+			msgType: models.OperationTypeKickUser,
+			verifyFunc: func(t *testing.T) {
+				// 验证连接状态应该改变
+				time.Sleep(200 * time.Millisecond)
+				t.Log("踢出用户消息已发送")
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -503,6 +552,11 @@ func TestDistributedMessageTypes(t *testing.T) {
 				Message:   createTestHubMessage(MessageTypeText),
 				Reason:    "test",
 				Timestamp: time.Now(),
+			}
+
+			// 广播消息需要设置 BroadcastType=Global 才能走全量广播路径
+			if tt.msgType == models.OperationTypeBroadcast {
+				distMsg.Message.BroadcastType = BroadcastTypeGlobal
 			}
 
 			// 发布消息到相应频道
@@ -583,45 +637,57 @@ func TestDistributedMessageSerialization(t *testing.T) {
 
 // TestMultiNodeScenario 测试多节点场景
 func TestMultiNodeScenario(t *testing.T) {
+	redisClient := newSharedMiniRedisClient(t)
+
 	// 创建 3 个节点
-	hub1 := createTestHubWithDistributed(t, "node-1")
+	hub1 := createTestHubWithDistributed(t, "node-1", redisClient)
 	defer hub1.SafeShutdown()
 
-	hub2 := createTestHubWithDistributed(t, "node-2")
+	hub2 := createTestHubWithDistributed(t, "node-2", redisClient)
 	defer hub2.SafeShutdown()
 
-	hub3 := createTestHubWithDistributed(t, "node-3")
+	hub3 := createTestHubWithDistributed(t, "node-3", redisClient)
 	defer hub3.SafeShutdown()
 
 	ctx := context.Background()
 
+	registry1 := hub1.GetNodeRegistry()
+	require.NotNil(t, registry1)
+	registry2 := hub2.GetNodeRegistry()
+	require.NotNil(t, registry2)
+	registry3 := hub3.GetNodeRegistry()
+	require.NotNil(t, registry3)
+
 	// 注册所有节点
-	err := hub1.RegisterNode(ctx)
+	err := registry1.Register(ctx)
 	require.NoError(t, err)
 
-	err = hub2.RegisterNode(ctx)
+	err = registry2.Register(ctx)
 	require.NoError(t, err)
 
-	err = hub3.RegisterNode(ctx)
+	err = registry3.Register(ctx)
 	require.NoError(t, err)
 
-	// 从 node-1 发现其他节点
-	nodes, err := hub1.DiscoverNodes(ctx)
-	assert.NoError(t, err)
+	// registry1 注册时 hub2/hub3 尚未写入 Redis，需重新触发刷新以发现其他节点
+	err = registry1.Register(ctx)
+	require.NoError(t, err)
+
+	// 从 node-1 发现其他节点（GetAllNodes 返回 map[nodeID]grpcAddr，不含本节点）
+	nodes := registry1.GetAllNodes()
 	assert.Len(t, nodes, 2)
 
 	// 验证发现的节点（使用实际的节点 ID）
-	nodeIDs := make(map[string]bool)
-	for _, node := range nodes {
-		nodeIDs[node.ID] = true
-	}
-	assert.True(t, nodeIDs[hub2.GetNodeID()], "应该发现 hub2")
-	assert.True(t, nodeIDs[hub3.GetNodeID()], "应该发现 hub3")
+	assert.Contains(t, nodes, hub2.GetNodeID(), "应该发现 hub2")
+	assert.Contains(t, nodes, hub3.GetNodeID(), "应该发现 hub3")
 }
 
 // TestLockExpiration 测试锁过期
 func TestLockExpiration(t *testing.T) {
-	hub := createTestHubWithDistributed(t, "node-1")
+	// 使用独立的 miniredis 实例以便通过 FastForward 模拟 TTL 过期
+	// （miniredis 不会像真实 Redis 那样主动后台过期 Lua 脚本中访问的 key）
+	mr := miniredis.RunT(t)
+	redisClient := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	hub := createTestHubWithDistributed(t, "node-1", redisClient)
 	defer hub.SafeShutdown()
 
 	ctx := context.Background()
@@ -632,8 +698,8 @@ func TestLockExpiration(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, acquired)
 
-	// 等待锁过期
-	time.Sleep(2 * time.Second)
+	// 推进 miniredis 时钟使锁过期（避免依赖真实时钟的精度）
+	mr.FastForward(2 * time.Second)
 
 	// 应该可以再次获取
 	acquired, err = hub.AcquireDistributedLock(ctx, lockKey, 10*time.Second)
@@ -643,10 +709,12 @@ func TestLockExpiration(t *testing.T) {
 
 // TestConcurrentLockAcquisition 测试并发获取锁
 func TestConcurrentLockAcquisition(t *testing.T) {
-	hub1 := createTestHubWithDistributed(t, "node-1")
+	redisClient := newSharedMiniRedisClient(t)
+
+	hub1 := createTestHubWithDistributed(t, "node-1", redisClient)
 	defer hub1.SafeShutdown()
 
-	hub2 := createTestHubWithDistributed(t, "node-2")
+	hub2 := createTestHubWithDistributed(t, "node-2", redisClient)
 	defer hub2.SafeShutdown()
 
 	ctx := context.Background()

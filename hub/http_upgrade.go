@@ -110,7 +110,8 @@ func (h *Hub) CreateClientFromRequest(r *http.Request, conn *websocket.Conn, att
 		WithNamespace(attrs.Namespace).
 		WithGroupID(attrs.GroupID).
 		WithMetadataMap(metaMap).
-		WithContext(context.WithValue(r.Context(), ContextKeySenderID, attrs.UserID))
+		// 从 Hub 生命周期 ctx 派生连接级 ctx（r.Context() 在 WebSocket 升级后会取消，不适合长连接）
+		WithContext(context.WithValue(h.ctx, ContextKeySenderID, attrs.UserID))
 
 	// 初始化客户端 SendChan（根据客户端类型使用配置的容量）
 	h.initClientSendChan(client)
@@ -146,9 +147,7 @@ func (h *Hub) extractClientAttributes(r *http.Request) *ClientAttributes {
 			namespace := claims.Namespace
 			groupID := claims.GroupID
 			// UserType 默认值为 visitor
-			if userType == "" {
-				userType = string(UserTypeVisitor)
-			}
+			userType = mathx.IfEmpty(userType, string(UserTypeVisitor))
 			// 基于 UserID + DeviceID + UserType 时间窗口哈希生成 ClientID
 			clientID := h.temporalHasher.Hash(userID, deviceID, userType)
 			return &ClientAttributes{
@@ -174,8 +173,9 @@ func (h *Hub) extractClientAttributes(r *http.Request) *ClientAttributes {
 	// UserType 默认值为 visitor
 	userType = mathx.IfEmpty(userType, string(UserTypeVisitor))
 
-	// 基于 UserID + DeviceID + UserType 时间窗口哈希生成 ClientID
-	clientID = h.temporalHasher.Hash(userID, deviceID, userType)
+	// 仅在请求未提供 ClientID 时，基于 UserID + DeviceID + UserType 时间窗口哈希生成
+	// 请求显式传入的 client_id 优先使用，避免覆盖调用方指定的标识
+	clientID = mathx.IfEmpty(clientID, h.temporalHasher.Hash(userID, deviceID, userType))
 
 	return &ClientAttributes{
 		ClientID:  clientID,
@@ -379,7 +379,7 @@ func (h *Hub) sendClientRegisteredMessage(client *Client) {
 	}
 
 	// 发送注册成功消息
-	h.sendToClient(client, registeredMsg)
+	h.sendToClient(h.ctx, client, registeredMsg)
 }
 
 // handleHealthCheck 处理健康检查请求

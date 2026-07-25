@@ -137,9 +137,12 @@ func (h *Hub) GetUserStatus(userID string) UserStatus {
 
 	// 返回最后活跃的客户端状态
 	var mostRecent *Client
+	var mostRecentSeen time.Time
 	for _, client := range clients {
-		if mostRecent == nil || client.LastSeen.After(mostRecent.LastSeen) {
+		seen := client.GetLastSeen()
+		if mostRecent == nil || seen.After(mostRecentSeen) {
 			mostRecent = client
+			mostRecentSeen = seen
 		}
 	}
 	if mostRecent != nil {
@@ -266,7 +269,7 @@ func (h *Hub) GetClientStats(clientID string) map[string]interface{} {
 
 	return map[string]interface{}{
 		"connection_info":     client,
-		"connection_duration": time.Since(client.LastSeen),
+		"connection_duration": time.Since(client.GetLastSeen()),
 	}
 }
 
@@ -308,9 +311,12 @@ func findMostRecentClient(clientMap map[string]*Client) *Client {
 		return nil
 	}
 	var mostRecent *Client
+	var mostRecentSeen time.Time
 	for _, client := range clientMap {
-		if mostRecent == nil || client.LastSeen.After(mostRecent.LastSeen) {
+		seen := client.GetLastSeen()
+		if mostRecent == nil || seen.After(mostRecentSeen) {
 			mostRecent = client
+			mostRecentSeen = seen
 		}
 	}
 	return mostRecent
@@ -353,9 +359,12 @@ func (h *Hub) GetUserClientsCopy() []*Client {
 		}
 		// 找到最近活跃的客户端
 		var mostRecent *Client
+		var mostRecentSeen time.Time
 		for _, client := range clientMap {
-			if mostRecent == nil || client.LastSeen.After(mostRecent.LastSeen) {
+			seen := client.GetLastSeen()
+			if mostRecent == nil || seen.After(mostRecentSeen) {
 				mostRecent = client
+				mostRecentSeen = seen
 			}
 		}
 		if mostRecent != nil {

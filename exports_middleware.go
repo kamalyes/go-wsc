@@ -36,8 +36,18 @@ var InitLogger = middleware.InitLogger
 // RateLimiterConfig 限流器配置
 type RateLimiterConfig = middleware.RateLimiterConfig
 
-// RedisClient Redis客户端接口
+// RedisClient Redis客户端接口（统一单个和批量操作）
 type RedisClient = middleware.RedisClient
+
+// IncrExpireEntry 递增条目（用于批量操作）
+type IncrExpireEntry = middleware.IncrExpireEntry
+
+// GoRedisRateLimitClient 基于 go-redis 的限流器客户端
+// 实现统一的 RedisClient 接口，单次和批量操作都通过 Pipeline 优化
+type GoRedisRateLimitClient = middleware.GoRedisRateLimitClient
+
+// NewGoRedisRateLimitClient 创建 go-redis 限流器客户端
+var NewGoRedisRateLimitClient = middleware.NewGoRedisRateLimitClient
 
 // RateLimiter 限流器
 type RateLimiter = middleware.RateLimiter
@@ -47,6 +57,9 @@ var DefaultRateLimiterConfig = middleware.DefaultRateLimiterConfig
 
 // NewRateLimiter 创建限流器
 var NewRateLimiter = middleware.NewRateLimiter
+
+// NewRateLimiterConfigFromMessageRateLimit 从 go-config 的 MessageRateLimit 构建限流器配置
+var NewRateLimiterConfigFromMessageRateLimit = middleware.NewRateLimiterConfigFromMessageRateLimit
 
 // ============================================
 // Rate Limit Alert - 限流告警

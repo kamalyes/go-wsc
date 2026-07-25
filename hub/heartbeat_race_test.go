@@ -12,6 +12,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"testing"
 	"time"
@@ -163,9 +164,53 @@ func TestSendPongResponseToClosedChannel(t *testing.T) {
 	client.CloseMu.Unlock()
 
 	// 尝试发送 Pong 响应（应该返回错误而不是 panic）
-	err := hub.SendPongResponse(client)
+	err := hub.sendPongResponse(client, time.Now())
 	assert.Error(t, err, "向已关闭的 channel 发送应该返回错误")
 	assert.Contains(t, err.Error(), "closed", "错误信息应该包含 'closed'")
+}
+
+// TestSendPongResponseSuccess 测试 Pong 响应成功发送及消息内容
+func TestSendPongResponseSuccess(t *testing.T) {
+	hub := NewHub(wscconfig.Default())
+	defer hub.Shutdown()
+
+	go hub.Run()
+	hub.WaitForStart()
+
+	client := &Client{
+		ID:            "pong-success-test",
+		UserID:        "pong-success-user",
+		UserType:      UserTypeCustomer,
+		Status:        UserStatusOnline,
+		LastSeen:      time.Now(),
+		LastHeartbeat: time.Now(),
+		SendChan:      make(chan []byte, 10),
+		Context:       context.Background(),
+	}
+
+	hub.Register(client)
+	time.Sleep(50 * time.Millisecond)
+
+	// 发送 Pong 响应
+	now := time.Now()
+	err := hub.sendPongResponse(client, now)
+	assert.NoError(t, err, "发送 Pong 应该成功")
+
+	// 验证消息是否被发送到 SendChan
+	select {
+	case msg := <-client.SendChan:
+		assert.NotNil(t, msg, "应该收到 Pong 消息")
+		var pongMsg HubMessage
+		err := json.Unmarshal(msg, &pongMsg)
+		assert.NoError(t, err, "消息应该能反序列化")
+		assert.Equal(t, MessageTypePong, pongMsg.MessageType, "消息类型应该是 Pong")
+		assert.Equal(t, client.UserID, pongMsg.Receiver, "接收者应该是客户端用户ID")
+		assert.Equal(t, now.Unix(), pongMsg.CreateAt.Unix(), "CreateAt 应该为传入时间")
+	case <-time.After(1 * time.Second):
+		t.Fatal("超时:没有收到 Pong 消息")
+	}
+
+	hub.Unregister(client)
 }
 
 // TestClientTrySendAfterClose 测试客户端关闭后的 TrySend
@@ -235,7 +280,7 @@ func TestMultipleGoroutinesSendingToSameClient(t *testing.T) {
 					Content:     "test message",
 					CreateAt:    time.Now(),
 				}
-				hub.sendToClient(client, msg)
+				hub.sendToClient(context.Background(), client, msg)
 				time.Sleep(time.Microsecond)
 			}
 		}(i)

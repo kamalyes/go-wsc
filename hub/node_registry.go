@@ -32,10 +32,6 @@ import (
 // ============================================================================
 
 const (
-	// nodeGRPCKey 节点 gRPC 地址的 Redis Hash key
-	nodeGRPCKey = "wsc:nodes:grpc"
-	// nodeHeartbeatKey 节点心跳的 Redis Hash key
-	nodeHeartbeatKey = "wsc:nodes:heartbeat"
 	// nodeRegistryTTL 节点注册信息的 TTL（超过此时间未刷新视为离线）
 	nodeRegistryTTL = 90 * time.Second
 	// nodeRefreshInterval 节点列表刷新间隔
@@ -48,9 +44,11 @@ const (
 
 // NodeRegistry 管理节点发现与 gRPC 地址映射
 type NodeRegistry struct {
-	redisClient *redis.Client
-	localNodeID string
-	grpcAddr    string
+	redisClient  *redis.Client
+	localNodeID  string
+	grpcAddr     string
+	grpcKey      string // 节点 gRPC 地址 Hash key（从配置获取）
+	heartbeatKey string // 节点心跳 Hash key（从配置获取）
 
 	// nodes 缓存所有活跃节点的 gRPC 地址（nodeID → addr）
 	nodes sync.Map
@@ -61,12 +59,15 @@ type NodeRegistry struct {
 }
 
 // NewNodeRegistry 创建节点注册中心
-func NewNodeRegistry(redisClient *redis.Client, nodeID, grpcAddr string) *NodeRegistry {
+// grpcKey/heartbeatKey 来自 go-config NodeGRPC 配置，默认 "wsc:nodes:grpc" / "wsc:nodes:heartbeat"
+func NewNodeRegistry(redisClient *redis.Client, nodeID, grpcAddr, grpcKey, heartbeatKey string) *NodeRegistry {
 	return &NodeRegistry{
-		redisClient: redisClient,
-		localNodeID: nodeID,
-		grpcAddr:    grpcAddr,
-		stopCh:      make(chan struct{}),
+		redisClient:  redisClient,
+		localNodeID:  nodeID,
+		grpcAddr:     grpcAddr,
+		grpcKey:      grpcKey,
+		heartbeatKey: heartbeatKey,
+		stopCh:       make(chan struct{}),
 	}
 }
 
@@ -78,10 +79,10 @@ func (r *NodeRegistry) Register(ctx context.Context) error {
 
 	// 注册 gRPC 地址和心跳
 	pipe := r.redisClient.Pipeline()
-	pipe.HSet(ctx, nodeGRPCKey, r.localNodeID, r.grpcAddr)
-	pipe.HSet(ctx, nodeHeartbeatKey, r.localNodeID, time.Now().Unix())
-	pipe.Expire(ctx, nodeGRPCKey, nodeRegistryTTL)
-	pipe.Expire(ctx, nodeHeartbeatKey, nodeRegistryTTL)
+	pipe.HSet(ctx, r.grpcKey, r.localNodeID, r.grpcAddr)
+	pipe.HSet(ctx, r.heartbeatKey, r.localNodeID, time.Now().Unix())
+	pipe.Expire(ctx, r.grpcKey, nodeRegistryTTL)
+	pipe.Expire(ctx, r.heartbeatKey, nodeRegistryTTL)
 	_, err := pipe.Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("注册节点失败: %w", err)
@@ -106,8 +107,8 @@ func (r *NodeRegistry) Unregister(ctx context.Context) error {
 	}
 
 	pipe := r.redisClient.Pipeline()
-	pipe.HDel(ctx, nodeGRPCKey, r.localNodeID)
-	pipe.HDel(ctx, nodeHeartbeatKey, r.localNodeID)
+	pipe.HDel(ctx, r.grpcKey, r.localNodeID)
+	pipe.HDel(ctx, r.heartbeatKey, r.localNodeID)
 	_, err := pipe.Exec(ctx)
 	return err
 }
@@ -157,7 +158,7 @@ func (r *NodeRegistry) refreshLoop() {
 		case <-ticker.C:
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			// 刷新本节点心跳
-			r.redisClient.HSet(ctx, nodeHeartbeatKey, r.localNodeID, time.Now().Unix())
+			r.redisClient.HSet(ctx, r.heartbeatKey, r.localNodeID, time.Now().Unix())
 			// 刷新全量节点列表
 			r.refreshNodes(ctx)
 			cancel()
@@ -168,13 +169,13 @@ func (r *NodeRegistry) refreshLoop() {
 // refreshNodes 从 Redis 拉取全量节点列表并清理过期节点
 func (r *NodeRegistry) refreshNodes(ctx context.Context) error {
 	// 获取所有 gRPC 地址
-	addrMap, err := r.redisClient.HGetAll(ctx, nodeGRPCKey).Result()
+	addrMap, err := r.redisClient.HGetAll(ctx, r.grpcKey).Result()
 	if err != nil {
 		return err
 	}
 
 	// 获取所有心跳时间
-	heartbeatMap, err := r.redisClient.HGetAll(ctx, nodeHeartbeatKey).Result()
+	heartbeatMap, err := r.redisClient.HGetAll(ctx, r.heartbeatKey).Result()
 	if err != nil {
 		return err
 	}
@@ -198,8 +199,8 @@ func (r *NodeRegistry) refreshNodes(ctx context.Context) error {
 			fmt.Sscanf(heartbeatStr, "%d", &heartbeat)
 			if now-heartbeat > expireThreshold {
 				// 心跳过期，清理
-				r.redisClient.HDel(ctx, nodeGRPCKey, nodeID)
-				r.redisClient.HDel(ctx, nodeHeartbeatKey, nodeID)
+				r.redisClient.HDel(ctx, r.grpcKey, nodeID)
+				r.redisClient.HDel(ctx, r.heartbeatKey, nodeID)
 				r.nodes.Delete(nodeID)
 				continue
 			}

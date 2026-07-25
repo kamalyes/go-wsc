@@ -15,6 +15,7 @@ import (
 	"compress/zlib"
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -316,28 +317,29 @@ func NewRedisOnlineStatusRepository(client *redis.Client, config *wscconfig.Onli
 // ============================================================================
 
 // GetClientKey 获取客户端详细信息的 key
+// 性能：字符串拼接替代 fmt.Sprintf，减少分配
 func (r *RedisOnlineStatusRepository) GetClientKey(clientID string) string {
-	return fmt.Sprintf("%sclient:%s", r.keyPrefix, clientID)
+	return r.keyPrefix + "client:" + clientID
 }
 
 // GetUserClientsKey 获取用户客户端集合的 key
 func (r *RedisOnlineStatusRepository) GetUserClientsKey(userID string) string {
-	return fmt.Sprintf("%suser_clients:%s", r.keyPrefix, userID)
+	return r.keyPrefix + "user_clients:" + userID
 }
 
 // GetNodeClientsKey 获取节点客户端集合的 key
 func (r *RedisOnlineStatusRepository) GetNodeClientsKey(nodeID string) string {
-	return fmt.Sprintf("%snode_clients:%s", r.keyPrefix, nodeID)
+	return r.keyPrefix + "node_clients:" + nodeID
 }
 
 // GetUserTypeSetKey 获取用户类型集合的 key
 func (r *RedisOnlineStatusRepository) GetUserTypeSetKey(userType models.UserType) string {
-	return fmt.Sprintf("%stype:%s", r.keyPrefix, userType)
+	return r.keyPrefix + "type:" + userType.String()
 }
 
 // GetAllUsersSetKey 获取所有在线用户集合的 key
 func (r *RedisOnlineStatusRepository) GetAllUsersSetKey() string {
-	return fmt.Sprintf("%sall_users", r.keyPrefix)
+	return r.keyPrefix + "all_users"
 }
 
 // ============================================================================
@@ -358,12 +360,8 @@ func (r *RedisOnlineStatusRepository) SetClientOffline(ctx context.Context, clie
 	currentTime := time.Now().Unix()
 
 	// 直接使用提供的客户端信息构建参数，避免从 Redis 查询
-	batchData := fmt.Sprintf("%s|%s|%s|%s",
-		client.ID,
-		client.UserID,
-		client.NodeID,
-		string(client.UserType),
-	)
+	// 性能：字符串拼接替代 fmt.Sprintf，减少分配
+	batchData := client.ID + "|" + client.UserID + "|" + client.NodeID + "|" + string(client.UserType)
 
 	args := []any{currentTime, 1, batchData}
 
@@ -473,7 +471,7 @@ func (r *RedisOnlineStatusRepository) UpdateClientHeartbeat(ctx context.Context,
 func (r *RedisOnlineStatusRepository) IsUserOnline(ctx context.Context, userID string) (bool, error) {
 	// 使用 ZCOUNT 统计未过期的客户端（score > 当前时间）
 	currentTime := time.Now().Unix()
-	count, err := r.client.ZCount(ctx, r.GetUserClientsKey(userID), fmt.Sprintf("%d", currentTime), "+inf").Result()
+	count, err := r.client.ZCount(ctx, r.GetUserClientsKey(userID), strconv.FormatInt(currentTime, 10), "+inf").Result()
 	if err != nil {
 		return false, err
 	}
@@ -487,7 +485,7 @@ func (r *RedisOnlineStatusRepository) GetAllOnlineUsers(ctx context.Context) ([]
 	return r.client.ZRangeArgs(ctx, redis.ZRangeArgs{
 		Key:     r.GetAllUsersSetKey(),
 		ByScore: true,
-		Start:   fmt.Sprintf("%d", currentTime),
+		Start:   strconv.FormatInt(currentTime, 10),
 		Stop:    "+inf",
 	}).Result()
 }
@@ -495,7 +493,7 @@ func (r *RedisOnlineStatusRepository) GetAllOnlineUsers(ctx context.Context) ([]
 // GetOnlineCount 获取在线用户总数（使用 ZCOUNT 统计未过期的用户）
 func (r *RedisOnlineStatusRepository) GetOnlineCount(ctx context.Context) (int64, error) {
 	currentTime := time.Now().Unix()
-	return r.client.ZCount(ctx, r.GetAllUsersSetKey(), fmt.Sprintf("%d", currentTime), "+inf").Result()
+	return r.client.ZCount(ctx, r.GetAllUsersSetKey(), strconv.FormatInt(currentTime, 10), "+inf").Result()
 }
 
 // GetOnlineUsersByType 根据用户类型获取在线用户（使用 ZSET，自动过滤过期数据）
@@ -505,7 +503,7 @@ func (r *RedisOnlineStatusRepository) GetOnlineUsersByType(ctx context.Context, 
 	return r.client.ZRangeArgs(ctx, redis.ZRangeArgs{
 		Key:     r.GetUserTypeSetKey(userType),
 		ByScore: true,
-		Start:   fmt.Sprintf("%d", currentTime),
+		Start:   strconv.FormatInt(currentTime, 10),
 		Stop:    "+inf",
 	}).Result()
 }
@@ -739,14 +737,8 @@ func (r *RedisOnlineStatusRepository) BatchSetClientsOnline(ctx context.Context,
 		}
 
 		// 格式：clientID|userID|nodeID|userType|expireTime|clientData
-		batchData := fmt.Sprintf("%s|%s|%s|%s|%d|%s",
-			client.ID,
-			client.UserID,
-			client.NodeID,
-			string(client.UserType),
-			expireTime,
-			string(clientData),
-		)
+		// 性能：字符串拼接 + strconv.FormatInt 替代 fmt.Sprintf
+		batchData := client.ID + "|" + client.UserID + "|" + client.NodeID + "|" + string(client.UserType) + "|" + strconv.FormatInt(expireTime, 10) + "|" + string(clientData)
 		validClients = append(validClients, batchData)
 	}
 
@@ -816,12 +808,8 @@ func (r *RedisOnlineStatusRepository) BatchSetClientsOffline(ctx context.Context
 		}
 
 		// 格式：clientID|userID|nodeID|userType
-		batchData := fmt.Sprintf("%s|%s|%s|%s",
-			clientIDs[i],
-			client.UserID,
-			client.NodeID,
-			string(client.UserType),
-		)
+		// 性能：字符串拼接替代 fmt.Sprintf，减少分配
+		batchData := clientIDs[i] + "|" + client.UserID + "|" + client.NodeID + "|" + string(client.UserType)
 		args = append(args, batchData)
 		validCount++
 	}
@@ -854,12 +842,8 @@ func (r *RedisOnlineStatusRepository) BatchSetClientsOfflineWithInfo(ctx context
 	args := []any{currentTime, len(clients)}
 
 	for _, client := range clients {
-		batchData := fmt.Sprintf("%s|%s|%s|%s",
-			client.ID,
-			client.UserID,
-			client.NodeID,
-			string(client.UserType),
-		)
+		// 性能：字符串拼接替代 fmt.Sprintf，减少分配
+		batchData := client.ID + "|" + client.UserID + "|" + client.NodeID + "|" + string(client.UserType)
 		args = append(args, batchData)
 	}
 

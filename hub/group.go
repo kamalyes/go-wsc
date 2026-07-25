@@ -281,7 +281,7 @@ func (h *Hub) SendToGroup(ctx context.Context, namespace, groupID string, msg *H
 	result.Failed = int(atomic.LoadInt64(&failed))
 
 	// 🔔 通知观察者（异步，三级索引 O(k) 查找命名空间+群组级观察者）
-	h.notifyObservers(msg, namespace, groupID)
+	h.notifyObservers(ctx, msg, namespace, groupID)
 
 	h.logger.InfoKV("✅ 群组消息投递完成",
 		"namespace", namespace,
@@ -355,10 +355,10 @@ func (h *Hub) BroadcastToGroupMembers(ctx context.Context, namespace, groupID st
 	}
 
 	// 3. 按成员ID查找本地连接并投递（O(m)，m=成员数，不遍历全部连接）
-	localCount := h.broadcastToUserIDs(targetMembers, msg)
+	localCount := h.broadcastToUserIDs(ctx, targetMembers, msg)
 
 	// 🔔 通知观察者（异步，三级索引 O(k) 查找命名空间+群组级观察者）
-	h.notifyObservers(msg, namespace, groupID)
+	h.notifyObservers(ctx, msg, namespace, groupID)
 
 	// 4. 跨节点广播：优先 gRPC 直连，降级 PubSub
 	h.crossNodeGroupBroadcast(ctx, namespace, groupID, msg, excludeSender)
@@ -484,7 +484,7 @@ func (h *Hub) BroadcastToAllGroups(ctx context.Context, namespace string, msg *H
 	for uid := range memberSet {
 		memberList = append(memberList, uid)
 	}
-	localCount := h.broadcastToUserIDs(memberList, msg)
+	localCount := h.broadcastToUserIDs(ctx, memberList, msg)
 
 	// 5. 一次跨节点路由（携带所有 groupIDs，接收端批量处理）
 	h.crossNodeGroupsBroadcast(ctx, namespace, groupIDs, msg)
@@ -626,7 +626,7 @@ func (h *Hub) BroadcastToGroups(ctx context.Context, namespaces, groupIDs []stri
 	for uid := range memberSet {
 		memberList = append(memberList, uid)
 	}
-	localCount := h.broadcastToUserIDs(memberList, msg)
+	localCount := h.broadcastToUserIDs(ctx, memberList, msg)
 
 	// 4. 按命名空间分组跨节点路由（每命名空间一条消息，携带该命名空间的 GroupIDs）
 	h.crossNodeMultiNamespaceGroupsBroadcast(ctx, namespaceGroups, msg)
@@ -795,7 +795,7 @@ func (h *Hub) ensureAndJoinSystemGroup(ctx context.Context, namespace, groupID, 
 func (h *Hub) BroadcastToNamespace(ctx context.Context, namespace string, msg *HubMessage) int {
 	msg = msg.Clone()
 	// 本地按命名空间过滤广播
-	count := h.broadcastToFiltered(func(c *Client) bool {
+	count := h.broadcastToFiltered(ctx, func(c *Client) bool {
 		return c.Namespace == namespace
 	}, msg)
 	// 跨节点命名空间广播

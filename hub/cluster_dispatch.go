@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-07-18 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-07-25 10:51:59
+ * @LastEditTime: 2026-07-25 20:36:01
  * @FilePath: \go-wsc\hub\cluster_dispatch.go
  * @Description: 统一跨节点路由 — 所有跨节点通信的唯一入口
  *
@@ -279,7 +279,7 @@ func (h *Hub) publishToCluster(ctx context.Context, dispatch *models.Distributed
 		return nil
 	}
 
-	channel := "wsc:broadcast"
+	channel := h.config.RedisRepository.PubSub.GetBroadcastChannel()
 	data := h.marshalDistributedMessage(dispatch, dispatch.Message.GetMessageID())
 	return h.pubsub.Publish(ctx, channel, string(data))
 }

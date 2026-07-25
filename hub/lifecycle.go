@@ -13,6 +13,7 @@ package hub
 
 import (
 	"context"
+	"runtime/debug"
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
@@ -72,7 +73,7 @@ func (h *Hub) Run() {
 	if h.onlineStatusRepo != nil {
 		syncx.Go().
 			OnPanic(func(r any) {
-				h.logger.ErrorKV("心跳 Redis 更新 worker panic", "panic", r, "node_id", h.nodeID)
+				h.logger.ErrorKV("心跳 Redis 更新 worker panic", "panic", r, "stack", string(debug.Stack()), "node_id", h.nodeID)
 			}).
 			Exec(h.processHeartbeatRedisUpdates)
 	}
@@ -83,7 +84,7 @@ func (h *Hub) Run() {
 	// 启动待发送消息处理goroutine
 	syncx.Go().
 		OnPanic(func(r any) {
-			h.logger.ErrorKV("待发送消息处理器 panic", "panic", r, "node_id", h.nodeID)
+			h.logger.ErrorKV("待发送消息处理器 panic", "panic", r, "stack", string(debug.Stack()), "node_id", h.nodeID)
 		}).
 		Exec(h.processPendingMessages)
 
@@ -93,7 +94,7 @@ func (h *Hub) Run() {
 		// 订阅节点间消息
 		syncx.Go(h.ctx).
 			OnPanic(func(r any) {
-				h.logger.ErrorKV("订阅节点消息 panic", "panic", r, "node_id", h.nodeID)
+				h.logger.ErrorKV("订阅节点消息 panic", "panic", r, "stack", string(debug.Stack()), "node_id", h.nodeID)
 			}).
 			Exec(func() {
 				if err := h.SubscribeNodeMessages(h.ctx); err != nil {
@@ -104,7 +105,7 @@ func (h *Hub) Run() {
 		// 订阅全局广播频道
 		syncx.Go(h.ctx).
 			OnPanic(func(r any) {
-				h.logger.ErrorKV("订阅广播频道 panic", "panic", r, "node_id", h.nodeID)
+				h.logger.ErrorKV("订阅广播频道 panic", "panic", r, "stack", string(debug.Stack()), "node_id", h.nodeID)
 			}).
 			Exec(func() {
 				if err := h.SubscribeBroadcastChannel(h.ctx); err != nil {
@@ -115,7 +116,7 @@ func (h *Hub) Run() {
 		// 订阅观察者通知频道
 		syncx.Go(h.ctx).
 			OnPanic(func(r any) {
-				h.logger.ErrorKV("订阅观察者频道 panic", "panic", r, "node_id", h.nodeID)
+				h.logger.ErrorKV("订阅观察者频道 panic", "panic", r, "stack", string(debug.Stack()), "node_id", h.nodeID)
 			}).
 			Exec(func() {
 				if err := h.SubscribeObserverChannel(h.ctx); err != nil {
@@ -160,7 +161,7 @@ func (h *Hub) Run() {
 			h.cleanupExpiredMessageRecords).
 		// Panic处理：捕获事件处理过程中的panic，防止整个Hub崩溃
 		OnPanic(func(r interface{}) {
-			h.logger.ErrorKV("Hub事件循环panic", "panic", r, "node_id", h.nodeID)
+			h.logger.ErrorKV("Hub事件循环panic", "panic", r, "stack", string(debug.Stack()), "node_id", h.nodeID)
 		}).
 		// 优雅关闭：事件循环停止时记录日志
 		OnShutdown(func() {
@@ -427,7 +428,7 @@ func (h *Hub) SafeShutdown() error {
 	done := make(chan struct{})
 	syncx.Go().
 		OnPanic(func(r any) {
-			h.logger.ErrorKV("WaitGroup等待崩溃", "panic", r)
+			h.logger.ErrorKV("WaitGroup等待崩溃", "panic", r, "stack", string(debug.Stack()))
 		}).
 		Exec(func() {
 			h.wg.Wait()
@@ -513,7 +514,7 @@ func (h *Hub) processPendingMessages() {
 		}).
 		// Panic 保护
 		OnPanic(func(r interface{}) {
-			h.logger.ErrorKV("待发送消息处理器panic", "panic", r, "node_id", h.nodeID)
+			h.logger.ErrorKV("待发送消息处理器panic", "panic", r, "stack", string(debug.Stack()), "node_id", h.nodeID)
 		}).
 		// 优雅关闭
 		OnShutdown(func() {

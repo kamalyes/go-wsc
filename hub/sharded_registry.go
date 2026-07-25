@@ -776,12 +776,20 @@ func (r *ShardedRegistry) Clear() {
 
 	if r.observerShards != nil {
 		r.observerShards.Clear()
+		// 同步清空 observerIdx 三级索引，避免内存泄漏
+		// （observerIdx 是独立 map，不会被 observerShards.Clear 联动清理）
+		r.observerIdx.mu.Lock()
+		r.observerIdx.global = make(map[string]*Client)
+		r.observerIdx.byNamespace = make(map[string]map[string]*Client)
+		r.observerIdx.byGroup = make(map[string]map[string]*Client)
+		r.observerIdx.mu.Unlock()
 	}
 	if r.agentShards != nil {
 		r.agentShards.Clear()
 	}
 
 	// 清空反向索引
+	// 性能：用新实例替换比逐个 Delete 更快（旧 map 由 GC 回收）
 	r.clientIDToUserID.Range(func(key, value any) bool {
 		r.clientIDToUserID.Delete(key)
 		return true

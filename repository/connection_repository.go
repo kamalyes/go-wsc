@@ -14,6 +14,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"runtime/debug"
 	"time"
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
@@ -617,21 +618,16 @@ func (r *connectionRecordRepositoryImpl) GetConnectionStats(ctx context.Context,
 			SUM(bytes_sent) as total_bytes_sent,
 			SUM(bytes_received) as total_bytes_received,
 			AVG(CASE WHEN average_ping_ms > 0 THEN average_ping_ms ELSE NULL END) as average_ping_ms,
-			AVG(reconnect_count) as average_reconnect_count
+			AVG(reconnect_count) as average_reconnect_count,
+			CASE WHEN COUNT(*) > 0
+				THEN SUM(CASE WHEN is_abnormal = true THEN 1 ELSE 0 END) * 100.0 / COUNT(*)
+				ELSE 0
+			END as abnormal_rate
 		`).
 		Scan(stats).Error
 
 	if err != nil {
 		return nil, err
-	}
-
-	// 计算异常率
-	if stats.TotalConnections > 0 {
-		var abnormalCount int64
-		r.getDB(ctx).
-			Where("connected_at BETWEEN ? AND ? AND is_abnormal = ?", startTime, endTime, true).
-			Count(&abnormalCount)
-		stats.AbnormalRate = float64(abnormalCount) / float64(stats.TotalConnections) * 100
 	}
 
 	return stats, nil
@@ -992,7 +988,7 @@ func (r *connectionRecordRepositoryImpl) startCleanupScheduler(ctx context.Conte
 		}).
 		// Panic 处理
 		OnPanic(func(rec any) {
-			r.logger.Errorf("⚠️ 连接记录清理任务 panic: %v", rec)
+			r.logger.Errorf("⚠️ 连接记录清理任务 panic: %v, stack: %s", rec, debug.Stack())
 		}).
 		// 优雅关闭
 		OnShutdown(func() {

@@ -52,10 +52,11 @@ type Client struct {
 	closed         atomic.Bool            `json:"-"`                  // channel关闭标志（不序列化）
 	CloseMu        sync.Mutex             `json:"-"`                  // 保护channel关闭的互斥锁（不序列化）
 
-	// 原子时间戳（消除 LastHeartbeat/LastSeen 的并发读写数据竞争）
+	// 原子时间戳（消除 LastHeartbeat/LastSeen/LastPong 的并发读写数据竞争）
 	// 与 time.Time 字段同步更新，并发读通过原子读获取
 	lastHeartbeatUnix atomic.Int64 `json:"-"` // LastHeartbeat 的 UnixNano 原子镜像
 	lastSeenUnix      atomic.Int64 `json:"-"` // LastSeen 的 UnixNano 原子镜像
+	lastPongUnix      atomic.Int64 `json:"-"` // LastPong 的 UnixNano 原子镜像
 
 	// SSE 专用字段（仅当 ConnectionType 为 SSE 时使用）
 	SSEWriter    http.ResponseWriter `json:"-"` // SSE Writer（不序列化）
@@ -82,6 +83,7 @@ func NewClient(id, userID string, userType UserType) *Client {
 	}
 	c.lastHeartbeatUnix.Store(unix)
 	c.lastSeenUnix.Store(unix)
+	c.lastPongUnix.Store(unix)
 	return c
 }
 
@@ -97,6 +99,12 @@ func (c *Client) SetLastSeen(t time.Time) {
 	c.lastSeenUnix.Store(t.UnixNano())
 }
 
+// SetLastPong 原子更新最后 Pong 响应时间（同时更新 time.Time 字段和原子镜像）
+func (c *Client) SetLastPong(t time.Time) {
+	c.LastPong = t
+	c.lastPongUnix.Store(t.UnixNano())
+}
+
 // GetLastHeartbeat 原子读最后心跳时间（并发安全）
 func (c *Client) GetLastHeartbeat() time.Time {
 	return time.Unix(0, c.lastHeartbeatUnix.Load())
@@ -105,6 +113,11 @@ func (c *Client) GetLastHeartbeat() time.Time {
 // GetLastSeen 原子读最后活跃时间（并发安全）
 func (c *Client) GetLastSeen() time.Time {
 	return time.Unix(0, c.lastSeenUnix.Load())
+}
+
+// GetLastPong 原子读最后 Pong 响应时间（并发安全）
+func (c *Client) GetLastPong() time.Time {
+	return time.Unix(0, c.lastPongUnix.Load())
 }
 
 // WithVIPLevel 设置VIP等级

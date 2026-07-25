@@ -19,6 +19,7 @@ package hub
 
 import (
 	"context"
+	"runtime/debug"
 	"time"
 
 	"github.com/kamalyes/go-logger"
@@ -38,7 +39,7 @@ func (h *Hub) syncClientStats() {
 	syncx.Go().
 		WithTimeout(5 * time.Second).
 		OnPanic(func(r interface{}) {
-			h.logger.ErrorKV("同步客户端统计崩溃", "panic", r)
+			h.logger.ErrorKV("同步客户端统计崩溃", "panic", r, "stack", string(debug.Stack()))
 		}).
 		ExecWithContext(func(ctx context.Context) error {
 			_ = h.statsRepo.UpdateConnectionStats(ctx, h.nodeID, h.shardedRegistry.GetClientCount())
@@ -155,7 +156,7 @@ func (h *Hub) trackConnectionError(connectionID string, userType UserType, err e
 	syncx.Go().
 		WithTimeout(5 * time.Second).
 		OnPanic(func(r any) {
-			h.logger.ErrorKV("记录连接错误崩溃", "panic", r, "connection_id", connectionID)
+			h.logger.ErrorKV("记录连接错误崩溃", "panic", r, "stack", string(debug.Stack()), "connection_id", connectionID)
 		}).
 		ExecWithContext(func(ctx context.Context) error {
 			return h.connectionRecordRepo.AddError(ctx, connectionID, err)
@@ -174,18 +175,19 @@ func (h *Hub) trackHeartbeatStats(client *Client) {
 		return
 	}
 
-	// 计算Ping延迟
+	// 计算Ping延迟（原子读，避免与 SetLastHeartbeat 并发写产生数据竞争）
 	pingMs := float64(0)
-	if !client.LastHeartbeat.IsZero() {
-		pingMs = float64(time.Since(client.LastHeartbeat).Milliseconds())
+	lastHeartbeat := client.GetLastHeartbeat()
+	if !lastHeartbeat.IsZero() {
+		pingMs = float64(time.Since(lastHeartbeat).Milliseconds())
 	}
 
 	// 使用批量更新器，避免每次心跳都启动 goroutine
 	if h.heartbeatBatcher != nil {
 		h.heartbeatBatcher.Submit(&heartbeatStatsEntry{
 			ClientID: client.ID,
-			PingTime: client.LastHeartbeat,
-			PongTime: client.LastPong,
+			PingTime: lastHeartbeat,
+			PongTime: client.GetLastPong(),
 			PingMs:   pingMs,
 		})
 	}

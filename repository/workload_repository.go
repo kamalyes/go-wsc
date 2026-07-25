@@ -119,7 +119,7 @@ func NewRedisWorkloadRepository(client *redis.Client, db *gorm.DB, config *wscco
 // realtime: workload:realtime:agent:{agentID}
 // hourly: workload:hourly:2026022513:agent:agent123
 func (r *RedisWorkloadRepository) GetDimensionKey(dimension WorkloadDimension, agentID string, t time.Time) string {
-	return fmt.Sprintf("%s%s:agent:%s", r.keyPrefix, dimension.FormatKeyPart(t), agentID)
+	return r.keyPrefix + dimension.FormatKeyPart(t) + ":agent:" + agentID
 }
 
 // GetDimensionZSetKey 生成指定维度的 ZSet key
@@ -127,7 +127,7 @@ func (r *RedisWorkloadRepository) GetDimensionKey(dimension WorkloadDimension, a
 // realtime: workload:realtime:zset
 // hourly: workload:hourly:2026022513:zset
 func (r *RedisWorkloadRepository) GetDimensionZSetKey(dimension WorkloadDimension, t time.Time) string {
-	return fmt.Sprintf("%s%s:zset", r.keyPrefix, dimension.FormatKeyPart(t))
+	return r.keyPrefix + dimension.FormatKeyPart(t) + ":zset"
 }
 
 // evalLua 执行 Lua 脚本的通用方法

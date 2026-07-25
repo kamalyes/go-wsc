@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime/debug"
 	"sync/atomic"
 	"time"
 
@@ -146,14 +147,14 @@ func (h *Hub) SubscribeNodeMessages(ctx context.Context) error {
 		return ErrPubSubNotSet
 	}
 
-	channel := "wsc:node:" + h.nodeID
+	channel := h.config.RedisRepository.PubSub.GetNodeChannelPrefix() + h.nodeID
 
 	h.logger.InfoKV("订阅节点消息通道", "channel", channel)
 
 	// 使用 EventLoop 包装订阅过程，提供 panic 恢复和优雅关闭
 	syncx.Go(ctx).
 		OnPanic(func(r any) {
-			h.logger.ErrorKV("节点消息订阅 panic", "panic", r, "channel", channel)
+			h.logger.ErrorKV("节点消息订阅 panic", "panic", r, "stack", string(debug.Stack()), "channel", channel)
 		}).
 		Exec(func() {
 			_, err := h.pubsub.Subscribe([]string{channel}, func(subCtx context.Context, ch string, msg string) error {
@@ -280,7 +281,7 @@ func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *Distrib
 	if len(distMsg.GroupIDs) > 0 {
 		observerGroupID = distMsg.GroupIDs[0]
 	}
-	h.notifyObservers(distMsg.Message, distMsg.Namespace, observerGroupID)
+	h.notifyObservers(ctx, distMsg.Message, distMsg.Namespace, observerGroupID)
 
 	return nil
 }
@@ -329,7 +330,7 @@ func (h *Hub) handleDistributedBroadcast(ctx context.Context, distMsg *Distribut
 	}
 
 	// 命名空间广播 → 仅发送给同命名空间客户端
-	count := h.broadcastToFiltered(func(c *Client) bool {
+	count := h.broadcastToFiltered(ctx, func(c *Client) bool {
 		return c.Namespace == namespace
 	}, distMsg.Message)
 
@@ -351,7 +352,7 @@ func (h *Hub) AcquireDistributedLock(ctx context.Context, key string, ttl time.D
 		return false, ErrPubSubNotSet
 	}
 
-	lockKey := fmt.Sprintf("wsc:lock:%s", key)
+	lockKey := h.config.RedisRepository.PubSub.GetLockKeyPrefix() + key
 	lockValue := h.nodeID
 
 	// 使用 Lua 脚本实现 SETNX + EXPIRE 原子操作
@@ -384,7 +385,7 @@ func (h *Hub) ReleaseDistributedLock(ctx context.Context, key string) error {
 		return ErrPubSubNotSet
 	}
 
-	lockKey := fmt.Sprintf("wsc:lock:%s", key)
+	lockKey := h.config.RedisRepository.PubSub.GetLockKeyPrefix() + key
 
 	// Lua 脚本确保只删除自己的锁
 	script := `
@@ -460,7 +461,7 @@ func (h *Hub) handleDistributedGroupsBroadcast(ctx context.Context, distMsg *Dis
 	for uid := range memberSet {
 		memberList = append(memberList, uid)
 	}
-	count := h.broadcastToUserIDs(memberList, distMsg.Message)
+	count := h.broadcastToUserIDs(ctx, memberList, distMsg.Message)
 
 	h.logger.DebugKV("跨节点群组广播已处理",
 		"namespace", namespace,
@@ -548,10 +549,11 @@ func (h *Hub) handleDistributedObserverNotify(ctx context.Context, distMsg *Dist
 				"client_id", client.ID,
 				"message_id", msgID,
 				"panic", panicVal,
+				"stack", string(debug.Stack()),
 			)
 		}).
 		Execute(func(idx int, observer *Client) (error, error) {
-			return h.sendToObserver(observer, msgID, msgData), nil
+			return h.sendToObserver(ctx, observer, msgID, msgData), nil
 		})
 
 	h.logger.DebugContextKV(ctx, "已处理跨节点观察者通知",
@@ -570,14 +572,14 @@ func (h *Hub) SubscribeBroadcastChannel(ctx context.Context) error {
 		return ErrPubSubNotSet
 	}
 
-	channel := "wsc:broadcast"
+	channel := h.config.RedisRepository.PubSub.GetBroadcastChannel()
 
 	h.logger.InfoKV("订阅全局广播频道", "channel", channel)
 
 	// 使用 EventLoop 包装订阅过程，提供 panic 恢复和优雅关闭
 	syncx.Go(ctx).
 		OnPanic(func(r any) {
-			h.logger.ErrorKV("广播频道订阅 panic", "panic", r, "channel", channel)
+			h.logger.ErrorKV("广播频道订阅 panic", "panic", r, "stack", string(debug.Stack()), "channel", channel)
 		}).
 		Exec(func() {
 			_, err := h.pubsub.Subscribe([]string{channel}, func(subCtx context.Context, ch string, msg string) error {
@@ -616,14 +618,14 @@ func (h *Hub) SubscribeObserverChannel(ctx context.Context) error {
 		return ErrPubSubNotSet
 	}
 
-	channel := "wsc:observers"
+	channel := h.config.RedisRepository.PubSub.GetObserverChannel()
 
 	h.logger.InfoKV("订阅观察者通知频道", "channel", channel)
 
 	// 使用 EventLoop 包装订阅过程，提供 panic 恢复和优雅关闭
 	syncx.Go(ctx).
 		OnPanic(func(r any) {
-			h.logger.ErrorKV("观察者频道订阅 panic", "panic", r, "channel", channel)
+			h.logger.ErrorKV("观察者频道订阅 panic", "panic", r, "stack", string(debug.Stack()), "channel", channel)
 		}).
 		Exec(func() {
 			_, err := h.pubsub.Subscribe([]string{channel}, func(subCtx context.Context, ch string, msg string) error {

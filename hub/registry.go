@@ -13,7 +13,7 @@ package hub
 
 import (
 	"context"
-	"fmt"
+	"runtime/debug"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -93,8 +93,8 @@ func (h *Hub) handleRegister(client *Client) {
 	// 初始化客户端时间戳（原子更新）
 	now := time.Now()
 	client.ConnectedAt = mathx.IfNotZero(client.ConnectedAt, now)
-	client.SetLastHeartbeat(mathx.IfNotZero(client.LastHeartbeat, now))
-	client.SetLastSeen(mathx.IfNotZero(client.LastSeen, now))
+	client.SetLastHeartbeat(mathx.IfNotZero(client.GetLastHeartbeat(), now))
+	client.SetLastSeen(mathx.IfNotZero(client.GetLastSeen(), now))
 
 	// ================================================================
 	// 临界区 - 仅 map 操作（shardedRegistry 分片锁，粒度细）
@@ -303,7 +303,7 @@ func (h *Hub) KickUser(userID string, reason string, sendNotification bool, noti
 	if len(clients) == 0 {
 		result.Error = errorx.NewError(ErrTypeUserNotFound, "user not online or not found: %s", userID)
 		result.Success = false
-		result.Reason = fmt.Sprintf("%s (用户不在线)", reason)
+		result.Reason = reason + " (用户不在线)"
 		h.logger.WarnKV("踢出用户失败：用户不在线",
 			"user_id", userID,
 			"reason", reason,
@@ -462,7 +462,7 @@ func (h *Hub) syncActiveConnectionsToRedis() {
 		syncx.Go().
 			WithTimeout(2 * time.Second).
 			OnPanic(func(r any) {
-				h.logger.ErrorKV("同步活跃连接数到Redis崩溃", "panic", r)
+				h.logger.ErrorKV("同步活跃连接数到Redis崩溃", "panic", r, "stack", string(debug.Stack()))
 			}).
 			ExecWithContext(func(ctx context.Context) error {
 				// 再次检查shutdown
@@ -571,9 +571,10 @@ func (h *Hub) kickOldestConnection(clients map[string]*Client) {
 
 	// 找出最久没有心跳的客户端
 	for _, client := range clients {
-		if oldestClient == nil || client.LastHeartbeat.Before(oldestTime) {
+		heartbeat := client.GetLastHeartbeat()
+		if oldestClient == nil || heartbeat.Before(oldestTime) {
 			oldestClient = client
-			oldestTime = client.LastHeartbeat
+			oldestTime = heartbeat
 		}
 	}
 
@@ -584,7 +585,7 @@ func (h *Hub) kickOldestConnection(clients map[string]*Client) {
 	h.logger.InfoKV("踢掉最不活跃的连接",
 		"client_id", oldestClient.ID,
 		"user_id", oldestClient.UserID,
-		"last_heartbeat", oldestClient.LastHeartbeat,
+		"last_heartbeat", oldestClient.GetLastHeartbeat(),
 		"connected_at", oldestClient.ConnectedAt,
 	)
 
@@ -604,7 +605,7 @@ func (h *Hub) kickClientWithNotification(client *Client, reason DisconnectReason
 			SetContent(message).
 			WithContentExtra("reason", reason)
 
-		h.sendToClient(client, forceOfflineMsg)
+		h.sendToClient(h.ctx, client, forceOfflineMsg)
 		// 不再使用 time.Sleep 阻塞等待，sendToClient 已将消息写入 SendChan，
 		// handleClientWrite 会异步发送 Unregister 后通道关闭前消息仍会被消费
 	}
@@ -613,10 +614,7 @@ func (h *Hub) kickClientWithNotification(client *Client, reason DisconnectReason
 
 // createKickNotification 创建踢人通知消息
 func (h *Hub) createKickNotification(userID, reason, customMsg string, kickedAt time.Time) *HubMessage {
-	content := customMsg
-	if content == "" {
-		content = "您已被踢出: " + reason
-	}
+	content := mathx.IfEmpty(customMsg, "您已被踢出: "+reason)
 
 	return &HubMessage{
 		MessageType: MessageTypeKickOut,
@@ -638,7 +636,7 @@ func (h *Hub) sendKickNotificationToClients(clients []*Client, msg *HubMessage) 
 	}
 
 	for _, client := range clients {
-		h.sendToClient(client, msg)
+		h.sendToClient(h.ctx, client, msg)
 	}
 	return true
 }

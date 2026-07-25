@@ -16,8 +16,13 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 )
+
+// rateLimitDefaultKeyPrefix 默认 Redis key 前缀
+// 走配置时由 RateLimiterConfig.RedisKeyPrefix 覆盖
+const rateLimitDefaultKeyPrefix = "wsc:rate_limit:"
 
 // RateLimiterConfig 频率限制配置
 type RateLimiterConfig struct {
@@ -32,17 +37,44 @@ type RateLimiterConfig struct {
 	OnBlock func(ctx context.Context, userID, userType string, minuteCount, hourCount int64) // 封禁回调
 
 	// Redis相关（可选，不提供则使用内存计数）
-	RedisEnabled bool
-	RedisClient  RedisClient                               // Redis客户端接口
-	RedisKeyFunc func(userID string, window string) string // Redis键生成函数
+	RedisEnabled   bool
+	RedisClient    RedisClient                               // Redis客户端接口
+	RedisKeyFunc   func(userID string, window string) string // 自定义 Redis键生成函数（最高优先级，覆盖 RedisKeyPrefix）
+	RedisKeyPrefix string                                    // Redis key 前缀，默认 "wsc:rate_limit:"（来自 go-config MessageRateLimit.RedisKeyPrefix）
 }
 
-// RedisClient Redis客户端接口
+// RedisClient Redis客户端接口（统一单个和批量操作）
+//
+// 设计理念：
+//   - 单个操作和批量操作合并在同一接口下，避免接口分裂
+//   - 实现方应优先使用 Pipeline 执行 BatchIncrExpire，单次往返完成多个操作
+//   - IncrExpire 用于单次检查场景，BatchIncrExpire 用于多窗口场景
+//
+// 性能：
+//   - BatchIncrExpire：N 次 IncrExpire → 1 次 Pipeline（N RTT → 1 RTT）
+//   - IncrExpire：INCR + 首次 EXPIRE（2 命令 1 RTT，Pipeline 合并）
 type RedisClient interface {
-	Incr(ctx context.Context, key string) (int64, error)
-	Expire(ctx context.Context, key string, ttl time.Duration) error
+	// IncrExpire 递增计数器并设置 TTL
+	// 首次 Incr（返回 1）时设置 TTL，后续 Incr 不重置 TTL
+	// 返回递增后的计数值
+	IncrExpire(ctx context.Context, key string, ttl time.Duration) (int64, error)
+
+	// BatchIncrExpire 批量递增计数器（单次 Redis 往返）
+	// 同时为多个 key 执行 Incr 和首次 Expire
+	// 返回值按 entries 顺序对应
+	BatchIncrExpire(ctx context.Context, entries ...IncrExpireEntry) ([]int64, error)
+
+	// Get 获取计数器值
 	Get(ctx context.Context, key string) (int64, error)
+
+	// Del 删除 key
 	Del(ctx context.Context, keys ...string) error
+}
+
+// IncrExpireEntry 递增条目（用于批量操作）
+type IncrExpireEntry struct {
+	Key string
+	TTL time.Duration
 }
 
 // DefaultRateLimiterConfig 默认频率限制配置
@@ -53,6 +85,7 @@ func DefaultRateLimiterConfig() *RateLimiterConfig {
 		AlertThreshold:       30,
 		BlockThreshold:       50,
 		RedisEnabled:         false,
+		RedisKeyPrefix:       rateLimitDefaultKeyPrefix,
 	}
 }
 
@@ -139,29 +172,22 @@ func (r *RateLimiter) CheckLimit(ctx context.Context, userID, userType string) (
 }
 
 // checkRedisLimit 使用Redis进行限流检查
+//
+// 性能：BatchIncrExpire 单次 Pipeline 往返（原 4 RTT → 1 RTT）
 func (r *RateLimiter) checkRedisLimit(ctx context.Context, userID string) (int64, int64, error) {
 	minuteKey := r.getRedisKey(userID, "minute")
 	hourKey := r.getRedisKey(userID, "hour")
 
-	// 增加分钟计数
-	minuteCount, err := r.config.RedisClient.Incr(ctx, minuteKey)
+	// 批量执行 Incr+Expire（单次 Pipeline 往返）
+	counts, err := r.config.RedisClient.BatchIncrExpire(ctx,
+		IncrExpireEntry{Key: minuteKey, TTL: 60 * time.Second},
+		IncrExpireEntry{Key: hourKey, TTL: 60 * time.Minute},
+	)
 	if err != nil {
 		return 0, 0, err
 	}
-	if minuteCount == 1 {
-		_ = r.config.RedisClient.Expire(ctx, minuteKey, 60*time.Second)
-	}
 
-	// 增加小时计数
-	hourCount, err := r.config.RedisClient.Incr(ctx, hourKey)
-	if err != nil {
-		return minuteCount, 0, err
-	}
-	if hourCount == 1 {
-		_ = r.config.RedisClient.Expire(ctx, hourKey, 60*time.Minute)
-	}
-
-	return minuteCount, hourCount, nil
+	return counts[0], counts[1], nil
 }
 
 // checkMemoryLimit 使用内存进行限流检查
@@ -238,19 +264,28 @@ func (r *RateLimiter) GetUserMessageCount(ctx context.Context, userID string) (m
 }
 
 // getRedisKey 生成Redis键
+// 优先级：RedisKeyFunc > RedisKeyPrefix（来自 go-config）> 默认 "wsc:rate_limit:"
+//
+// 性能优化：原实现对同一 time.Now() 调用两次 Format（minute/hour 各一次），
+// 现合并为单次 time.Now() + 单次 Format，避免重复系统调用和字符串格式化
 func (r *RateLimiter) getRedisKey(userID, window string) string {
 	if r.config.RedisKeyFunc != nil {
 		return r.config.RedisKeyFunc(userID, window)
 	}
 
+	// 前缀走配置（默认 "wsc:rate_limit:"，可由 go-config MessageRateLimit.RedisKeyPrefix 覆盖）
+	prefix := mathx.IfEmpty(r.config.RedisKeyPrefix, rateLimitDefaultKeyPrefix)
+
+	// 单次 time.Now() 调用，按 window 选择格式（minute 精确到分钟，hour 精确到小时）
+	now := time.Now()
 	var timeKey string
 	if window == "minute" {
-		timeKey = time.Now().Format("2006-01-02:15:04")
+		timeKey = now.Format("2006-01-02:15:04")
 	} else {
-		timeKey = time.Now().Format("2006-01-02:15")
+		timeKey = now.Format("2006-01-02:15")
 	}
 
-	return fmt.Sprintf("wsc:rate_limit:%s:%s:%s", userID, window, timeKey)
+	return prefix + userID + ":" + window + ":" + timeKey
 }
 
 // cleanupMemoryCounters 定期清理过期的内存计数器

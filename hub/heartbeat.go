@@ -5,7 +5,6 @@
  * @LastEditTime: 2025-01-30 11:20:15
  * @FilePath: \go-wsc\hub\heartbeat.go
  * @Description: Hub 心跳处理
- *   - 客户端心跳时间更新
  *   - PONG 响应发送
  *   - 心跳消息处理流程（前置回调 → 更新 → Redis 同步 → PONG → 统计 → 后置回调）
  *
@@ -22,39 +21,9 @@ import (
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
 )
 
-// ============================================================================
-// 心跳时间更新
-// ============================================================================
-
-// UpdateHeartbeat 更新客户端心跳时间
-// 使用 shardedRegistry 查找客户端（分片读锁，粒度细）
-func (h *Hub) UpdateHeartbeat(clientID string) {
-	client, exists := h.shardedRegistry.GetClient(clientID)
-	if !exists {
-		return
-	}
-	now := time.Now()
-	client.SetLastHeartbeat(now)
-	client.SetLastSeen(now)
-}
-
-// UpdatePongTime 更新客户端PONG响应时间（发送PONG时调用）
-// 使用 shardedRegistry 查找客户端
-func (h *Hub) UpdatePongTime(clientID string) {
-	client, exists := h.shardedRegistry.GetClient(clientID)
-	if !exists {
-		return
-	}
-	client.LastPong = time.Now()
-}
-
-// ============================================================================
-// PONG 响应
-// ============================================================================
-
-// SendPongResponse 发送 pong 响应给客户端（避免竞态条件）
-// 此方法接收已获取的客户端对象，避免在发送时重新查询导致的竞态条件
-func (h *Hub) SendPongResponse(client *Client) error {
+// sendPongResponse 发送 pong 响应（心跳热路径专用）
+// 接收已获取的客户端对象，避免在发送时重新查询 shardedRegistry 导致的竞态条件与冗余开销
+func (h *Hub) sendPongResponse(client *Client, now time.Time) error {
 	if client == nil {
 		return errorx.WrapError("client is nil")
 	}
@@ -66,7 +35,7 @@ func (h *Hub) SendPongResponse(client *Client) error {
 		SenderType:   UserTypeSystem,
 		Receiver:     client.UserID,
 		ReceiverType: client.UserType,
-		CreateAt:     time.Now(),
+		CreateAt:     now,
 		Priority:     PriorityNormal,
 	}
 
@@ -76,11 +45,9 @@ func (h *Hub) SendPongResponse(client *Client) error {
 		return errorx.WrapError("failed to marshal pong message", err)
 	}
 
-	h.logWithClient(logger.DEBUG, "💓 准备发送心跳 pong 响应", client)
-
 	// 优先使用非阻塞发送
 	if client.TrySend(data) {
-		h.UpdatePongTime(client.ID)
+		client.SetLastPong(now) // 直接更新，避免 UpdatePongTime 的冗余 GetClient 查询
 		return nil
 	}
 
@@ -90,7 +57,6 @@ func (h *Hub) SendPongResponse(client *Client) error {
 	defer client.CloseMu.Unlock()
 
 	if client.IsClosed() || client.SendChan == nil {
-		h.logWithClient(logger.DEBUG, "💓 发送心跳 pong 响应失败，客户端已关闭", client)
 		return errorx.WrapError("client is closed or send channel is nil")
 	}
 
@@ -99,7 +65,7 @@ func (h *Hub) SendPongResponse(client *Client) error {
 
 	select {
 	case client.SendChan <- data:
-		h.UpdatePongTime(client.ID)
+		client.SetLastPong(now) // 直接更新
 		return nil
 	case <-timer.C:
 		h.logger.WarnKV("心跳 pong 响应发送超时",
@@ -132,8 +98,10 @@ func (h *Hub) handleHeartbeatMessage(client *Client) {
 		}
 	}
 
-	// 更新心跳请求时间（内存）- 收到PING时
-	h.UpdateHeartbeat(client.ID)
+	// 更新心跳请求时间（内存）- 收到PING时直接更新 client 字段，避免 shardedRegistry 冗余查询
+	now := time.Now()
+	client.SetLastHeartbeat(now)
+	client.SetLastSeen(now)
 
 	// 💓 记录心跳日志
 	h.logWithClient(logger.DEBUG, "💓 收到心跳消息", client)
@@ -149,7 +117,7 @@ func (h *Hub) handleHeartbeatMessage(client *Client) {
 	}
 
 	// 直接发送 pong 响应（使用已获取的客户端对象，避免竞态条件）
-	if err := h.SendPongResponse(client); err != nil {
+	if err := h.sendPongResponse(client, now); err != nil {
 		h.logger.WarnKV("心跳 pong 响应发送失败",
 			"client_id", client.ID,
 			"user_id", client.UserID,

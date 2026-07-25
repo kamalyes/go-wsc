@@ -22,11 +22,13 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	gccommon "github.com/kamalyes/go-config/pkg/common"
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -189,7 +191,7 @@ func IssueConnectionToken(cfg *wscconfig.ConnectionToken, redisCli *redis.Client
 		claims.IssuedAt = jwt.NewNumericDate(time.Now())
 	}
 	if claims.ID == "" {
-		claims.ID = fmt.Sprintf("%d", time.Now().UnixNano())
+		claims.ID = strconv.FormatInt(time.Now().UnixNano(), 10)
 	}
 
 	method := jwt.GetSigningMethod(cfg.GetAlgorithm())
@@ -207,9 +209,7 @@ func IssueConnectionToken(cfg *wscconfig.ConnectionToken, redisCli *redis.Client
 	if cfg.IsRedisEnabled() && redisCli != nil {
 		key := whitelistKey(cfg.GetRedisKeyPrefix(), tokenStr)
 		ttl := time.Until(claims.ExpiresAt.Time)
-		if ttl <= 0 {
-			ttl = cfg.GetExpiresTime()
-		}
+		ttl = mathx.IfLeZero(ttl, cfg.GetExpiresTime())
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		if err := redisCli.Set(ctx, key, "1", ttl).Err(); err != nil {

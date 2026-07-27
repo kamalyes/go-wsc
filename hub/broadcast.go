@@ -239,13 +239,14 @@ func (h *Hub) BroadcastAfterDelay(ctx context.Context, msg *HubMessage, delay ti
 
 // BroadcastExclude 广播消息给所有客户端，但排除指定用户
 func (h *Hub) BroadcastExclude(ctx context.Context, msg *HubMessage, excludeUserIDs []string) int {
-	excludeMap := make(map[string]bool, len(excludeUserIDs))
+	excludeMap := make(map[string]struct{}, len(excludeUserIDs))
 	for _, userID := range excludeUserIDs {
-		excludeMap[userID] = true
+		excludeMap[userID] = struct{}{}
 	}
 
 	return h.SendConditional(ctx, func(c *Client) bool {
-		return !excludeMap[c.UserID]
+		_, excluded := excludeMap[c.UserID]
+		return !excluded
 	}, msg)
 }
 
@@ -275,5 +276,6 @@ func (h *Hub) GetClientsByDepartment(department Department) []*Client {
 
 // GetClientsByVIPLevel 获取特定VIP等级及以上的客户端（委托 FilterClients 零拷贝）
 func (h *Hub) GetClientsByVIPLevel(minVIPLevel VIPLevel) []*Client {
-	return h.FilterClients(func(c *Client) bool { return c.VIPLevel.GetLevel() >= minVIPLevel.GetLevel() })
+	minLevel := minVIPLevel.GetLevel()
+	return h.FilterClients(func(c *Client) bool { return c.GetVIPLevel().GetLevel() >= minLevel })
 }

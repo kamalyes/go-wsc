@@ -294,7 +294,7 @@ func (h *Hub) GetObserverManagerStats() *ObserverManagerStats {
 	}
 
 	return &ObserverManagerStats{
-		TotalObservers:      h.GetObserverCount(),
+		TotalObservers:      int(h.GetObserverCount()),
 		TotalDevices:        h.GetObserverDeviceCount(),
 		TotalNotifications:  0,
 		FailedNotifications: 0,

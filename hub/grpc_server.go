@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 
@@ -81,6 +82,7 @@ func (s *GRPCServer) Stop() {
 // ============================================================================
 
 // SendToUser 向本节点的指定用户发送消息（点对点投递）
+// 使用 ForEachUserClient 零拷贝遍历 + 预序列化，替代 GetClientsByUserID 切片拷贝 + 逐客户端序列化
 func (s *GRPCServer) SendToUser(ctx context.Context, req *wscpb.SendToUserRequest) (*wscpb.SendToUserResponse, error) {
 	// 反序列化消息
 	msg, err := wscpb.UnmarshalHubMessage(req.GetMessageData())
@@ -88,9 +90,10 @@ func (s *GRPCServer) SendToUser(ctx context.Context, req *wscpb.SendToUserReques
 		return nil, status.Errorf(codes.InvalidArgument, "反序列化消息失败: %v", err)
 	}
 
-	// 查找本地客户端
-	clients := s.hub.GetClientsByUserID(req.GetUserId())
-	if len(clients) == 0 {
+	userID := req.GetUserId()
+
+	// 快速检查用户是否在线（O(1)，避免无用户时序列化开销）
+	if !s.hub.HasUserClient(userID) {
 		return &wscpb.SendToUserResponse{
 			Success:    false,
 			Error:      "用户不在线",
@@ -98,10 +101,21 @@ func (s *GRPCServer) SendToUser(ctx context.Context, req *wscpb.SendToUserReques
 		}, nil
 	}
 
-	// 发送到该用户的所有客户端连接（多端登录）
-	for _, client := range clients {
-		s.hub.sendToClient(ctx, client, msg)
+	// 预序列化一次消息（所有客户端复用，消除逐客户端 json.Marshal 开销）
+	preSerialized, err := json.Marshal(msg)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "消息序列化失败: %v", err)
 	}
+
+	// 零拷贝遍历：ForEachUserClient 持读锁遍历，sendToClientSerialized 非阻塞发送
+	s.hub.shardedRegistry.ForEachUserClient(userID, func(_ string, client *Client) bool {
+		s.hub.sendToClientSerialized(ctx, client, msg, preSerialized)
+		return true
+	})
+
+	// 🔔 通知本节点观察者（跨节点 gRPC 消息也需要通知观察者，与本地 broadcast 流程一致）
+	// SendToUserRequest 不携带 namespace/groupID，传空值通知所有全局/命名空间级观察者
+	s.hub.notifyObservers(ctx, msg, "", "")
 
 	return &wscpb.SendToUserResponse{
 		Success:    true,
@@ -110,11 +124,11 @@ func (s *GRPCServer) SendToUser(ctx context.Context, req *wscpb.SendToUserReques
 }
 
 // CheckUsersOnline 批量检查用户是否在本节点在线（路由探测）
+// 使用 HasUserClient O(1) 检查，替代 GetClientsByUserID 切片分配
 func (s *GRPCServer) CheckUsersOnline(ctx context.Context, req *wscpb.CheckUsersOnlineRequest) (*wscpb.CheckUsersOnlineResponse, error) {
 	onlineUsers := make(map[string]bool, len(req.GetUserIds()))
 	for _, userID := range req.GetUserIds() {
-		clients := s.hub.GetClientsByUserID(userID)
-		onlineUsers[userID] = len(clients) > 0
+		onlineUsers[userID] = s.hub.HasUserClient(userID)
 	}
 
 	return &wscpb.CheckUsersOnlineResponse{

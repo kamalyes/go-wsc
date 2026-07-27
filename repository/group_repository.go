@@ -183,8 +183,8 @@ func (r *RedisGroupRepository) createGroupUnchecked(ctx context.Context, group *
 
 // EnsureSystemGroup 确保系统保留组存在（agent/observer 自动加入前初始化）
 //
-// 幂等：不存在则创建，已存在则返回 nil。仅允许 __ 前缀系统组名。
-// 复用 createGroupScript，返回 0（已存在）/1（新建）均视为成功，天然处理并发竞态。
+// 幂等：不存在则创建，已存在则返回 nil仅允许 __ 前缀系统组名
+// 复用 createGroupScript，返回 0（已存在）/1（新建）均视为成功，天然处理并发竞态
 func (r *RedisGroupRepository) EnsureSystemGroup(ctx context.Context, namespace, groupID string) error {
 	if !IsSystemGroup(groupID) {
 		return ErrGroupReserved

@@ -14,91 +14,48 @@ package wsc
 import (
 	"context"
 	"fmt"
-	"os"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/glebarez/sqlite"
+	dbMigrator "github.com/kamalyes/go-sqlbuilder/db"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
-	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
 
 // ============================================================================
-// Redis 连接配置
+// Redis 连接配置（基于 miniredis 本地内存实例，零外部依赖）
 // ============================================================================
-
-const (
-	// Redis 默认配置
-	defaultRedisAddr     = "120.79.25.168:16389"
-	defaultRedisPassword = "M5Pi9YW6u"
-	defaultRedisDB       = 1
-	// MySQL 默认配置
-	defaultMySQLDSN = "root:idev88888@tcp(120.77.38.35:13306)/im_agent?charset=utf8mb4&parseTime=True&loc=Local&timeout=60s&readTimeout=60s&writeTimeout=60s"
-)
 
 var (
 	// 单例 Redis 客户端（用于需要持久连接的测试）
 	testRedisInstance *redis.Client
 	testRedisOnce     sync.Once
+	// miniredis 实例引用，必须持有否则被 GC 后连接失效
+	testMiniRedis *miniredis.Miniredis
 )
 
 // GetTestRedisClient 获取测试用 Redis 客户端（单例模式）
-// 优先使用环境变量 TEST_REDIS_ADDR 和 TEST_REDIS_PASSWORD，否则使用默认配置
+// 基于 miniredis 本地内存实例，零外部依赖，无需连接真实 Redis
 func GetTestRedisClient(t *testing.T) *redis.Client {
 	testRedisOnce.Do(func() {
-		// 从环境变量读取配置，支持 CI/CD 环境
-		addr := os.Getenv("TEST_REDIS_ADDR")
-		password := os.Getenv("TEST_REDIS_PASSWORD")
-
-		if addr == "" {
-			// 本地开发环境默认配置
-			addr = defaultRedisAddr
-			password = defaultRedisPassword
-			t.Logf("📌 使用默认 Redis 配置: %s (DB:%d)", addr, defaultRedisDB)
-		} else {
-			t.Logf("📌 使用环境变量 Redis 配置: %s (DB:%d)", addr, defaultRedisDB)
-		}
+		mr, err := miniredis.Run()
+		require.NoError(t, err, "启动 miniredis 失败")
+		testMiniRedis = mr
 
 		testRedisInstance = redis.NewClient(&redis.Options{
-			Addr:     addr,
-			Password: password,
-			DB:       defaultRedisDB,
-			// 增加连接池大小以支持高并发测试
-			PoolSize:        1000,                   // 增加到1000个连接，支持500并发×2
-			MinIdleConns:    100,                    // 增加最小空闲连接，减少建立新连接的开销
-			MaxRetries:      5,                      // 增加重试次数，应对网络波动
-			DialTimeout:     60 * time.Second,       // 大幅增加连接超时，应对网络延迟
-			ReadTimeout:     30 * time.Second,       // 大幅增加读超时
-			WriteTimeout:    30 * time.Second,       // 大幅增加写超时
-			PoolTimeout:     60 * time.Second,       // 大幅增加连接池超时，避免高并发时获取连接超时
-			MinRetryBackoff: 200 * time.Millisecond, // 重试最小间隔
-			MaxRetryBackoff: 1 * time.Second,        // 重试最大间隔
-			// 连接保活配置，防止长时间空闲导致连接断开
-			ConnMaxIdleTime: 5 * time.Minute,
-			ConnMaxLifetime: 30 * time.Minute,
+			Addr: mr.Addr(),
 		})
 
-		// 测试连接，增加重试机制
-		var err error
-		for retry := 0; retry < 3; retry++ {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			err = testRedisInstance.Ping(ctx).Err()
-			cancel()
-
-			if err == nil {
-				break
-			}
-			if retry < 2 {
-				t.Logf("⚠️ Redis连接失败（重试 %d/3）: %v", retry+1, err)
-				time.Sleep(time.Second * time.Duration(retry+1))
-			}
-		}
-		require.NoError(t, err, "Redis 连接失败（已重试3次），请检查配置和网络")
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		require.NoError(t, testRedisInstance.Ping(ctx).Err(), "miniredis ping 失败")
+		t.Logf("📌 使用 miniredis 本地实例: %s", mr.Addr())
 	})
-	// 并发安全检查: 如果初始化失败, testRedisInstance 可能为 nil
 	if testRedisInstance == nil {
 		t.Fatal("Redis 单例未正确初始化")
 	}
@@ -120,31 +77,21 @@ func GetTestRedisClientWithFlush(t *testing.T) *redis.Client {
 	return client
 }
 
-// NewTestRedisClient 创建新的 Redis 客户端（每次返回新实例）
+// NewTestRedisClient 创建新的 Redis 客户端（连同一 miniredis 实例的独立连接）
 // 适用于需要独立连接的测试
 func NewTestRedisClient(t *testing.T) *redis.Client {
-	// 从环境变量读取配置，支持 CI/CD 环境
-	addr := os.Getenv("TEST_REDIS_ADDR")
-	password := os.Getenv("TEST_REDIS_PASSWORD")
-
-	if addr == "" {
-		// 本地开发环境默认配置
-		addr = defaultRedisAddr
-		password = defaultRedisPassword
+	// 确保 miniredis 已启动
+	if testMiniRedis == nil {
+		GetTestRedisClient(t)
 	}
 
-	client := redis.NewClient(&redis.Options{
-		Addr:     addr,
-		Password: password,
-		DB:       defaultRedisDB,
-	})
+	client := redis.NewClient(&redis.Options{Addr: testMiniRedis.Addr()})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	// 测试连接
 	err := client.Ping(ctx).Err()
-	require.NoError(t, err, "Redis 连接失败，请检查配置")
+	require.NoError(t, err, "miniredis 连接失败")
 
 	// 清空测试数据
 	_ = client.FlushDB(ctx).Err()
@@ -176,40 +123,31 @@ var (
 )
 
 // GetTestDB 获取测试用数据库连接（单例模式）
-// 从环境变量读取 DSN，支持 CI/CD 环境
+// 基于 SQLite 内存数据库（cache=shared 共享），零外部依赖，无需连接真实 MySQL
 func GetTestDB(t *testing.T) *gorm.DB {
 	testDBOnce.Do(func() {
-		// 从环境变量读取 DSN，支持 CI/CD 环境
-		dsn := os.Getenv("TEST_MYSQL_DSN")
-		if dsn == "" {
-			// 本地开发环境默认配置
-			dsn = defaultMySQLDSN
-			t.Logf("📌 使用默认 MySQL 配置: %s", maskPassword(dsn))
-		} else {
-			t.Logf("📌 使用环境变量 MySQL 配置: %s", maskPassword(dsn))
-		}
-		db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{
+		// :memory: 内存数据库，配合 MaxOpenConns(1) 单连接复用，所有测试共享同一内存库
+		// SQLite 并发写需串行，单连接避免 "database is locked"
+		db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
 			Logger:                 logger.Default.LogMode(logger.Silent), // 测试时使用静默模式
 			SkipDefaultTransaction: true,                                  // 跳过默认事务，提升性能
-			PrepareStmt:            true,                                  // 预编译语句，提升性能
 		})
-		require.NoError(t, err, "MySQL 连接失败，请检查配置和网络")
+		require.NoError(t, err, "SQLite 连接失败")
 
-		// 配置连接池 - 增加连接数以支持并发测试
 		sqlDB, err := db.DB()
 		require.NoError(t, err, "获取 SQL DB 失败")
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		err = sqlDB.PingContext(ctx)
-		require.NoError(t, err, "MySQL Ping 失败")
+		require.NoError(t, sqlDB.PingContext(ctx), "SQLite Ping 失败")
 
-		sqlDB.SetMaxIdleConns(20)                  // 增加空闲连接数
-		sqlDB.SetMaxOpenConns(50)                  // 增加最大连接数
-		sqlDB.SetConnMaxLifetime(30 * time.Minute) // 减少连接生命周期，避免长时间测试中连接失效
-		sqlDB.SetConnMaxIdleTime(5 * time.Minute)  // 减少空闲连接超时时间
+		// SQLite 写操作需要串行，单连接避免并发写冲突
+		sqlDB.SetMaxOpenConns(1)
+		sqlDB.SetMaxIdleConns(1)
+		sqlDB.SetConnMaxLifetime(0)
+		sqlDB.SetConnMaxIdleTime(0)
 
-		t.Logf("✅ MySQL 连接成功")
+		t.Logf("✅ SQLite 内存数据库连接成功")
 		testDBInstance = db
 	})
 	return testDBInstance
@@ -265,6 +203,19 @@ func GetTestDBWithMigration(t *testing.T, models ...interface{}) *gorm.DB {
 		require.NoError(t, err, "数据库迁移失败")
 		t.Logf("✅ 迁移完成，耗时: %v", time.Since(start))
 
+		// 创建唯一索引（不使用 GORM uniqueIndex tag，改用 Migrator 跨方言创建）
+		if db.Migrator().HasTable("wsc_agent_workload") {
+			idxMigrator := dbMigrator.NewMigrator(db, &dbMigrator.MigratorConfig{
+				Indexes: []dbMigrator.IndexDefinition{
+					dbMigrator.NewUniqueIndex("wsc_agent_workload", "agent_id", "dimension", "time_key"),
+				},
+				SkipIndexOnError: true,
+			})
+			if err := idxMigrator.CreateIndexes(); err != nil {
+				t.Logf("⚠️ 创建 AgentWorkload 唯一索引失败: %v", err)
+			}
+		}
+
 		// 标记首次迁移完成
 		migrationDoneOnce.Do(func() {
 			close(migrationDone)
@@ -289,59 +240,10 @@ func CleanupTestRedis(t *testing.T, client *redis.Client) {
 	}
 }
 
-// CleanupTestTable 清理 MySQL 测试表数据
+// CleanupTestTable 清理测试表数据（SQLite 兼容，用 DELETE 替代 TRUNCATE）
 func CleanupTestTable(t *testing.T, db *gorm.DB, tableName string) {
-	err := db.Exec("TRUNCATE TABLE " + tableName).Error
+	err := db.Exec("DELETE FROM " + tableName).Error
 	if err != nil {
 		t.Logf("警告：清理表 %s 失败: %v", tableName, err)
 	}
-}
-
-// maskPassword 隐藏 DSN 中的密码部分
-func maskPassword(dsn string) string {
-	// DSN 格式: user:password@tcp(host:port)/database?params
-	if len(dsn) == 0 {
-		return dsn
-	}
-	// 查找密码位置
-	start := 0
-	for i := 0; i < len(dsn); i++ {
-		if dsn[i] == ':' && start == 0 {
-			start = i + 1
-		}
-		if dsn[i] == '@' && start > 0 {
-			// 找到密码结束位置
-			return dsn[:start] + "***" + dsn[i:]
-		}
-	}
-	return dsn
-}
-
-// ============================================================================
-// 兼容旧代码的函数别名
-// ============================================================================
-
-// getTestRedisClient 兼容旧测试代码（小写函数名）
-func getTestRedisClient(t *testing.T) *redis.Client {
-	return GetTestRedisClientWithFlush(t)
-}
-
-// getTestDB 兼容旧测试代码（小写函数名）
-func getTestDB(t *testing.T) *gorm.DB {
-	return GetTestDB(t)
-}
-
-// getTestOfflineDB 兼容离线消息测试
-func getTestOfflineDB(t *testing.T) *gorm.DB {
-	return GetTestDBWithMigration(t, &OfflineMessageRecord{})
-}
-
-// getTestHandlerDB 兼容消息处理器测试
-func getTestHandlerDB(t *testing.T) *gorm.DB {
-	return GetTestDBWithMigration(t, &MessageSendRecord{}, &OfflineMessageRecord{})
-}
-
-// getTestHandlerRedis 兼容消息处理器 Redis 测试
-func getTestHandlerRedis(t *testing.T) redis.UniversalClient {
-	return GetTestRedisUniversalClient(t)
 }

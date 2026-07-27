@@ -50,10 +50,10 @@ func NewGoRedisRateLimitClient(client redis.UniversalClient) *GoRedisRateLimitCl
 
 // IncrExpire 递增计数器并设置 TTL（Pipeline 合并为 1 RTT）
 //
-// 说明：Expire 始终执行（而非仅在 Incr 结果为 1 时执行）。
+// 说明：Expire 始终执行（而非仅在 Incr 结果为 1 时执行）
 // 原因：Pipeline 模式下无法基于 Incr 的返回值条件性执行 Expire，
-// 重复设置 Expire 只是刷新 TTL，等价于 SETEX 语义，无副作用且更安全。
-// 在限流场景下，每个窗口 key 都应保持固定 TTL，刷新 TTL 反而更合理。
+// 重复设置 Expire 只是刷新 TTL，等价于 SETEX 语义，无副作用且更安全
+// 在限流场景下，每个窗口 key 都应保持固定 TTL，刷新 TTL 反而更合理
 func (c *GoRedisRateLimitClient) IncrExpire(ctx context.Context, key string, ttl time.Duration) (int64, error) {
 	pipe := c.client.Pipeline()
 	incrCmd := pipe.Incr(ctx, key)
@@ -73,7 +73,7 @@ func (c *GoRedisRateLimitClient) IncrExpire(ctx context.Context, key string, ttl
 //
 // 性能：N 个 IncrExpire → 1 次 Pipeline（N RTT → 1 RTT）
 //
-// 说明：Expire 始终执行（同 IncrExpire 说明），刷新 TTL 无副作用。
+// 说明：Expire 始终执行（同 IncrExpire 说明），刷新 TTL 无副作用
 func (c *GoRedisRateLimitClient) BatchIncrExpire(ctx context.Context, entries ...IncrExpireEntry) ([]int64, error) {
 	if len(entries) == 0 {
 		return nil, nil

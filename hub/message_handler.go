@@ -286,8 +286,8 @@ func (h *Hub) normalizeMessageFields(client *Client, msg *HubMessage) {
 //
 // ⚠️ 死锁防御：ForEachClient 持有 shard 读锁，若在 callback 中直接调用 Unregister，
 // 当 unregister channel 满时会走 default 同步分支 → handleUnregister → RemoveClient → WithShardLock，
-// 同一 shard 持读锁等写锁 → 死锁。
-// 修复：先收集超时客户端到本地 slice，遍历结束后在锁外统一调用 Unregister。
+// 同一 shard 持读锁等写锁 → 死锁
+// 修复：先收集超时客户端到本地 slice，遍历结束后在锁外统一调用 Unregister
 func (h *Hub) checkHeartbeat() {
 	now := time.Now()
 

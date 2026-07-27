@@ -68,7 +68,7 @@ func newTestConnectionRepoContext(t *testing.T) *testConnectionRepoContext {
 
 	// 测试结束后清理表
 	t.Cleanup(func() {
-		db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`", tableName))
+		db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS \"%s\"", tableName))
 	})
 
 	return tc
@@ -213,68 +213,6 @@ func TestMarkDisconnected(t *testing.T) {
 	assert.Equal(t, string(models.DisconnectReasonTimeout), disconnected.DisconnectReason)
 	assert.Equal(t, 1001, disconnected.DisconnectCode)
 	assert.True(t, disconnected.IsAbnormal)
-}
-
-// TestIncrementMessageStats 测试增加消息统计
-func TestIncrementMessageStats(t *testing.T) {
-	tc := newTestConnectionRepoContext(t)
-	connID := tc.generateConnectionID()
-
-	// 创建连接记录
-	record := &models.ConnectionRecord{
-		ConnectionID: connID,
-		UserID:       tc.generateUserID(),
-		ConnectedAt:  time.Now(),
-		IsActive:     true,
-	}
-	err := tc.repo.Upsert(tc.ctx, record)
-	assert.NoError(t, err)
-
-	// 增加消息统计
-	err = tc.repo.IncrementMessageStats(tc.ctx, connID, 10, 5)
-	assert.NoError(t, err)
-
-	// 验证统计
-	updated, err := tc.repo.GetByConnectionID(tc.ctx, connID)
-	assert.NoError(t, err)
-	assert.Equal(t, int64(10), updated.MessagesSent)
-	assert.Equal(t, int64(5), updated.MessagesReceived)
-}
-
-// TestUpdatePingStats 测试更新Ping统计
-func TestUpdatePingStats(t *testing.T) {
-	tc := newTestConnectionRepoContext(t)
-	connID := tc.generateConnectionID()
-
-	// 创建连接记录
-	record := &models.ConnectionRecord{
-		ConnectionID: connID,
-		UserID:       tc.generateUserID(),
-		ConnectedAt:  time.Now(),
-		IsActive:     true,
-	}
-	err := tc.repo.Upsert(tc.ctx, record)
-	assert.NoError(t, err)
-
-	// 更新Ping统计
-	err = tc.repo.UpdatePingStats(tc.ctx, connID, 50.5)
-	assert.NoError(t, err)
-
-	updated, err := tc.repo.GetByConnectionID(tc.ctx, connID)
-	assert.NoError(t, err)
-	assert.Equal(t, 50.5, updated.AveragePingMs)
-	assert.Equal(t, 50.5, updated.MaxPingMs)
-	assert.Equal(t, 50.5, updated.MinPingMs)
-
-	// 再次更新
-	err = tc.repo.UpdatePingStats(tc.ctx, connID, 30.0)
-	assert.NoError(t, err)
-
-	updated, err = tc.repo.GetByConnectionID(tc.ctx, connID)
-	assert.NoError(t, err)
-	assert.Equal(t, 40.25, updated.AveragePingMs)
-	assert.Equal(t, 50.5, updated.MaxPingMs)
-	assert.Equal(t, 30.0, updated.MinPingMs)
 }
 
 // TestAddError 测试记录错误

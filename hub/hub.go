@@ -211,6 +211,7 @@ var (
 	ErrGroupMemberExisted = models.ErrGroupMemberExisted
 	ErrGroupFull          = models.ErrGroupFull
 	ErrGroupRepoNotSet    = models.ErrGroupRepoNotSet
+	ErrGroupExisted       = models.ErrGroupExisted
 
 	// ErrorType 常量
 	ErrTypeUserNotFound   = models.ErrTypeUserNotFound
@@ -285,6 +286,13 @@ type (
 	ErrorCallback func(ctx context.Context, err error, severity ErrorSeverity) error
 	// BatchSendFailureCallback 批量发送失败回调
 	BatchSendFailureCallback func(userID string, msg *HubMessage, err error)
+	// GroupDisbandCallback 群组解散回调
+	GroupDisbandCallback func(ctx context.Context, namespace, groupID string)
+	// GroupMemberJoinCallback 群组成员加入回调
+	// 仅在客户端连接时自动加群成功后触发（register 自动装配），手动 AddGroupMembers 不触发
+	GroupMemberJoinCallback func(ctx context.Context, namespace, groupID string, userIDs []string)
+	// GroupMemberLeaveCallback 群组成员离开回调
+	GroupMemberLeaveCallback func(ctx context.Context, namespace, groupID string, userIDs []string)
 )
 
 // ============================================================================
@@ -334,8 +342,6 @@ type Hub struct {
 	// shardedRegistry 分片注册表（64 shard），降低高并发锁竞争
 	// 替代 clients/userToClients 的单 mutex 访问
 	shardedRegistry *ShardedRegistry
-	// messageBatcher 消息批处理器，聚合短时间内的消息批量发送
-	messageBatcher *MessageBatcher
 	// statusUpdater 消息状态批量更新器
 	// 收集消息状态更新请求，按 batch flush 到 DB，减少广播场景下的 DB 压力
 	statusUpdater *MessageStatusUpdater
@@ -352,6 +358,9 @@ type Hub struct {
 	messageReceivedCallback    MessageReceivedCallback
 	errorCallback              ErrorCallback
 	batchSendFailureCallback   BatchSendFailureCallback
+	groupDisbandCallback       GroupDisbandCallback
+	groupMemberJoinCallback    GroupMemberJoinCallback
+	groupMemberLeaveCallback   GroupMemberLeaveCallback
 
 	wg       sync.WaitGroup
 	shutdown atomic.Bool
@@ -473,7 +482,7 @@ func NewHub(config *wscconfig.WSC) *Hub {
 	// 同时按预估容量预分配每 shard 内部 map，减少扩容次数
 	hub.shardedRegistry = NewShardedRegistry(config.EnableAgent, config.EnableObserver, registryCapacity)
 	// WorkerPool（按任务类型分池控制并发，防止 goroutine 泛滥）
-	hub.workerPool = NewHubWorkerPool(DefaultWorkerPoolConfig(), hub.logger)
+	hub.workerPool = NewHubWorkerPool(mathx.IfNotZero(config.WorkerPool, wscconfig.DefaultWorkerPoolConfig()), hub.logger)
 
 	// 消息状态批量更新器（队列 4096，批次 100，500ms flush）
 	// 广播 1 万人成功 = 1 次 UPDATE，而非 1 万次
@@ -539,7 +548,7 @@ func (h *Hub) SetPubSub(pubsub *cachex.PubSub) {
 	// 🚀 初始化路由缓存（需要 Redis 客户端，从 PubSub 获取）
 	// KVCache 三层兜底：本地 map → Redis Hash → BatchLoader 回源
 	if pubsub != nil && h.onlineStatusRepo != nil {
-		h.routerCache = NewRouterCache(pubsub.GetClient(), h.onlineStatusRepo, DefaultRouterCacheConfig())
+		h.routerCache = NewRouterCache(pubsub.GetClient(), h.onlineStatusRepo, mathx.IfNotZero(h.config.RouterCache, wscconfig.DefaultRouterCacheConfig()))
 		h.logger.InfoKV("路由缓存已启用", "type", "KVCache三层兜底")
 	}
 
@@ -558,7 +567,6 @@ func (h *Hub) GetPubSub() *cachex.PubSub {
 func (h *Hub) GetWorkerPool() *HubWorkerPool        { return h.workerPool }
 func (h *Hub) GetRouterCache() *RouterCache         { return h.routerCache }
 func (h *Hub) GetShardedRegistry() *ShardedRegistry { return h.shardedRegistry }
-func (h *Hub) GetMessageBatcher() *MessageBatcher   { return h.messageBatcher }
 
 // 🔗 gRPC 节点通信 Getter 方法
 func (h *Hub) GetNodeRegistry() *NodeRegistry     { return h.nodeRegistry }

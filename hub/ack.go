@@ -98,10 +98,9 @@ func (h *Hub) HandleAck(ackMsg *AckMessage) {
 // ============================================================================
 
 // checkUserOnlineForAck 检查用户是否在线（用于ACK）
+// 使用 HasUser O(1) 原子检查，替代 GetUserClientsMapWithLock 锁外 len() 读的数据竞争
 func (h *Hub) checkUserOnlineForAck(ctx context.Context, toUserID string, msg *HubMessage) (*AckMessage, error, bool) {
-	clientMap, isOnline := h.GetUserClientsMapWithLock(toUserID)
-
-	if !isOnline || len(clientMap) == 0 {
+	if !h.shardedRegistry.HasUser(toUserID) {
 		return h.handleOfflineAckMessage(ctx, toUserID, msg)
 	}
 	return nil, nil, true

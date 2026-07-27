@@ -85,11 +85,10 @@ func (h *Hub) UnregisterSSE(clientID string) {
 // ============================================================================
 
 // SendToUserViaSSE 通过SSE发送消息给指定用户（支持多设备）
-// 通过 shardedRegistry.sseShards 分片读锁获取该用户所有 SSE 客户端
+// 使用 ForEachSSEUserClient 持读锁零拷贝遍历，替代 GetSSEUserClients 锁外遍历的数据竞争
 func (h *Hub) SendToUserViaSSE(userID string, msg *HubMessage) bool {
-	clientMap, exists := h.shardedRegistry.GetSSEUserClients(userID)
-
-	if !exists || len(clientMap) == 0 {
+	// 快速检查用户是否有 SSE 连接（O(1)）
+	if !h.shardedRegistry.HasSSEUser(userID) {
 		h.logger.WarnKV("SSE用户不存在",
 			"user_id", userID,
 			"message_id", msg.MessageID,
@@ -98,9 +97,11 @@ func (h *Hub) SendToUserViaSSE(userID string, msg *HubMessage) bool {
 		return false
 	}
 
-	// 发送到该用户的所有 SSE 设备
+	// 持读锁零拷贝遍历发送
 	successCount := 0
-	for clientID, client := range clientMap {
+	totalDevices := 0
+	h.shardedRegistry.ForEachSSEUserClient(userID, func(clientID string, client *Client) bool {
+		totalDevices++
 		select {
 		case client.SSEMessageCh <- msg:
 			client.SetLastSeen(time.Now())
@@ -121,7 +122,8 @@ func (h *Hub) SendToUserViaSSE(userID string, msg *HubMessage) bool {
 				"message_type", msg.MessageType,
 			)
 		}
-	}
+		return true
+	})
 
 	if successCount > 0 {
 		h.logger.InfoKV("SSE消息发送成功",
@@ -129,7 +131,7 @@ func (h *Hub) SendToUserViaSSE(userID string, msg *HubMessage) bool {
 			"message_id", msg.MessageID,
 			"message_type", msg.MessageType,
 			"success_devices", successCount,
-			"total_devices", len(clientMap),
+			"total_devices", totalDevices,
 		)
 		return true
 	}

@@ -27,15 +27,29 @@ import (
 // ============================================================================
 
 // DisconnectUser 主动断开指定用户的所有连接
+// 使用 ForEachUserClient 持读锁收集客户端，替代 GetUserClientsMapWithLock 锁外遍历的数据竞争
 func (h *Hub) DisconnectUser(userID string, reason string) error {
-	clientMap, exists := h.GetUserClientsMapWithLock(userID)
-
-	if !exists || len(clientMap) == 0 {
+	if !h.shardedRegistry.HasUser(userID) {
 		return errorx.NewError(ErrTypeUserNotFound, "user_id: %s", userID)
 	}
 
-	// 断开所有客户端连接
-	h.CloseAllClientsInMap(clientMap)
+	// 持读锁零拷贝收集客户端
+	var clients []*Client
+	h.shardedRegistry.ForEachUserClient(userID, func(_ string, client *Client) bool {
+		clients = append(clients, client)
+		return true
+	})
+
+	if len(clients) == 0 {
+		return errorx.NewError(ErrTypeUserNotFound, "user_id: %s", userID)
+	}
+
+	// 并行断开所有客户端连接
+	syncx.ParallelForEachSlice(clients, func(_ int, client *Client) {
+		if client.Conn != nil {
+			client.Conn.Close()
+		}
+	})
 	return nil
 }
 
@@ -103,6 +117,6 @@ func (h *Hub) ResetClientStatus(clientID string, status UserStatus) error {
 		return errorx.NewError(ErrTypeClientNotFound, "client_id: %s", clientID)
 	}
 
-	client.Status = status
+	client.SetStatus(status)
 	return nil
 }

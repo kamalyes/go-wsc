@@ -99,6 +99,7 @@ var (
 		MessageTypeServerStats, MessageTypeClientConfig, MessageTypeConfigUpdate, MessageTypeHealthCheck,
 		MessageTypeHealthResponse, MessageTypeConnected, MessageTypeDisconnected, MessageTypeReconnected,
 		MessageTypeConnectionError, MessageTypeConnectionTimeout, MessageTypeKickOut, MessageTypeForceOffline,
+		MessageTypeGroupChanged,
 	)
 
 	// PushTypeValidator 推送类型验证器

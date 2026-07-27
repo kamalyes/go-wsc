@@ -18,12 +18,12 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/models"
@@ -32,30 +32,6 @@ import (
 // ============================================================================
 // 群组管理方法
 // ============================================================================
-
-// CreateGroup 创建群组
-// group.Namespace 为空时自动填充 "default"
-func (h *Hub) CreateGroup(ctx context.Context, group *Group) error {
-	if h.groupRepo == nil {
-		return ErrGroupRepoNotSet
-	}
-	if group == nil || group.GroupID == "" {
-		return errorx.WrapError("group or groupID cannot be empty")
-	}
-	if err := h.groupRepo.CreateGroup(ctx, group); err != nil {
-		h.logger.ErrorKV("创建群组失败",
-			"namespace", group.GetNamespace(), "group_id", group.GroupID, "error", err)
-		return err
-	}
-	h.logger.InfoKV("群组创建成功",
-		"namespace", group.GetNamespace(),
-		"group_id", group.GroupID,
-		"name", group.Name,
-		"owner_id", group.OwnerID,
-		"max_members", group.MaxMembers,
-	)
-	return nil
-}
 
 // GetGroup 获取群组元信息
 func (h *Hub) GetGroup(ctx context.Context, namespace, groupID string) (*Group, error) {
@@ -77,41 +53,90 @@ func (h *Hub) DisbandGroup(ctx context.Context, namespace, groupID string) error
 		return err
 	}
 	h.logger.InfoKV("群组已解散", "namespace", namespace, "group_id", groupID)
+
+	// 🔔 异步触发群组解散回调
+	if h.groupDisbandCallback != nil {
+		ns, gid := namespace, groupID
+		h.workerPool.TrySubmitCallback(func() {
+			h.groupDisbandCallback(context.Background(), ns, gid)
+		})
+	}
 	return nil
 }
 
-// AddGroupMembers 添加成员到群组
+// addGroupMembers 添加成员到群组
 // 同时更新成员的反向索引（user→groups）
-func (h *Hub) AddGroupMembers(ctx context.Context, namespace, groupID string, userIDs []string) error {
+// 群组不存在时自动创建（register 自动装配场景，无需手动 CreateGroup）
+func (h *Hub) addGroupMembers(ctx context.Context, namespace, groupID string, userIDs []string) error {
 	if h.groupRepo == nil {
 		return ErrGroupRepoNotSet
 	}
 	if len(userIDs) == 0 {
 		return nil
 	}
-	// 校验群组是否存在
+	// 校验群组是否存在，不存在则自动创建
 	group, err := h.groupRepo.GetGroup(ctx, namespace, groupID)
 	if err != nil {
-		return err
+		if !errors.Is(err, ErrGroupNotFound) {
+			return err
+		}
+		// 群组不存在，自动创建（register 自动装配时无需业务方手动建群）
+		newGroup := &Group{
+			GroupID:   groupID,
+			Namespace: namespace,
+			CreatedAt: time.Now(),
+		}
+		if err := h.groupRepo.CreateGroup(ctx, newGroup); err != nil && !errors.Is(err, ErrGroupExisted) {
+			h.logger.ErrorKV("自动创建群组失败",
+				"namespace", namespace, "group_id", groupID, "error", err)
+			return err
+		}
+		h.logger.InfoKV("群组自动创建成功", "namespace", namespace, "group_id", groupID)
+		group = newGroup
 	}
-	// 校验群组人数上限
+	// 校验群组人数上限（排除已存在成员，避免重连用户被误判超限）
+	// 重连场景：用户成员关系在离线时保留，IsMember 返回 true 不计入新增
 	if group.MaxMembers > 0 {
 		current, err := h.groupRepo.GetMemberCount(ctx, namespace, groupID)
 		if err != nil {
 			return err
 		}
-		if int(current)+len(userIDs) > group.MaxMembers {
+		newCount := 0
+		for _, uid := range userIDs {
+			exists, err := h.groupRepo.IsMember(ctx, namespace, groupID, uid)
+			if err != nil {
+				return err
+			}
+			if !exists {
+				newCount++
+			}
+		}
+		if int(current)+newCount > group.MaxMembers {
 			return ErrGroupFull
 		}
 	}
 	if err := h.groupRepo.AddMembers(ctx, namespace, groupID, userIDs); err != nil {
 		h.logger.ErrorKV("添加群组成员失败",
-			"namespace", namespace, "group_id", groupID, "user_count", len(userIDs), "error", err)
+			"namespace", namespace, "group_id", groupID, "users", userIDs, "error", err)
 		return err
 	}
 	h.logger.InfoKV("群组成员添加成功",
-		"namespace", namespace, "group_id", groupID, "added_count", len(userIDs))
+		"namespace", namespace, "group_id", groupID, "users", userIDs)
 	return nil
+}
+
+// triggerGroupMemberJoinCallback 异步触发群组成员加入回调
+// 仅在客户端连接时自动加群成功后调用（register 自动装配流程），手动 AddGroupMembers 不触发
+// 复制切片避免调用方后续修改影响异步回调
+func (h *Hub) triggerGroupMemberJoinCallback(namespace, groupID string, userIDs []string) {
+	if h.groupMemberJoinCallback == nil {
+		return
+	}
+	ns, gid := namespace, groupID
+	uids := append([]string(nil), userIDs...)
+	h.workerPool.TrySubmitCallback(func() {
+		h.groupMemberJoinCallback(context.Background(), ns, gid, uids)
+	})
 }
 
 // RemoveGroupMembers 从群组移除成员
@@ -125,11 +150,20 @@ func (h *Hub) RemoveGroupMembers(ctx context.Context, namespace, groupID string,
 	}
 	if err := h.groupRepo.RemoveMembers(ctx, namespace, groupID, userIDs); err != nil {
 		h.logger.ErrorKV("移除群组成员失败",
-			"namespace", namespace, "group_id", groupID, "user_count", len(userIDs), "error", err)
+			"namespace", namespace, "group_id", groupID, "users", userIDs, "error", err)
 		return err
 	}
 	h.logger.InfoKV("群组成员移除成功",
-		"namespace", namespace, "group_id", groupID, "removed_count", len(userIDs))
+		"namespace", namespace, "group_id", groupID, "users", userIDs)
+
+	// 🔔 异步触发群组成员离开回调（复制切片避免调用方后续修改）
+	if h.groupMemberLeaveCallback != nil {
+		ns, gid := namespace, groupID
+		uids := append([]string(nil), userIDs...)
+		h.workerPool.TrySubmitCallback(func() {
+			h.groupMemberLeaveCallback(context.Background(), ns, gid, uids)
+		})
+	}
 	return nil
 }
 
@@ -192,7 +226,6 @@ func (h *Hub) SendToGroup(ctx context.Context, namespace, groupID string, msg *H
 		GroupID: groupID,
 		Errors:  make([]error, 0),
 	}
-
 
 	if h.groupRepo == nil {
 		result.Errors = append(result.Errors, ErrGroupRepoNotSet)
@@ -761,12 +794,23 @@ func (h *Hub) joinSystemGroupsOnConnect(ctx context.Context, client *Client) {
 }
 
 // leaveSystemGroupsOnDisconnect 客户端断开时自动离开系统保留组
+//
+// 多端登录保护：仅当该 userID 已无任何在线连接时才离开系统组
+// 调用时当前 client 已由 removeClientUnsafe（handleUnregister Phase 1）从注册表移除，
+// 因此 HasUser 查询的是"移除当前连接后是否还存在其他在线连接"
+// 竞态可接受：RemoveMembers 对不存在成员幂等，重连时 joinSystemGroupsOnConnect 会重新加入
 func (h *Hub) leaveSystemGroupsOnDisconnect(ctx context.Context, client *Client) {
 	if h.groupRepo == nil {
 		return
 	}
 	groupID := systemGroupOfUserType(client.UserType)
 	if groupID == "" {
+		return
+	}
+	// 该 userID 仍有其他在线连接时保留系统组成员身份，避免多端场景下其他端收不到系统组广播
+	if h.shardedRegistry.HasUser(client.UserID) {
+		h.logger.DebugContextKV(ctx, "用户仍有其他在线连接，保留系统组成员身份",
+			"user_id", client.UserID, "group_id", groupID)
 		return
 	}
 	if err := h.groupRepo.RemoveMembers(ctx, client.Namespace, groupID, []string{client.UserID}); err != nil {

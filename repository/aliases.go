@@ -32,9 +32,6 @@ type (
 	// RetryAttempt 重试尝试记录
 	RetryAttempt = models.RetryAttempt
 
-	// RetryAttemptList 重试尝试列表
-	RetryAttemptList = models.RetryAttemptList
-
 	// OfflineMessageRecord 离线消息记录
 	OfflineMessageRecord = models.OfflineMessageRecord
 

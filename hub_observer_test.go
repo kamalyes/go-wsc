@@ -199,14 +199,20 @@ func TestObserverReceiveMessages(t *testing.T) {
 
 // TestObserverReceiveDistributedMessages 测试观察者接收分布式消息
 func TestObserverReceiveDistributedMessages(t *testing.T) {
+	// 共享 Redis 实例：节点发现、用户在线状态、PubSub 消息互通都依赖共享 Redis
+	redisClient := newSharedMiniRedisClient(t)
+
 	// 创建两个节点
-	hub1 := createTestHubWithDistributed(t, "node-1")
-	hub2 := createTestHubWithDistributed(t, "node-2")
+	hub1 := createTestHubWithDistributed(t, "node-1", redisClient)
+	hub2 := createTestHubWithDistributed(t, "node-2", redisClient)
 
 	go hub1.Run()
 	go hub2.Run()
-	defer hub1.Shutdown()
-	defer hub2.Shutdown()
+	defer hub1.SafeShutdown()
+	defer hub2.SafeShutdown()
+
+	hub1.WaitForStart()
+	hub2.WaitForStart()
 
 	time.Sleep(100 * time.Millisecond)
 
@@ -276,17 +282,24 @@ func TestObserverMultiNodeReceive(t *testing.T) {
 		t.Skip("跳过需要 Redis 的分布式测试")
 	}
 
+	// 共享 Redis 实例：节点发现、用户在线状态、PubSub 消息互通都依赖共享 Redis
+	redisClient := newSharedMiniRedisClient(t)
+
 	// 创建三个节点
-	hub1 := createTestHubWithDistributed(t, "node-1")
-	hub2 := createTestHubWithDistributed(t, "node-2")
-	hub3 := createTestHubWithDistributed(t, "node-3")
+	hub1 := createTestHubWithDistributed(t, "node-1", redisClient)
+	hub2 := createTestHubWithDistributed(t, "node-2", redisClient)
+	hub3 := createTestHubWithDistributed(t, "node-3", redisClient)
 
 	go hub1.Run()
 	go hub2.Run()
 	go hub3.Run()
-	defer hub1.Shutdown()
-	defer hub2.Shutdown()
-	defer hub3.Shutdown()
+	defer hub1.SafeShutdown()
+	defer hub2.SafeShutdown()
+	defer hub3.SafeShutdown()
+
+	hub1.WaitForStart()
+	hub2.WaitForStart()
+	hub3.WaitForStart()
 
 	time.Sleep(100 * time.Millisecond)
 
@@ -332,25 +345,25 @@ func TestObserverReceiveBroadcastMessages(t *testing.T) {
 		t.Skip("跳过需要 Redis 的分布式测试")
 	}
 
+	// 共享 Redis 实例：节点发现、用户在线状态、PubSub 消息互通都依赖共享 Redis
+	redisClient := newSharedMiniRedisClient(t)
+
 	// 创建两个节点
-	hub1 := createTestHubWithDistributed(t, "node-1")
-	hub2 := createTestHubWithDistributed(t, "node-2")
+	hub1 := createTestHubWithDistributed(t, "node-1", redisClient)
+	hub2 := createTestHubWithDistributed(t, "node-2", redisClient)
 
 	go hub1.Run()
 	go hub2.Run()
-	defer hub1.Shutdown()
-	defer hub2.Shutdown()
+	defer hub1.SafeShutdown()
+	defer hub2.SafeShutdown()
 
+	hub1.WaitForStart()
+	hub2.WaitForStart()
+
+	// Run() 已自动订阅广播频道和观察者频道，无需手动订阅
 	time.Sleep(100 * time.Millisecond)
 
 	ctx := context.Background()
-
-	// 订阅分布式频道（包括广播频道和观察者频道）
-	require.NoError(t, hub1.SubscribeBroadcastChannel(ctx))
-	require.NoError(t, hub2.SubscribeBroadcastChannel(ctx))
-	require.NoError(t, hub1.SubscribeObserverChannel(ctx))
-	require.NoError(t, hub2.SubscribeObserverChannel(ctx))
-	time.Sleep(100 * time.Millisecond)
 
 	// 节点1: 注册观察者
 	observer1 := createTestClientWithIDGen(UserTypeObserver)

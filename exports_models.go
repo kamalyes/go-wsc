@@ -395,7 +395,6 @@ type (
 	MessageSendStatus = models.MessageSendStatus
 	FailureReason     = models.FailureReason
 	RetryAttempt      = models.RetryAttempt
-	RetryAttemptList  = models.RetryAttemptList
 )
 
 // ==================== 消息常量 ====================

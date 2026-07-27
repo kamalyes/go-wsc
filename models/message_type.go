@@ -120,6 +120,7 @@ const (
 	MessageTypeOpenWindow           MessageType = "open_window"            // 打开窗口消息
 	MessageTypeCloseWindow          MessageType = "close_window"           // 关闭窗口消息
 	MessageTypeBStatusReminder      MessageType = "b_status_reminder"      // 业务状态提醒消息
+	MessageTypeGroupChanged         MessageType = "group_changed"         // 群组变更通知（成员被 move 时下发，告知客户端已切换群组）
 )
 
 // String 实现Stringer接口

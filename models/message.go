@@ -13,8 +13,6 @@ package models
 import (
 	"encoding/json"
 	"time"
-
-	"github.com/kamalyes/go-toolbox/pkg/syncx"
 )
 
 // Data 字段的常量 key
@@ -34,15 +32,15 @@ const (
 //   - 热点字段（ID/MessageType/Sender/Receiver）保持在结构体头部，位于首个 cache line 内
 type HubMessage struct {
 	// ========== 标识与路由（热点字段，置于头部以利用 cache line） ==========
-	ID           string      `json:"id"`                              // 消息ID（用于ACK）
-	MessageType  MessageType `json:"message_type"`                    // 消息类型
-	Sender       string      `json:"sender"`                          // 发送者 (从上下文获取)
-	SenderName   string      `json:"sender_name"`                     // 发送者昵称
-	SenderType   UserType    `json:"sender_type"`                     // 发送者类型
-	SenderClient string      `json:"sender_client,omitempty"`         // 发送者客户端ID（多端同步标识）
-	Receiver     string      `json:"receiver"`                        // 接收者用户ID
-	ReceiverName string      `json:"receiver_name"`                   // 接收者昵称
-	ReceiverType UserType    `json:"receiver_type"`                   // 接收者用户类型
+	ID           string      `json:"id"`                      // 消息ID（用于ACK）
+	MessageType  MessageType `json:"message_type"`            // 消息类型
+	Sender       string      `json:"sender"`                  // 发送者 (从上下文获取)
+	SenderName   string      `json:"sender_name"`             // 发送者昵称
+	SenderType   UserType    `json:"sender_type"`             // 发送者类型
+	SenderClient string      `json:"sender_client,omitempty"` // 发送者客户端ID（多端同步标识）
+	Receiver     string      `json:"receiver"`                // 接收者用户ID
+	ReceiverName string      `json:"receiver_name"`           // 接收者昵称
+	ReceiverType UserType    `json:"receiver_type"`           // 接收者用户类型
 
 	// ========== 接收与节点路由 ==========
 	ReceiverClient string `json:"receiver_client,omitempty"` // 接收者客户端ID
@@ -54,7 +52,7 @@ type HubMessage struct {
 
 	// ========== 扩展数据（8 字节对齐字段） ==========
 	Data     map[string]interface{} `json:"data,omitempty"` // 扩展数据（包含 content_extra、metadata、media_info）
-	CreateAt time.Time              `json:"create_at"`     // 创建时间
+	CreateAt time.Time              `json:"create_at"`      // 创建时间
 
 	// ========== 消息ID与序列 ==========
 	MessageID    string `json:"message_id"`                // 业务消息ID
@@ -64,7 +62,7 @@ type HubMessage struct {
 	// ========== 类型与策略（string，16 字节对齐） ==========
 	Priority      Priority      `json:"priority"`                 // 优先级
 	Source        MessageSource `json:"source,omitempty"`         // 消息来源(online/offline)
-	PushType      PushType      `json:"push_type,omitempty"`       // 推送类型
+	PushType      PushType      `json:"push_type,omitempty"`      // 推送类型
 	BroadcastType BroadcastType `json:"broadcast_type,omitempty"` // 广播类型（会话成员/全站）
 
 	// ========== 布尔标志（1 字节对齐，集中置于末尾避免 padding） ==========
@@ -394,12 +392,26 @@ func (m *HubMessage) GetMetadataJSON() string {
 }
 
 // Clone 创建消息的深拷贝，避免并发修改问题
-// 底层 syncx.DeepCopy 已优化：Struct 先值拷贝再只对引用类型字段递归，
-// Map key/value 基本类型快速路径，Interface 基本类型快速路径
+// 实现 syncx.Cloner 接口，DeepCopy 调用时走零反射快速路径
+// 手动值拷贝 + 仅对 Data map 深拷贝，消除反射开销
 func (m *HubMessage) Clone() *HubMessage {
-	var msg HubMessage
-	syncx.DeepCopy(&msg, m)
+	msg := *m // 值拷贝所有字段（string/int/bool/time.Time 等）
+
+	// 仅 Data map 需要深拷贝，其他字段均为值类型
+	if m.Data != nil {
+		msg.Data = make(map[string]interface{}, len(m.Data))
+		for k, v := range m.Data {
+			msg.Data[k] = v // interface{} 值拷贝；基本类型无引用共享问题
+		}
+	}
+
 	return &msg
+}
+
+// CloneDeep 实现 syncx.Cloner 接口
+// DeepCopy(&dst, src) 检测到 src 实现 Cloner 时，直接调用此方法跳过反射
+func (m *HubMessage) CloneDeep() any {
+	return m.Clone()
 }
 
 // GetMessageID 获取消息ID，空值返回默认消息ID

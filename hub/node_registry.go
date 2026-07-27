@@ -56,6 +56,10 @@ type NodeRegistry struct {
 	// stopCh 停止信号
 	stopCh chan struct{}
 	wg     sync.WaitGroup
+
+	// mu 保护 stopped/wg，防止 Stop 与 Register 的 wg.Add/Wait 并发竞争
+	mu      sync.Mutex
+	stopped bool
 }
 
 // NewNodeRegistry 创建节点注册中心
@@ -93,8 +97,14 @@ func (r *NodeRegistry) Register(ctx context.Context) error {
 		return fmt.Errorf("首次刷新节点列表失败: %w", err)
 	}
 
-	// 启动定期刷新
+	// 启动定期刷新（加锁防止与 Stop 并发导致 wg.Add/Wait 竞争）
+	r.mu.Lock()
+	if r.stopped {
+		r.mu.Unlock()
+		return nil
+	}
 	r.wg.Add(1)
+	r.mu.Unlock()
 	go r.refreshLoop()
 
 	return nil
@@ -115,7 +125,14 @@ func (r *NodeRegistry) Unregister(ctx context.Context) error {
 
 // Stop 停止节点注册中心
 func (r *NodeRegistry) Stop() {
+	r.mu.Lock()
+	if r.stopped {
+		r.mu.Unlock()
+		return
+	}
+	r.stopped = true
 	close(r.stopCh)
+	r.mu.Unlock()
 	r.wg.Wait()
 }
 

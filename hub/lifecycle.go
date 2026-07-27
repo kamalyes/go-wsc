@@ -283,6 +283,12 @@ func (h *Hub) flushStatsCounters() {
 	}
 }
 
+// FlushStats 公共方法：立即将内存中累积的消息/广播统计计数器刷写到 Redis
+// 正常运行时由 30 秒定时器自动刷写，测试或需要即时统计的场景可手动调用
+func (h *Hub) FlushStats() {
+	h.flushStatsCounters()
+}
+
 // cleanupExpiredAck 清理过期的ACK消息
 func (h *Hub) cleanupExpiredAck() {
 	if h.ackManager == nil {
@@ -372,6 +378,9 @@ func (h *Hub) SafeShutdown() error {
 	if h.messageStatsBatcher != nil {
 		h.messageStatsBatcher.Stop()
 	}
+
+	// 刷写消息/广播原子计数器到 Redis，避免关闭时统计丢失
+	h.flushStatsCounters()
 
 	time.Sleep(50 * time.Millisecond)
 

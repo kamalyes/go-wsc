@@ -23,6 +23,7 @@ import (
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
+	"github.com/kamalyes/go-wsc/repository"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -157,8 +158,8 @@ func TestHubClientRegistration(t *testing.T) {
 		assert.True(t, hub.HasUserClient(client.UserID))
 
 		stats := hub.GetStats()
-		assert.Equal(t, 1, stats.WebSocketClients)
-		assert.Equal(t, 1, stats.TotalClients)
+		assert.Equal(t, int64(1), stats.WebSocketClients)
+		assert.Equal(t, int64(1), stats.TotalClients)
 
 		// 注销客户端
 		hub.Unregister(client)
@@ -169,8 +170,8 @@ func TestHubClientRegistration(t *testing.T) {
 		assert.False(t, hub.HasUserClient(client.UserID))
 
 		stats = hub.GetStats()
-		assert.Equal(t, 0, stats.WebSocketClients)
-		assert.Equal(t, 0, stats.TotalClients)
+		assert.Equal(t, int64(0), stats.WebSocketClients)
+		assert.Equal(t, int64(0), stats.TotalClients)
 	})
 
 	t.Run("注册Agent客户端", func(t *testing.T) {
@@ -792,8 +793,8 @@ func TestHubConcurrentOperations(t *testing.T) {
 
 			// 验证最终状态
 			stats := hub.GetStats()
-			assert.Equal(t, 0, stats.WebSocketClients)
-			assert.Equal(t, 0, stats.TotalClients)
+			assert.Equal(t, int64(0), stats.WebSocketClients)
+			assert.Equal(t, int64(0), stats.TotalClients)
 		case <-time.After(10 * time.Second):
 			t.Fatal("并发操作超时")
 		}
@@ -1011,7 +1012,7 @@ func TestHubExtendedAPI(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 
 		count := hub.GetClientsCount()
-		assert.Equal(t, 5, count)
+		assert.Equal(t, int64(5), count)
 
 		// 清理测试数据
 		for i := 0; i < 5; i++ {
@@ -1213,10 +1214,10 @@ func TestHubExtendedAPI(t *testing.T) {
 	t.Run("GetStats", func(t *testing.T) {
 		stats := hub.GetStats()
 		assert.NotNil(t, stats)
-		assert.GreaterOrEqual(t, stats.TotalClients, 0)
-		assert.GreaterOrEqual(t, stats.AgentConnections, 0)
-		assert.GreaterOrEqual(t, stats.WebSocketClients, 0)
-		assert.GreaterOrEqual(t, stats.SSEClients, 0)
+		assert.GreaterOrEqual(t, stats.TotalClients, int64(0))
+		assert.GreaterOrEqual(t, stats.AgentConnections, int64(0))
+		assert.GreaterOrEqual(t, stats.WebSocketClients, int64(0))
+		assert.GreaterOrEqual(t, stats.SSEClients, int64(0))
 		assert.GreaterOrEqual(t, stats.OnlineUsers, 0)
 	})
 
@@ -1592,7 +1593,7 @@ func TestHubConcurrentRegistration(t *testing.T) {
 
 		count := hub.GetClientsCount()
 		// 并发注册可能有一些失败，但应该大部分成功
-		assert.GreaterOrEqual(t, count, 950, fmt.Sprintf("期望至少950个注册，实际: %d", count))
+		assert.GreaterOrEqual(t, count, int64(950), fmt.Sprintf("期望至少950个注册，实际: %d", count))
 	})
 
 	t.Run("Concurrent-Unregister-500", func(t *testing.T) {
@@ -2114,105 +2115,122 @@ func TestHubStatusTransitions(t *testing.T) {
 	})
 }
 
-// TestHubBroadcastToGroup 测试分组广播功能
+// TestHubBroadcastToGroup 测试群组广播功能（基于群组 API：BroadcastToGroup(ctx, namespace, groupID, msg, excludeSender)）
 func TestHubBroadcastToGroup(t *testing.T) {
-	t.Skip("BroadcastToGroup 签名已变更为 (ctx, namespace, groupID, msg, excludeSender)，测试需重写以适配群组 API")
+	redisClient := newSharedMiniRedisClient(t)
+	defer redisClient.Close()
 
-	hub := NewHub(wscconfig.Default())
+	config := wscconfig.Default()
+	hub := NewHub(config)
+	groupRepo := repository.NewRedisGroupRepository(redisClient, "wsc:test:group:")
+	hub.SetGroupRepository(groupRepo)
 	defer hub.Shutdown()
 
 	go hub.Run()
 	time.Sleep(100 * time.Millisecond)
 
-	// 创建不同部门的客户端
-	for i := 0; i < 3; i++ {
-		client := &Client{
-			ID:         fmt.Sprintf("group-client-sales-%d", i),
-			UserID:     fmt.Sprintf("group-user-sales-%d", i),
-			UserType:   UserTypeAgent,
-			Role:       UserRoleAgent,
-			Status:     UserStatusOnline,
-			Department: "Sales",
-			LastSeen:   time.Now(),
-			SendChan:   make(chan []byte, 256),
-			Context:    context.WithValue(context.Background(), ContextKeyUserID, fmt.Sprintf("group-user-sales-%d", i)),
+	ctx := context.Background()
+
+	// 创建群组并加入成员
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "sales-group", Namespace: "default", OwnerID: "owner"}))
+	require.NoError(t, groupRepo.AddMembers(ctx, "default", "sales-group", []string{"sales-user-1", "sales-user-2"}))
+
+	// 注册在线客户端
+	client1 := &Client{
+		ID:       "sales-client-1",
+		UserID:   "sales-user-1",
+		UserType: UserTypeCustomer,
+		Status:   UserStatusOnline,
+		SendChan: make(chan []byte, 16),
+		Context:  context.WithValue(context.Background(), ContextKeyUserID, "sales-user-1"),
+	}
+	client2 := &Client{
+		ID:       "sales-client-2",
+		UserID:   "sales-user-2",
+		UserType: UserTypeCustomer,
+		Status:   UserStatusOnline,
+		SendChan: make(chan []byte, 16),
+		Context:  context.WithValue(context.Background(), ContextKeyUserID, "sales-user-2"),
+	}
+	hub.Register(client1)
+	hub.Register(client2)
+	time.Sleep(100 * time.Millisecond)
+
+	// 排空注册时的旧消息
+	drainSendChan := func(c *Client) {
+		for {
+			select {
+			case <-c.SendChan:
+			default:
+				return
+			}
 		}
-		hub.Register(client)
 	}
 
-	for i := 0; i < 2; i++ {
-		client := &Client{
-			ID:         fmt.Sprintf("group-client-support-%d", i),
-			UserID:     fmt.Sprintf("group-user-support-%d", i),
-			UserType:   UserTypeAgent,
-			Role:       UserRoleAgent,
-			Status:     UserStatusOnline,
-			Department: "Support",
-			LastSeen:   time.Now(),
-			SendChan:   make(chan []byte, 256),
-			Context:    context.WithValue(context.Background(), ContextKeyUserID, fmt.Sprintf("group-user-support-%d", i)),
-		}
-		hub.Register(client)
-	}
-	time.Sleep(200 * time.Millisecond)
-
-	t.Run("BroadcastToGroup-ExistingDept", func(t *testing.T) {
-		// 注册一些用户先
-		client1 := &Client{
-			ID:       "sales-user-1",
-			UserID:   "sales-user-1",
-			UserType: UserTypeCustomer,
-			Role:     UserRoleCustomer,
-			Status:   UserStatusOnline,
-			LastSeen: time.Now(),
-			SendChan: make(chan []byte, 256),
-			Context:  context.WithValue(context.Background(), ContextKeyUserID, "sales-user-1"),
-			Metadata: map[string]interface{}{"department": "Sales"},
-		}
-		hub.Register(client1)
-
-		client2 := &Client{
-			ID:       "sales-user-2",
-			UserID:   "sales-user-2",
-			UserType: UserTypeCustomer,
-			Role:     UserRoleAgent,
-			Status:   UserStatusOnline,
-			LastSeen: time.Now(),
-			SendChan: make(chan []byte, 256),
-			Context:  context.WithValue(context.Background(), ContextKeyUserID, "sales-user-2"),
-			Metadata: map[string]interface{}{"department": "Sales"},
-		}
-		hub.Register(client2)
-
-		time.Sleep(100 * time.Millisecond)
+	t.Run("BroadcastToGroup-AllMembers", func(t *testing.T) {
+		drainSendChan(client1)
+		drainSendChan(client2)
 
 		msg := &HubMessage{
 			ID:          "group-msg-1",
+			MessageID:   "group-msg-1",
 			MessageType: MessageTypeText,
-			Content:     "sales department message",
+			Sender:      "system",
+			Content:     "sales group message",
+			CreateAt:    time.Now(),
 		}
-		count := hub.BroadcastToGroup(context.Background(), "default", "customer", msg, false)
-		assert.GreaterOrEqual(t, count, 0) // 允许为0，取决于实际实现
+		count := hub.BroadcastToGroup(ctx, "default", "sales-group", msg, false)
+		assert.Equal(t, 2, count, "应投递给2个在线成员")
+
+		select {
+		case <-client1.SendChan:
+		case <-time.After(time.Second):
+			t.Fatal("client1 未收到群组广播")
+		}
+		select {
+		case <-client2.SendChan:
+		case <-time.After(time.Second):
+			t.Fatal("client2 未收到群组广播")
+		}
 	})
 
-	t.Run("BroadcastToGroup-DifferentDept", func(t *testing.T) {
+	t.Run("BroadcastToGroup-ExcludeSender", func(t *testing.T) {
+		drainSendChan(client1)
+		drainSendChan(client2)
+
 		msg := &HubMessage{
 			ID:          "group-msg-2",
+			MessageID:   "group-msg-2",
 			MessageType: MessageTypeText,
-			Content:     "support department message",
+			Sender:      "sales-user-1",
+			Content:     "exclude sender test",
+			CreateAt:    time.Now(),
 		}
-		count := hub.BroadcastToGroup(context.Background(), "default", "agent", msg, false)
-		assert.Greater(t, count, 0)
+		count := hub.BroadcastToGroup(ctx, "default", "sales-group", msg, true)
+		assert.Equal(t, 1, count, "排除发送者后应只投递给1个成员")
+
+		select {
+		case <-client2.SendChan:
+		case <-time.After(time.Second):
+			t.Fatal("client2 未收到广播消息")
+		}
+		select {
+		case <-client1.SendChan:
+			t.Fatal("发送者不应收到被排除的广播消息")
+		case <-time.After(200 * time.Millisecond):
+		}
 	})
 
-	t.Run("BroadcastToGroup-NonExistent", func(t *testing.T) {
+	t.Run("BroadcastToGroup-NonExistentGroup", func(t *testing.T) {
 		msg := &HubMessage{
 			ID:          "group-msg-3",
+			MessageID:   "group-msg-3",
 			MessageType: MessageTypeText,
 			Content:     "nonexistent group",
+			CreateAt:    time.Now(),
 		}
-		count := hub.BroadcastToGroup(context.Background(), "default", "customer", msg, false)
-		assert.GreaterOrEqual(t, count, 0) // 可能有之前测试的客户端存在
+		count := hub.BroadcastToGroup(ctx, "default", "non-existent", msg, false)
+		assert.Equal(t, 0, count, "不存在的群组应投递0个")
 	})
 }
 

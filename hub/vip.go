@@ -21,35 +21,37 @@ import (
 
 // SendToVIPUsers 发送消息给指定VIP等级及以上的用户
 func (h *Hub) SendToVIPUsers(ctx context.Context, minVIPLevel VIPLevel, msg *HubMessage) int {
+	minLevel := minVIPLevel.GetLevel()
 	return h.SendConditional(ctx, func(c *Client) bool {
-		return c.VIPLevel.GetLevel() >= minVIPLevel.GetLevel()
+		return c.GetVIPLevel().GetLevel() >= minLevel
 	}, msg)
 }
 
 // SendToExactVIPLevel 发送消息给指定VIP等级用户
 func (h *Hub) SendToExactVIPLevel(ctx context.Context, vipLevel VIPLevel, msg *HubMessage) int {
 	return h.SendConditional(ctx, func(c *Client) bool {
-		return c.VIPLevel == vipLevel
+		return c.GetVIPLevel() == vipLevel
 	}, msg)
 }
 
 // SendWithVIPPriority 根据用户VIP等级自动设置消息优先级
+// 使用 ForEachUserClient 零拷贝遍历 + 提前终止，替代 GetUserClients + 手动迭代
 func (h *Hub) SendWithVIPPriority(ctx context.Context, userID string, msg *HubMessage) {
-	// 通过 shardedRegistry 获取用户客户端（分片读锁）
-	clientMap, exists := h.shardedRegistry.GetUserClients(userID)
+	// 零拷贝获取第一个客户端的VIP等级（提前终止遍历）
+	var vipLevel VIPLevel
+	found := false
+	h.shardedRegistry.ForEachUserClient(userID, func(_ string, client *Client) bool {
+		vipLevel = client.GetVIPLevel()
+		found = true
+		return false // 第一个即终止
+	})
 
-	if exists && len(clientMap) > 0 {
-		// 获取第一个客户端的VIP等级
-		var client *Client
-		for _, c := range clientMap {
-			client = c
-			break
-		}
+	if found {
 		// 根据VIP等级自动调整优先级
-		vipLevel := client.VIPLevel.GetLevel()
-		if vipLevel >= 6 { // V6-V8
+		level := vipLevel.GetLevel()
+		if level >= 6 { // V6-V8
 			msg.Priority = PriorityHigh
-		} else if vipLevel >= 3 { // V3-V5
+		} else if level >= 3 { // V3-V5
 			msg.Priority = PriorityNormal
 		} else { // V0-V2
 			msg.Priority = PriorityLow
@@ -62,14 +64,15 @@ func (h *Hub) SendWithVIPPriority(ctx context.Context, userID string, msg *HubMe
 // SendToVIPWithPriority 根据VIP等级优先发送
 func (h *Hub) SendToVIPWithPriority(ctx context.Context, vipLevel VIPLevel, msg *HubMessage) int {
 	// VIP消息优先级更高
-	if vipLevel.GetLevel() >= 5 {
+	level := vipLevel.GetLevel()
+	if level >= 5 {
 		msg.Priority = PriorityHigh
-	} else if vipLevel.GetLevel() >= 3 {
+	} else if level >= 3 {
 		msg.Priority = PriorityNormal
 	}
 
 	return h.SendConditional(ctx, func(c *Client) bool {
-		return c.VIPLevel.GetLevel() >= vipLevel.GetLevel()
+		return c.GetVIPLevel().GetLevel() >= level
 	}, msg)
 }
 
@@ -119,10 +122,11 @@ func (h *Hub) GetVIPStatistics() map[string]int {
 		stats[string(level)] = 0
 	}
 
-	// shardedRegistry 遍历所有客户端
+	// shardedRegistry 遍历所有客户端（原子读 VIPLevel，并发安全）
 	h.shardedRegistry.ForEachClient(func(_ string, client *Client) bool {
-		if client.VIPLevel.IsValid() {
-			stats[string(client.VIPLevel)]++
+		vipLevel := client.GetVIPLevel()
+		if vipLevel.IsValid() {
+			stats[string(vipLevel)]++
 		}
 		return true
 	})
@@ -139,9 +143,10 @@ func (h *Hub) GetVIPStatistics() map[string]int {
 
 // FilterVIPClients 筛选VIP用户客户端
 func (h *Hub) FilterVIPClients(minLevel VIPLevel) []*Client {
+	minL := minLevel.GetLevel()
 	var vipClients []*Client
 	h.shardedRegistry.ForEachClient(func(_ string, client *Client) bool {
-		if client.VIPLevel.GetLevel() >= minLevel.GetLevel() {
+		if client.GetVIPLevel().GetLevel() >= minL {
 			vipClients = append(vipClients, client)
 		}
 		return true
@@ -154,27 +159,29 @@ func (h *Hub) FilterVIPClients(minLevel VIPLevel) []*Client {
 // ============================================================================
 
 // UpgradeVIPLevel 升级用户VIP等级
+// 使用 ForEachUserClient 零拷贝遍历 + SetVIPLevel 原子更新，消除数据竞争
 func (h *Hub) UpgradeVIPLevel(userID string, newLevel VIPLevel) bool {
-	clientMap, exists := h.shardedRegistry.GetUserClients(userID)
-	if !exists || len(clientMap) == 0 || !newLevel.IsValid() {
+	if !newLevel.IsValid() {
 		return false
 	}
 
-	// 获取任意一个客户端的当前等级(所有客户端等级一致)
-	var currentLevel VIPLevel
-	for _, client := range clientMap {
-		currentLevel = client.VIPLevel
-		break
+	// 快速检查用户是否存在（O(1)，避免无用户时加锁遍历）
+	if !h.shardedRegistry.HasUser(userID) {
+		return false
 	}
 
-	// 只允许升级，不允许降级
-	if newLevel.GetLevel() > currentLevel.GetLevel() {
-		// 升级所有客户端的VIP等级
-		for _, client := range clientMap {
-			client.VIPLevel = newLevel
+	newLevelVal := newLevel.GetLevel()
+	upgraded := false
+
+	// 单次遍历：检查当前等级 + 升级所有客户端（零拷贝，原子更新）
+	h.shardedRegistry.ForEachUserClient(userID, func(_ string, client *Client) bool {
+		// 只允许升级，不允许降级
+		if newLevelVal > client.GetVIPLevel().GetLevel() {
+			client.SetVIPLevel(newLevel)
+			upgraded = true
 		}
 		return true
-	}
+	})
 
-	return false
+	return upgraded
 }

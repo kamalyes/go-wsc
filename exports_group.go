@@ -86,18 +86,21 @@ var (
 // ============================================
 
 // 注意：以下是 Hub 类型的群组方法列表，通过 Hub 实例调用
-// 例如：hub := wsc.NewHub(config); hub.CreateGroup(ctx, group)
+// 例如：hub := wsc.NewHub(config); hub.GetGroup(ctx, namespace, groupID)
 //
 // 层级结构：Namespace（默认 "default"，类似 k8s namespace）→ Group → Members
 // 群组管理方法中 namespace 为空时自动使用 "default"
 // 消息投递方法中 namespace 由参数显式传入（HubMessage 不携带路由元数据）
 //
+// 群组生命周期说明：
+// - 客户端连接（register）时根据 token/query 的 group_id 自动加入群组，群组不存在时自动创建
+// - 离线不销毁群组，重连后继续接收群组消息（离线消息按 UserID 存储，与群组无关）
+// - 成员关系变更（move）由业务层调用 RemoveGroupMembers + 下发 group_changed 通知完成
+//
 // 群组管理方法：
-// - CreateGroup(ctx context.Context, group *Group) error: 创建群组（group.Namespace 为空时默认 "default"）
 // - GetGroup(ctx context.Context, namespace, groupID string) (*Group, error): 获取群组元信息
 // - DisbandGroup(ctx context.Context, namespace, groupID string) error: 解散群组
-// - AddGroupMembers(ctx context.Context, namespace, groupID string, userIDs []string) error: 添加群组成员
-// - RemoveGroupMembers(ctx context.Context, namespace, groupID string, userIDs []string) error: 移除群组成员
+// - RemoveGroupMembers(ctx context.Context, namespace, groupID string, userIDs []string) error: 移除群组成员（触发 leave 回调）
 // - GetGroupMembers(ctx context.Context, namespace, groupID string) ([]string, error): 获取群组所有成员ID
 // - GetUserGroups(ctx context.Context, namespace, userID string) ([]string, error): 获取用户在指定命名空间下加入的所有群组ID
 // - IsGroupMember(ctx context.Context, namespace, groupID, userID string) (bool, error): 判断用户是否为群组成员

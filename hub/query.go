@@ -65,20 +65,21 @@ func (h *Hub) GetOnlineUsers() []string {
 }
 
 // GetOnlineUsersCount 获取在线用户数量
+// 使用原子计数器 O(1)，替代 GetOnlineUsers() 的 O(n) Keys() 遍历
 func (h *Hub) GetOnlineUsersCount() int {
-	return len(h.GetOnlineUsers())
+	return int(h.shardedRegistry.GetUserCount())
 }
 
 // GetOnlineUserCountByType 根据用户类型获取在线用户数量
+// 使用 ForEachClient 零拷贝遍历 + 用户去重，替代 GetClientsByUserType 切片拷贝
 func (h *Hub) GetOnlineUserCountByType(userType UserType) (int64, error) {
-	clients := h.GetClientsByUserType(userType)
-
-	// 按用户ID去重计数（同一用户多个连接只计数一次）
 	userSet := make(map[string]struct{})
-	for _, client := range clients {
-		userSet[client.UserID] = struct{}{}
-	}
-
+	h.shardedRegistry.ForEachClient(func(_ string, client *Client) bool {
+		if client.UserType == userType {
+			userSet[client.UserID] = struct{}{}
+		}
+		return true
+	})
 	return int64(len(userSet)), nil
 }
 
@@ -120,50 +121,54 @@ func (h *Hub) GetClientByID(clientID string) *Client {
 }
 
 // GetClientsByUserID 根据用户ID获取所有客户端
+// 使用 ForEachUserClient 持读锁遍历，替代 GetUserClients 锁外 CopyClientsFromMap 的数据竞争
 func (h *Hub) GetClientsByUserID(userID string) []*Client {
-	clientMap, exists := h.shardedRegistry.GetUserClients(userID)
-	if !exists || len(clientMap) == 0 {
+	clients := make([]*Client, 0, 4)
+	h.shardedRegistry.ForEachUserClient(userID, func(_ string, client *Client) bool {
+		clients = append(clients, client)
+		return true
+	})
+	if len(clients) == 0 {
 		return nil
 	}
-	return CopyClientsFromMap(clientMap)
+	return clients
 }
 
 // GetUserStatus 获取用户状态
+// 使用 ForEachUserClient 零拷贝遍历，替代 GetClientsByUserID 切片拷贝
 func (h *Hub) GetUserStatus(userID string) UserStatus {
-	clients := h.GetClientsByUserID(userID)
-	if len(clients) == 0 {
-		return UserStatusOffline
-	}
-
-	// 返回最后活跃的客户端状态
 	var mostRecent *Client
 	var mostRecentSeen time.Time
-	for _, client := range clients {
+	h.shardedRegistry.ForEachUserClient(userID, func(_ string, client *Client) bool {
 		seen := client.GetLastSeen()
 		if mostRecent == nil || seen.After(mostRecentSeen) {
 			mostRecent = client
 			mostRecentSeen = seen
 		}
-	}
+		return true
+	})
 	if mostRecent != nil {
-		return mostRecent.Status
+		return mostRecent.GetStatus()
 	}
 	return UserStatusOffline
 }
 
 // GetClientIPs 获取用户所有客户端的IP地址列表
+// 使用 ForEachUserClient 零拷贝遍历，替代 GetClientsByUserID 切片拷贝
 func (h *Hub) GetClientIPs(userID string) []string {
-	clients := h.GetClientsByUserID(userID)
-	if len(clients) == 0 {
+	// 先计数预估容量
+	count := h.shardedRegistry.GetUserClientCount(userID)
+	if count == 0 {
 		return nil
 	}
 
-	ips := make([]string, 0, len(clients))
-	for _, client := range clients {
+	ips := make([]string, 0, count)
+	h.shardedRegistry.ForEachUserClient(userID, func(_ string, client *Client) bool {
 		if ip := h.getClientIPFromClient(client); ip != "" {
 			ips = append(ips, ip)
 		}
-	}
+		return true
+	})
 	return ips
 }
 
@@ -172,8 +177,8 @@ func (h *Hub) getClientIPFromClient(client *Client) string {
 	if client.ClientIP != "" {
 		return client.ClientIP
 	}
-	if client.Metadata != nil {
-		if ip, ok := client.Metadata["client_ip"].(string); ok {
+	if val, ok := client.GetMetadataValue("client_ip"); ok {
+		if ip, ok := val.(string); ok && ip != "" {
 			return ip
 		}
 	}
@@ -184,27 +189,22 @@ func (h *Hub) getClientIPFromClient(client *Client) string {
 // 元数据操作
 // ============================================================================
 
-// GetClientMetadata 获取客户端元数据
+// GetClientMetadata 获取客户端元数据（线程安全）
 func (h *Hub) GetClientMetadata(clientID string, key string) (interface{}, bool) {
 	client, exists := h.shardedRegistry.GetClient(clientID)
-	if !exists || client.Metadata == nil {
+	if !exists {
 		return nil, false
 	}
-	val, ok := client.Metadata[key]
-	return val, ok
+	return client.GetMetadataValue(key)
 }
 
-// UpdateClientMetadata 更新客户端元数据
+// UpdateClientMetadata 更新客户端元数据（线程安全）
 func (h *Hub) UpdateClientMetadata(clientID string, key string, value interface{}) error {
 	client, exists := h.shardedRegistry.GetClient(clientID)
 	if !exists {
 		return errorx.NewError(ErrTypeClientNotFound, "client_id: %s", clientID)
 	}
-
-	if client.Metadata == nil {
-		client.Metadata = make(map[string]interface{})
-	}
-	client.Metadata[key] = value
+	client.SetMetadataValue(key, value)
 	return nil
 }
 
@@ -232,19 +232,20 @@ func (h *Hub) GetClientsByUserTypeGrouped() map[UserType][]*Client {
 	return result
 }
 
-// GetClientsByStatusGrouped 按状态分组获取客户端（零拷贝遍历）
+// GetClientsByStatusGrouped 按状态分组获取客户端（零拷贝遍历，原子读 Status）
 func (h *Hub) GetClientsByStatusGrouped() map[UserStatus][]*Client {
 	result := make(map[UserStatus][]*Client)
 	h.shardedRegistry.ForEachClient(func(_ string, client *Client) bool {
-		result[client.Status] = append(result[client.Status], client)
+		status := client.GetStatus()
+		result[status] = append(result[status], client)
 		return true
 	})
 	return result
 }
 
-// GetClientsWithStatus 获取指定状态的所有客户端（委托 FilterClients 零拷贝）
+// GetClientsWithStatus 获取指定状态的所有客户端（委托 FilterClients 零拷贝，原子读 Status）
 func (h *Hub) GetClientsWithStatus(status UserStatus) []*Client {
-	return h.FilterClients(func(c *Client) bool { return c.Status == status })
+	return h.FilterClients(func(c *Client) bool { return c.GetStatus() == status })
 }
 
 // ============================================================================
@@ -297,12 +298,19 @@ func (h *Hub) FilterClients(predicate func(*Client) bool) []*Client {
 // ============================================================================
 
 // GetMostRecentClient 获取用户对应的客户端（返回最近活跃的客户端）
+// 使用 ForEachUserClient 零拷贝遍历（持读锁），替代 GetUserClients 锁外遍历内部 map 的数据竞争
 func (h *Hub) GetMostRecentClient(userID string) *Client {
-	clientMap, exists := h.shardedRegistry.GetUserClients(userID)
-	if !exists || len(clientMap) == 0 {
-		return nil
-	}
-	return findMostRecentClient(clientMap)
+	var mostRecent *Client
+	var mostRecentSeen time.Time
+	h.shardedRegistry.ForEachUserClient(userID, func(_ string, client *Client) bool {
+		seen := client.GetLastSeen()
+		if mostRecent == nil || seen.After(mostRecentSeen) {
+			mostRecent = client
+			mostRecentSeen = seen
+		}
+		return true
+	})
+	return mostRecent
 }
 
 // findMostRecentClient 从客户端map中找到最近活跃的客户端
@@ -350,24 +358,11 @@ func (h *Hub) GetClientsCopy() []*Client {
 }
 
 // GetUserClientsCopy 获取每个用户最活跃的客户端副本列表
-// 遍历所有 shard，每个用户取最近活跃的客户端
+// 遍历所有 shard，每个用户取最近活跃的客户端（复用 findMostRecentClient）
 func (h *Hub) GetUserClientsCopy() []*Client {
 	result := make([]*Client, 0, h.shardedRegistry.GetUserCount())
 	h.shardedRegistry.ForEachUser(func(_ string, clientMap map[string]*Client) bool {
-		if len(clientMap) == 0 {
-			return true
-		}
-		// 找到最近活跃的客户端
-		var mostRecent *Client
-		var mostRecentSeen time.Time
-		for _, client := range clientMap {
-			seen := client.GetLastSeen()
-			if mostRecent == nil || seen.After(mostRecentSeen) {
-				mostRecent = client
-				mostRecentSeen = seen
-			}
-		}
-		if mostRecent != nil {
+		if mostRecent := findMostRecentClient(clientMap); mostRecent != nil {
 			result = append(result, mostRecent)
 		}
 		return true
@@ -384,31 +379,40 @@ func (h *Hub) GetUserClientsMapWithLock(userID string) (map[string]*Client, bool
 
 // GetClientsCopyForUser 获取用户的客户端列表副本（线程安全）
 // 如果指定了 clientID，只返回该客户端；否则返回用户的所有客户端
+// 使用 ForEachUserClient 持读锁遍历，替代 GetUserClients 锁外遍历的数据竞争
 func (h *Hub) GetClientsCopyForUser(userID, clientID string) []*Client {
-	clientMap, exists := h.shardedRegistry.GetUserClients(userID)
-	if !exists || len(clientMap) == 0 {
-		return nil
-	}
-
-	// 如果指定了客户端ID，只返回该客户端
+	// 指定 clientID 时用 O(1) 查找
 	if clientID != "" {
-		if targetClient, ok := clientMap[clientID]; ok {
-			return []*Client{targetClient}
+		if client, exists := h.shardedRegistry.GetClient(clientID); exists && client.UserID == userID {
+			return []*Client{client}
 		}
 		return nil
 	}
 
-	// 返回所有客户端的副本
-	return CopyClientsFromMap(clientMap)
+	// 未指定 clientID 时零拷贝遍历收集
+	clients := make([]*Client, 0, 4)
+	h.shardedRegistry.ForEachUserClient(userID, func(_ string, client *Client) bool {
+		clients = append(clients, client)
+		return true
+	})
+	if len(clients) == 0 {
+		return nil
+	}
+	return clients
 }
 
 // GetConnectionsByUserID 获取用户的所有连接
+// 使用 ForEachUserClient 持读锁遍历，替代 GetUserClients 锁外 CopyClientsFromMap 的数据竞争
 func (h *Hub) GetConnectionsByUserID(userID string) []*Client {
-	clientMap, exists := h.shardedRegistry.GetUserClients(userID)
-	if !exists {
+	clients := make([]*Client, 0, 4)
+	h.shardedRegistry.ForEachUserClient(userID, func(_ string, client *Client) bool {
+		clients = append(clients, client)
+		return true
+	})
+	if len(clients) == 0 {
 		return nil
 	}
-	return CopyClientsFromMap(clientMap)
+	return clients
 }
 
 // checkUserOnline 检查用户是否在线（支持分布式）
@@ -457,21 +461,20 @@ func (h *Hub) GetHubHealth() *HubHealthInfo {
 }
 
 // GetOnlineUsersByType 按用户类型获取在线用户列表
+// 使用 ForEachClient 零拷贝遍历 + 用户去重，替代 FilterClients 切片拷贝
 func (h *Hub) GetOnlineUsersByType(userType UserType) ([]string, error) {
-	clients := h.FilterClients(func(c *Client) bool {
-		return c.UserType == userType
+	seen := make(map[string]struct{})
+	h.shardedRegistry.ForEachClient(func(_ string, client *Client) bool {
+		if client.UserType == userType {
+			seen[client.UserID] = struct{}{}
+		}
+		return true
 	})
 
-	userIDs := make([]string, 0, len(clients))
-	seen := make(map[string]bool)
-
-	for _, client := range clients {
-		if !seen[client.UserID] {
-			userIDs = append(userIDs, client.UserID)
-			seen[client.UserID] = true
-		}
+	userIDs := make([]string, 0, len(seen))
+	for uid := range seen {
+		userIDs = append(userIDs, uid)
 	}
-
 	return userIDs, nil
 }
 

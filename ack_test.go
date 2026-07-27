@@ -91,19 +91,18 @@ func TestAckManagerCleanupExpired(t *testing.T) {
 	am := NewAckManager(5*time.Second, 3)
 
 	// 添加多个消息,使用较短的超时
-	// timeout=50ms, maxRetry=0, contextTimeout = 50ms * (0+1) + 1s = 1.05s
+	// 注意：IfLeZero(maxRetry=0, am.maxRetry=3) 返回 3，故实际 maxRetry=3
+	// contextTimeout = 50ms * (3+1) + 1s = 1.2s
 	for i := 0; i < 5; i++ {
 		msg := createTestHubMessage(MessageTypeCard)
-		// 设置 maxRetry=0 以缩短 context 超时时间
 		am.AddPendingMessageWithExpire(msg, 50*time.Millisecond, 0)
 	}
 
 	assert.Equal(t, 5, am.GetPendingCount())
 
 	// 等待所有消息的 context 过期
-	// contextTimeout = 50ms * (0+1) + 1s = 1.05s
-	// 等待 1.2s 确保所有消息都过期
-	time.Sleep(1200 * time.Millisecond)
+	// contextTimeout = 50ms * (3+1) + 1s = 1.2s，等待 1.6s 确保过期
+	time.Sleep(1600 * time.Millisecond)
 
 	// 清理过期消息
 	cleaned := am.CleanupExpired()

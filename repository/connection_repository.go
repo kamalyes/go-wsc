@@ -48,20 +48,8 @@ type ConnectionRecordRepository interface {
 
 	// ========== 统计更新操作 ==========
 
-	// IncrementMessageStats 增加消息统计
-	IncrementMessageStats(ctx context.Context, connectionID string, sent, received int64) error
-
-	// IncrementBytesStats 增加字节统计
-	IncrementBytesStats(ctx context.Context, connectionID string, sent, received int64) error
-
-	// UpdatePingStats 更新Ping延迟统计
-	UpdatePingStats(ctx context.Context, connectionID string, pingMs float64) error
-
 	// AddError 记录错误
 	AddError(ctx context.Context, connectionID string, err error) error
-
-	// UpdateHeartbeat 更新心跳时间
-	UpdateHeartbeat(ctx context.Context, connectionID string, pingTime, pongTime *time.Time) error
 
 	// BatchUpdateHeartbeats 批量更新心跳时间和 Ping 统计（单事务，避免 N 次 BeginTx/Commit）
 	BatchUpdateHeartbeats(ctx context.Context, entries []*HeartbeatUpdateEntry) error
@@ -375,48 +363,6 @@ func (r *connectionRecordRepositoryImpl) GetActiveByUserID(ctx context.Context, 
 
 // ========== 统计更新操作 ==========
 
-// IncrementMessageStats 增加消息统计
-func (r *connectionRecordRepositoryImpl) IncrementMessageStats(ctx context.Context, connectionID string, sent, received int64) error {
-	return r.getDB(ctx).
-		Where("connection_id = ?", connectionID).
-		Updates(map[string]any{
-			"messages_sent":     gorm.Expr("messages_sent + ?", sent),
-			"messages_received": gorm.Expr("messages_received + ?", received),
-		}).Error
-}
-
-// IncrementBytesStats 增加字节统计
-func (r *connectionRecordRepositoryImpl) IncrementBytesStats(ctx context.Context, connectionID string, sent, received int64) error {
-	return r.getDB(ctx).
-		Where("connection_id = ?", connectionID).
-		Updates(map[string]any{
-			"bytes_sent":     gorm.Expr("bytes_sent + ?", sent),
-			"bytes_received": gorm.Expr("bytes_received + ?", received),
-		}).Error
-}
-
-// UpdatePingStats 更新Ping延迟统计
-// 优化：使用纯 SQL 表达式更新，避免先查再改的两次数据库操作
-func (r *connectionRecordRepositoryImpl) UpdatePingStats(ctx context.Context, connectionID string, pingMs float64) error {
-	if pingMs <= 0 {
-		return nil
-	}
-
-	// 使用 SQL 表达式直接更新，无需先查询
-	updates := map[string]any{
-		// 移动平均：new_avg = old_avg * 0.7 + new_ping * 0.3
-		"average_ping_ms": gorm.Expr("CASE WHEN average_ping_ms > 0 THEN average_ping_ms * 0.7 + ? * 0.3 ELSE ? END", pingMs, pingMs),
-		// 最大值
-		"max_ping_ms": gorm.Expr("CASE WHEN max_ping_ms = 0 OR max_ping_ms < ? THEN ? ELSE max_ping_ms END", pingMs, pingMs),
-		// 最小值
-		"min_ping_ms": gorm.Expr("CASE WHEN min_ping_ms = 0 OR min_ping_ms > ? THEN ? ELSE min_ping_ms END", pingMs, pingMs),
-	}
-
-	return r.getDB(ctx).
-		Where("connection_id = ?", connectionID).
-		Updates(updates).Error
-}
-
 // AddError 记录错误
 func (r *connectionRecordRepositoryImpl) AddError(ctx context.Context, connectionID string, err error) error {
 	if err == nil {
@@ -428,26 +374,6 @@ func (r *connectionRecordRepositoryImpl) AddError(ctx context.Context, connectio
 		"error_count":   gorm.Expr("error_count + ?", 1),
 		"last_error":    err.Error(),
 		"last_error_at": now,
-	}
-
-	return r.getDB(ctx).
-		Where("connection_id = ?", connectionID).
-		Updates(updates).Error
-}
-
-// UpdateHeartbeat 更新心跳时间
-func (r *connectionRecordRepositoryImpl) UpdateHeartbeat(ctx context.Context, connectionID string, pingTime, pongTime *time.Time) error {
-	updates := make(map[string]any)
-
-	if pingTime != nil {
-		updates["last_ping_at"] = pingTime
-	}
-	if pongTime != nil {
-		updates["last_pong_at"] = pongTime
-	}
-
-	if len(updates) == 0 {
-		return nil
 	}
 
 	return r.getDB(ctx).
@@ -928,23 +854,25 @@ func (r *connectionRecordRepositoryImpl) BatchUpsert(ctx context.Context, record
 	}
 
 	// 冲突时更新重连相关字段（与 updateConnectionRecord 逻辑一致）
+	// 通过 Dialect 引擎兼容 MySQL 的 VALUES(col) 与 SQLite/PostgreSQL 的 excluded.col
+	dialect := sqlbuilder.DetectDialect(r.db)
 	onConflict := clause.OnConflict{
 		Columns: []clause.Column{{Name: "connection_id"}},
 		DoUpdates: clause.Assignments(map[string]any{
-			"node_id":            gorm.Expr("VALUES(node_id)"),
-			"node_ip":            gorm.Expr("VALUES(node_ip)"),
-			"node_port":          gorm.Expr("VALUES(node_port)"),
-			"client_ip":          gorm.Expr("VALUES(client_ip)"),
-			"client_type":        gorm.Expr("VALUES(client_type)"),
-			"protocol":           gorm.Expr("VALUES(protocol)"),
-			"connected_at":       gorm.Expr("NOW()"),
+			"node_id":            gorm.Expr(dialect.UpsertColumnRef("node_id")),
+			"node_ip":            gorm.Expr(dialect.UpsertColumnRef("node_ip")),
+			"node_port":          gorm.Expr(dialect.UpsertColumnRef("node_port")),
+			"client_ip":          gorm.Expr(dialect.UpsertColumnRef("client_ip")),
+			"client_type":        gorm.Expr(dialect.UpsertColumnRef("client_type")),
+			"protocol":           gorm.Expr(dialect.UpsertColumnRef("protocol")),
+			"connected_at":       gorm.Expr("CURRENT_TIMESTAMP"),
 			"disconnected_at":    nil,
 			"duration":           0,
 			"is_active":          true,
 			"is_abnormal":        false,
 			"is_forced_offline":  false,
 			"reconnect_count":    gorm.Expr("reconnect_count + 1"),
-			"metadata":           gorm.Expr("VALUES(metadata)"),
+			"metadata":           gorm.Expr(dialect.UpsertColumnRef("metadata")),
 			"error_count":        0,
 			"last_error":         "",
 			"last_error_at":      nil,

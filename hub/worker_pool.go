@@ -22,43 +22,9 @@ package hub
 import (
 	"context"
 
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 )
-
-// WorkerPoolConfig WorkerPool 配置
-type WorkerPoolConfig struct {
-	// MessageWorkers 消息发送 worker 数（默认 64）
-	MessageWorkers int
-	// MessageQueueSize 消息发送队列大小（默认 4096）
-	MessageQueueSize int
-	// CallbackWorkers 业务回调 worker 数（默认 32）
-	CallbackWorkers int
-	// CallbackQueueSize 业务回调队列大小（默认 2048）
-	CallbackQueueSize int
-	// RecordWorkers 数据库记录 worker 数（默认 16）
-	RecordWorkers int
-	// RecordQueueSize 数据库记录队列大小（默认 2048）
-	RecordQueueSize int
-	// DistributedWorkers 跨节点消息 worker 数（默认 32）
-	DistributedWorkers int
-	// DistributedQueueSize 跨节点消息队列大小（默认 2048）
-	DistributedQueueSize int
-}
-
-// DefaultWorkerPoolConfig 默认 WorkerPool 配置
-// 针对 8C16G 节点调优，可按实际负载调整
-func DefaultWorkerPoolConfig() *WorkerPoolConfig {
-	return &WorkerPoolConfig{
-		MessageWorkers:       64,
-		MessageQueueSize:     4096,
-		CallbackWorkers:      32,
-		CallbackQueueSize:    2048,
-		RecordWorkers:        16,
-		RecordQueueSize:      2048,
-		DistributedWorkers:   32,
-		DistributedQueueSize: 2048,
-	}
-}
 
 // HubWorkerPool Hub 工作池集合
 // 按任务类型分池，避免低优先级任务饿死高优先级任务
@@ -77,11 +43,7 @@ type HubWorkerPool struct {
 
 // NewHubWorkerPool 创建 Hub 工作池集合
 // syncx.NewWorkerPool 在构造时自动启动 worker goroutine
-func NewHubWorkerPool(cfg *WorkerPoolConfig, log WSCLogger) *HubWorkerPool {
-	if cfg == nil {
-		cfg = DefaultWorkerPoolConfig()
-	}
-
+func NewHubWorkerPool(cfg *wscconfig.WorkerPoolConfig, log WSCLogger) *HubWorkerPool {
 	return &HubWorkerPool{
 		// NewWorkerPool 构造时自动启动 workers，无需调 Start
 		MessagePool:     syncx.NewWorkerPool(cfg.MessageWorkers, cfg.MessageQueueSize),

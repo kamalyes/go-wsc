@@ -48,9 +48,6 @@ type MessageRecordRepository interface {
 	// Create 创建记录
 	Create(ctx context.Context, record *MessageSendRecord) error
 
-	// CreateFromMessage 从 HubMessage 创建记录
-	CreateFromMessage(ctx context.Context, msg *HubMessage, maxRetry int, expiresAt *time.Time) (*MessageSendRecord, error)
-
 	// Update 更新记录
 	Update(ctx context.Context, record *MessageSendRecord) error
 
@@ -131,29 +128,6 @@ func NewMessageRecordRepository(db *gorm.DB, config *wscconfig.MessageRecord, lo
 // Create 创建记录
 func (r *MessageRecordGormRepository) Create(ctx context.Context, record *MessageSendRecord) error {
 	return r.db.WithContext(ctx).Create(record).Error
-}
-
-// CreateFromMessage 从 HubMessage 创建记录
-func (r *MessageRecordGormRepository) CreateFromMessage(ctx context.Context, msg *HubMessage, maxRetry int, expiresAt *time.Time) (*MessageSendRecord, error) {
-	record := &MessageSendRecord{
-		MessageID:  msg.MessageID, // 业务消息ID
-		HubID:      msg.ID,        // Hub内部ID
-		Status:     MessageSendStatusPending,
-		CreateTime: time.Now(),
-		MaxRetry:   maxRetry,
-		ExpiresAt:  expiresAt,
-	}
-
-	// 序列化 HubMessage
-	if err := record.SetMessage(msg); err != nil {
-		return nil, err
-	}
-
-	if err := r.db.WithContext(ctx).Create(record).Error; err != nil {
-		return nil, err
-	}
-
-	return record, nil
 }
 
 // Update 更新记录
@@ -336,8 +310,8 @@ func (r *MessageRecordGormRepository) BatchUpdateStatus(ctx context.Context, mes
 // IncrementRetry 增加重试次数
 //
 // 优化说明：原实现 SELECT + UPDATE 两次数据库往返，且 SELECT 读取整行数据仅为
-// 获取 retry_history/first_send_time/max_retry。现合并为单条 UPDATE：
-//   - retry_history 使用 MySQL JSON_ARRAY_APPEND 追加（无需读取已有数组）
+// 获取 retry_history/first_send_time/max_retry现合并为单条 UPDATE：
+//   - retry_history 使用方言感知的 JSON 数组追加（MySQL: JSON_ARRAY_APPEND / SQLite: json_insert / PG: || ）
 //   - first_send_time/status/success_time/failure_reason 全部用 CASE WHEN 条件更新
 //   - 状态判定依据 attempt.Success 与 retry_count vs max_retry 列
 //
@@ -345,7 +319,7 @@ func (r *MessageRecordGormRepository) BatchUpdateStatus(ctx context.Context, mes
 func (r *MessageRecordGormRepository) IncrementRetry(ctx context.Context, messageID string, attempt RetryAttempt) error {
 	now := time.Now()
 
-	// 序列化重试记录为 JSON，用于 JSON_ARRAY_APPEND
+	// 序列化重试记录为 JSON，用于方言感知的 JSON 数组追加
 	attemptJSON, err := json.Marshal(attempt)
 	if err != nil {
 		return fmt.Errorf("序列化重试记录失败: %w", err)
@@ -361,11 +335,15 @@ func (r *MessageRecordGormRepository) IncrementRetry(ctx context.Context, messag
 		hasError = 1
 	}
 
+	// 通过 Dialect 引擎兼容 MySQL/SQLite/PostgreSQL 的 JSON 数组追加语法
+	dialect := sqlbuilder.DetectDialect(r.db)
+	retryHistoryExpr := dialect.JsonArrayAppend("retry_history", "?")
+
 	// 单条 UPDATE 完成所有更新，WHERE message_id = ? 与 UpdateStatus 保持一致
 	result := r.db.WithContext(ctx).Exec(
 		`UPDATE `+MessageSendRecord{}.TableName()+` SET
 			retry_count = ?,
-			retry_history = JSON_ARRAY_APPEND(IFNULL(retry_history, JSON_ARRAY()), '$', CAST(? AS JSON)),
+			retry_history = `+retryHistoryExpr+`,
 			last_send_time = ?,
 			first_send_time = CASE WHEN first_send_time IS NULL THEN ? ELSE first_send_time END,
 			status = CASE
@@ -397,9 +375,9 @@ func (r *MessageRecordGormRepository) IncrementRetry(ctx context.Context, messag
 
 // GetStatistics 获取统计信息
 //
-// 优化说明：原实现先做 1 次总数 COUNT，再对 8 种状态各做 1 次 COUNT，共 9 次数据库往返。
-// 现合并为单条 GROUP BY 查询，数据库往返从 9 次降为 1 次。
-// 所有状态预初始化为 0，保证返回结构与原实现一致（未出现的状态也返回 0）。
+// 优化说明：原实现先做 1 次总数 COUNT，再对 8 种状态各做 1 次 COUNT，共 9 次数据库往返
+// 现合并为单条 GROUP BY 查询，数据库往返从 9 次降为 1 次
+// 所有状态预初始化为 0，保证返回结构与原实现一致（未出现的状态也返回 0）
 func (r *MessageRecordGormRepository) GetStatistics(ctx context.Context) (map[string]int64, error) {
 	stats := make(map[string]int64)
 

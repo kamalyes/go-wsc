@@ -37,14 +37,14 @@ import (
 // ============================================================================
 
 // ConnectionClaims 连接 Token 的 JWT Claims
-// 将原本明文暴露的 user_id/user_type/device_id/namespace/group_id 加密到 JWT 中
+// 将原本明文暴露的 user_id/user_type/device_id/namespace 加密到 JWT 中
 // 字段名采用短缩写以减小 token 体积
+// 注意：群组成员关系是持久化实体，由业务层通过 API 管理，token 不携带 group_id
 type ConnectionClaims struct {
 	UserID    string `json:"uid"`           // 用户ID（必填）
 	UserType  string `json:"utp,omitempty"` // 用户类型（默认 visitor）
 	DeviceID  string `json:"did,omitempty"` // 设备ID
 	Namespace string `json:"tid,omitempty"` // 命名空间ID（默认 "default"，用于命名空间隔离与消息过滤）
-	GroupID   string `json:"gid,omitempty"` // 群组ID（普通用户=连接后自动加入；观察者=订阅的观察群组，空=观察整个命名空间）
 	jwt.RegisteredClaims
 }
 

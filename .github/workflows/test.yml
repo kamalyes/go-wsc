@@ -21,39 +21,6 @@ jobs:
       fail-fast: false
     runs-on: ubuntu-latest
     timeout-minutes: 60
-
-    # 🔥 全局环境变量（可通过 GitHub Variables 覆盖）
-    env:
-      MYSQL_ROOT_PASSWORD: ${{ vars.MYSQL_ROOT_PASSWORD || 'test_password_123' }}
-      MYSQL_DATABASE: ${{ vars.MYSQL_DATABASE || 'go_wsc_test' }}
-      TEST_REDIS_ADDR: ${{ vars.TEST_REDIS_ADDR || 'localhost:6379' }}
-      TEST_REDIS_PASSWORD: ${{ vars.TEST_REDIS_PASSWORD || '' }}
-
-    # 🐳 服务容器
-    services:
-      mysql:
-        image: mysql:8.0
-        env:
-          MYSQL_ROOT_PASSWORD: ${{ env.MYSQL_ROOT_PASSWORD }}
-          MYSQL_DATABASE: ${{ env.MYSQL_DATABASE }}
-        ports:
-          - 3306:3306
-        options: >-
-          --health-cmd="mysqladmin ping -h localhost"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=5
-
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd="redis-cli ping"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=5
-
     steps:
       - name: Fetch Repository
         uses: actions/checkout@v5

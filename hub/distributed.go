@@ -218,33 +218,27 @@ func (h *Hub) handleDistributedMessage(ctx context.Context, distMsg *Distributed
 }
 
 // handleDistributedSendMessage 处理跨节点发送消息
-// 使用 shardedRegistry 查找用户客户端（分片读锁）
+// 使用 ForEachUserClient 零拷贝遍历 + 预序列化，替代 CopyClientsFromMap 双重拷贝
 func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *DistributedMessage) error {
 	if distMsg.Message == nil {
 		return fmt.Errorf("message data not found")
 	}
 
-	// 通过 shardedRegistry 查找用户的所有客户端
-	userClients, exists := h.shardedRegistry.GetUserClients(distMsg.TargetID)
-	if !exists || len(userClients) == 0 {
+	// 快速检查用户是否存在（避免无用户时序列化开销）
+	if !h.shardedRegistry.HasUser(distMsg.TargetID) {
 		h.logger.DebugKV("用户不在本节点", "user_id", distMsg.TargetID)
 		return fmt.Errorf("user not found on this node: %s", distMsg.TargetID)
 	}
 
-	// 复制一份客户端引用，避免遍历过程中 map 被修改
-	clientsCopy := CopyClientsFromMap(userClients)
-
-	// 序列化消息为字节
+	// 序列化消息为字节（预序列化一次，多设备复用）
 	msgData, err := json.Marshal(distMsg.Message)
 	if err != nil {
 		return fmt.Errorf("marshal message failed: %w", err)
 	}
 
-	// 发送到用户的所有客户端（支持多端登录）
-	// 遍历复制后的切片，避免持锁发送导致死锁
+	// 零拷贝遍历：ForEachUserClient 持读锁遍历，TrySend 非阻塞安全
 	successCount := 0
-	for _, client := range clientsCopy {
-		// 使用 TrySend 方法，它内部有锁保护，避免竞态条件
+	h.shardedRegistry.ForEachUserClient(distMsg.TargetID, func(_ string, client *Client) bool {
 		if client.TrySend(msgData) {
 			successCount++
 		} else {
@@ -258,10 +252,11 @@ func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *Distrib
 		// 检查上下文是否取消
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("context cancelled: %w", ctx.Err())
+			return false
 		default:
+			return true
 		}
-	}
+	})
 
 	if successCount == 0 {
 		h.handleSendFailure(ctx, distMsg.TargetID, distMsg.Message, "all clients unavailable")
@@ -272,7 +267,6 @@ func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *Distrib
 		"message_id", distMsg.Message.MessageID,
 		"user_id", distMsg.TargetID,
 		"success_count", successCount,
-		"total_clients", len(userClients),
 	)
 
 	// 🔔 通知观察者（跨节点消息也需要通知观察者）

@@ -59,7 +59,7 @@ func testBasicScenarios(t *testing.T, hub *Hub) {
 				time.Sleep(10 * time.Millisecond)
 
 				stats := hub.GetStats()
-				assert.GreaterOrEqual(t, stats.TotalClients, 1,
+				assert.GreaterOrEqual(t, stats.TotalClients, int64(1),
 					"场景%d: 应该至少有1个连接", i)
 
 				hub.Unregister(client)
@@ -149,7 +149,7 @@ func testConcurrentScenarios(t *testing.T, hub *Hub) {
 				time.Sleep(100 * time.Millisecond)
 
 				stats := hub.GetStats()
-				assert.GreaterOrEqual(t, stats.TotalClients, clientCount,
+				assert.GreaterOrEqual(t, stats.TotalClients, int64(clientCount),
 					"场景%d: 并发注册应成功", i)
 
 			case i <= 70: // 场景61-70: 并发注销
@@ -349,7 +349,7 @@ func testEdgeCaseScenarios(t *testing.T, hub *Hub) {
 
 				stats := hub.GetStats()
 				assert.NotNil(t, stats, "场景%d: 统计信息应可获取", i)
-				assert.GreaterOrEqual(t, stats.TotalClients, 0, "场景%d: 应有总连接数字段", i)
+				assert.GreaterOrEqual(t, stats.TotalClients, int64(0), "场景%d: 应有总连接数字段", i)
 				assert.GreaterOrEqual(t, stats.OnlineUsers, 0, "场景%d: 应有在线用户数字段", i)
 
 				hub.Unregister(client)

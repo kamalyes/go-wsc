@@ -28,30 +28,11 @@ package hub
 
 import (
 	"context"
-	"time"
 
 	"github.com/kamalyes/go-cachex"
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/redis/go-redis/v9"
 )
-
-// RouterCacheConfig 路由缓存配置
-type RouterCacheConfig struct {
-	// TTL 缓存过期时间（默认 5 分钟）
-	TTL time.Duration
-	// MaxLocalCacheSize 本地缓存最大条目数（默认 50000，约 5 万用户）
-	MaxLocalCacheSize int
-	// Namespace Redis 命名空间（默认 "wsc"）
-	Namespace string
-}
-
-// DefaultRouterCacheConfig 默认路由缓存配置
-func DefaultRouterCacheConfig() *RouterCacheConfig {
-	return &RouterCacheConfig{
-		TTL:               5 * time.Minute,
-		MaxLocalCacheSize: 50000,
-		Namespace:         "wsc",
-	}
-}
 
 // RouterCache 分布式路由缓存
 // 缓存 userID → []nodeIDs 映射，加速跨节点消息路由判断
@@ -63,15 +44,7 @@ type RouterCache struct {
 // redisClient: Redis 客户端（从 PubSub.GetClient() 获取）
 // onlineRepo: 在线状态仓库（用于 BatchLoader 回源查询）
 // cfg: 缓存配置（nil 使用默认值）
-func NewRouterCache(
-	redisClient *redis.Client,
-	onlineRepo OnlineStatusRepository,
-	cfg *RouterCacheConfig,
-) *RouterCache {
-	if cfg == nil {
-		cfg = DefaultRouterCacheConfig()
-	}
-
+func NewRouterCache(redisClient *redis.Client, onlineRepo OnlineStatusRepository, cfg *wscconfig.RouterCacheConfig) *RouterCache {
 	// BatchLoader: 缓存未命中时，回源查询 online_status_repo
 	// 使用 BatchGetUserNodes 批量查询（Pipeline 优化），避免 N+1 网络往返
 	batchLoader := func(ctx context.Context, userIDs []string) (map[string][]string, error) {

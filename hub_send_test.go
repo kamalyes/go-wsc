@@ -18,6 +18,7 @@ import (
 	"time"
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-wsc/repository"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -67,6 +68,11 @@ func TestBroadcastToGroup(t *testing.T) {
 	hub := NewHub(config)
 	defer hub.Shutdown()
 
+	// 设置群组仓库（基于 miniredis），BroadcastToGroup 依赖 groupRepo 获取群组成员
+	redisClient := GetTestRedisClient(t)
+	groupRepo := repository.NewRedisGroupRepository(redisClient, "wsc:test:broadcast_group:")
+	hub.SetGroupRepository(groupRepo)
+
 	go hub.Run()
 	hub.WaitForStart()
 
@@ -78,6 +84,16 @@ func TestBroadcastToGroup(t *testing.T) {
 	hub.Register(agent)
 	time.Sleep(50 * time.Millisecond)
 
+	ctx := context.Background()
+
+	// 创建群组并将 customer 加入群组成员
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{
+		GroupID:   "customer-group",
+		Namespace: "default",
+		OwnerID:   "system",
+	}))
+	require.NoError(t, groupRepo.AddMembers(ctx, "default", "customer-group", []string{customer.UserID}))
+
 	msg := &HubMessage{
 		ID:           "broadcast-group-1",
 		MessageType:  MessageTypeText,
@@ -86,7 +102,7 @@ func TestBroadcastToGroup(t *testing.T) {
 	}
 
 	// 广播到customer组
-	count := hub.BroadcastToGroup(context.Background(), "default", "customer-group", msg, false)
+	count := hub.BroadcastToGroup(ctx, "default", "customer-group", msg, false)
 	assert.Equal(t, 1, count, "应该发送给1个customer")
 
 	hub.Unregister(customer)

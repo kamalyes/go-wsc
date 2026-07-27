@@ -21,6 +21,9 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -88,7 +91,7 @@ func makeGroupMessage(sender string) *HubMessage {
 
 // TestHubCreateAndGetGroup 验证通过 Hub 层创建和查询群组
 func TestHubCreateAndGetGroup(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
 	defer cleanup()
 	ctx := context.Background()
 
@@ -100,7 +103,7 @@ func TestHubCreateAndGetGroup(t *testing.T) {
 			OwnerID:    "owner1",
 			MaxMembers: 50,
 		}
-		require.NoError(t, hub.CreateGroup(ctx, g))
+		require.NoError(t, groupRepo.CreateGroup(ctx, g))
 
 		got, err := hub.GetGroup(ctx, "tenantA", "g1")
 		require.NoError(t, err)
@@ -113,7 +116,7 @@ func TestHubCreateAndGetGroup(t *testing.T) {
 	t.Run("default 命名空间查询", func(t *testing.T) {
 		// CreateGroup 时 groupRepo 将空 Namespace 归一化为 default
 		g := &Group{GroupID: "g-default", Name: "默认群", OwnerID: "owner1"}
-		require.NoError(t, hub.CreateGroup(ctx, g))
+		require.NoError(t, groupRepo.CreateGroup(ctx, g))
 
 		// 业务查询传明确 namespace（归一化由 register/CreateGroup 层统一）
 		got, err := hub.GetGroup(ctx, "default", "g-default")
@@ -124,12 +127,12 @@ func TestHubCreateAndGetGroup(t *testing.T) {
 
 // TestHubDisbandGroup 验证通过 Hub 解散群组后成员与元信息被清理
 func TestHubDisbandGroup(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
 	defer cleanup()
 	ctx := context.Background()
 
-	require.NoError(t, hub.CreateGroup(ctx, &Group{GroupID: "g-disband", Namespace: "tenantA", OwnerID: "o1"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, "tenantA", "g-disband", []string{"u1", "u2"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-disband", Namespace: "tenantA", OwnerID: "o1"}))
+	require.NoError(t, hub.addGroupMembers(ctx, "tenantA", "g-disband", []string{"u1", "u2"}))
 
 	require.NoError(t, hub.DisbandGroup(ctx, "tenantA", "g-disband"))
 
@@ -143,14 +146,14 @@ func TestHubDisbandGroup(t *testing.T) {
 
 // TestHubAddAndRemoveMembers 验证通过 Hub 添加和移除群组成员
 func TestHubAddAndRemoveMembers(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
 	defer cleanup()
 	ctx := context.Background()
 
-	require.NoError(t, hub.CreateGroup(ctx, &Group{GroupID: "g-members", Namespace: "tenantA", OwnerID: "o1"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-members", Namespace: "tenantA", OwnerID: "o1"}))
 
 	// 添加成员
-	require.NoError(t, hub.AddGroupMembers(ctx, "tenantA", "g-members", []string{"u1", "u2", "u3"}))
+	require.NoError(t, hub.addGroupMembers(ctx, "tenantA", "g-members", []string{"u1", "u2", "u3"}))
 
 	cnt, err := hub.GetGroupMemberCount(ctx, "tenantA", "g-members")
 	require.NoError(t, err)
@@ -178,31 +181,31 @@ func TestHubAddAndRemoveMembers(t *testing.T) {
 
 // TestHubGroupMaxMembers 验证群组成员上限校验
 func TestHubGroupMaxMembers(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
 	defer cleanup()
 	ctx := context.Background()
 
-	require.NoError(t, hub.CreateGroup(ctx, &Group{GroupID: "g-max", Namespace: "tenantA", OwnerID: "o1", MaxMembers: 2}))
-	require.NoError(t, hub.AddGroupMembers(ctx, "tenantA", "g-max", []string{"u1", "u2"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-max", Namespace: "tenantA", OwnerID: "o1", MaxMembers: 2}))
+	require.NoError(t, hub.addGroupMembers(ctx, "tenantA", "g-max", []string{"u1", "u2"}))
 
 	// 超出上限应返回 ErrGroupFull
-	err := hub.AddGroupMembers(ctx, "tenantA", "g-max", []string{"u3"})
+	err := hub.addGroupMembers(ctx, "tenantA", "g-max", []string{"u3"})
 	assert.ErrorIs(t, err, ErrGroupFull)
 }
 
 // TestHubGroupNamespaceIsolation 验证 Hub 层群组命名空间隔离
 func TestHubGroupNamespaceIsolation(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
 	defer cleanup()
 	ctx := context.Background()
 
 	// 两个命名空间创建同名群组
-	require.NoError(t, hub.CreateGroup(ctx, &Group{GroupID: "g-same", Namespace: "tenantA", Name: "A群", OwnerID: "oA"}))
-	require.NoError(t, hub.CreateGroup(ctx, &Group{GroupID: "g-same", Namespace: "tenantB", Name: "B群", OwnerID: "oB"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-same", Namespace: "tenantA", Name: "A群", OwnerID: "oA"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-same", Namespace: "tenantB", Name: "B群", OwnerID: "oB"}))
 
 	// 各自添加成员
-	require.NoError(t, hub.AddGroupMembers(ctx, "tenantA", "g-same", []string{"userA"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, "tenantB", "g-same", []string{"userB"}))
+	require.NoError(t, hub.addGroupMembers(ctx, "tenantA", "g-same", []string{"userA"}))
+	require.NoError(t, hub.addGroupMembers(ctx, "tenantB", "g-same", []string{"userB"}))
 
 	// 成员不跨命名空间
 	aMembers, err := hub.GetGroupMembers(ctx, "tenantA", "g-same")
@@ -221,13 +224,13 @@ func TestHubGroupNamespaceIsolation(t *testing.T) {
 
 // TestHubGetUserGroupsAndNamespaceGroups 验证用户群组列表与命名空间群组列表
 func TestHubGetUserGroupsAndNamespaceGroups(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
 	defer cleanup()
 	ctx := context.Background()
 
 	for _, gid := range []string{"g1", "g2", "g3"} {
-		require.NoError(t, hub.CreateGroup(ctx, &Group{GroupID: gid, Namespace: "tenantA", OwnerID: "o1"}))
-		require.NoError(t, hub.AddGroupMembers(ctx, "tenantA", gid, []string{"userX"}))
+		require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: gid, Namespace: "tenantA", OwnerID: "o1"}))
+		require.NoError(t, hub.addGroupMembers(ctx, "tenantA", gid, []string{"userX"}))
 	}
 
 	// 用户群组列表
@@ -247,13 +250,13 @@ func TestHubGetUserGroupsAndNamespaceGroups(t *testing.T) {
 
 // TestBroadcastToGroupMembersLocal 验证群组广播本地投递给在线成员
 func TestBroadcastToGroupMembersLocal(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
 	defer cleanup()
 	ctx := context.Background()
 
 	// 创建群组并添加成员
-	require.NoError(t, hub.CreateGroup(ctx, &Group{GroupID: "g-broadcast", Namespace: "tenantA", OwnerID: "owner1"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, "tenantA", "g-broadcast", []string{"user1", "user2", "user3"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-broadcast", Namespace: "tenantA", OwnerID: "owner1"}))
+	require.NoError(t, hub.addGroupMembers(ctx, "tenantA", "g-broadcast", []string{"user1", "user2", "user3"}))
 
 	// 启动 Hub 并注册在线客户端（user1 和 user2 在本节点）
 	go hub.Run()
@@ -291,12 +294,12 @@ func TestBroadcastToGroupMembersLocal(t *testing.T) {
 
 // TestBroadcastToGroupMembersExcludeSender 验证广播排除发送者
 func TestBroadcastToGroupMembersExcludeSender(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
 	defer cleanup()
 	ctx := context.Background()
 
-	require.NoError(t, hub.CreateGroup(ctx, &Group{GroupID: "g-exclude", Namespace: "tenantA", OwnerID: "owner1"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, "tenantA", "g-exclude", []string{"sender", "user2"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-exclude", Namespace: "tenantA", OwnerID: "owner1"}))
+	require.NoError(t, hub.addGroupMembers(ctx, "tenantA", "g-exclude", []string{"sender", "user2"}))
 
 	go hub.Run()
 	defer hub.Shutdown()
@@ -431,12 +434,12 @@ func TestCrossNodeGroupBroadcastSingleNode(t *testing.T) {
 // TestSendToGroupOfflineMembers 验证群组消息对离线成员的投递结果统计
 // 注意：未配置离线消息处理器时，离线成员计为 Failed
 func TestSendToGroupOfflineMembers(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
 	defer cleanup()
 	ctx := context.Background()
 
-	require.NoError(t, hub.CreateGroup(ctx, &Group{GroupID: "g-send", Namespace: "tenantA", OwnerID: "owner1"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, "tenantA", "g-send", []string{"u-online", "u-offline"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-send", Namespace: "tenantA", OwnerID: "owner1"}))
+	require.NoError(t, hub.addGroupMembers(ctx, "tenantA", "g-send", []string{"u-online", "u-offline"}))
 
 	go hub.Run()
 	defer hub.Shutdown()
@@ -508,19 +511,19 @@ func TestNodeGRPCConfigEnabled(t *testing.T) {
 // TestBroadcastToAllGroupsDedup 验证向命名空间所有群组广播时成员去重
 // 用户同时属于多个群组时只应收到一条消息
 func TestBroadcastToAllGroupsDedup(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
 	defer cleanup()
 	ctx := context.Background()
 
 	// 创建 3 个群组
-	require.NoError(t, hub.CreateGroup(ctx, &Group{GroupID: "g1", Namespace: "tenantA", OwnerID: "o1"}))
-	require.NoError(t, hub.CreateGroup(ctx, &Group{GroupID: "g2", Namespace: "tenantA", OwnerID: "o1"}))
-	require.NoError(t, hub.CreateGroup(ctx, &Group{GroupID: "g3", Namespace: "tenantA", OwnerID: "o1"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g1", Namespace: "tenantA", OwnerID: "o1"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g2", Namespace: "tenantA", OwnerID: "o1"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g3", Namespace: "tenantA", OwnerID: "o1"}))
 
 	// user1 同时在 g1、g2、g3 三个群组（应去重，只收一条）
-	require.NoError(t, hub.AddGroupMembers(ctx, "tenantA", "g1", []string{"user1", "user2"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, "tenantA", "g2", []string{"user1", "user3"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, "tenantA", "g3", []string{"user1", "user4"}))
+	require.NoError(t, hub.addGroupMembers(ctx, "tenantA", "g1", []string{"user1", "user2"}))
+	require.NoError(t, hub.addGroupMembers(ctx, "tenantA", "g2", []string{"user1", "user3"}))
+	require.NoError(t, hub.addGroupMembers(ctx, "tenantA", "g3", []string{"user1", "user4"}))
 
 	go hub.Run()
 	defer hub.Shutdown()
@@ -582,14 +585,14 @@ func TestBroadcastToAllGroupsEmptyNamespace(t *testing.T) {
 // TestBroadcastToAllGroupsDefaultNamespace 验证 default 命名空间的群组广播
 // namespace 归一化由 register 层统一，业务调用方需传明确 namespace
 func TestBroadcastToAllGroupsDefaultNamespace(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
 	defer cleanup()
 	ctx := context.Background()
 
 	// CreateGroup 时 groupRepo 将空 Namespace 归一化为 default
-	require.NoError(t, hub.CreateGroup(ctx, &Group{GroupID: "g-default", OwnerID: "o1"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-default", OwnerID: "o1"}))
 	// 业务方法调用方传明确 namespace（default）
-	require.NoError(t, hub.AddGroupMembers(ctx, "default", "g-default", []string{"user1"}))
+	require.NoError(t, hub.addGroupMembers(ctx, "default", "g-default", []string{"user1"}))
 
 	go hub.Run()
 	defer hub.Shutdown()
@@ -606,15 +609,15 @@ func TestBroadcastToAllGroupsDefaultNamespace(t *testing.T) {
 
 // TestBroadcastToAllNamespacesAllGroups 验证向所有命名空间所有群组广播
 func TestBroadcastToAllNamespacesAllGroups(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
 	defer cleanup()
 	ctx := context.Background()
 
 	// 两个命名空间各创建群组
-	require.NoError(t, hub.CreateGroup(ctx, &Group{GroupID: "gA", Namespace: "tenantA", OwnerID: "o1"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, "tenantA", "gA", []string{"userA"}))
-	require.NoError(t, hub.CreateGroup(ctx, &Group{GroupID: "gB", Namespace: "tenantB", OwnerID: "o1"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, "tenantB", "gB", []string{"userB"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "gA", Namespace: "tenantA", OwnerID: "o1"}))
+	require.NoError(t, hub.addGroupMembers(ctx, "tenantA", "gA", []string{"userA"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "gB", Namespace: "tenantB", OwnerID: "o1"}))
+	require.NoError(t, hub.addGroupMembers(ctx, "tenantB", "gB", []string{"userB"}))
 
 	go hub.Run()
 	defer hub.Shutdown()
@@ -646,12 +649,12 @@ func TestBroadcastToAllNamespacesAllGroups(t *testing.T) {
 // TestHandleDistributedGroupsBroadcastSingleGroup 验证接收端兼容单群组（TargetID 回退）
 // 模拟跨节点消息：GroupIDs 为空但 TargetID 有值时，应按单群组处理
 func TestHandleDistributedGroupsBroadcastSingleGroup(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
 	defer cleanup()
 	ctx := context.Background()
 
-	require.NoError(t, hub.CreateGroup(ctx, &Group{GroupID: "g-single", Namespace: "tenantA", OwnerID: "o1"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, "tenantA", "g-single", []string{"user1"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-single", Namespace: "tenantA", OwnerID: "o1"}))
+	require.NoError(t, hub.addGroupMembers(ctx, "tenantA", "g-single", []string{"user1"}))
 
 	go hub.Run()
 	defer hub.Shutdown()
@@ -818,4 +821,692 @@ func TestRejoinSystemGroupOnReconnect(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, members, "agent-003", "重连后应重新加入系统组")
 	assert.Len(t, members, 1, "不应重复加入")
+}
+
+// ============================================================================
+// 群组生命周期回调测试
+// ============================================================================
+//
+// 覆盖：
+//   1. 回调在正确触发点被异步触发（参数正确）
+//      - OnGroupMemberJoin：由 triggerGroupMemberJoinCallback 触发（register 自动装配）
+//      - OnGroupMemberLeave：由 RemoveGroupMembers 触发
+//      - OnGroupDisband：由 DisbandGroup 触发
+//   2. 成员切片快照隔离（调用方后续修改不影响回调收到的数据）
+//   3. 手动 AddGroupMembers 不触发 OnGroupMemberJoin（仅在 register 自动装配时触发）
+//   4. 操作失败时不触发回调
+//   5. 系统保留组自动加入/离开不触发业务回调（隔离原则）
+// ============================================================================
+
+// TestGroupLifecycleCallbacks 验证群组生命周期回调在正确触发点被异步触发
+func TestGroupLifecycleCallbacks(t *testing.T) {
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	type nsGidEvt struct{ namespace, groupID string }
+	type memberEvt struct {
+		namespace, groupID string
+		userIDs            []string
+	}
+
+	disbandCh := make(chan nsGidEvt, 1)
+	joinCh := make(chan memberEvt, 1)
+	leaveCh := make(chan memberEvt, 1)
+
+	hub.OnGroupDisband(func(_ context.Context, ns, gid string) { disbandCh <- nsGidEvt{ns, gid} })
+	hub.OnGroupMemberJoin(func(_ context.Context, ns, gid string, uids []string) {
+		joinCh <- memberEvt{ns, gid, uids}
+	})
+	hub.OnGroupMemberLeave(func(_ context.Context, ns, gid string, uids []string) {
+		leaveCh <- memberEvt{ns, gid, uids}
+	})
+
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-cb", Namespace: "tenantA", OwnerID: "o1", MaxMembers: 10}))
+
+	// 1. Join（模拟 register 自动装配：AddGroupMembers 落库 + triggerGroupMemberJoinCallback 触发回调）
+	require.NoError(t, hub.addGroupMembers(ctx, "tenantA", "g-cb", []string{"u1", "u2"}))
+	hub.triggerGroupMemberJoinCallback("tenantA", "g-cb", []string{"u1", "u2"})
+	select {
+	case e := <-joinCh:
+		assert.Equal(t, "tenantA", e.namespace)
+		assert.Equal(t, "g-cb", e.groupID)
+		assert.ElementsMatch(t, []string{"u1", "u2"}, e.userIDs)
+	case <-time.After(time.Second):
+		t.Fatal("OnGroupMemberJoin 未触发")
+	}
+
+	// 2. Leave
+	require.NoError(t, hub.RemoveGroupMembers(ctx, "tenantA", "g-cb", []string{"u1"}))
+	select {
+	case e := <-leaveCh:
+		assert.Equal(t, "tenantA", e.namespace)
+		assert.Equal(t, "g-cb", e.groupID)
+		assert.ElementsMatch(t, []string{"u1"}, e.userIDs)
+	case <-time.After(time.Second):
+		t.Fatal("OnGroupMemberLeave 未触发")
+	}
+
+	// 3. Disband
+	require.NoError(t, hub.DisbandGroup(ctx, "tenantA", "g-cb"))
+	select {
+	case e := <-disbandCh:
+		assert.Equal(t, "tenantA", e.namespace)
+		assert.Equal(t, "g-cb", e.groupID)
+	case <-time.After(time.Second):
+		t.Fatal("OnGroupDisband 未触发")
+	}
+}
+
+// TestGroupCallbackSliceSnapshot 验证成员加入回调收到的切片是副本
+// 调用方在 triggerGroupMemberJoinCallback 后修改原切片，不应影响回调收到的数据
+func TestGroupCallbackSliceSnapshot(t *testing.T) {
+	hub, _, _, cleanup := setupGroupTestHub(t)
+	defer cleanup()
+
+	joinCh := make(chan []string, 1)
+	hub.OnGroupMemberJoin(func(_ context.Context, _, _ string, uids []string) {
+		joinCh <- uids
+	})
+
+	original := []string{"u1", "u2"}
+	hub.triggerGroupMemberJoinCallback("tA", "g-snap", original)
+
+	// 立即修改原切片，验证回调收到的是快照副本
+	original[0] = "MUTATED"
+	original = append(original, "u3")
+
+	select {
+	case uids := <-joinCh:
+		assert.ElementsMatch(t, []string{"u1", "u2"}, uids, "回调应收到修改前的快照副本")
+	case <-time.After(time.Second):
+		t.Fatal("OnGroupMemberJoin 未触发")
+	}
+}
+
+// TestGroupCallbackNotTriggeredOnError 验证手动/失败操作不触发回调
+func TestGroupCallbackNotTriggeredOnError(t *testing.T) {
+	t.Run("手动 AddGroupMembers 不触发 OnGroupMemberJoin", func(t *testing.T) {
+		hub, groupRepo, _, cleanup := setupGroupTestHub(t)
+		defer cleanup()
+		ctx := context.Background()
+
+		require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-manual", Namespace: "tA", OwnerID: "o"}))
+
+		joinCh := make(chan []string, 1)
+		hub.OnGroupMemberJoin(func(_ context.Context, _, _ string, uids []string) { joinCh <- uids })
+
+		// 手动 AddGroupMembers 不应触发回调（回调仅在 register 自动装配时触发）
+		require.NoError(t, hub.addGroupMembers(ctx, "tA", "g-manual", []string{"u1", "u2"}))
+
+		select {
+		case uids := <-joinCh:
+			t.Fatalf("手动 AddGroupMembers 不应触发 OnGroupMemberJoin, 收到: %v", uids)
+		case <-time.After(300 * time.Millisecond):
+			// OK
+		}
+	})
+
+	t.Run("AddGroupMembers 超限不触发 OnGroupMemberJoin", func(t *testing.T) {
+		hub, groupRepo, _, cleanup := setupGroupTestHub(t)
+		defer cleanup()
+		ctx := context.Background()
+
+		require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-full", Namespace: "tA", OwnerID: "o", MaxMembers: 1}))
+		require.NoError(t, hub.addGroupMembers(ctx, "tA", "g-full", []string{"u1"}))
+
+		joinCh := make(chan []string, 1)
+		hub.OnGroupMemberJoin(func(_ context.Context, _, _ string, uids []string) { joinCh <- uids })
+
+		err := hub.addGroupMembers(ctx, "tA", "g-full", []string{"u2"})
+		require.ErrorIs(t, err, ErrGroupFull)
+
+		select {
+		case uids := <-joinCh:
+			t.Fatalf("AddGroupMembers 失败不应触发 OnGroupMemberJoin, 收到: %v", uids)
+		case <-time.After(300 * time.Millisecond):
+			// OK
+		}
+	})
+
+	t.Run("DisbandGroup 仓库未设置不触发 OnGroupDisband", func(t *testing.T) {
+		config := wscconfig.Default()
+		hub := NewHub(config)
+		defer hub.Shutdown()
+
+		disbandCh := make(chan string, 1)
+		hub.OnGroupDisband(func(_ context.Context, _, gid string) { disbandCh <- gid })
+
+		err := hub.DisbandGroup(context.Background(), "tA", "any")
+		require.Error(t, err, "groupRepo 未设置应返回错误")
+
+		select {
+		case gid := <-disbandCh:
+			t.Fatalf("DisbandGroup 失败不应触发 OnGroupDisband, 收到: %s", gid)
+		case <-time.After(300 * time.Millisecond):
+			// OK
+		}
+	})
+}
+
+// TestSystemGroupNoBusinessCallback 验证系统保留组的自动加入/离开不触发业务回调
+// joinSystemGroupsOnConnect/leaveSystemGroupsOnDisconnect 走底层 groupRepo，绕开 AddGroupMembers/RemoveGroupMembers
+func TestSystemGroupNoBusinessCallback(t *testing.T) {
+	hub, _, _, cleanup := setupGroupTestHub(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	joinTriggered := make(chan []string, 1)
+	leaveTriggered := make(chan []string, 1)
+	hub.OnGroupMemberJoin(func(_ context.Context, _, _ string, uids []string) { joinTriggered <- uids })
+	hub.OnGroupMemberLeave(func(_ context.Context, _, _ string, uids []string) { leaveTriggered <- uids })
+
+	// agent 连接 → 自动加入 __agents__ 系统组
+	client := makeTestClient("c-agent", "agent-001")
+	client.UserType = UserTypeAgent
+	client.Namespace = "tenantA"
+	hub.joinSystemGroupsOnConnect(ctx, client)
+
+	// 确认已加入系统组（底层生效）
+	members, err := hub.groupRepo.GetMembers(ctx, "tenantA", models.SystemGroupAgents)
+	require.NoError(t, err)
+	assert.Contains(t, members, "agent-001")
+
+	// 但不应触发业务回调
+	select {
+	case uids := <-joinTriggered:
+		t.Fatalf("系统组自动加入不应触发 OnGroupMemberJoin, 收到: %v", uids)
+	case <-time.After(300 * time.Millisecond):
+		// OK
+	}
+
+	// 断开 → 自动离开系统组
+	hub.leaveSystemGroupsOnDisconnect(ctx, client)
+	select {
+	case uids := <-leaveTriggered:
+		t.Fatalf("系统组自动离开不应触发 OnGroupMemberLeave, 收到: %v", uids)
+	case <-time.After(300 * time.Millisecond):
+		// OK
+	}
+}
+
+// TestLeaveSystemGroupMultiClient 验证多端登录场景下，仅当 userID 的所有连接都断开后才离开系统组
+// 避免一端断开导致其他端收不到系统组广播
+func TestLeaveSystemGroupMultiClient(t *testing.T) {
+	hub, _, _, cleanup := setupGroupTestHub(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// 同 userID 的两个 agent 连接（模拟多端登录）
+	client1 := makeTestClient("c-agent-a", "agent-multi")
+	client1.UserType = UserTypeAgent
+	client1.Namespace = "tenantA"
+	client2 := makeTestClient("c-agent-b", "agent-multi")
+	client2.UserType = UserTypeAgent
+	client2.Namespace = "tenantA"
+
+	// 注册到 registry（模拟在线）
+	hub.shardedRegistry.AddClient(client1)
+	hub.shardedRegistry.AddClient(client2)
+
+	// 两个都加入系统组（集合语义，agent-multi 只存一份）
+	hub.joinSystemGroupsOnConnect(ctx, client1)
+	hub.joinSystemGroupsOnConnect(ctx, client2)
+
+	// 确认系统组包含 agent-multi
+	members, err := hub.groupRepo.GetMembers(ctx, "tenantA", models.SystemGroupAgents)
+	require.NoError(t, err)
+	assert.Contains(t, members, "agent-multi")
+
+	// 断开 client1：先从 registry 移除（模拟 removeClientUnsafe 时序），再 leave
+	hub.shardedRegistry.RemoveClient(client1.ID, client1.UserID)
+	hub.leaveSystemGroupsOnDisconnect(ctx, client1)
+
+	// client2 仍在线，系统组应保留 agent-multi
+	members, err = hub.groupRepo.GetMembers(ctx, "tenantA", models.SystemGroupAgents)
+	require.NoError(t, err)
+	assert.Contains(t, members, "agent-multi", "仍有其他端在线时不应离开系统组")
+
+	// 断开 client2：从 registry 移除，再 leave
+	hub.shardedRegistry.RemoveClient(client2.ID, client2.UserID)
+	hub.leaveSystemGroupsOnDisconnect(ctx, client2)
+
+	// 所有连接断开，系统组应移除 agent-multi
+	members, err = hub.groupRepo.GetMembers(ctx, "tenantA", models.SystemGroupAgents)
+	require.NoError(t, err)
+	assert.NotContains(t, members, "agent-multi", "所有连接断开后应离开系统组")
+}
+
+// TestAddGroupMembersReconnectIdempotent 验证重连加群幂等性
+// 重连时用户成员关系保留，AddGroupMembers 不应误报 ErrGroupFull
+func TestAddGroupMembersReconnectIdempotent(t *testing.T) {
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// 创建 MaxMembers=2 的群组
+	group := &models.Group{
+		Namespace:  "default",
+		GroupID:    "room-1",
+		Name:       "测试房间",
+		MaxMembers: 2,
+	}
+	require.NoError(t, groupRepo.CreateGroup(ctx, group))
+
+	// 用户 A 首次加群（成员数=1）
+	require.NoError(t, hub.addGroupMembers(ctx, "default", "room-1", []string{"userA"}))
+
+	// 用户 A 重连再次加群：A 已存在，不应误报 ErrGroupFull（1+0=1 ≤ 2）
+	require.NoError(t, hub.addGroupMembers(ctx, "default", "room-1", []string{"userA"}),
+		"重连用户已在群内，不应误报超限")
+
+	// 用户 B 加群（成员数=2，满员）
+	require.NoError(t, hub.addGroupMembers(ctx, "default", "room-1", []string{"userB"}))
+
+	// 用户 B 重连再次加群：B 已存在，不应误报（2+0=2 ≤ 2）
+	require.NoError(t, hub.addGroupMembers(ctx, "default", "room-1", []string{"userB"}),
+		"重连用户已在群内，满员时也不应误报超限")
+
+	// 用户 C 加群：真正超限（2+1=3 > 2），应报 ErrGroupFull
+	err := hub.addGroupMembers(ctx, "default", "room-1", []string{"userC"})
+	assert.ErrorIs(t, err, ErrGroupFull, "真正新增超限应报错")
+
+	// 验证 A/B 成员关系保留（离线不销毁语义）
+	exists, err := groupRepo.IsMember(ctx, "default", "room-1", "userA")
+	require.NoError(t, err)
+	assert.True(t, exists, "用户 A 成员关系应保留")
+	exists, err = groupRepo.IsMember(ctx, "default", "room-1", "userB")
+	require.NoError(t, err)
+	assert.True(t, exists, "用户 B 成员关系应保留")
+
+	// 验证成员总数仍为 2（A、B），C 未加入
+	count, err := groupRepo.GetMemberCount(ctx, "default", "room-1")
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), count, "成员总数应为 2")
+}
+
+// ============================================================================
+// 群组自动创建测试（addGroupMembers 群组不存在时自动创建，无需手动 CreateGroup）
+// ============================================================================
+
+// TestAddGroupMembersAutoCreate 验证 addGroupMembers 群组不存在时自动创建
+func TestAddGroupMembersAutoCreate(t *testing.T) {
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// 群组 "g-auto" 不存在，addGroupMembers 应自动创建
+	require.NoError(t, hub.addGroupMembers(ctx, "tenantA", "g-auto", []string{"u1", "u2"}))
+
+	// 验证群组已被自动创建
+	g, err := groupRepo.GetGroup(ctx, "tenantA", "g-auto")
+	require.NoError(t, err)
+	assert.Equal(t, "g-auto", g.GroupID)
+	assert.Equal(t, "tenantA", g.GetNamespace())
+
+	// 验证成员关系已建立
+	members, err := hub.GetGroupMembers(ctx, "tenantA", "g-auto")
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"u1", "u2"}, members)
+
+	// 验证命名空间索引包含该群组
+	nsGroups, err := hub.GetNamespaceGroups(ctx, "tenantA")
+	require.NoError(t, err)
+	assert.Contains(t, nsGroups, "g-auto")
+
+	// 验证用户反向索引
+	userGroups, err := hub.GetUserGroups(ctx, "tenantA", "u1")
+	require.NoError(t, err)
+	assert.Contains(t, userGroups, "g-auto")
+}
+
+// TestAddGroupMembersAutoCreatePreservesExisting 验证已存在群组不会被覆盖
+func TestAddGroupMembersAutoCreatePreservesExisting(t *testing.T) {
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// 预先创建群组（带 MaxMembers 与 Name）
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{
+		GroupID:    "g-exist",
+		Namespace:  "tenantA",
+		Name:       "原始群名",
+		MaxMembers: 5,
+	}))
+
+	// addGroupMembers 应复用已存在群组，不覆盖 MaxMembers/Name
+	require.NoError(t, hub.addGroupMembers(ctx, "tenantA", "g-exist", []string{"u1"}))
+
+	g, err := groupRepo.GetGroup(ctx, "tenantA", "g-exist")
+	require.NoError(t, err)
+	assert.Equal(t, 5, g.MaxMembers, "已存在群组的 MaxMembers 不应被覆盖")
+	assert.Equal(t, "原始群名", g.Name, "已存在群组的 Name 不应被覆盖")
+}
+
+// ============================================================================
+// move 场景测试（RemoveGroupMembers + 调用方自行下发 group_changed 通知）
+// ============================================================================
+
+// TestMoveScenarioWithRemoveAndNotify 验证 move 场景：
+// 调用方 addGroupMembers(新群) → RemoveGroupMembers(旧群) → 更新连接 GroupID → 自行下发 group_changed 通知
+func TestMoveScenarioWithRemoveAndNotify(t *testing.T) {
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// 创建 groupB、groupC
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "groupB", Namespace: "default", OwnerID: "owner"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "groupC", Namespace: "default", OwnerID: "owner"}))
+
+	go hub.Run()
+	defer hub.Shutdown()
+	time.Sleep(100 * time.Millisecond)
+
+	// 注册 client A（GroupID=groupB）
+	clientA := makeTestClient("c-a", "u-move")
+	clientA.GroupID = "groupB"
+	hub.Register(clientA)
+	time.Sleep(100 * time.Millisecond)
+
+	// A 加入 groupB
+	require.NoError(t, hub.addGroupMembers(ctx, "default", "groupB", []string{"u-move"}))
+
+	// 收集 leave 回调
+	var leaveCalls []string
+	var cbMu sync.Mutex
+	hub.OnGroupMemberLeave(func(_ context.Context, _, gid string, uids []string) {
+		cbMu.Lock()
+		leaveCalls = append(leaveCalls, gid+":"+strings.Join(uids, ","))
+		cbMu.Unlock()
+	})
+
+	// 排空注册时产生的旧消息
+	drainChan := func(c *Client) {
+		for {
+			select {
+			case <-c.SendChan:
+			default:
+				return
+			}
+		}
+	}
+	drainChan(clientA)
+
+	// === move 场景：调用方自行操作 ===
+	// 1. 先加入新群 groupC
+	require.NoError(t, hub.addGroupMembers(ctx, "default", "groupC", []string{"u-move"}))
+	// 2. 从旧群 groupB 移除（触发 leave 回调）
+	require.NoError(t, hub.RemoveGroupMembers(ctx, "default", "groupB", []string{"u-move"}))
+	// 3. 更新在线连接 GroupID 与观察者索引（调用方自行调用 MoveClientGroup）
+	hub.shardedRegistry.ForEachUserClient("u-move", func(_ string, c *Client) bool {
+		hub.shardedRegistry.MoveClientGroup(c, "groupC")
+		return true
+	})
+	// 4. 调用方自行下发 group_changed 通知
+	notifyMsg := NewHubMessage()
+	notifyMsg.MessageType = models.MessageTypeGroupChanged
+	notifyMsg.Sender = UserTypeSystem.String()
+	notifyMsg.SenderType = UserTypeSystem
+	notifyMsg.Receiver = "u-move"
+	notifyMsg.Content = "群组已变更"
+	notifyMsg.Data = map[string]interface{}{
+		"from_group": "groupB",
+		"to_group":   "groupC",
+		"namespace":  "default",
+	}
+	result := hub.SendToUserWithRetry(ctx, "u-move", notifyMsg)
+	assert.NoError(t, result.FinalError, "group_changed 通知应发送成功")
+
+	time.Sleep(300 * time.Millisecond) // 等异步回调 + 消息投递
+
+	// 验证收到群组变更通知
+	foundChanged := false
+loop:
+	for {
+		select {
+		case b := <-clientA.SendChan:
+			var m HubMessage
+			if json.Unmarshal(b, &m) == nil && m.MessageType == models.MessageTypeGroupChanged {
+				foundChanged = true
+				assert.Equal(t, "groupB", m.Data["from_group"], "通知应含旧群组")
+				assert.Equal(t, "groupC", m.Data["to_group"], "通知应含新群组")
+			}
+		default:
+			break loop
+		}
+	}
+	assert.True(t, foundChanged, "move 后应收到群组变更通知")
+
+	// 验证成员关系：A 不在 groupB，在 groupC
+	membersB, err := hub.GetGroupMembers(ctx, "default", "groupB")
+	require.NoError(t, err)
+	assert.NotContains(t, membersB, "u-move", "A 应已移出 groupB")
+	membersC, err := hub.GetGroupMembers(ctx, "default", "groupC")
+	require.NoError(t, err)
+	assert.Contains(t, membersC, "u-move", "A 应在 groupC")
+
+	// 验证在线连接 GroupID 已更新
+	assert.Equal(t, "groupC", clientA.GetGroupIDRaw(), "move 后连接 GroupID 应更新为 groupC")
+
+	// 验证 leave 回调触发
+	cbMu.Lock()
+	assert.Contains(t, leaveCalls, "groupB:u-move", "应触发 groupB 的 leave 回调")
+	cbMu.Unlock()
+}
+
+// TestMoveScenarioOfflineUser 验证离线用户 move 场景：
+// 用户离线时，RemoveGroupMembers 从旧群删除 + 成员关系正确迁移
+// 注：离线消息存储依赖 offlineMessageHandler，未配置时 SendToUserWithRetry 返回 ErrTypeUserOffline
+func TestMoveScenarioOfflineUser(t *testing.T) {
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// 创建 groupB、groupC
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "groupB", Namespace: "default", OwnerID: "owner"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "groupC", Namespace: "default", OwnerID: "owner"}))
+
+	// A 加入 groupB（A 离线，不注册客户端）
+	require.NoError(t, hub.addGroupMembers(ctx, "default", "groupB", []string{"u-offline"}))
+
+	// === move 场景：A 离线 ===
+	// 1. 先加入新群 groupC
+	require.NoError(t, hub.addGroupMembers(ctx, "default", "groupC", []string{"u-offline"}))
+	// 2. 从旧群 groupB 移除
+	require.NoError(t, hub.RemoveGroupMembers(ctx, "default", "groupB", []string{"u-offline"}))
+	// 3. 调用方下发 group_changed 通知（A 离线，未配置离线处理器时返回 offline 错误，属预期行为）
+	notifyMsg := NewHubMessage()
+	notifyMsg.MessageType = models.MessageTypeGroupChanged
+	notifyMsg.Sender = UserTypeSystem.String()
+	notifyMsg.SenderType = UserTypeSystem
+	notifyMsg.Receiver = "u-offline"
+	notifyMsg.Data = map[string]interface{}{
+		"from_group": "groupB",
+		"to_group":   "groupC",
+		"namespace":  "default",
+	}
+	result := hub.SendToUserWithRetry(ctx, "u-offline", notifyMsg)
+	// 未配置 offlineMessageHandler 时，离线用户返回 ErrTypeUserOffline
+	assert.Error(t, result.FinalError, "离线用户无离线处理器时应返回 offline 错误")
+	assert.False(t, result.Success, "离线用户无离线处理器时发送不应成功")
+
+	// 核心验证：成员关系正确迁移（与通知投递无关）
+	membersB, err := hub.GetGroupMembers(ctx, "default", "groupB")
+	require.NoError(t, err)
+	assert.NotContains(t, membersB, "u-offline", "A 应已移出 groupB")
+	membersC, err := hub.GetGroupMembers(ctx, "default", "groupC")
+	require.NoError(t, err)
+	assert.Contains(t, membersC, "u-offline", "A 应在 groupC")
+
+	// 验证用户群组列表只含 groupC（反向索引已更新）
+	userGroups, err := hub.GetUserGroups(ctx, "default", "u-offline")
+	require.NoError(t, err)
+	assert.NotContains(t, userGroups, "groupB", "用户群组列表不应再含 groupB")
+	assert.Contains(t, userGroups, "groupC", "用户群组列表应含 groupC")
+}
+
+// ============================================================================
+// 离线消息处理器内存 mock（测试专用）
+// ============================================================================
+
+// memoryOfflineHandler 内存离线消息处理器，实现 OfflineMessageHandler 接口
+type memoryOfflineHandler struct {
+	mu       sync.Mutex
+	messages map[string][]*HubMessage // userID → messages（按存储顺序）
+}
+
+func newMemoryOfflineHandler() *memoryOfflineHandler {
+	return &memoryOfflineHandler{messages: make(map[string][]*HubMessage)}
+}
+
+func (m *memoryOfflineHandler) StoreOfflineMessage(_ context.Context, userID string, msg *HubMessage) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.messages[userID] = append(m.messages[userID], msg)
+	return nil
+}
+
+func (m *memoryOfflineHandler) GetOfflineMessages(_ context.Context, userID string, limit int, _ string) ([]*HubMessage, string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	msgs := m.messages[userID]
+	if limit > 0 && len(msgs) > limit {
+		return msgs[:limit], "more", nil
+	}
+	return msgs, "", nil
+}
+
+func (m *memoryOfflineHandler) DeleteOfflineMessages(_ context.Context, userID string, messageIDs []string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(messageIDs) == 0 {
+		return nil
+	}
+	idSet := make(map[string]struct{}, len(messageIDs))
+	for _, id := range messageIDs {
+		idSet[id] = struct{}{}
+	}
+	var remaining []*HubMessage
+	for _, msg := range m.messages[userID] {
+		if _, ok := idSet[msg.MessageID]; ok {
+			continue
+		}
+		remaining = append(remaining, msg)
+	}
+	m.messages[userID] = remaining
+	return nil
+}
+
+func (m *memoryOfflineHandler) GetOfflineMessageCount(_ context.Context, userID string) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return int64(len(m.messages[userID])), nil
+}
+
+func (m *memoryOfflineHandler) ClearOfflineMessages(_ context.Context, userID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.messages, userID)
+	return nil
+}
+
+func (m *memoryOfflineHandler) UpdatePushStatus(_ context.Context, _ []string, _ error) error {
+	return nil
+}
+
+// ============================================================================
+// 离线 → 重连 → 验证离线消息测试
+// ============================================================================
+
+// TestMoveScenarioOfflineReconnect 验证离线 move 完整流程：
+// A 离线 → move + group_changed 通知走离线存储 → A 重连 → 收到离线消息 → 验证内容正确 → 离线消息已删除
+func TestMoveScenarioOfflineReconnect(t *testing.T) {
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
+	defer cleanup()
+
+	// 设置内存离线消息处理器
+	offlineHandler := newMemoryOfflineHandler()
+	hub.SetOfflineMessageHandler(offlineHandler)
+
+	ctx := context.Background()
+
+	// 创建 groupB、groupC
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "groupB", Namespace: "default", OwnerID: "owner"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "groupC", Namespace: "default", OwnerID: "owner"}))
+
+	go hub.Run()
+	defer hub.Shutdown()
+	time.Sleep(100 * time.Millisecond)
+
+	// === 阶段1：A 离线时 move ===
+	// A 加入 groupB（A 离线，不注册客户端）
+	require.NoError(t, hub.addGroupMembers(ctx, "default", "groupB", []string{"u-reconnect"}))
+
+	// move：加入新群 + 从旧群移除
+	require.NoError(t, hub.addGroupMembers(ctx, "default", "groupC", []string{"u-reconnect"}))
+	require.NoError(t, hub.RemoveGroupMembers(ctx, "default", "groupB", []string{"u-reconnect"}))
+
+	// 下发 group_changed 通知（A 离线，应走离线存储）
+	notifyMsg := NewHubMessage()
+	notifyMsg.MessageType = models.MessageTypeGroupChanged
+	notifyMsg.Sender = UserTypeSystem.String()
+	notifyMsg.SenderType = UserTypeSystem
+	notifyMsg.Receiver = "u-reconnect"
+	notifyMsg.Content = "群组已变更"
+	notifyMsg.Data = map[string]interface{}{
+		"from_group": "groupB",
+		"to_group":   "groupC",
+		"namespace":  "default",
+	}
+	result := hub.SendToUserWithRetry(ctx, "u-reconnect", notifyMsg)
+	assert.NoError(t, result.FinalError, "离线用户 group_changed 通知应存储成功")
+	assert.True(t, result.StoredOffline, "离线用户消息应标记为 StoredOffline")
+
+	// 验证离线存储中有一条消息
+	count, err := offlineHandler.GetOfflineMessageCount(ctx, "u-reconnect")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), count, "离线存储应有1条消息")
+
+	// === 阶段2：A 重连，加入新群 groupC ===
+	clientA := makeTestClient("c-reconnect", "u-reconnect")
+	clientA.GroupID = "groupC" // 重连时带新群组ID
+	hub.Register(clientA)
+
+	// 等待异步离线消息推送（pushOfflineMessagesOnConnect 在 workerPool 中异步执行）
+	time.Sleep(500 * time.Millisecond)
+
+	// === 阶段3：验证收到的离线消息内容正确 ===
+	foundChanged := false
+loop:
+	for {
+		select {
+		case b := <-clientA.SendChan:
+			var m HubMessage
+			if json.Unmarshal(b, &m) == nil && m.MessageType == models.MessageTypeGroupChanged {
+				foundChanged = true
+				assert.Equal(t, "groupB", m.Data["from_group"], "离线消息应含旧群组")
+				assert.Equal(t, "groupC", m.Data["to_group"], "离线消息应含新群组")
+				assert.Equal(t, "default", m.Data["namespace"], "离线消息应含命名空间")
+				assert.Equal(t, "群组已变更", m.Content, "离线消息内容应正确")
+				assert.Equal(t, "u-reconnect", m.Receiver, "离线消息接收者应正确")
+				assert.Equal(t, models.MessageSourceOffline, m.Source, "离线消息来源应标记为 offline")
+			}
+		default:
+			break loop
+		}
+	}
+	assert.True(t, foundChanged, "重连后应收到 group_changed 离线消息")
+
+	// 验证离线消息已被删除（推送成功后自动删除）
+	count, err = offlineHandler.GetOfflineMessageCount(ctx, "u-reconnect")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), count, "推送后离线消息应被删除")
+
+	// 验证成员关系：A 在 groupC，不在 groupB
+	membersB, err := hub.GetGroupMembers(ctx, "default", "groupB")
+	require.NoError(t, err)
+	assert.NotContains(t, membersB, "u-reconnect", "A 应不在 groupB")
+	membersC, err := hub.GetGroupMembers(ctx, "default", "groupC")
+	require.NoError(t, err)
+	assert.Contains(t, membersC, "u-reconnect", "A 应在 groupC")
 }

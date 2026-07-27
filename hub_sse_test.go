@@ -202,7 +202,7 @@ func TestSSEClientCount(t *testing.T) {
 
 	// 获取统计信息
 	stats := hub.GetStats()
-	assert.GreaterOrEqual(t, stats.TotalClients, 1, "应该至少有1个连接")
+	assert.GreaterOrEqual(t, stats.TotalClients, int64(1), "应该至少有1个连接")
 
 	hub.UnregisterSSE(client.ID)
 }

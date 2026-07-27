@@ -31,7 +31,7 @@ type testRepoSetup struct {
 
 // newTestRepoSetup 创建测试仓库设置
 func newTestRepoSetup(t *testing.T, ttl time.Duration) *testRepoSetup {
-	redisClient := getTestRedisClient(t)
+	redisClient := GetTestRedisClientWithFlush(t)
 	prefix := getTestIDGenerator().GenerateRequestID()
 
 	return &testRepoSetup{

@@ -238,3 +238,70 @@ func (h *Hub) OnError(callback ErrorCallback) {
 func (h *Hub) OnBatchSendFailure(callback BatchSendFailureCallback) {
 	h.batchSendFailureCallback = callback
 }
+
+// ============================================================================
+// 群组生命周期回调注册方法
+// ============================================================================
+//
+// 设计原则：
+//   - OnGroupMemberJoin：仅在客户端连接时自动加群成功后触发（register 自动装配），
+//     手动 AddGroupMembers 不触发因为实际业务中成员入群是连接的副产品，
+//     而非管理端手动操作
+//   - OnGroupDisband / OnGroupMemberLeave：在对应业务 API 成功后触发
+//   - 系统保留组（__agents__/__observers__）的自动加入/离开直接走底层 groupRepo，
+//     不触发任何业务回调，不会产生系统组噪声
+// ============================================================================
+
+// OnGroupDisband 注册群组解散回调
+// 在 DisbandGroup 成功后异步调用
+//
+// 参数:
+//   - namespace: 命名空间
+//   - groupID: 群组ID
+//
+// 示例:
+//
+//	hub.OnGroupDisband(func(ctx context.Context, namespace, groupID string) {
+//	    log.Printf("群组解散: %s/%s", namespace, groupID)
+//	    // 清理业务缓存、通知成员等
+//	})
+func (h *Hub) OnGroupDisband(callback GroupDisbandCallback) {
+	h.groupDisbandCallback = callback
+}
+
+// OnGroupMemberJoin 注册群组成员加入回调
+// 仅在客户端连接时自动加群成功后异步调用（register 自动装配流程），
+// 手动 AddGroupMembers 不触发本回调
+//
+// 参数:
+//   - namespace: 命名空间
+//   - groupID: 群组ID
+//   - userIDs: 本次加入的成员ID列表（register 自动装配时为单个 userID）
+//
+// 示例:
+//
+//	hub.OnGroupMemberJoin(func(ctx context.Context, namespace, groupID string, userIDs []string) {
+//	    log.Printf("成员加入群组: %s/%s, count=%d", namespace, groupID, len(userIDs))
+//	    // 入群欢迎、权限初始化等
+//	})
+func (h *Hub) OnGroupMemberJoin(callback GroupMemberJoinCallback) {
+	h.groupMemberJoinCallback = callback
+}
+
+// OnGroupMemberLeave 注册群组成员离开回调
+// 在 RemoveGroupMembers 成功后异步调用
+//
+// 参数:
+//   - namespace: 命名空间
+//   - groupID: 群组ID
+//   - userIDs: 本次离开的成员ID列表
+//
+// 示例:
+//
+//	hub.OnGroupMemberLeave(func(ctx context.Context, namespace, groupID string, userIDs []string) {
+//	    log.Printf("成员离开群组: %s/%s, count=%d", namespace, groupID, len(userIDs))
+//	    // 退群清理、会话存档等
+//	})
+func (h *Hub) OnGroupMemberLeave(callback GroupMemberLeaveCallback) {
+	h.groupMemberLeaveCallback = callback
+}

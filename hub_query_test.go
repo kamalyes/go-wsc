@@ -44,7 +44,7 @@ func TestGetStats(t *testing.T) {
 	stats := hub.GetStats()
 
 	assert.NotNil(t, stats, "统计信息不应为空")
-	assert.GreaterOrEqual(t, stats.TotalClients, 1, "应该至少有1个连接")
+	assert.GreaterOrEqual(t, stats.TotalClients, int64(1), "应该至少有1个连接")
 	assert.NotEmpty(t, hub.GetNodeID(), "NodeID不应为空")
 
 	hub.Unregister(client)

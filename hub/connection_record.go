@@ -52,8 +52,8 @@ func (h *Hub) CreateConnectionRecord(client *Client) *ConnectionRecord {
 		IsActive:     true,
 	}
 
-	// 设置 metadata
-	record.Metadata = sqlbuilder.MapAny(client.Metadata)
+	// 设置 metadata（线程安全读取快照）
+	record.Metadata = sqlbuilder.MapAny(client.GetMetadataSnapshot())
 
 	return record
 }

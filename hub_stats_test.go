@@ -133,6 +133,8 @@ func TestHubRedisStatistics(t *testing.T) {
 	require.NoError(t, result.FinalError)
 
 	time.Sleep(1 * time.Second)
+	// 手动触发统计刷写（正常运行时由 30 秒定时器自动刷写）
+	hub.FlushStats()
 
 	// 验证消息发送统计
 	nodeStats, err = statsRepo.GetNodeStats(ctx, hub.GetNodeID())
@@ -147,6 +149,8 @@ func TestHubRedisStatistics(t *testing.T) {
 	hub.Broadcast(ctx, broadcastMsg)
 
 	time.Sleep(1 * time.Second)
+	// 手动触发统计刷写
+	hub.FlushStats()
 
 	// 验证广播统计
 	nodeStats, err = statsRepo.GetNodeStats(ctx, hub.GetNodeID())

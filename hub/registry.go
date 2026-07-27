@@ -13,6 +13,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"runtime/debug"
 	"time"
 
@@ -212,31 +213,24 @@ func (h *Hub) handleUnregister(client *Client) {
 
 // handleMultiLoginPolicy 统一处理多端登录策略（内部方法）
 // 根据配置决定是否允许多端登录、是否限制连接数
+// 全程使用原子/O(1) 查询 + ForEachUserClient 持锁遍历，消除 GetUserClients 锁外遍历的数据竞争
 func (h *Hub) handleMultiLoginPolicy(newClient *Client) {
 	userID := newClient.UserID
-	// 通过 shardedRegistry 获取用户现有客户端（分片读锁）
-	existingClients, exists := h.shardedRegistry.GetUserClients(userID)
 
-	h.logger.DebugKV("处理多端登录策略",
-		"user_id", userID,
-		"new_client_id", newClient.ID,
-		"existing_clients_count", len(existingClients),
-		"allow_multi_login", h.config.AllowMultiLogin,
-		"max_connections_per_user", h.config.MaxConnectionsPerUser)
-
-	// 如果用户没有旧连接，直接添加新客户端
-	if !exists || len(existingClients) == 0 {
+	// O(1) 快速检查用户是否有现有客户端（原子计数器，无锁）
+	if !h.shardedRegistry.HasUser(userID) {
 		h.addNewClient(newClient)
 		return
 	}
 
-	// 复制一份现有客户端引用，避免在踢人过程中 map 被修改
-	existingClientsCopy := CopyClientsFromMap(existingClients)
+	h.logger.DebugKV("处理多端登录策略",
+		"user_id", userID,
+		"new_client_id", newClient.ID,
+		"allow_multi_login", h.config.AllowMultiLogin,
+		"max_connections_per_user", h.config.MaxConnectionsPerUser)
 
-	// 检测断线重连：如果新客户端与旧客户端的 ClientID 相同，
-	// 说明是同一用户+设备在时间窗口内重连（TemporalHasher 特性）
-	// 需要先清理旧客户端的通道和连接，避免旧协程干扰新连接
-	if oldClient, sameIDExists := existingClients[newClient.ID]; sameIDExists {
+	// 检测断线重连：O(1) 查找相同 ClientID 的旧客户端（GetClient 持读锁）
+	if oldClient, exists := h.shardedRegistry.GetClient(newClient.ID); exists && oldClient.UserID == userID {
 		h.logger.InfoKV("检测到相同ClientID的旧连接，执行断线重连替换",
 			"user_id", userID,
 			"client_id", newClient.ID,
@@ -249,18 +243,25 @@ func (h *Hub) handleMultiLoginPolicy(newClient *Client) {
 
 	// 不允许多端登录：踢掉所有旧连接
 	if !h.config.AllowMultiLogin {
+		// 使用 ForEachUserClient 持读锁零拷贝收集客户端（消除 CopyClientsFromMap 锁外遍历数据竞争）
+		var clients []*Client
+		h.shardedRegistry.ForEachUserClient(userID, func(_ string, client *Client) bool {
+			clients = append(clients, client)
+			return true
+		})
+
 		h.logger.InfoKV("不允许多端登录，踢掉所有旧连接",
 			"user_id", userID,
-			"old_connections", len(existingClientsCopy))
+			"old_connections", len(clients))
 
-		h.kickExistingClientsUnsafe(existingClients, DisconnectReasonForceOffline)
+		h.kickExistingClients(clients, DisconnectReasonForceOffline)
 		h.addNewClient(newClient)
 		return
 	}
 
 	// 允许多端登录，但有连接数限制
 	if h.config.MaxConnectionsPerUser > 0 {
-		currentCount := len(existingClientsCopy)
+		currentCount := h.shardedRegistry.GetUserClientCount(userID)
 		maxAllowed := h.config.MaxConnectionsPerUser
 
 		// 如果未达到上限，直接添加
@@ -275,7 +276,7 @@ func (h *Hub) handleMultiLoginPolicy(newClient *Client) {
 			"current_count", currentCount,
 			"max_allowed", maxAllowed)
 
-		h.kickOldestConnection(existingClients)
+		h.kickOldestConnection(userID)
 		h.addNewClient(newClient)
 		return
 	}
@@ -496,7 +497,9 @@ func (h *Hub) removeOnlineStatusFromRedis(client *Client) {
 		})
 }
 
-// closeClientChannel 关闭客户端发送通道并回收到对象池
+// closeClientChannel 关闭客户端发送通道
+// 仅关闭 channel 通知 handleClientWrite 退出，不回收到对象池（已关闭的 channel 无法复用）
+// 不置 nil SendChan，避免与 handleClientWrite 的 select 读产生数据竞争
 func (h *Hub) closeClientChannel(client *Client) {
 	// 使用互斥锁保护关闭操作
 	client.CloseMu.Lock()
@@ -508,11 +511,11 @@ func (h *Hub) closeClientChannel(client *Client) {
 	}
 	client.MarkClosed()
 
-	// 关闭并回收 WebSocket 发送通道
+	// 关闭 WebSocket 发送通道（handleClientWrite 会读完缓冲后收到 ok=false 退出）
+	// 不调用 releaseClientSendChan：1) 已关闭的 channel 不能放回池中复用
+	//   2) 不置 nil SendChan，避免与 handleClientWrite 的 <-client.SendChan 数据竞争
 	if client.SendChan != nil {
 		close(client.SendChan)
-		// 将 channel 放回对象池复用
-		h.releaseClientSendChan(client)
 	}
 
 	// SSE 客户端需要关闭专用通道
@@ -550,8 +553,8 @@ func (h *Hub) addNewClient(client *Client) {
 	h.shardedRegistry.AddClient(client)
 }
 
-// kickExistingClientsUnsafe 踢掉现有客户端（不加锁）
-func (h *Hub) kickExistingClientsUnsafe(clients map[string]*Client, reason DisconnectReason) {
+// kickExistingClients 踢掉现有客户端（接收切片，调用方负责通过 ForEachUserClient 持锁收集）
+func (h *Hub) kickExistingClients(clients []*Client, reason DisconnectReason) {
 	for _, client := range clients {
 		h.kickClientWithNotification(client, reason, "您的账号在其他设备登录，当前连接将被断开")
 
@@ -564,19 +567,20 @@ func (h *Hub) kickExistingClientsUnsafe(clients map[string]*Client, reason Disco
 }
 
 // kickOldestConnection 踢掉最不活跃的连接（基于最后心跳时间）
-// 优先踢掉长时间没有心跳的连接，保留活跃连接
-func (h *Hub) kickOldestConnection(clients map[string]*Client) {
+// 使用 ForEachUserClient 持读锁遍历，消除锁外遍历 map 的数据竞争
+func (h *Hub) kickOldestConnection(userID string) {
 	var oldestClient *Client
 	var oldestTime time.Time
 
-	// 找出最久没有心跳的客户端
-	for _, client := range clients {
+	// 持读锁遍历找出最久没有心跳的客户端
+	h.shardedRegistry.ForEachUserClient(userID, func(_ string, client *Client) bool {
 		heartbeat := client.GetLastHeartbeat()
 		if oldestClient == nil || heartbeat.Before(oldestTime) {
 			oldestClient = client
 			oldestTime = heartbeat
 		}
-	}
+		return true
+	})
 
 	if oldestClient == nil {
 		return
@@ -630,13 +634,17 @@ func (h *Hub) createKickNotification(userID, reason, customMsg string, kickedAt 
 }
 
 // sendKickNotificationToClients 发送踢人通知到客户端
+// 预序列化一次消息，所有客户端复用，消除逐客户端 json.Marshal 开销
 func (h *Hub) sendKickNotificationToClients(clients []*Client, msg *HubMessage) bool {
 	if len(clients) == 0 {
 		return false
 	}
 
+	// 预序列化一次（所有客户端复用）
+	preSerialized, _ := json.Marshal(msg)
+
 	for _, client := range clients {
-		h.sendToClient(h.ctx, client, msg)
+		h.sendToClientSerialized(h.ctx, client, msg, preSerialized)
 	}
 	return true
 }

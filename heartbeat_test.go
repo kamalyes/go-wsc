@@ -123,10 +123,10 @@ func TestHeartbeatBasic(t *testing.T) {
 	// 验证客户端已注册
 	registeredClient := hub.GetClientByID(client.ID)
 	assert.NotNil(t, registeredClient, "Client should be registered")
-	assert.False(t, registeredClient.LastHeartbeat.IsZero(), "LastHeartbeat should be initialized")
+	assert.False(t, registeredClient.GetLastHeartbeat().IsZero(), "LastHeartbeat should be initialized")
 
 	// 验证初始化的心跳时间是最近的
-	timeSinceHeartbeat := time.Since(registeredClient.LastHeartbeat)
+	timeSinceHeartbeat := time.Since(registeredClient.GetLastHeartbeat())
 	assert.Less(t, timeSinceHeartbeat, 1*time.Second, "Initial heartbeat should be recent")
 }
 
@@ -160,7 +160,7 @@ func TestHeartbeatUpdate(t *testing.T) {
 
 	// 获取初始心跳时间
 	initialClient := hub.GetClientByID(client.ID)
-	initialHeartbeat := initialClient.LastHeartbeat
+	initialHeartbeat := initialClient.GetLastHeartbeat()
 
 	// 等待一段时间
 	time.Sleep(500 * time.Millisecond)
@@ -172,7 +172,7 @@ func TestHeartbeatUpdate(t *testing.T) {
 
 	// 验证心跳时间已更新
 	updatedClient := hub.GetClientByID(client.ID)
-	updatedHeartbeat := updatedClient.LastHeartbeat
+	updatedHeartbeat := updatedClient.GetLastHeartbeat()
 
 	assert.True(t, updatedHeartbeat.After(initialHeartbeat),
 		"Updated heartbeat should be after initial heartbeat")
@@ -265,6 +265,7 @@ func TestHeartbeatNoTimeout(t *testing.T) {
 
 	// 定期更新心跳（每500毫秒一次）
 	done := make(chan bool)
+	stopped := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
@@ -275,6 +276,7 @@ func TestHeartbeatNoTimeout(t *testing.T) {
 				client.SetLastHeartbeat(now)
 				client.SetLastSeen(now)
 			case <-done:
+				close(stopped)
 				return
 			}
 		}
@@ -283,14 +285,15 @@ func TestHeartbeatNoTimeout(t *testing.T) {
 	// 等待3秒，超过超时时间
 	time.Sleep(3 * time.Second)
 	close(done)
+	<-stopped // 等待心跳 goroutine 退出，避免与后续变量访问产生数据竞争
 
 	// 验证没有触发超时回调
 	calls := recorder.GetTimeoutCalls()
 	assert.Equal(t, 0, len(calls), "Should not trigger timeout with regular heartbeats")
 
-	// 验证客户端仍然存在
-	client = hub.GetClientByID(clientID)
-	assert.NotNil(t, client, "Client should still exist with regular heartbeats")
+	// 验证客户端仍然存在（使用独立变量，避免与心跳 goroutine 读取 client 产生竞争）
+	existingClient := hub.GetClientByID(clientID)
+	assert.NotNil(t, existingClient, "Client should still exist with regular heartbeats")
 }
 
 // TestMultipleClientsHeartbeat 测试多个客户端的心跳管理

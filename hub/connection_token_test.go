@@ -32,8 +32,8 @@ func newTestTokenCfg() *wscconfig.ConnectionToken {
 	}
 }
 
-// TestConnectionTokenWithNamespaceAndGroup 测试 Token 携带 Namespace/GroupID 的编解码
-func TestConnectionTokenWithNamespaceAndGroup(t *testing.T) {
+// TestConnectionTokenWithNamespace 测试 Token 携带 Namespace 的编解码
+func TestConnectionTokenWithNamespace(t *testing.T) {
 	cfg := newTestTokenCfg()
 
 	claims := &ConnectionClaims{
@@ -41,7 +41,6 @@ func TestConnectionTokenWithNamespaceAndGroup(t *testing.T) {
 		UserType:  "agent",
 		DeviceID:  "device-001",
 		Namespace: "tenantA",
-		GroupID:   "group-001",
 	}
 
 	token, err := IssueConnectionToken(cfg, nil, claims)
@@ -57,11 +56,10 @@ func TestConnectionTokenWithNamespaceAndGroup(t *testing.T) {
 	assert.Equal(t, claims.UserType, decoded.UserType)
 	assert.Equal(t, claims.DeviceID, decoded.DeviceID)
 	assert.Equal(t, claims.Namespace, decoded.Namespace, "Namespace 应一致")
-	assert.Equal(t, claims.GroupID, decoded.GroupID, "GroupID 应一致")
 }
 
-// TestConnectionTokenWithoutNamespaceAndGroup 测试 Token 不带 Namespace/GroupID 时解码为空
-func TestConnectionTokenWithoutNamespaceAndGroup(t *testing.T) {
+// TestConnectionTokenWithoutNamespace 测试 Token 不带 Namespace 时解码为空
+func TestConnectionTokenWithoutNamespace(t *testing.T) {
 	cfg := newTestTokenCfg()
 
 	claims := &ConnectionClaims{
@@ -77,10 +75,9 @@ func TestConnectionTokenWithoutNamespaceAndGroup(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "user-002", decoded.UserID)
 	assert.Empty(t, decoded.Namespace, "未设置 Namespace 时应为空")
-	assert.Empty(t, decoded.GroupID, "未设置 GroupID 时应为空")
 }
 
-// TestConnectionTokenFromHeader 测试从 Header 提取 Token 并还原 Namespace/GroupID
+// TestConnectionTokenFromHeader 测试从 Header 提取 Token 并还原 Namespace
 func TestConnectionTokenFromHeader(t *testing.T) {
 	cfg := newTestTokenCfg()
 	cfg.TokenSource = "header"
@@ -89,7 +86,6 @@ func TestConnectionTokenFromHeader(t *testing.T) {
 	claims := &ConnectionClaims{
 		UserID:    "user-003",
 		Namespace: "tenantB",
-		GroupID:   "group-003",
 	}
 
 	token, err := IssueConnectionToken(cfg, nil, claims)
@@ -101,5 +97,4 @@ func TestConnectionTokenFromHeader(t *testing.T) {
 	decoded, err := decoder.Decode(req)
 	require.NoError(t, err)
 	assert.Equal(t, "tenantB", decoded.Namespace)
-	assert.Equal(t, "group-003", decoded.GroupID)
 }

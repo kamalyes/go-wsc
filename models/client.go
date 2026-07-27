@@ -58,6 +58,15 @@ type Client struct {
 	lastSeenUnix      atomic.Int64 `json:"-"` // LastSeen 的 UnixNano 原子镜像
 	lastPongUnix      atomic.Int64 `json:"-"` // LastPong 的 UnixNano 原子镜像
 
+	// VIPLevel 的原子镜像（消除 UpgradeVIPLevel 并发写与广播遍历并发读的数据竞争）
+	vipLevelVal atomic.Int32 `json:"-"`
+
+	// Status 的原子镜像（消除 ResetClientStatus 并发写与 GetUserStatus 并发读的数据竞争）
+	statusVal atomic.Int32 `json:"-"`
+
+	// Metadata 互斥锁（保护 map[string]interface{} 的并发读写）
+	metadataMu sync.RWMutex `json:"-"`
+
 	// SSE 专用字段（仅当 ConnectionType 为 SSE 时使用）
 	SSEWriter    http.ResponseWriter `json:"-"` // SSE Writer（不序列化）
 	SSEFlusher   http.Flusher        `json:"-"` // SSE Flusher（不序列化）
@@ -84,46 +93,115 @@ func NewClient(id, userID string, userType UserType) *Client {
 	c.lastHeartbeatUnix.Store(unix)
 	c.lastSeenUnix.Store(unix)
 	c.lastPongUnix.Store(unix)
+	c.vipLevelVal.Store(int32(c.VIPLevel.GetLevel()))
+	c.statusVal.Store(int32(c.Status.ToInt()))
 	return c
 }
 
-// SetLastHeartbeat 原子更新最后心跳时间（同时更新 time.Time 字段和原子镜像）
+// SetStatus 原子更新用户状态（同时更新 Status 字段和原子镜像，并发安全）
+func (c *Client) SetStatus(status UserStatus) {
+	c.Status = status
+	c.statusVal.Store(int32(status.ToInt()))
+}
+
+// GetStatus 原子读用户状态（并发安全，广播遍历中使用）
+func (c *Client) GetStatus() UserStatus {
+	return UserStatusFromInt(int(c.statusVal.Load()))
+}
+
+// GetMetadataValue 线程安全地读取元数据值
+func (c *Client) GetMetadataValue(key string) (interface{}, bool) {
+	c.metadataMu.RLock()
+	defer c.metadataMu.RUnlock()
+	if c.Metadata == nil {
+		return nil, false
+	}
+	val, ok := c.Metadata[key]
+	return val, ok
+}
+
+// SetMetadataValue 线程安全地写入元数据值
+func (c *Client) SetMetadataValue(key string, value interface{}) {
+	c.metadataMu.Lock()
+	defer c.metadataMu.Unlock()
+	if c.Metadata == nil {
+		c.Metadata = make(map[string]interface{})
+	}
+	c.Metadata[key] = value
+}
+
+// GetMetadataSnapshot 线程安全地获取元数据的只读副本（用于序列化/日志）
+func (c *Client) GetMetadataSnapshot() map[string]interface{} {
+	c.metadataMu.RLock()
+	defer c.metadataMu.RUnlock()
+	if c.Metadata == nil {
+		return nil
+	}
+	snapshot := make(map[string]interface{}, len(c.Metadata))
+	for k, v := range c.Metadata {
+		snapshot[k] = v
+	}
+	return snapshot
+}
+
+// SetLastHeartbeat 原子更新最后心跳时间（仅写原子镜像，消除 time.Time 并发写数据竞争）
 func (c *Client) SetLastHeartbeat(t time.Time) {
-	c.LastHeartbeat = t
 	c.lastHeartbeatUnix.Store(t.UnixNano())
 }
 
-// SetLastSeen 原子更新最后活跃时间（同时更新 time.Time 字段和原子镜像）
+// SetLastSeen 原子更新最后活跃时间（仅写原子镜像，消除 time.Time 并发写数据竞争）
 func (c *Client) SetLastSeen(t time.Time) {
-	c.LastSeen = t
 	c.lastSeenUnix.Store(t.UnixNano())
 }
 
-// SetLastPong 原子更新最后 Pong 响应时间（同时更新 time.Time 字段和原子镜像）
+// SetLastPong 原子更新最后 Pong 响应时间（仅写原子镜像，消除 time.Time 并发写数据竞争）
 func (c *Client) SetLastPong(t time.Time) {
-	c.LastPong = t
 	c.lastPongUnix.Store(t.UnixNano())
 }
 
 // GetLastHeartbeat 原子读最后心跳时间（并发安全）
 func (c *Client) GetLastHeartbeat() time.Time {
-	return time.Unix(0, c.lastHeartbeatUnix.Load())
+	nano := c.lastHeartbeatUnix.Load()
+	if nano == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, nano)
 }
 
 // GetLastSeen 原子读最后活跃时间（并发安全）
 func (c *Client) GetLastSeen() time.Time {
-	return time.Unix(0, c.lastSeenUnix.Load())
+	nano := c.lastSeenUnix.Load()
+	if nano == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, nano)
 }
 
 // GetLastPong 原子读最后 Pong 响应时间（并发安全）
 func (c *Client) GetLastPong() time.Time {
-	return time.Unix(0, c.lastPongUnix.Load())
+	nano := c.lastPongUnix.Load()
+	if nano == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, nano)
 }
 
-// WithVIPLevel 设置VIP等级
+// WithVIPLevel 设置VIP等级（仅用于构造期，并发场景使用 SetVIPLevel）
 func (c *Client) WithVIPLevel(level VIPLevel) *Client {
 	c.VIPLevel = level
+	c.vipLevelVal.Store(int32(level.GetLevel()))
 	return c
+}
+
+// SetVIPLevel 原子更新VIP等级（同时更新 VIPLevel 字段和原子镜像，并发安全）
+func (c *Client) SetVIPLevel(level VIPLevel) {
+	c.VIPLevel = level
+	c.vipLevelVal.Store(int32(level.GetLevel()))
+}
+
+// GetVIPLevel 原子读VIP等级（并发安全，广播遍历中使用）
+func (c *Client) GetVIPLevel() VIPLevel {
+	return VIPLevelFromLevel(int(c.vipLevelVal.Load()))
 }
 
 // WithNamespace 设置命名空间ID
@@ -147,12 +225,26 @@ func (c *Client) WithGroupID(groupID string) *Client {
 	return c
 }
 
+// SetGroupID 并发安全更新群组ID（用于 MoveGroupMember 等运行时变更场景）
+func (c *Client) SetGroupID(groupID string) {
+	c.metadataMu.Lock()
+	c.GroupID = groupID
+	c.metadataMu.Unlock()
+}
+
+// GetGroupIDRaw 并发安全获取原始群组ID（不加默认值，用于索引判断）
+func (c *Client) GetGroupIDRaw() string {
+	c.metadataMu.RLock()
+	defer c.metadataMu.RUnlock()
+	return c.GroupID
+}
+
 // GetGroupID 获取群组ID，空值返回默认群组ID
 func (c *Client) GetGroupID() string {
-	if c.GroupID == "" {
-		return DefaultGroupID
+	if gid := c.GetGroupIDRaw(); gid != "" {
+		return gid
 	}
-	return c.GroupID
+	return DefaultGroupID
 }
 
 // WithRole 设置用户角色
@@ -277,18 +369,19 @@ func (c *Client) GetClientIP() string {
 		}
 	}
 
-	// 3. 从Metadata中获取
-	if c.Metadata != nil {
-		if ip, ok := c.Metadata["client_ip"].(string); ok && ip != "" {
+	// 3. 从Metadata中获取（线程安全，使用快照避免并发读写）
+	metadata := c.GetMetadataSnapshot()
+	if metadata != nil {
+		if ip, ok := metadata["client_ip"].(string); ok && ip != "" {
 			return ip
 		}
-		if ip, ok := c.Metadata["x-forwarded-for"].(string); ok && ip != "" {
+		if ip, ok := metadata["x-forwarded-for"].(string); ok && ip != "" {
 			// X-Forwarded-For 可能包含多个IP，取第一个
 			if parts := strings.Split(ip, ","); len(parts) > 0 {
 				return strings.TrimSpace(parts[0])
 			}
 		}
-		if ip, ok := c.Metadata["x-real-ip"].(string); ok && ip != "" {
+		if ip, ok := metadata["x-real-ip"].(string); ok && ip != "" {
 			return ip
 		}
 	}
@@ -307,12 +400,13 @@ func (c *Client) GetClientIP() string {
 
 // GetUserAgent 获取用户代理
 func (c *Client) GetUserAgent() string {
-	// 从 Metadata 中获取用户代理
-	if c.Metadata != nil {
-		if ua, ok := c.Metadata["user_agent"].(string); ok && ua != "" {
+	// 从 Metadata 中获取用户代理（线程安全，使用快照避免并发读写）
+	metadata := c.GetMetadataSnapshot()
+	if metadata != nil {
+		if ua, ok := metadata["user_agent"].(string); ok && ua != "" {
 			return ua
 		}
-		if ua, ok := c.Metadata["user-agent"].(string); ok && ua != "" {
+		if ua, ok := metadata["user-agent"].(string); ok && ua != "" {
 			return ua
 		}
 	}

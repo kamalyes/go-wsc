@@ -90,6 +90,11 @@ type ShardedRegistry struct {
 	// 替代 Hub.observerClients，nil 表示该模块未启用（读写均跳过）
 	observerShards *syncx.ShardedMap[string, map[string]*Client]
 
+	// observerUserCount 观察者用户数（设备去重，原子计数器）
+	// observerShards 通过 WithShardLock 写入，其内部 count 不会被更新，
+	// 因此单独维护原子计数器保证 GetObserverUserCount 的 O(1) 且准确
+	observerUserCount atomic.Int64
+
 	// observerIdx 观察者三级二级索引（加速 namespace+group 级查找，消除 O(n) 全量扫描）
 	// observerShards 为主存储（userID 分片），observerIdx 为按观察范围的二级索引
 	// 三级：global（所有命名空间）/ byNamespace（指定命名空间）/ byGroup（指定命名空间+群组）
@@ -98,6 +103,11 @@ type ShardedRegistry struct {
 	// agentShards 客服/Bot 分类索引：userID → (clientID → Client)
 	// 替代 Hub.agentClients，nil 表示该模块未启用（读写均跳过）
 	agentShards *syncx.ShardedMap[string, map[string]*Client]
+
+	// agentUserCount 客服用户数（设备去重，原子计数器）
+	// 与 observerUserCount 同理，agentShards 通过 WithShardLock 写入，
+	// 单独维护原子计数器保证 GetAgentUserCount 的 O(1) 且准确
+	agentUserCount atomic.Int64
 
 	// sseCount SSE 连接数（原子计数器，替代 Hub.sseClientsCount）
 	// WS 连接数 = clientCount - sseCount，无需单独维护
@@ -280,7 +290,7 @@ func (r *ShardedRegistry) HasUser(userID string) bool {
 }
 
 // ForEachUserClient 遍历指定用户的所有客户端（在读锁内执行，并发安全）
-// 回调返回 false 时停止遍历。回调不应执行阻塞操作（TrySend 等非阻塞操作可安全调用）
+// 回调返回 false 时停止遍历回调不应执行阻塞操作（TrySend 等非阻塞操作可安全调用）
 func (r *ShardedRegistry) ForEachUserClient(userID string, fn func(clientID string, client *Client) bool) {
 	r.userShards.WithShardRLock(userID, func(data map[string]map[string]*Client) {
 		userClients, ok := data[userID]
@@ -293,6 +303,20 @@ func (r *ShardedRegistry) ForEachUserClient(userID string, fn func(clientID stri
 			}
 		}
 	})
+}
+
+// MoveClientGroup 更新客户端的 GroupID 并迁移观察者索引
+// 用于 MoveGroupMember 场景：普通客户仅更新字段；观察者需从旧 group 索引迁移到新 group 索引
+func (r *ShardedRegistry) MoveClientGroup(client *Client, newGroupID string) {
+	if client.UserType == UserTypeObserver {
+		// 观察者：先从旧索引移除（用当前 GroupID），再更新字段，再加入新索引
+		r.observerIdx.remove(client)
+		client.SetGroupID(newGroupID)
+		r.observerIdx.add(client)
+	} else {
+		// 普通客户：仅更新字段（群组投递走 groupRepo 成员关系，不依赖该索引）
+		client.SetGroupID(newGroupID)
+	}
 }
 
 // ============================================================================
@@ -370,6 +394,23 @@ func (r *ShardedRegistry) ForEachSSEClient(fn func(userID string, clientID strin
 			}
 		}
 		return true
+	})
+}
+
+// ForEachSSEUserClient 遍历指定用户的所有 SSE 客户端（持读锁，零拷贝）
+// 回调返回 false 时停止遍历
+// 替代 GetSSEUserClients 锁外遍历内部 map 的数据竞争
+func (r *ShardedRegistry) ForEachSSEUserClient(userID string, fn func(clientID string, client *Client) bool) {
+	r.sseShards.WithShardRLock(userID, func(data map[string]map[string]*Client) {
+		userClients, ok := data[userID]
+		if !ok {
+			return
+		}
+		for clientID, client := range userClients {
+			if !fn(clientID, client) {
+				return
+			}
+		}
 	})
 }
 
@@ -458,12 +499,12 @@ func (r *ShardedRegistry) ForEachObserver(fn func(userID string, clientID string
 	})
 }
 
-// GetObserverUserCount 获取观察者用户数（设备去重）
+// GetObserverUserCount 获取观察者用户数（设备去重）- O(1)
 func (r *ShardedRegistry) GetObserverUserCount() int {
 	if r.observerShards == nil {
 		return 0
 	}
-	return r.observerShards.Len()
+	return int(r.observerUserCount.Load())
 }
 
 // GetObserverDeviceCount 获取观察者设备总数
@@ -501,6 +542,7 @@ func (r *ShardedRegistry) addObserverClient(client *Client) {
 		if !exists {
 			userClients = make(map[string]*Client)
 			data[client.UserID] = userClients
+			r.observerUserCount.Add(1)
 		}
 		userClients[client.ID] = client
 	})
@@ -521,6 +563,7 @@ func (r *ShardedRegistry) removeObserverClient(client *Client) {
 		delete(userClients, client.ID)
 		if len(userClients) == 0 {
 			delete(data, client.UserID)
+			r.observerUserCount.Add(-1)
 		}
 	})
 	// 同步从三级二级索引移除
@@ -572,9 +615,9 @@ func (idx *observerIndex) add(client *Client) {
 	if client.Namespace == "" {
 		// 全局观察者：观察所有命名空间
 		idx.global[client.ID] = client
-	} else if client.GroupID != "" {
+	} else if gid := client.GetGroupIDRaw(); gid != "" {
 		// 群组级观察者：观察指定命名空间+群组
-		key := groupIndexKey(client.Namespace, client.GroupID)
+		key := groupIndexKey(client.Namespace, gid)
 		group, ok := idx.byGroup[key]
 		if !ok {
 			group = make(map[string]*Client)
@@ -599,8 +642,8 @@ func (idx *observerIndex) remove(client *Client) {
 
 	if client.Namespace == "" {
 		delete(idx.global, client.ID)
-	} else if client.GroupID != "" {
-		key := groupIndexKey(client.Namespace, client.GroupID)
+	} else if gid := client.GetGroupIDRaw(); gid != "" {
+		key := groupIndexKey(client.Namespace, gid)
 		if group, ok := idx.byGroup[key]; ok {
 			delete(group, client.ID)
 			if len(group) == 0 {
@@ -697,7 +740,7 @@ func (r *ShardedRegistry) GetAgentUserCount() int {
 	if r.agentShards == nil {
 		return 0
 	}
-	return r.agentShards.Len()
+	return int(r.agentUserCount.Load())
 }
 
 // HasAgent 检查用户是否为客服 - O(1)
@@ -723,6 +766,7 @@ func (r *ShardedRegistry) addAgentClient(client *Client) {
 		if !exists {
 			userClients = make(map[string]*Client)
 			data[client.UserID] = userClients
+			r.agentUserCount.Add(1)
 		}
 		userClients[client.ID] = client
 	})
@@ -741,6 +785,7 @@ func (r *ShardedRegistry) removeAgentClient(client *Client) {
 		delete(userClients, client.ID)
 		if len(userClients) == 0 {
 			delete(data, client.UserID)
+			r.agentUserCount.Add(-1)
 		}
 	})
 }
@@ -790,10 +835,7 @@ func (r *ShardedRegistry) Clear() {
 
 	// 清空反向索引
 	// 性能：用新实例替换比逐个 Delete 更快（旧 map 由 GC 回收）
-	r.clientIDToUserID.Range(func(key, value any) bool {
-		r.clientIDToUserID.Delete(key)
-		return true
-	})
+	r.clientIDToUserID = sync.Map{}
 
 	r.clientCount.Store(0)
 	r.userCount.Store(0)

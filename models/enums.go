@@ -119,6 +119,38 @@ func (s UserStatus) IsValid() bool {
 	return UserStatusValidator.IsValid(s)
 }
 
+// UserStatusFromInt 将数值转换为 UserStatus（0-4 → online/offline/busy/away/invisible，越界返回 offline）
+func UserStatusFromInt(val int) UserStatus {
+	switch val {
+	case 0:
+		return UserStatusOnline
+	case 1:
+		return UserStatusBusy
+	case 2:
+		return UserStatusAway
+	case 3:
+		return UserStatusInvisible
+	default:
+		return UserStatusOffline
+	}
+}
+
+// ToInt 将 UserStatus 转换为数值（用于原子存储）
+func (s UserStatus) ToInt() int {
+	switch s {
+	case UserStatusOnline:
+		return 0
+	case UserStatusBusy:
+		return 1
+	case UserStatusAway:
+		return 2
+	case UserStatusInvisible:
+		return 3
+	default:
+		return 4 // offline
+	}
+}
+
 // DisconnectReason 断开连接原因
 type DisconnectReason string
 
@@ -475,6 +507,17 @@ func (v VIPLevel) GetLevel() int {
 // IsHigherThan 比较VIP等级
 func (v VIPLevel) IsHigherThan(other VIPLevel) bool {
 	return v.GetLevel() > other.GetLevel()
+}
+
+// VIPLevelFromLevel 将数值等级转换为 VIPLevel（0-8 → v0-v8，越界返回 v0）
+func VIPLevelFromLevel(level int) VIPLevel {
+	if level < 0 || level > 8 {
+		return VIPLevelV0
+	}
+	return [...]VIPLevel{
+		VIPLevelV0, VIPLevelV1, VIPLevelV2, VIPLevelV3, VIPLevelV4,
+		VIPLevelV5, VIPLevelV6, VIPLevelV7, VIPLevelV8,
+	}[level]
 }
 
 // UrgencyLevel 紧急等级

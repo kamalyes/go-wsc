@@ -38,13 +38,13 @@ const (
 // sendToUser 发送消息给指定用户（内部方法）
 // 自动支持分布式：如果用户在其他节点，会自动路由过去
 func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) error {
-	// 不 Clone：调用者负责消息独立性
-	// - SendToUserWithRetry 已 Clone（主发送路径）
-	// - ack.go/离线推送的 msg 是独立消息
-	// 移除冗余 Clone：原实现每次重试都 Clone 一次，N 次重试 = N 次拷贝
-	msgCopy := msg
-	msgCopy.ReceiverNode = mathx.IfEmpty(msgCopy.ReceiverNode, h.nodeID)
-	msgCopy.CreateAt = mathx.IfNotZero(msgCopy.CreateAt, time.Now())
+	// 浅拷贝消息，避免修改原 msg 字段引发数据竞争
+	// （ack 重试 goroutine 写 CreateAt 与 EventLoop 序列化读 CreateAt 并发）
+	// 仅改 ReceiverNode/CreateAt 两个值类型字段，浅拷贝足够；下游只读不改其他字段
+	cp := *msg
+	cp.ReceiverNode = mathx.IfEmpty(cp.ReceiverNode, h.nodeID)
+	cp.CreateAt = mathx.IfNotZero(cp.CreateAt, time.Now())
+	msgCopy := &cp
 
 	// 🌐 分布式路由：检查用户是否在其他节点
 	routed, err := h.checkAndRouteToNode(ctx, toUserID, msgCopy)

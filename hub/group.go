@@ -64,10 +64,10 @@ func (h *Hub) DisbandGroup(ctx context.Context, namespace, groupID string) error
 	return nil
 }
 
-// addGroupMembers 添加成员到群组
+// AddGroupMembers 添加成员到群组
 // 同时更新成员的反向索引（user→groups）
 // 群组不存在时自动创建（register 自动装配场景，无需手动 CreateGroup）
-func (h *Hub) addGroupMembers(ctx context.Context, namespace, groupID string, userIDs []string) error {
+func (h *Hub) AddGroupMembers(ctx context.Context, namespace, groupID string, userIDs []string) error {
 	if h.groupRepo == nil {
 		return ErrGroupRepoNotSet
 	}
@@ -126,7 +126,7 @@ func (h *Hub) addGroupMembers(ctx context.Context, namespace, groupID string, us
 }
 
 // triggerGroupMemberJoinCallback 异步触发群组成员加入回调
-// 仅在客户端连接时自动加群成功后调用（register 自动装配流程），手动 AddGroupMembers 不触发
+// 在客户端连接时自动加群成功后调用（register 自动装配 + 系统组自动加入），手动 AddGroupMembers 不触发
 // 复制切片避免调用方后续修改影响异步回调
 func (h *Hub) triggerGroupMemberJoinCallback(namespace, groupID string, userIDs []string) {
 	if h.groupMemberJoinCallback == nil {
@@ -412,7 +412,7 @@ func (h *Hub) BroadcastToGroupMembers(ctx context.Context, namespace, groupID st
 // crossNodeGroupBroadcast 跨节点群组广播（单群组）
 //
 // 统一走 OperationTypeGroupsBroadcast 批量路径，单群组作为 GroupIDs=[groupID] 的特例
-// 由 routeToCluster 集中决策 gRPC 直连与 PubSub 兜底
+// 提交到 clusterBatcher 批量处理，消除 per-message goroutine
 func (h *Hub) crossNodeGroupBroadcast(ctx context.Context, namespace, groupID string, msg *HubMessage, excludeSender bool) {
 	if h.pubsub == nil && !h.IsGRPCEnabled() {
 		return // 单机模式，无需跨节点
@@ -431,12 +431,10 @@ func (h *Hub) crossNodeGroupBroadcast(ctx context.Context, namespace, groupID st
 		SenderID:      senderID,
 	}
 
-	publishCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	if err := h.routeToCluster(publishCtx, msg, opts); err != nil {
-		h.logger.WarnContextKV(ctx, "跨节点群组广播失败",
+	if !h.clusterBatcher.Submit(msg, opts) {
+		h.logger.WarnContextKV(ctx, "集群分发队列已满，丢弃跨节点群组广播",
 			"namespace", namespace, "group_id", groupID,
-			"error", err, "message_id", msg.MessageID)
+			"message_id", msg.MessageID)
 	}
 }
 
@@ -535,6 +533,7 @@ func (h *Hub) BroadcastToAllGroups(ctx context.Context, namespace string, msg *H
 
 // crossNodeGroupsBroadcast 跨节点批量群组广播（一次路由）
 // 携带所有 groupIDs，接收端 Pipeline 批量查询 + 去重 + 一次过滤
+// 提交到 clusterBatcher 批量处理，消除 per-message goroutine
 func (h *Hub) crossNodeGroupsBroadcast(ctx context.Context, namespace string, groupIDs []string, msg *HubMessage) {
 	if h.pubsub == nil && !h.IsGRPCEnabled() {
 		return // 单机模式，无需跨节点
@@ -546,12 +545,10 @@ func (h *Hub) crossNodeGroupsBroadcast(ctx context.Context, namespace string, gr
 		GroupIDs:  groupIDs,
 	}
 
-	publishCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	if err := h.routeToCluster(publishCtx, msg, opts); err != nil {
-		h.logger.WarnContextKV(ctx, "跨节点批量群组广播失败",
+	if !h.clusterBatcher.Submit(msg, opts) {
+		h.logger.WarnContextKV(ctx, "集群分发队列已满，丢弃跨节点批量群组广播",
 			"namespace", namespace, "group_count", len(groupIDs),
-			"error", err, "message_id", msg.MessageID)
+			"message_id", msg.MessageID)
 	}
 }
 
@@ -737,25 +734,21 @@ func (h *Hub) resolveTargetGroups(ctx context.Context, namespaces, groupIDs []st
 }
 
 // crossNodeMultiNamespaceGroupsBroadcast 按命名空间分组跨节点路由
-// 每个命名空间一条分布式消息，携带该命名空间的 GroupIDs（接收端批量处理）
+// 每个命名空间提交一条到 clusterBatcher，携带该命名空间的 GroupIDs（接收端批量处理）
 func (h *Hub) crossNodeMultiNamespaceGroupsBroadcast(ctx context.Context, namespaceGroups map[string][]string, msg *HubMessage) {
+	if h.pubsub == nil && !h.IsGRPCEnabled() {
+		return // 单机模式，无需跨节点
+	}
 	for namespace, groupIDs := range namespaceGroups {
-		ns := namespace
-		gids := groupIDs
-		msgCopy := msg.Clone()
-		go func() {
-			publishCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
-			opts := ClusterDispatchOptions{
-				Operation: OperationTypeGroupsBroadcast,
-				Namespace: ns,
-				GroupIDs:  gids,
-			}
-			if err := h.routeToCluster(publishCtx, msgCopy, opts); err != nil {
-				h.logger.WarnContextKV(ctx, "跨节点批量群组广播失败",
-					"namespace", ns, "error", err, "message_id", msgCopy.MessageID)
-			}
-		}()
+		opts := ClusterDispatchOptions{
+			Operation: OperationTypeGroupsBroadcast,
+			Namespace: namespace,
+			GroupIDs:  groupIDs,
+		}
+		if !h.clusterBatcher.Submit(msg, opts) {
+			h.logger.WarnContextKV(ctx, "集群分发队列已满，丢弃跨节点多命名空间群组广播",
+				"namespace", namespace, "message_id", msg.MessageID)
+		}
 	}
 }
 
@@ -821,6 +814,7 @@ func (h *Hub) leaveSystemGroupsOnDisconnect(ctx context.Context, client *Client)
 
 // ensureAndJoinSystemGroup 确保系统组存在并加入成员
 // namespace 已在 register 时归一化（全局观察者保持 ""），此处直接使用
+// 加入成功后触发 OnGroupMemberJoin 回调（observer/agent 自动入群也通知业务层）
 func (h *Hub) ensureAndJoinSystemGroup(ctx context.Context, namespace, groupID, userID string) {
 	if err := h.groupRepo.EnsureSystemGroup(ctx, namespace, groupID); err != nil {
 		h.logger.WarnKV("ensureSystemGroup 失败",
@@ -830,29 +824,29 @@ func (h *Hub) ensureAndJoinSystemGroup(ctx context.Context, namespace, groupID, 
 	if err := h.groupRepo.AddMembers(ctx, namespace, groupID, []string{userID}); err != nil {
 		h.logger.WarnKV("加入系统组失败",
 			"namespace", namespace, "group_id", groupID, "user_id", userID, "error", err)
+		return
 	}
+	// 🔔 触发群组成员加入回调（observer/agent 自动入群也通知业务层）
+	h.triggerGroupMemberJoinCallback(namespace, groupID, []string{userID})
 }
 
 // BroadcastToNamespace 向指定命名空间的所有连接广播消息（不限群组）
 // namespace 为空时自动填充 "default"
-// 本地按命名空间过滤广播 + 跨节点命名空间广播
+// 本地按命名空间过滤广播 + 跨节点命名空间广播（提交到 clusterBatcher）
 func (h *Hub) BroadcastToNamespace(ctx context.Context, namespace string, msg *HubMessage) int {
 	msg = msg.Clone()
 	// 本地按命名空间过滤广播
 	count := h.broadcastToFiltered(ctx, func(c *Client) bool {
 		return c.Namespace == namespace
 	}, msg)
-	// 跨节点命名空间广播
-	go func() {
-		publishCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		opts := ClusterDispatchOptions{
-			Operation: OperationTypeBroadcast,
-			Namespace: namespace,
-		}
-		if err := h.routeToCluster(publishCtx, msg, opts); err != nil {
-			h.logger.WarnKV("跨节点命名空间广播失败", "error", err, "message_id", msg.MessageID)
-		}
-	}()
+	// 跨节点命名空间广播（提交到 clusterBatcher 批量处理）
+	opts := ClusterDispatchOptions{
+		Operation: OperationTypeBroadcast,
+		Namespace: namespace,
+	}
+	if !h.clusterBatcher.Submit(msg, opts) {
+		h.logger.WarnContextKV(ctx, "集群分发队列已满，丢弃跨节点命名空间广播",
+			"namespace", namespace, "message_id", msg.MessageID)
+	}
 	return count
 }

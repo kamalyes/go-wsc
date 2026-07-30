@@ -193,7 +193,7 @@ func (r *RedisGroupRepository) EnsureSystemGroup(ctx context.Context, namespace,
 		GroupID:   groupID,
 		Namespace: namespace,
 		Name:      groupID,
-		OwnerID:   "system",
+		OwnerID:   models.UserTypeSystem.String(),
 		CreatedAt: time.Now(),
 	}
 	data, err := json.Marshal(group)

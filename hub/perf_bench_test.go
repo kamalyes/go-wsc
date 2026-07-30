@@ -125,7 +125,7 @@ func prepareGroup(b testing.TB, hub *Hub, groupRepo repository.GroupRepository, 
 		b.Fatalf("创建群组失败: %v", err)
 	}
 	if len(memberIDs) > 0 {
-		if err := hub.addGroupMembers(context.Background(), ns, gid, memberIDs); err != nil {
+		if err := hub.AddGroupMembers(context.Background(), ns, gid, memberIDs); err != nil {
 			b.Fatalf("添加成员失败: %v", err)
 		}
 	}

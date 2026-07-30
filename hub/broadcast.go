@@ -44,19 +44,15 @@ func (h *Hub) Broadcast(ctx context.Context, msg *HubMessage) {
 		h.broadcastSentCount.Add(1)
 	}
 
-	// 🌐 分布式广播：统一走 routeToCluster
-	// 全命名空间广播（routeToCluster 对 Broadcast 操作不 normalize）
-	go func() {
-		publishCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		opts := ClusterDispatchOptions{
-			Operation: OperationTypeBroadcast,
-			Namespace: "", // 全命名空间广播
-		}
-		if err := h.routeToCluster(publishCtx, msg, opts); err != nil {
-			h.logger.WarnKV("跨节点广播失败", "error", err, "message_id", msg.MessageID)
-		}
-	}()
+	// 🌐 分布式广播：提交到 clusterBatcher 批量处理（消除 per-message goroutine）
+	opts := ClusterDispatchOptions{
+		Operation: OperationTypeBroadcast,
+		Namespace: "", // 全命名空间广播
+	}
+	if !h.clusterBatcher.Submit(msg, opts) {
+		h.logger.WarnKV("集群分发队列已满，丢弃跨节点广播",
+			"message_id", msg.MessageID)
+	}
 
 	// 本地广播
 	select {

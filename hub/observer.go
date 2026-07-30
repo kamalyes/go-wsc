@@ -80,14 +80,28 @@ func (h *Hub) IsObserver(userID string) bool {
 
 // notifyObservers 通知观察者（内部方法）
 // namespace+groupID 定位观察范围，通过三级索引 O(k) 查找匹配的观察者
-// 异步并发投递，不阻塞主流程
+// 提交到 observerBatcher 批量处理，消除 per-message goroutine
 func (h *Hub) notifyObservers(ctx context.Context, msg *HubMessage, namespace, groupID string) {
 	// 观察者模块未启用时直接返回
 	if !h.shardedRegistry.ObserverEnabled() {
 		return
 	}
+	// 提交到批量处理器（msg 会在 Submit 内 Clone，避免调用方修改影响异步 flush）
+	if !h.observerBatcher.Submit(msg, namespace, groupID) {
+		h.logger.DebugContextKV(ctx, "观察者通知队列已满，丢弃",
+			"message_id", msg.MessageID,
+			"namespace", namespace,
+			"group_id", groupID,
+		)
+	}
+}
 
-	// 快速检查：无观察者时直接返回 - O(1)
+// notifyObserversDirect 同步执行观察者通知（由 observerBatcher.flush 调用）
+// 本地观察者投递 + 跨节点广播，无 per-message goroutine
+func (h *Hub) notifyObserversDirect(msg *HubMessage, namespace, groupID string) {
+	ctx := h.ctx
+
+	// 快速检查：无观察者时仅跨节点广播 - O(1)
 	observerCount := h.shardedRegistry.GetObserverUserCount()
 
 	h.logger.DebugContextKV(ctx, "开始通知观察者",
@@ -117,66 +131,58 @@ func (h *Hub) notifyObservers(ctx context.Context, msg *HubMessage, namespace, g
 		"observer_devices", len(observers),
 	)
 
-	// 异步并发通知所有观察者，不阻塞主流程
-	syncx.Go().
-		OnPanic(func(r any) {
-			h.logger.ErrorContextKV(ctx, "通知观察者 panic", "panic", r, "stack", string(debug.Stack()), "message_id", msg.MessageID)
+	// 预构建观察者专用消息（Clone + metadata），所有观察者共享同一份
+	observerMsg := msg.Clone()
+	observerMsg.WithMetadata("observer_mode", "true")
+	observerMsg.WithMetadata("original_sender", msg.Sender)
+	observerMsg.WithMetadata("original_receiver", msg.Receiver)
+
+	// 预序列化一次（所有观察者复用同一份 msgData）
+	msgData, err := json.Marshal(observerMsg)
+	if err != nil {
+		h.logger.ErrorContextKV(ctx, "序列化观察者消息失败",
+			"message_id", msg.MessageID, "error", err)
+		return
+	}
+	msgID := observerMsg.MessageID
+
+	var successCount atomic.Int32
+
+	syncx.NewParallelSliceExecutor[*Client, error](observers).
+		OnSuccess(func(idx int, client *Client, result error) {
+			successCount.Add(1)
 		}).
-		Exec(func() {
-			// 预构建观察者专用消息（Clone + metadata），所有观察者共享同一份
-			// 替代旧版每个观察者 Clone+Marshal 的 N 次开销
-			observerMsg := msg.Clone()
-			observerMsg.WithMetadata("observer_mode", "true")
-			observerMsg.WithMetadata("original_sender", msg.Sender)
-			observerMsg.WithMetadata("original_receiver", msg.Receiver)
-
-			// 预序列化一次（所有观察者复用同一份 msgData）
-			msgData, err := json.Marshal(observerMsg)
-			if err != nil {
-				h.logger.ErrorContextKV(ctx, "序列化观察者消息失败",
-					"message_id", msg.MessageID, "error", err)
-				return
-			}
-			msgID := observerMsg.MessageID
-
-			var successCount atomic.Int32
-
-			syncx.NewParallelSliceExecutor[*Client, error](observers).
-				OnSuccess(func(idx int, client *Client, result error) {
-					successCount.Add(1)
-				}).
-				OnError(func(idx int, client *Client, err error) {
-					h.logger.WarnContextKV(ctx, "通知观察者失败",
-						"observer_id", client.UserID,
-						"client_id", client.ID,
-						"message_id", msgID,
-						"error", err,
-					)
-				}).
-				OnPanic(func(idx int, client *Client, panicVal any) {
-					h.logger.WarnContextKV(ctx, "向观察者发送消息时发生 panic(通道可能已关闭)",
-						"observer_id", client.UserID,
-						"client_id", client.ID,
-						"message_id", msgID,
-						"panic", panicVal,
-						"stack", string(debug.Stack()),
-					)
-				}).
-				Execute(func(idx int, observer *Client) (error, error) {
-					return h.sendToObserver(ctx, observer, msgID, msgData), nil
-				})
-
-			h.logger.DebugContextKV(ctx, "已通知本地观察者",
+		OnError(func(idx int, client *Client, err error) {
+			h.logger.WarnContextKV(ctx, "通知观察者失败",
+				"observer_id", client.UserID,
+				"client_id", client.ID,
 				"message_id", msgID,
-				"sender", msg.Sender,
-				"receiver", msg.Receiver,
-				"message_type", msg.MessageType,
-				"total_devices", len(observers),
-				"success_count", successCount.Load(),
+				"error", err,
 			)
+		}).
+		OnPanic(func(idx int, client *Client, panicVal any) {
+			h.logger.WarnContextKV(ctx, "向观察者发送消息时发生 panic(通道可能已关闭)",
+				"observer_id", client.UserID,
+				"client_id", client.ID,
+				"message_id", msgID,
+				"panic", panicVal,
+				"stack", string(debug.Stack()),
+			)
+		}).
+		Execute(func(idx int, observer *Client) (error, error) {
+			return h.sendToObserver(ctx, observer, msgID, msgData), nil
 		})
 
-	// 广播观察者通知到其他节点
+	h.logger.DebugContextKV(ctx, "已通知本地观察者",
+		"message_id", msgID,
+		"sender", msg.Sender,
+		"receiver", msg.Receiver,
+		"message_type", msg.MessageType,
+		"total_devices", len(observers),
+		"success_count", successCount.Load(),
+	)
+
+	// 跨节点广播观察者通知
 	h.broadcastObserverNotification(ctx, msg, namespace, groupID)
 }
 
@@ -184,41 +190,35 @@ func (h *Hub) notifyObservers(ctx context.Context, msg *HubMessage, namespace, g
 //
 // 统一走 routeToCluster 入口，由其集中决策 gRPC 直连与 PubSub 兜底
 // groupID 通过 GroupIDs 字段传递，接收端从 distMsg.GroupIDs 提取
+// 同步执行（由 observerBatcher.flush 调用，无需额外 goroutine）
 func (h *Hub) broadcastObserverNotification(ctx context.Context, msg *HubMessage, namespace, groupID string) {
 	// 单机模式：无 PubSub 且无 gRPC，不跨节点
 	if h.pubsub == nil && !h.IsGRPCEnabled() {
 		return
 	}
 
-	// 异步广播，不阻塞主流程
-	syncx.Go().
-		OnPanic(func(r any) {
-			h.logger.ErrorContextKV(ctx, "广播观察者通知 panic", "panic", r, "stack", string(debug.Stack()), "message_id", msg.MessageID)
-		}).
-		Exec(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
+	dispatchCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
 
-			opts := ClusterDispatchOptions{
-				Operation: OperationTypeObserverNotify,
-				Namespace: namespace,
-			}
-			// 通过 GroupIDs 携带 groupID，接收端从 distMsg.GroupIDs[0] 提取
-			if groupID != "" {
-				opts.GroupIDs = []string{groupID}
-			}
+	opts := ClusterDispatchOptions{
+		Operation: OperationTypeObserverNotify,
+		Namespace: namespace,
+	}
+	// 通过 GroupIDs 携带 groupID，接收端从 distMsg.GroupIDs[0] 提取
+	if groupID != "" {
+		opts.GroupIDs = []string{groupID}
+	}
 
-			if err := h.routeToCluster(ctx, msg, opts); err != nil {
-				h.logger.WarnContextKV(ctx, "广播观察者通知失败",
-					"error", err,
-					"message_id", msg.MessageID,
-				)
-			} else {
-				h.logger.DebugContextKV(ctx, "已广播观察者通知",
-					"message_id", msg.MessageID,
-				)
-			}
-		})
+	if err := h.routeToCluster(dispatchCtx, msg, opts); err != nil {
+		h.logger.WarnContextKV(ctx, "广播观察者通知失败",
+			"error", err,
+			"message_id", msg.MessageID,
+		)
+	} else {
+		h.logger.DebugContextKV(ctx, "已广播观察者通知",
+			"message_id", msg.MessageID,
+		)
+	}
 }
 
 // sendToObserver 发送预序列化消息给单个观察者设备 - O(1)

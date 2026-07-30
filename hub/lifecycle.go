@@ -379,6 +379,16 @@ func (h *Hub) SafeShutdown() error {
 		h.messageStatsBatcher.Stop()
 	}
 
+	// 停止观察者通知批量处理器，flush 剩余通知
+	if h.observerBatcher != nil {
+		h.observerBatcher.Stop()
+	}
+
+	// 停止跨节点分发批量处理器，flush 剩余分发
+	if h.clusterBatcher != nil {
+		h.clusterBatcher.Stop()
+	}
+
 	// 刷写消息/广播原子计数器到 Redis，避免关闭时统计丢失
 	h.flushStatsCounters()
 

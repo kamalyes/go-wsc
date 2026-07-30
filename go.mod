@@ -8,13 +8,13 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.2.2
 	github.com/gorilla/websocket v1.4.2
 	github.com/jpillora/backoff v1.0.0
-	github.com/kamalyes/go-argus v0.3.0
-	github.com/kamalyes/go-cachex v0.2.5
-	github.com/kamalyes/go-config v0.21.7-0.20260728162126-1b0cad45b821
-	github.com/kamalyes/go-logger v0.5.5-0.20260728161616-cc643ae0fae7
-	github.com/kamalyes/go-pbmo v0.1.6
-	github.com/kamalyes/go-sqlbuilder v0.5.8-0.20260729125929-6d0048828ff9
-	github.com/kamalyes/go-toolbox v0.15.6-0.20260729085951-81590c775d02
+	github.com/kamalyes/go-argus v0.3.1
+	github.com/kamalyes/go-cachex v0.2.7
+	github.com/kamalyes/go-config v0.21.10
+	github.com/kamalyes/go-logger v0.5.6
+	github.com/kamalyes/go-pbmo v0.1.8
+	github.com/kamalyes/go-sqlbuilder v0.6.0
+	github.com/kamalyes/go-toolbox v0.15.7
 	github.com/redis/go-redis/v9 v9.21.0
 	github.com/stretchr/testify v1.11.1
 	google.golang.org/grpc v1.82.1

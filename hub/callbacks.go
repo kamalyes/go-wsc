@@ -244,12 +244,12 @@ func (h *Hub) OnBatchSendFailure(callback BatchSendFailureCallback) {
 // ============================================================================
 //
 // 设计原则：
-//   - OnGroupMemberJoin：仅在客户端连接时自动加群成功后触发（register 自动装配），
+//   - OnGroupMemberJoin：在客户端连接时自动加群成功后触发（register 自动装配 + 系统组自动加入），
 //     手动 AddGroupMembers 不触发因为实际业务中成员入群是连接的副产品，
 //     而非管理端手动操作
 //   - OnGroupDisband / OnGroupMemberLeave：在对应业务 API 成功后触发
-//   - 系统保留组（__agents__/__observers__）的自动加入/离开直接走底层 groupRepo，
-//     不触发任何业务回调，不会产生系统组噪声
+//   - 系统保留组（__agents__/__observers__）的自动加入也会触发 OnGroupMemberJoin，
+//     便于业务层感知 observer/agent 上线
 // ============================================================================
 
 // OnGroupDisband 注册群组解散回调
@@ -270,7 +270,7 @@ func (h *Hub) OnGroupDisband(callback GroupDisbandCallback) {
 }
 
 // OnGroupMemberJoin 注册群组成员加入回调
-// 仅在客户端连接时自动加群成功后异步调用（register 自动装配流程），
+// 在客户端连接时自动加群成功后异步调用（register 自动装配 + 系统组自动加入），
 // 手动 AddGroupMembers 不触发本回调
 //
 // 参数:

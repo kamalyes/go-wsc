@@ -289,7 +289,7 @@ type (
 	// GroupDisbandCallback 群组解散回调
 	GroupDisbandCallback func(ctx context.Context, namespace, groupID string)
 	// GroupMemberJoinCallback 群组成员加入回调
-	// 仅在客户端连接时自动加群成功后触发（register 自动装配），手动 AddGroupMembers 不触发
+	// 在客户端连接时自动加群成功后触发（register 自动装配 + 系统组自动加入），手动 AddGroupMembers 不触发
 	GroupMemberJoinCallback func(ctx context.Context, namespace, groupID string, userIDs []string)
 	// GroupMemberLeaveCallback 群组成员离开回调
 	GroupMemberLeaveCallback func(ctx context.Context, namespace, groupID string, userIDs []string)
@@ -377,6 +377,12 @@ type Hub struct {
 
 	// 消息统计批量更新器（替代每消息 syncx.Go() goroutine）
 	messageStatsBatcher *MessageStatsBatcher
+
+	// 观察者通知批量处理器（替代每消息 syncx.Go() 观察者投递 + 跨节点广播）
+	observerBatcher *ObserverNotificationBatcher
+
+	// 跨节点分发批量处理器（替代每消息 go func() { routeToCluster(...) }()）
+	clusterBatcher *ClusterDispatchBatcher
 
 	// 心跳 Redis 更新通道（替代每次心跳创建 goroutine）
 	heartbeatRedisCh chan string
@@ -484,16 +490,28 @@ func NewHub(config *wscconfig.WSC) *Hub {
 	// WorkerPool（按任务类型分池控制并发，防止 goroutine 泛滥）
 	hub.workerPool = NewHubWorkerPool(mathx.IfNotZero(config.WorkerPool, wscconfig.DefaultWorkerPoolConfig()), hub.logger)
 
-	// 消息状态批量更新器（队列 4096，批次 100，500ms flush）
-	// 广播 1 万人成功 = 1 次 UPDATE，而非 1 万次
-	hub.statusUpdater = NewMessageStatusUpdater(hub, 4096, 100, 500*time.Millisecond)
+	// 批量处理器参数（从 config 读取，nil/零值时使用默认值）
+	batcherCfg := config.Batcher
 
-	// 初始化心跳统计批量更新器（队列 4096，批次 200，10s flush）
-	hub.heartbeatBatcher = NewHeartbeatStatsUpdater(hub, 4096, 200, 10*time.Second)
+	// 消息状态批量更新器（广播 1 万人成功 = 1 次 UPDATE，而非 1 万次）
+	msgStatus := batcherCfg.GetMessageStatusParams()
+	hub.statusUpdater = NewMessageStatusUpdater(hub, msgStatus.QueueSize, msgStatus.BatchSize, msgStatus.FlushInterval)
 
-	// 初始化消息统计批量更新器（队列 8192，批次 500，2s flush）
-	// 广播 939 人 = 939 次 Submit + 1 次事务（而非 939 个 goroutine + 1878 次 DB 调用）
-	hub.messageStatsBatcher = NewMessageStatsBatcher(hub, 8192, 500, 2*time.Second)
+	// 心跳统计批量更新器
+	hbStats := batcherCfg.GetHeartbeatStatsParams()
+	hub.heartbeatBatcher = NewHeartbeatStatsUpdater(hub, hbStats.QueueSize, hbStats.BatchSize, hbStats.FlushInterval)
+
+	// 消息统计批量更新器（广播 939 人 = 939 次 Submit + 1 次事务，而非 939 个 goroutine + 1878 次 DB 调用）
+	msgStats := batcherCfg.GetMessageStatsParams()
+	hub.messageStatsBatcher = NewMessageStatsBatcher(hub, msgStats.QueueSize, msgStats.BatchSize, msgStats.FlushInterval)
+
+	// 观察者通知批量处理器（替代每条消息 syncx.Go() 观察者投递 + syncx.Go() 跨节点广播）
+	obsNotify := batcherCfg.GetObserverNotifyParams()
+	hub.observerBatcher = NewObserverNotificationBatcher(hub, obsNotify.QueueSize, obsNotify.BatchSize, obsNotify.FlushInterval)
+
+	// 跨节点分发批量处理器（替代每条广播消息 go func() { routeToCluster(...) }()）
+	clusterDisp := batcherCfg.GetClusterDispatchParams()
+	hub.clusterBatcher = NewClusterDispatchBatcher(hub, clusterDisp.QueueSize, clusterDisp.BatchSize, clusterDisp.FlushInterval)
 
 	return hub
 }

@@ -221,6 +221,52 @@ func init() {
 
 	// 注册消息记录仓库相关错误
 	errorx.RegisterError(ErrTypeRecordRepositoryNotSet, "message record repository is not set")
+
+	// 包级错误变量必须在所有 RegisterError 完成后赋值
+	// 原因：errorx.NewError 依赖 errorMessages 映射，而 Go 中包级变量初始化先于 init() 执行，
+	// 若在 var 初始化期调用 NewError，此时映射为空，会全部回退为 "unknown error"(Type=0)，
+	// 导致所有 sentinel 互相相等且 ErrorType=0，破坏 Is*Error 判定、== 比较与 .Error() 文案
+	ErrConnectionClosed = errorx.NewError(ErrTypeConnectionClosed)
+	ErrMessageBufferFull = errorx.NewError(ErrTypeMessageBufferFull)
+	ErrHubStartupTimeout = errorx.NewError(ErrTypeHubStartupTimeout)
+	ErrHubShutdownTimeout = errorx.NewError(ErrTypeHubShutdownTimeout)
+	ErrQueueAndPendingFull = errorx.NewError(ErrTypeQueueAndPendingFull)
+	ErrMessageTargetMissing = errorx.NewError(ErrTypeMessageTargetMissing)
+	ErrUserOffline = errorx.NewError(ErrTypeUserOffline)
+	ErrMessageDeliveryTimeout = errorx.NewError(ErrTypeMessageDeliveryTimeout)
+	ErrCircuitBreakerOpen = errorx.NewError(ErrTypeCircuitBreakerOpen)
+
+	ErrAckTimeout = errorx.NewError(ErrTypeAckTimeout)
+	ErrAckTimeoutRetries = errorx.NewError(ErrTypeAckTimeoutRetries)
+	ErrContextCancelled = errorx.NewError(ErrTypeContextCancelled)
+
+	ErrRecordManagerNotInitialized = errorx.NewError(ErrTypeRecordManagerNotInitialized)
+	ErrMaxRetriesExceeded = errorx.NewError(ErrTypeMaxRetriesExceeded)
+
+	ErrConfigValidatorNotInitialized = errorx.NewError(ErrTypeConfigValidatorNotInitialized)
+
+	ErrMessageFiltered = errorx.NewError(ErrTypeMessageFiltered)
+	ErrNoAvailableAgents = errorx.NewError(ErrTypeNoAvailableAgents)
+	ErrQueueFull = errorx.NewError(ErrTypeQueueFull)
+	ErrRecordRepositoryNotSet = errorx.NewError(ErrTypeRecordRepositoryNotSet)
+	ErrOnlineStatusRepositoryNotSet = errorx.NewError(ErrTypeOnlineStatusRepositoryNotSet)
+	ErrStatsRepositoryNotSet = errorx.NewError(ErrTypeStatsRepositoryNotSet)
+	ErrSendChannelFull = errorx.NewError(ErrTypeSendChannelFull)
+	ErrUserNotFound = errorx.NewError(ErrTypeUserNotFound)
+	ErrClientNotFound = errorx.NewError(ErrTypeClientNotFound)
+	ErrClientDisconnected = errorx.NewError(ErrTypeClientDisconnected)
+
+	ErrPubSubNotSet = errorx.NewError(ErrTypePubSubNotSet)
+	ErrPubSubPublishFailed = errorx.NewError(ErrTypePubSubPublishFailed)
+	ErrEventSerializeFailed = errorx.NewError(ErrTypeEventSerializeFailed)
+	ErrEventDeserializeFailed = errorx.NewError(ErrTypeEventDeserializeFailed)
+
+	ErrGroupNotFound = errorx.NewError(ErrTypeGroupNotFound)
+	ErrGroupMemberExisted = errorx.NewError(ErrTypeGroupMemberExisted)
+	ErrGroupFull = errorx.NewError(ErrTypeGroupFull)
+	ErrGroupRepoNotSet = errorx.NewError(ErrTypeGroupRepoNotSet)
+	ErrGroupExisted = errorx.NewError(ErrTypeGroupExisted)
+	ErrGroupReserved = errorx.NewError(ErrTypeGroupReserved)
 }
 
 // ============================================================================
@@ -239,67 +285,67 @@ const (
 // 错误变量定义（向后兼容）
 // ============================================================================
 
-// 连接相关错误变量
+// 连接相关错误变量（在 init() 末尾统一赋值，详见 init() 注释）
 var (
-	ErrConnectionClosed       = errorx.NewError(ErrTypeConnectionClosed)
-	ErrMessageBufferFull      = errorx.NewError(ErrTypeMessageBufferFull)
-	ErrHubStartupTimeout      = errorx.NewError(ErrTypeHubStartupTimeout)
-	ErrHubShutdownTimeout     = errorx.NewError(ErrTypeHubShutdownTimeout)
-	ErrQueueAndPendingFull    = errorx.NewError(ErrTypeQueueAndPendingFull)
-	ErrMessageTargetMissing   = errorx.NewError(ErrTypeMessageTargetMissing)
-	ErrUserOffline            = errorx.NewError(ErrTypeUserOffline)
-	ErrMessageDeliveryTimeout = errorx.NewError(ErrTypeMessageDeliveryTimeout)
-	ErrCircuitBreakerOpen     = errorx.NewError(ErrTypeCircuitBreakerOpen)
+	ErrConnectionClosed       errorx.BaseError
+	ErrMessageBufferFull      errorx.BaseError
+	ErrHubStartupTimeout      errorx.BaseError
+	ErrHubShutdownTimeout     errorx.BaseError
+	ErrQueueAndPendingFull    errorx.BaseError
+	ErrMessageTargetMissing   errorx.BaseError
+	ErrUserOffline            errorx.BaseError
+	ErrMessageDeliveryTimeout errorx.BaseError
+	ErrCircuitBreakerOpen     errorx.BaseError
 )
 
 // ACK相关错误变量
 var (
-	ErrAckTimeout        = errorx.NewError(ErrTypeAckTimeout)
-	ErrAckTimeoutRetries = errorx.NewError(ErrTypeAckTimeoutRetries)
-	ErrContextCancelled  = errorx.NewError(ErrTypeContextCancelled)
+	ErrAckTimeout        errorx.BaseError
+	ErrAckTimeoutRetries errorx.BaseError
+	ErrContextCancelled  errorx.BaseError
 )
 
 // 记录管理相关错误变量
 var (
-	ErrRecordManagerNotInitialized = errorx.NewError(ErrTypeRecordManagerNotInitialized)
-	ErrMaxRetriesExceeded          = errorx.NewError(ErrTypeMaxRetriesExceeded)
+	ErrRecordManagerNotInitialized errorx.BaseError
+	ErrMaxRetriesExceeded          errorx.BaseError
 )
 
 // 配置相关错误变量
 var (
-	ErrConfigValidatorNotInitialized = errorx.NewError(ErrTypeConfigValidatorNotInitialized)
+	ErrConfigValidatorNotInitialized errorx.BaseError
 )
 
 // 业务逻辑错误变量
 var (
-	ErrMessageFiltered              = errorx.NewError(ErrTypeMessageFiltered)
-	ErrNoAvailableAgents            = errorx.NewError(ErrTypeNoAvailableAgents)
-	ErrQueueFull                    = errorx.NewError(ErrTypeQueueFull)
-	ErrRecordRepositoryNotSet       = errorx.NewError(ErrTypeRecordRepositoryNotSet)
-	ErrOnlineStatusRepositoryNotSet = errorx.NewError(ErrTypeOnlineStatusRepositoryNotSet)
-	ErrStatsRepositoryNotSet        = errorx.NewError(ErrTypeStatsRepositoryNotSet)
-	ErrSendChannelFull              = errorx.NewError(ErrTypeSendChannelFull)
-	ErrUserNotFound                 = errorx.NewError(ErrTypeUserNotFound)
-	ErrClientNotFound               = errorx.NewError(ErrTypeClientNotFound)
-	ErrClientDisconnected           = errorx.NewError(ErrTypeClientDisconnected)
+	ErrMessageFiltered              errorx.BaseError
+	ErrNoAvailableAgents            errorx.BaseError
+	ErrQueueFull                    errorx.BaseError
+	ErrRecordRepositoryNotSet       errorx.BaseError
+	ErrOnlineStatusRepositoryNotSet errorx.BaseError
+	ErrStatsRepositoryNotSet        errorx.BaseError
+	ErrSendChannelFull              errorx.BaseError
+	ErrUserNotFound                 errorx.BaseError
+	ErrClientNotFound               errorx.BaseError
+	ErrClientDisconnected           errorx.BaseError
 )
 
 // PubSub相关错误变量
 var (
-	ErrPubSubNotSet           = errorx.NewError(ErrTypePubSubNotSet)
-	ErrPubSubPublishFailed    = errorx.NewError(ErrTypePubSubPublishFailed)
-	ErrEventSerializeFailed   = errorx.NewError(ErrTypeEventSerializeFailed)
-	ErrEventDeserializeFailed = errorx.NewError(ErrTypeEventDeserializeFailed)
+	ErrPubSubNotSet           errorx.BaseError
+	ErrPubSubPublishFailed    errorx.BaseError
+	ErrEventSerializeFailed   errorx.BaseError
+	ErrEventDeserializeFailed errorx.BaseError
 )
 
 // 群组相关错误变量
 var (
-	ErrGroupNotFound      = errorx.NewError(ErrTypeGroupNotFound)
-	ErrGroupMemberExisted = errorx.NewError(ErrTypeGroupMemberExisted)
-	ErrGroupFull          = errorx.NewError(ErrTypeGroupFull)
-	ErrGroupRepoNotSet    = errorx.NewError(ErrTypeGroupRepoNotSet)
-	ErrGroupExisted       = errorx.NewError(ErrTypeGroupExisted)
-	ErrGroupReserved      = errorx.NewError(ErrTypeGroupReserved)
+	ErrGroupNotFound      errorx.BaseError
+	ErrGroupMemberExisted errorx.BaseError
+	ErrGroupFull          errorx.BaseError
+	ErrGroupRepoNotSet    errorx.BaseError
+	ErrGroupExisted       errorx.BaseError
+	ErrGroupReserved      errorx.BaseError
 )
 
 // IsRetryableError 判断错误是否可以重试
@@ -307,21 +353,9 @@ func IsRetryableError(err error) bool {
 	if err == nil {
 		return false
 	}
-
-	// 如果是 errorx.Error 类型，检查其错误类型
-	if errxErr, ok := err.(interface{ Type() ErrorType }); ok {
-		return IsRetryableErrorType(errxErr.Type())
-	}
-
-	// 对于定义的错误变量，直接检查可重试性
-	switch err {
-	case ErrMessageBufferFull, ErrQueueAndPendingFull,
-		ErrAckTimeout, ErrMessageDeliveryTimeout, ErrCircuitBreakerOpen,
-		ErrQueueFull, ErrHubStartupTimeout, ErrHubShutdownTimeout:
-		return true
-	default:
-		return false
-	}
+	// 使用 errorx.ClassifyError 基于 errors.As 提取 ErrorType，
+	// 兼容包装错误，且不依赖 BaseError 上不存在的 Type() 方法
+	return IsRetryableErrorType(errorx.ClassifyError(err))
 }
 
 // IsRetryableErrorType 判断错误类型是否可以重试
@@ -350,14 +384,11 @@ func IsQueueFullError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errxErr, ok := err.(interface{ Type() ErrorType }); ok {
-		errType := errxErr.Type()
-		return errType == ErrTypeQueueFull ||
-			errType == ErrTypeMessageBufferFull ||
-			errType == ErrTypePendingQueueFull ||
-			errType == ErrTypeQueueAndPendingFull
-	}
-	return err == ErrQueueFull || err == ErrMessageBufferFull || err == ErrQueueAndPendingFull
+	errType := errorx.ClassifyError(err)
+	return errType == ErrTypeQueueFull ||
+		errType == ErrTypeMessageBufferFull ||
+		errType == ErrTypePendingQueueFull ||
+		errType == ErrTypeQueueAndPendingFull
 }
 
 // IsUserOfflineError 判断是否为用户离线错误
@@ -365,10 +396,7 @@ func IsUserOfflineError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errxErr, ok := err.(interface{ Type() ErrorType }); ok {
-		return errxErr.Type() == ErrTypeUserOffline
-	}
-	return err == ErrUserOffline
+	return errorx.ClassifyError(err) == ErrTypeUserOffline
 }
 
 // IsSendTimeoutError 判断是否为发送超时错误
@@ -376,13 +404,10 @@ func IsSendTimeoutError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errxErr, ok := err.(interface{ Type() ErrorType }); ok {
-		errType := errxErr.Type()
-		return errType == ErrTypeOperationTimeout ||
-			errType == ErrTypeMessageDeliveryTimeout ||
-			errType == ErrTypeConnectionTimeout
-	}
-	return err == ErrMessageDeliveryTimeout
+	errType := errorx.ClassifyError(err)
+	return errType == ErrTypeOperationTimeout ||
+		errType == ErrTypeMessageDeliveryTimeout ||
+		errType == ErrTypeConnectionTimeout
 }
 
 // IsAckTimeoutError 判断是否为ACK超时错误
@@ -390,9 +415,6 @@ func IsAckTimeoutError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errxErr, ok := err.(interface{ Type() ErrorType }); ok {
-		errType := errxErr.Type()
-		return errType == ErrTypeAckTimeout || errType == ErrTypeAckTimeoutRetries
-	}
-	return err == ErrAckTimeout || err == ErrAckTimeoutRetries
+	errType := errorx.ClassifyError(err)
+	return errType == ErrTypeAckTimeout || errType == ErrTypeAckTimeoutRetries
 }

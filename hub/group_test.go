@@ -1499,3 +1499,389 @@ loop:
 	require.NoError(t, err)
 	assert.Contains(t, membersC, "u-reconnect", "A 应在 groupC")
 }
+
+// ============================================================================
+// 分组核心路径补充测试（白盒覆盖 group.go 未覆盖分支）
+//
+// 复用 setupGroupTestHub / makeTestClient / makeGroupMessage 等 helper，
+// 不重复已有断言，仅补齐 group.go 中尚未覆盖的早返回、空值、幂等与 excludeSender 分支
+// ============================================================================
+
+// TestAddGroupMembersAppendToExisting 验证已存在分组追加成员：旧成员保留、新成员加入、分组元信息不重复创建
+func TestAddGroupMembersAppendToExisting(t *testing.T) {
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-append", Namespace: "tenantA", OwnerID: "o1", Name: "原始群"}))
+	require.NoError(t, hub.AddGroupMembers(ctx, "tenantA", "g-append", []string{"u1", "u2"}))
+
+	// 追加新成员 u3、u4，同时重复添加已存在成员 u1（幂等，集合语义）
+	require.NoError(t, hub.AddGroupMembers(ctx, "tenantA", "g-append", []string{"u1", "u3", "u4"}))
+
+	members, err := hub.GetGroupMembers(ctx, "tenantA", "g-append")
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"u1", "u2", "u3", "u4"}, members)
+
+	cnt, err := hub.GetGroupMemberCount(ctx, "tenantA", "g-append")
+	require.NoError(t, err)
+	assert.Equal(t, int64(4), cnt)
+
+	// 追加后分组元信息仍存在且未被覆盖
+	g, err := hub.GetGroup(ctx, "tenantA", "g-append")
+	require.NoError(t, err)
+	assert.Equal(t, "o1", g.OwnerID)
+	assert.Equal(t, "原始群", g.Name)
+
+	// 命名空间群组索引不重复（仅一个 g-append）
+	nsGroups, err := hub.GetNamespaceGroups(ctx, "tenantA")
+	require.NoError(t, err)
+	assert.Equal(t, 1, len(nsGroups))
+}
+
+// TestAddGroupMembersEmptyUserIDs 验证空 userIDs 列表直接返回 nil（早返回分支）
+func TestAddGroupMembersEmptyUserIDs(t *testing.T) {
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-empty-arg", Namespace: "tenantA", OwnerID: "o1"}))
+
+	// 空切片与 nil 均不应报错，也不应建立成员关系
+	require.NoError(t, hub.AddGroupMembers(ctx, "tenantA", "g-empty-arg", []string{}))
+	require.NoError(t, hub.AddGroupMembers(ctx, "tenantA", "g-empty-arg", nil))
+
+	cnt, err := hub.GetGroupMemberCount(ctx, "tenantA", "g-empty-arg")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), cnt)
+}
+
+// TestRemoveGroupMembersNonExistent 验证移除不存在的成员不报错（幂等）
+func TestRemoveGroupMembersNonExistent(t *testing.T) {
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-rm", Namespace: "tenantA", OwnerID: "o1"}))
+	require.NoError(t, hub.AddGroupMembers(ctx, "tenantA", "g-rm", []string{"u1", "u2"}))
+
+	// 移除不存在的成员 uX、uY 不应报错（Redis SRem 对不存在元素幂等）
+	require.NoError(t, hub.RemoveGroupMembers(ctx, "tenantA", "g-rm", []string{"uX", "uY"}))
+
+	// 原成员不受影响
+	members, err := hub.GetGroupMembers(ctx, "tenantA", "g-rm")
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"u1", "u2"}, members)
+
+	// 混合移除：一个真实成员 + 一个不存在成员
+	require.NoError(t, hub.RemoveGroupMembers(ctx, "tenantA", "g-rm", []string{"u1", "uZ"}))
+	members, err = hub.GetGroupMembers(ctx, "tenantA", "g-rm")
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"u2"}, members)
+
+	cnt, err := hub.GetGroupMemberCount(ctx, "tenantA", "g-rm")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), cnt)
+}
+
+// TestRemoveGroupMembersEmptyUserIDs 验证空 userIDs 列表直接返回 nil（早返回分支）
+func TestRemoveGroupMembersEmptyUserIDs(t *testing.T) {
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-rm-empty", Namespace: "tenantA", OwnerID: "o1"}))
+	require.NoError(t, hub.AddGroupMembers(ctx, "tenantA", "g-rm-empty", []string{"u1"}))
+
+	// 空切片与 nil 均不应报错，成员应保留
+	require.NoError(t, hub.RemoveGroupMembers(ctx, "tenantA", "g-rm-empty", []string{}))
+	require.NoError(t, hub.RemoveGroupMembers(ctx, "tenantA", "g-rm-empty", nil))
+
+	members, err := hub.GetGroupMembers(ctx, "tenantA", "g-rm-empty")
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"u1"}, members)
+}
+
+// TestDisbandGroupNonExistent 验证解散不存在的分组按源码行为幂等返回 nil
+// 仓库 DisbandGroup 对缺失 key 的 SMembers 返回空切片+nil，Pipeline 删除为 no-op，最终返回 nil
+// 注意：Hub.DisbandGroup 在此场景仍会触发 OnGroupDisband 回调（见最终总结中的 bug 说明）
+func TestDisbandGroupNonExistent(t *testing.T) {
+	hub, _, _, cleanup := setupGroupTestHub(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// 不存在的分组，仓库 DisbandGroup 幂等返回 nil
+	err := hub.DisbandGroup(ctx, "tenantA", "g-not-exist")
+	assert.NoError(t, err, "解散不存在的分组应幂等返回 nil")
+
+	// 重复解散同样不报错
+	err = hub.DisbandGroup(ctx, "tenantA", "g-not-exist")
+	assert.NoError(t, err)
+
+	// 解散后查询仍为不存在
+	_, err = hub.GetGroup(ctx, "tenantA", "g-not-exist")
+	assert.ErrorIs(t, err, ErrGroupNotFound)
+
+	// 成员列表为空
+	members, err := hub.GetGroupMembers(ctx, "tenantA", "g-not-exist")
+	require.NoError(t, err)
+	assert.Empty(t, members)
+}
+
+// TestGetGroupMembersEmptyGroup 验证空分组/不存在的分组返回空成员列表与 0 计数
+func TestGetGroupMembersEmptyGroup(t *testing.T) {
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// 不存在的分组：GetMembers 对缺失 key 返回空切片，GetMemberCount 返回 0
+	members, err := hub.GetGroupMembers(ctx, "tenantA", "g-no-such")
+	require.NoError(t, err)
+	assert.Empty(t, members)
+
+	cnt, err := hub.GetGroupMemberCount(ctx, "tenantA", "g-no-such")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), cnt)
+
+	// 存在但无成员的分组同样返回空与 0
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-empty", Namespace: "tenantA", OwnerID: "o1"}))
+	members, err = hub.GetGroupMembers(ctx, "tenantA", "g-empty")
+	require.NoError(t, err)
+	assert.Empty(t, members)
+
+	cnt, err = hub.GetGroupMemberCount(ctx, "tenantA", "g-empty")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), cnt)
+}
+
+// TestGetUserGroupsNoMembership 验证用户未加入任何分组时返回空列表
+func TestGetUserGroupsNoMembership(t *testing.T) {
+	hub, _, _, cleanup := setupGroupTestHub(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	groups, err := hub.GetUserGroups(ctx, "tenantA", "user-no-groups")
+	require.NoError(t, err)
+	assert.Empty(t, groups)
+}
+
+// TestNamespaceGroupsEmpty 验证无群组的命名空间返回空列表
+func TestNamespaceGroupsEmpty(t *testing.T) {
+	hub, _, _, cleanup := setupGroupTestHub(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	groups, err := hub.GetNamespaceGroups(ctx, "tenant-empty")
+	require.NoError(t, err)
+	assert.Empty(t, groups)
+}
+
+// TestGroupRepoNotSetBranches 验证各群组只读/写方法在 groupRepo 未设置时统一返回 ErrGroupRepoNotSet
+// 覆盖 group.go 中每个方法首段的早返回分支
+func TestGroupRepoNotSetBranches(t *testing.T) {
+	config := wscconfig.Default()
+	hub := NewHub(config)
+	defer hub.Shutdown()
+	// 故意不设置 groupRepo
+	ctx := context.Background()
+
+	t.Run("GetGroup", func(t *testing.T) {
+		_, err := hub.GetGroup(ctx, "ns", "g")
+		assert.ErrorIs(t, err, ErrGroupRepoNotSet)
+	})
+	t.Run("DisbandGroup", func(t *testing.T) {
+		err := hub.DisbandGroup(ctx, "ns", "g")
+		assert.ErrorIs(t, err, ErrGroupRepoNotSet)
+	})
+	t.Run("AddGroupMembers", func(t *testing.T) {
+		err := hub.AddGroupMembers(ctx, "ns", "g", []string{"u1"})
+		assert.ErrorIs(t, err, ErrGroupRepoNotSet)
+	})
+	t.Run("RemoveGroupMembers", func(t *testing.T) {
+		err := hub.RemoveGroupMembers(ctx, "ns", "g", []string{"u1"})
+		assert.ErrorIs(t, err, ErrGroupRepoNotSet)
+	})
+	t.Run("GetGroupMembers", func(t *testing.T) {
+		_, err := hub.GetGroupMembers(ctx, "ns", "g")
+		assert.ErrorIs(t, err, ErrGroupRepoNotSet)
+	})
+	t.Run("GetGroupMemberCount", func(t *testing.T) {
+		_, err := hub.GetGroupMemberCount(ctx, "ns", "g")
+		assert.ErrorIs(t, err, ErrGroupRepoNotSet)
+	})
+	t.Run("IsGroupMember", func(t *testing.T) {
+		_, err := hub.IsGroupMember(ctx, "ns", "g", "u1")
+		assert.ErrorIs(t, err, ErrGroupRepoNotSet)
+	})
+	t.Run("GetUserGroups", func(t *testing.T) {
+		_, err := hub.GetUserGroups(ctx, "ns", "u1")
+		assert.ErrorIs(t, err, ErrGroupRepoNotSet)
+	})
+	t.Run("GetNamespaceGroups", func(t *testing.T) {
+		_, err := hub.GetNamespaceGroups(ctx, "ns")
+		assert.ErrorIs(t, err, ErrGroupRepoNotSet)
+	})
+}
+
+// TestSendToGroupExcludeSenderTrue 验证发送者在线时 excludeSender=true：自己不收到，其他在线成员收到
+func TestSendToGroupExcludeSenderTrue(t *testing.T) {
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-send-excl", Namespace: "tenantA", OwnerID: "o1"}))
+	require.NoError(t, hub.AddGroupMembers(ctx, "tenantA", "g-send-excl", []string{"sender", "user2"}))
+
+	go hub.Run()
+	defer hub.SafeShutdown()
+	hub.WaitForStart()
+
+	senderClient := makeTestClient("c-sender-excl", "sender")
+	otherClient := makeTestClient("c-other-excl", "user2")
+	hub.Register(senderClient)
+	hub.Register(otherClient)
+
+	// 等待两个客户端均注册上线（确定性，race-safe）
+	require.Eventually(t, func() bool {
+		return hub.shardedRegistry.HasUser("sender") && hub.shardedRegistry.HasUser("user2")
+	}, 2*time.Second, 5*time.Millisecond)
+
+	msg := makeGroupMessage("sender")
+	result := hub.SendToGroup(ctx, "tenantA", "g-send-excl", msg, true)
+
+	// 总成员 2，排除发送者后仅投递给 1 个在线成员
+	assert.Equal(t, 2, result.TotalMembers)
+	assert.Equal(t, 1, result.OnlineMembers, "排除发送者后仅 1 个在线成员被投递")
+	assert.Equal(t, 1, result.Sent, "应成功投递 1 条")
+	assert.Equal(t, 0, result.Failed)
+
+	// user2 应收到消息
+	select {
+	case <-otherClient.SendChan:
+		// ok
+	case <-time.After(time.Second):
+		t.Fatal("user2 未收到群组消息")
+	}
+
+	// sender 不应收到被排除的消息
+	select {
+	case <-senderClient.SendChan:
+		t.Fatal("发送者不应收到 excludeSender=true 的消息")
+	case <-time.After(200 * time.Millisecond):
+		// ok，无消息
+	}
+}
+
+// TestSendToGroupExcludeSenderFalse 验证 excludeSender=false：全员收到（含发送者本人）
+func TestSendToGroupExcludeSenderFalse(t *testing.T) {
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-send-all", Namespace: "tenantA", OwnerID: "o1"}))
+	require.NoError(t, hub.AddGroupMembers(ctx, "tenantA", "g-send-all", []string{"sender", "user2"}))
+
+	go hub.Run()
+	defer hub.SafeShutdown()
+	hub.WaitForStart()
+
+	senderClient := makeTestClient("c-sender-all", "sender")
+	otherClient := makeTestClient("c-other-all", "user2")
+	hub.Register(senderClient)
+	hub.Register(otherClient)
+
+	require.Eventually(t, func() bool {
+		return hub.shardedRegistry.HasUser("sender") && hub.shardedRegistry.HasUser("user2")
+	}, 2*time.Second, 5*time.Millisecond)
+
+	msg := makeGroupMessage("sender")
+	result := hub.SendToGroup(ctx, "tenantA", "g-send-all", msg, false)
+
+	// 总成员 2，全员在线均被投递
+	assert.Equal(t, 2, result.TotalMembers)
+	assert.Equal(t, 2, result.OnlineMembers, "全员在线成员均被投递")
+	assert.Equal(t, 2, result.Sent, "应成功投递 2 条")
+	assert.Equal(t, 0, result.Failed)
+
+	// 发送者本人应收到（excludeSender=false）
+	select {
+	case <-senderClient.SendChan:
+		// ok
+	case <-time.After(time.Second):
+		t.Fatal("发送者应收到 excludeSender=false 的消息")
+	}
+	// user2 应收到
+	select {
+	case <-otherClient.SendChan:
+		// ok
+	case <-time.After(time.Second):
+		t.Fatal("user2 未收到群组消息")
+	}
+}
+
+// TestSendToGroupEmptySenderNoFilter 验证 excludeSender=true 但 msg.Sender 为空时不执行过滤
+// 覆盖 SendToGroup 中 `excludeSender && msg.Sender != ""` 的 false 分支
+func TestSendToGroupEmptySenderNoFilter(t *testing.T) {
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-send-nofilter", Namespace: "tenantA", OwnerID: "o1"}))
+	require.NoError(t, hub.AddGroupMembers(ctx, "tenantA", "g-send-nofilter", []string{"user1", "user2"}))
+
+	go hub.Run()
+	defer hub.SafeShutdown()
+	hub.WaitForStart()
+
+	client1 := makeTestClient("c-nf1", "user1")
+	client2 := makeTestClient("c-nf2", "user2")
+	hub.Register(client1)
+	hub.Register(client2)
+
+	require.Eventually(t, func() bool {
+		return hub.shardedRegistry.HasUser("user1") && hub.shardedRegistry.HasUser("user2")
+	}, 2*time.Second, 5*time.Millisecond)
+
+	// Sender 为空 + excludeSender=true → 不过滤，全员投递
+	msg := makeGroupMessage("")
+	result := hub.SendToGroup(ctx, "tenantA", "g-send-nofilter", msg, true)
+
+	assert.Equal(t, 2, result.TotalMembers)
+	assert.Equal(t, 2, result.OnlineMembers, "Sender 为空时不过滤，全员被投递")
+	assert.Equal(t, 2, result.Sent)
+
+	// 两个成员都应收到
+	select {
+	case <-client1.SendChan:
+	case <-time.After(time.Second):
+		t.Fatal("user1 应收到消息（Sender 为空时不过滤）")
+	}
+	select {
+	case <-client2.SendChan:
+	case <-time.After(time.Second):
+		t.Fatal("user2 应收到消息（Sender 为空时不过滤）")
+	}
+}
+
+// TestSendToGroupEmptyGroup 验证空分组（无成员）投递时立即返回，TotalMembers=0 且无错误
+// 覆盖 SendToGroup 中 `if result.TotalMembers == 0 { return result }` 早返回分支
+func TestSendToGroupEmptyGroup(t *testing.T) {
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// 不存在的分组：GetMembers 返回空切片，TotalMembers=0 直接返回
+	msg := makeGroupMessage("sender")
+	result := hub.SendToGroup(ctx, "tenantA", "g-no-such-empty", msg, false)
+	assert.Equal(t, 0, result.TotalMembers)
+	assert.Equal(t, 0, result.OnlineMembers)
+	assert.Equal(t, 0, result.Sent)
+	assert.Empty(t, result.Errors)
+	assert.Equal(t, "g-no-such-empty", result.GroupID)
+
+	// 存在但无成员的分组同样立即返回
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-empty-send", Namespace: "tenantA", OwnerID: "o1"}))
+	result = hub.SendToGroup(ctx, "tenantA", "g-empty-send", msg, true)
+	assert.Equal(t, 0, result.TotalMembers)
+	assert.Empty(t, result.Errors)
+}

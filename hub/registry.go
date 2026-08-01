@@ -98,6 +98,28 @@ func (h *Hub) handleRegister(client *Client) {
 	client.SetLastSeen(mathx.IfNotZero(client.GetLastSeen(), now))
 
 	// ================================================================
+	// 节点级总连接数硬限制（动态扩容上限）
+	// MaxConnectionsPerNode > 0 时生效，0 表示不限制
+	// 超过上限：发送 Close 帧(1013 Try Again Later)告知客户端稍后重试，再关闭连接
+	// ============================================================
+	if maxConns := h.GetMaxConnectionsPerNode(); maxConns > 0 && h.shardedRegistry.GetClientCount() >= int64(maxConns) {
+		current := h.shardedRegistry.GetClientCount()
+		h.logger.WarnKV("节点连接数已达上限，拒绝注册",
+			"client_id", client.ID,
+			"user_id", client.UserID,
+			"current_connections", current,
+			"max_connections", maxConns,
+		)
+		if client.Conn != nil {
+			// WriteControl 内部加锁且并发安全，可与读循环并发执行
+			msg := websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "节点连接数已达上限，请稍后重试")
+			_ = client.Conn.WriteControl(websocket.CloseMessage, msg, time.Now().Add(2*time.Second))
+			client.Conn.Close()
+		}
+		return
+	}
+
+	// ================================================================
 	// 临界区 - 仅 map 操作（shardedRegistry 分片锁，粒度细）
 	// 多端登录策略 + 添加到注册表，同一 shard 内原子完成
 	// ============================================================
@@ -167,6 +189,15 @@ func (h *Hub) handleRegister(client *Client) {
 	if h.routerCache != nil {
 		h.routerCache.InvalidateUser(ctx, client.UserID)
 	}
+}
+
+// GetMaxConnectionsPerNode 获取节点最大连接数（0 表示不限制）
+// 从 Performance.MaxConnectionsPerNode 读取；config 或 Performance 为 nil 时返回 0（不限制）
+func (h *Hub) GetMaxConnectionsPerNode() int {
+	if h.config == nil || h.config.Performance == nil {
+		return 0
+	}
+	return h.config.Performance.MaxConnectionsPerNode
 }
 
 // handleUnregister 处理客户端注销（内部方法）

@@ -430,6 +430,17 @@ func NewHub(config *wscconfig.WSC) *Hub {
 	// CalculateCapacities 返回：(clients, userToClients, agentClients, observerClients, sseClients)
 	// 主存储 userShards 用 clients（连接数）作为总容量提示
 	// 各分类索引用对应类型的预估连接数
+	//
+	// 预分配容量联动节点最大连接数（动态扩容策略）：
+	//   - CapacityEstimation.Clients 显式配置 > 0 时，按配置预分配
+	//   - 未配置(<=0) 时按 Performance.MaxConnectionsPerNode 自动计算，与硬限制对齐
+	//   - 两者均未配置时兜底 3000，避免预分配为 0 导致频繁扩容
+	//   - 实际连接数达到 MaxConnectionsPerNode 前 map 会按需扩容，不受预分配值约束
+	maxConnsPerNode := 0
+	if config.Performance != nil {
+		maxConnsPerNode = config.Performance.MaxConnectionsPerNode
+	}
+	config.CapacityEstimation.Clients = mathx.IfLeZero(config.CapacityEstimation.Clients, mathx.IfLeZero(maxConnsPerNode, 3000))
 	clientsCap, _, agentClientsCap, observerClientsCap, sseClientsCap := config.CapacityEstimation.CalculateCapacities()
 	registryCapacity := RegistryCapacity{
 		TotalClients:    clientsCap,

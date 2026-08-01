@@ -47,7 +47,12 @@ type RouterCache struct {
 func NewRouterCache(redisClient *redis.Client, onlineRepo OnlineStatusRepository, cfg *wscconfig.RouterCacheConfig) *RouterCache {
 	// BatchLoader: 缓存未命中时，回源查询 online_status_repo
 	// 使用 BatchGetUserNodes 批量查询（Pipeline 优化），避免 N+1 网络往返
-	batchLoader := func(ctx context.Context, userIDs []string) (map[string][]string, error) {
+	//
+	// 注意：必须显式声明为 cachex.BatchLoader[string, []string] 命名类型。
+	// KVCacheConfig.BatchLoader 字段是 any，NewKVCache 内部用类型断言 config.BatchLoader.(BatchLoader[K,V])
+	// 提取加载器。Go 中命名函数类型与字面函数类型是不同类型，若用 := 推导为字面函数类型，
+	// 类型断言会失败导致 batchLoader 为 nil，Get miss 时回退到 LoadAll 报 "has no loader"。
+	var batchLoader cachex.BatchLoader[string, []string] = func(ctx context.Context, userIDs []string) (map[string][]string, error) {
 		if onlineRepo == nil {
 			return nil, nil
 		}

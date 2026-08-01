@@ -152,18 +152,26 @@ func newClientShardedMap(totalHint int) *syncx.ShardedMap[string, map[string]*Cl
 
 // AddClient 添加客户端到注册表
 // 主存储 + 分类索引在同一 userID 的 shard 锁内原子完成（ShardedMap 保证同一 key 落同一 shard）
+//
+// 覆盖语义（断线重连场景）：当相同 clientID 已存在时，仅更新主存储与分类索引的指针，
+// 不重复累加 clientCount/sseCount，否则计数器会随每次重连持续膨胀、与实际连接数脱节
+// observerUserCount/agentUserCount 在各自 add 方法内已按"用户是否新增"判定，无需此处处理
 func (r *ShardedRegistry) AddClient(client *Client) {
 	if client == nil {
 		return
 	}
 
-	// 1. 主存储：userID → (clientID → Client)
+	// 1. 主存储：userID → (clientID → Client）
+	isNew := false
 	r.userShards.WithShardLock(client.UserID, func(data map[string]map[string]*Client) {
 		userClients, exists := data[client.UserID]
 		if !exists {
 			userClients = make(map[string]*Client)
 			data[client.UserID] = userClients
 			r.userCount.Add(1)
+		}
+		if _, dup := userClients[client.ID]; !dup {
+			isNew = true
 		}
 		userClients[client.ID] = client
 	})
@@ -172,9 +180,13 @@ func (r *ShardedRegistry) AddClient(client *Client) {
 	r.clientIDToUserID.Store(client.ID, client.UserID)
 
 	// 3. 分类索引（按类型写入对应分片）
+	//    始终调用以刷新指针（断线重连覆盖时分类索引可能持有已关闭的旧客户端指针）；
+	//    计数器仅在真正新增时累加，避免覆盖场景重复计数。
 	if client.ConnectionType == models.ConnectionTypeSSE {
 		r.addSSEClient(client)
-		r.sseCount.Add(1)
+		if isNew {
+			r.sseCount.Add(1)
+		}
 	}
 
 	if client.UserType == models.UserTypeObserver {
@@ -185,8 +197,10 @@ func (r *ShardedRegistry) AddClient(client *Client) {
 		r.addAgentClient(client)
 	}
 
-	// 4. 总计数器
-	r.clientCount.Add(1)
+	// 4. 总计数器（仅新增时累加，覆盖场景不重复计数）
+	if isNew {
+		r.clientCount.Add(1)
+	}
 }
 
 // RemoveClient 从注册表移除客户端

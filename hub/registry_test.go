@@ -156,3 +156,68 @@ func TestGetMaxConnectionsPerNode(t *testing.T) {
 		assert.Equal(t, 0, hub.GetMaxConnectionsPerNode(), "Performance 为 nil 时应返回 0（不限制）")
 	})
 }
+
+// TestShardedRegistryAddClientOverwriteNoDoubleCount 验证断线重连覆盖场景下计数器不重复累加。
+//
+// 背景：相同 ClientID 的新客户端覆盖旧客户端时，旧客户端的 map 条目被覆盖（map 大小不变），
+// 若 clientCount/sseCount 仍无条件 +1，会随每次重连持续膨胀、与实际连接数脱节
+// （表现为"活跃连接数"远大于 netstat ESTABLISHED 连接数）
+// 旧客户端读协程退出后，removeClientUnsafe 会执行"删除当前条目-回填新客户端"流程，
+// 该流程后计数器必须与实际 map 条目数一致
+func TestShardedRegistryAddClientOverwriteNoDoubleCount(t *testing.T) {
+	makeClient := func(id, userID string, connType ConnectionType, userType UserType) *Client {
+		return &Client{
+			ID:             id,
+			UserID:         userID,
+			UserType:       userType,
+			Status:         UserStatusOnline,
+			ConnectionType: connType,
+			Context:        context.Background(),
+			Metadata:       make(map[string]interface{}),
+		}
+	}
+
+	t.Run("WebSocket 覆盖不重复计数", func(t *testing.T) {
+		reg := NewShardedRegistry(true, true, RegistryCapacity{})
+
+		c1 := makeClient("client-X", "user-U", ConnectionTypeWebSocket, UserTypeCustomer)
+		reg.AddClient(c1)
+		assert.Equal(t, int64(1), reg.GetClientCount(), "首次注册后 clientCount 应为 1")
+		assert.Equal(t, int64(1), reg.GetUserCount(), "userCount 应为 1")
+
+		// 断线重连：相同 ClientID 的新客户端覆盖 c1
+		c2 := makeClient("client-X", "user-U", ConnectionTypeWebSocket, UserTypeCustomer)
+		reg.AddClient(c2)
+		assert.Equal(t, int64(1), reg.GetClientCount(), "覆盖场景 clientCount 不应重复累加")
+		assert.Equal(t, int64(1), reg.GetUserCount(), "userCount 应保持为 1")
+
+		// 模拟 removeClientUnsafe 的"删除-回填"流程
+		removed := reg.RemoveClient(c2.ID, c2.UserID)
+		require.Equal(t, c2, removed, "应返回当前注册的新客户端 c2")
+		assert.Equal(t, int64(0), reg.GetClientCount(), "删除后 clientCount 应为 0")
+		reg.AddClient(removed) // 回填新客户端
+		assert.Equal(t, int64(1), reg.GetClientCount(), "回填后 clientCount 应恢复为 1")
+
+		// 多轮重连后计数器仍应准确
+		for i := 0; i < 10; i++ {
+			reg.AddClient(makeClient("client-X", "user-U", ConnectionTypeWebSocket, UserTypeCustomer))
+		}
+		assert.Equal(t, int64(1), reg.GetClientCount(), "10 轮重连后 clientCount 仍应为 1")
+		assert.Equal(t, int64(1), reg.GetUserCount(), "10 轮重连后 userCount 仍应为 1")
+	})
+
+	t.Run("SSE 覆盖不重复计数", func(t *testing.T) {
+		reg := NewShardedRegistry(true, true, RegistryCapacity{})
+
+		s1 := makeClient("sse-X", "user-S", ConnectionTypeSSE, UserTypeCustomer)
+		reg.AddClient(s1)
+		assert.Equal(t, int64(1), reg.GetSSEClientCount(), "SSE 首次注册 sseCount 应为 1")
+		assert.Equal(t, int64(1), reg.GetClientCount(), "SSE 首次注册 clientCount 应为 1")
+
+		// 相同 ClientID 的 SSE 客户端覆盖
+		s2 := makeClient("sse-X", "user-S", ConnectionTypeSSE, UserTypeCustomer)
+		reg.AddClient(s2)
+		assert.Equal(t, int64(1), reg.GetSSEClientCount(), "SSE 覆盖场景 sseCount 不应重复累加")
+		assert.Equal(t, int64(1), reg.GetClientCount(), "SSE 覆盖场景 clientCount 不应重复累加")
+	})
+}

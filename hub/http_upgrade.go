@@ -80,7 +80,7 @@ type ClientAttributes struct {
 	UserType  UserType // 用户类型
 	DeviceID  string   // 设备ID
 	Namespace string   // 命名空间ID（默认 "default"，用于命名空间隔离与消息过滤）
-	GroupID   string   // 观察者的观察群组ID（仅观察者使用，从 query/header 提取；普通用户不使用，群组成员关系由业务层 API 管理）
+	GroupID   string   // 群组ID（观察者表示观察范围；普通用户表示连接后自动加入的成员组；空则加入默认组）
 }
 
 // CreateClientFromRequest 从 HTTP 请求创建 WebSocket 客户端
@@ -102,20 +102,20 @@ func (h *Hub) CreateClientFromRequest(r *http.Request, conn *websocket.Conn, att
 	metaMap["x-device-id"] = attrs.DeviceID
 
 	// 使用 NewClient 构造函数创建客户端（自动初始化时间和状态）
+	// 观察者：GroupID 表示观察范围；普通用户：GroupID 表示连接后自动加入的成员组（空则加入默认组）
+	// 群组成员关系：连接时自动加入成员组（有 GroupID 加入指定组，无则加入默认组）
+	// 业务层仍可通过 API（AddGroupMembers/RemoveGroupMembers）管理成员关系
 	client := NewClient(attrs.ClientID, attrs.UserID, attrs.UserType).
 		WithClientIP(requestMeta.ClientIP).
 		WithClientType(MapDeviceTypeToClientType(requestMeta.DeviceType)).
 		WithWebSocketConn(conn).
 		WithNodeInfo(h.nodeID, h.config.NodeIP, h.config.NodePort).
 		WithNamespace(attrs.Namespace).
+		WithGroupID(attrs.GroupID).
 		WithMetadataMap(metaMap).
 		// 从 Hub 生命周期 ctx 派生连接级 ctx（r.Context() 在 WebSocket 升级后会取消，不适合长连接）
 		WithContext(context.WithValue(h.ctx, ContextKeySenderID, attrs.UserID))
 
-	// 观察者：从 query/header 设置 GroupID（观察范围）；普通用户不设 GroupID（群组成员关系由业务层 API 管理）
-	if attrs.UserType == UserTypeObserver && attrs.GroupID != "" {
-		client = client.WithGroupID(attrs.GroupID)
-	}
 
 	// 初始化客户端 SendChan（根据客户端类型使用配置的容量）
 	h.initClientSendChan(client)
@@ -297,8 +297,6 @@ func (h *Hub) HandleWebSocketUpgrade(w http.ResponseWriter, r *http.Request) {
 	h.Register(client)
 	success = true
 
-	// 群组成员关系由业务层通过 API（AddGroupMembers/RemoveGroupMembers）管理
-	// register 只管连接，不自动加群
 
 	// 发送客户端注册成功确认消息（如果配置启用）
 	if h.config.ResponseHeaders.SendRegisteredMessage {

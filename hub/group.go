@@ -786,6 +786,42 @@ func (h *Hub) joinSystemGroupsOnConnect(ctx context.Context, client *Client) {
 	h.ensureAndJoinSystemGroup(ctx, client.Namespace, groupID, client.UserID)
 }
 
+// joinMemberGroupOnConnect 客户端连接时自动加入成员组
+//
+// 普通用户（非观察者）连接时自动加入成员组：有 GroupID 加入指定组，无则加入默认组（DefaultGroupID）
+// 群组不存在时自动创建；成员关系持久化于 Redis，离线保留，重连幂等（AddMembers 集合语义）
+// 观察者不作为成员加入群组（仅观察，不接收成员消息）
+//
+// 系统组名（__ 前缀，如默认组）走 EnsureSystemGroup 路径创建；
+// 业务组名走 AddGroupMembers 路径（自动创建 + MaxMembers 校验）
+func (h *Hub) joinMemberGroupOnConnect(ctx context.Context, client *Client) {
+	if h.groupRepo == nil {
+		return
+	}
+	// 观察者不作为成员加入群组
+	if client.UserType == models.UserTypeObserver {
+		return
+	}
+	// 有 GroupID 加入指定组，无则加入默认组（GetGroupID 空值返回 DefaultGroupID）
+	groupID := client.GetGroupID()
+	namespace := client.Namespace
+
+	if models.IsSystemGroup(groupID) {
+		// 系统保留组名（如默认组 __default_gp__）：走 EnsureSystemGroup 路径（CreateGroup 会拒绝 __ 前缀）
+		h.ensureAndJoinSystemGroup(ctx, namespace, groupID, client.UserID)
+		return
+	}
+	// 业务组：走 AddGroupMembers（自动创建 + MaxMembers 校验）
+	if err := h.AddGroupMembers(ctx, namespace, groupID, []string{client.UserID}); err != nil {
+		h.logger.WarnContextKV(ctx, "连接时自动加入成员组失败",
+			"namespace", namespace, "group_id", groupID,
+			"user_id", client.UserID, "error", err)
+		return
+	}
+	// 触发群组成员加入回调（register 自动装配时触发，手动 AddGroupMembers 不触发）
+	h.triggerGroupMemberJoinCallback(namespace, groupID, []string{client.UserID})
+}
+
 // leaveSystemGroupsOnDisconnect 客户端断开时自动离开系统保留组
 //
 // 多端登录保护：仅当该 userID 已无任何在线连接时才离开系统组

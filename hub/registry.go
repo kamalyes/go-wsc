@@ -162,9 +162,10 @@ func (h *Hub) handleRegister(client *Client) {
 		}
 	})
 
-	// 系统组加入 + 在线状态同步 + 离线消息推送（提交到分布式池）
+	// 系统组加入 + 成员组加入 + 在线状态同步 + 离线消息推送（提交到分布式池）
 	h.workerPool.TrySubmitDistributed(func() {
 		h.joinSystemGroupsOnConnect(ctx, client)
+		h.joinMemberGroupOnConnect(ctx, client)
 		h.syncOnlineStatus(client)
 		h.pushOfflineMessagesOnConnect(client)
 	})

@@ -61,8 +61,8 @@ github.com/json-iterator/go v1.1.12 h1:PV8peI4a0ysnczrg+LtxykD8LfKY9ML6u2jnxaEnr
 github.com/json-iterator/go v1.1.12/go.mod h1:e30LSqwooZae/UwlEbR2852Gd8hjQvJoHmT4TnhNGBo=
 github.com/kamalyes/go-argus v0.3.1 h1:JuZkSvPlvFkosr7BXArI4fBJolEz8ST/3T565UyY7L8=
 github.com/kamalyes/go-argus v0.3.1/go.mod h1:dG5ttCh6wVn1u5qq4NEvoFtibgQ5Bj3PT8rw7HKX8c0=
-github.com/kamalyes/go-cachex v0.2.8 h1:gXxJzR+/6B/yduZRGJveChFioD0yPUvOt4/jcG5RY/E=
-github.com/kamalyes/go-cachex v0.2.8/go.mod h1:6yOAw/VrpK3RQZopQITyhcf7WfqoqnA/oY7E/Hm7658=
+github.com/kamalyes/go-cachex v0.2.9 h1:vfpht1ZqL17P4oTKrvMRh/XGLhbkzdrFWNBWpbZyQmI=
+github.com/kamalyes/go-cachex v0.2.9/go.mod h1:6yOAw/VrpK3RQZopQITyhcf7WfqoqnA/oY7E/Hm7658=
 github.com/kamalyes/go-config v0.21.11 h1:8/hORljRd64LTiepvrWmbx8ChMqPAtnXdp1W1U09bC8=
 github.com/kamalyes/go-config v0.21.11/go.mod h1:2KqlJrGiHYlqpFpK0swh8nvwWMvUDsb1XIpUOXhWCDE=
 github.com/kamalyes/go-logger v0.5.6 h1:k3c4pxc+miLahstgw/U4ukOFYvlKxDUoJzNJgcYYF9M=

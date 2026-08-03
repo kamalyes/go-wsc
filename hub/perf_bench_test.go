@@ -377,3 +377,209 @@ func BenchmarkMixed(b *testing.B) {
 		<-done
 	}
 }
+
+// ============================================================================
+// 6. 连接自动加群性能（joinMemberGroupOnConnect 开销 + 默认组消息投递）
+//
+// 覆盖：
+//   - 自动加群方法直接开销（默认组/业务组 × 新成员/重连幂等）
+//   - Register 端到端开销（有 GroupID vs 无 GroupID）
+//   - SendToGroup → 默认组大规模成员投递
+//   - BroadcastToAllGroups 含默认组去重开销
+// ============================================================================
+
+// benchJoinScale 自动加群基准测试规模档位（成员数）
+var benchJoinScale = []int{100, 1000, 10000}
+
+// BenchmarkJoinMemberGroupOnConnect 直接测量 joinMemberGroupOnConnect 开销
+func BenchmarkJoinMemberGroupOnConnect(b *testing.B) {
+	for _, n := range benchJoinScale {
+		// 默认组 - 新成员（每次不同 userID，走 EnsureSystemGroup + AddMembers）
+		b.Run(fmt.Sprintf("default_group/new_member/%d", n), func(b *testing.B) {
+			hub, groupRepo, cleanup := setupPerfHub(b)
+			defer cleanup()
+			ctx := context.Background()
+			// 预填充 n 个成员到默认组
+			preIDs := make([]string, n)
+			for i := 0; i < n; i++ {
+				preIDs[i] = fmt.Sprintf("pre-def-%d", i)
+			}
+			groupRepo.EnsureSystemGroup(ctx, "bench-ns", models.DefaultGroupID)
+			groupRepo.AddMembers(ctx, "bench-ns", models.DefaultGroupID, preIDs)
+
+			b.ResetTimer()
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				client := &Client{
+					ID:        fmt.Sprintf("c-def-%d", i),
+					UserID:    fmt.Sprintf("u-def-%d", i),
+					UserType:  UserTypeCustomer,
+					Namespace: "bench-ns",
+				}
+				hub.joinMemberGroupOnConnect(ctx, client)
+			}
+		})
+
+		// 默认组 - 重连幂等（同一 userID 反复加入，SADD 集合语义去重）
+		b.Run(fmt.Sprintf("default_group/reconnect/%d", n), func(b *testing.B) {
+			hub, groupRepo, cleanup := setupPerfHub(b)
+			defer cleanup()
+			ctx := context.Background()
+			preIDs := make([]string, n)
+			for i := 0; i < n; i++ {
+				preIDs[i] = fmt.Sprintf("pre-rc-%d", i)
+			}
+			groupRepo.EnsureSystemGroup(ctx, "bench-ns", models.DefaultGroupID)
+			groupRepo.AddMembers(ctx, "bench-ns", models.DefaultGroupID, preIDs)
+
+			client := &Client{
+				ID:        "c-reconnect",
+				UserID:    "u-reconnect",
+				UserType:  UserTypeCustomer,
+				Namespace: "bench-ns",
+			}
+			// 首次加入
+			hub.joinMemberGroupOnConnect(ctx, client)
+
+			b.ResetTimer()
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				hub.joinMemberGroupOnConnect(ctx, client)
+			}
+		})
+
+		// 业务组 - 新成员（每次不同 userID，走 AddGroupMembers 自动创建判断 + AddMembers）
+		b.Run(fmt.Sprintf("business_group/new_member/%d", n), func(b *testing.B) {
+			hub, groupRepo, cleanup := setupPerfHub(b)
+			defer cleanup()
+			ctx := context.Background()
+			preIDs := make([]string, n)
+			for i := 0; i < n; i++ {
+				preIDs[i] = fmt.Sprintf("pre-bg-%d", i)
+			}
+			groupRepo.CreateGroup(ctx, &Group{GroupID: "bench-bg", Namespace: "bench-ns", OwnerID: "o"})
+			groupRepo.AddMembers(ctx, "bench-ns", "bench-bg", preIDs)
+
+			b.ResetTimer()
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				client := &Client{
+					ID:        fmt.Sprintf("c-bg-%d", i),
+					UserID:    fmt.Sprintf("u-bg-%d", i),
+					UserType:  UserTypeCustomer,
+					Namespace: "bench-ns",
+					GroupID:   "bench-bg",
+				}
+				hub.joinMemberGroupOnConnect(ctx, client)
+			}
+		})
+
+		// 业务组 - 重连幂等
+		b.Run(fmt.Sprintf("business_group/reconnect/%d", n), func(b *testing.B) {
+			hub, groupRepo, cleanup := setupPerfHub(b)
+			defer cleanup()
+			ctx := context.Background()
+			groupRepo.CreateGroup(ctx, &Group{GroupID: "bench-bg-rc", Namespace: "bench-ns", OwnerID: "o"})
+			groupRepo.AddMembers(ctx, "bench-ns", "bench-bg-rc", []string{"u-bg-rc"})
+
+			client := &Client{
+				ID:        "c-bg-rc",
+				UserID:    "u-bg-rc",
+				UserType:  UserTypeCustomer,
+				Namespace: "bench-ns",
+				GroupID:   "bench-bg-rc",
+			}
+			hub.joinMemberGroupOnConnect(ctx, client)
+
+			b.ResetTimer()
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				hub.joinMemberGroupOnConnect(ctx, client)
+			}
+		})
+	}
+}
+
+// BenchmarkRegisterWithAutoJoin 测量 Register 端到端开销（含异步自动加群）
+func BenchmarkRegisterWithAutoJoin(b *testing.B) {
+	for _, n := range benchScale {
+		// 无 GroupID（自动加入默认组）
+		b.Run(fmt.Sprintf("default_group/%d", n), func(b *testing.B) {
+			hub, _, cleanup := setupPerfHub(b)
+			defer cleanup()
+			clients := makeBenchClients("rad", n, 64)
+			b.ResetTimer()
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				hub.Register(clients[i%n])
+			}
+		})
+
+		// 有 GroupID（自动加入业务组）
+		b.Run(fmt.Sprintf("business_group/%d", n), func(b *testing.B) {
+			hub, _, cleanup := setupPerfHub(b)
+			defer cleanup()
+			clients := makeBenchClients("rab", n, 64)
+			for _, c := range clients {
+				c.GroupID = "bench-reg-bg"
+			}
+			b.ResetTimer()
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				hub.Register(clients[i%n])
+			}
+		})
+	}
+}
+
+// BenchmarkSendToGroupDefaultGroup 测量向默认组投递消息的开销（全员在线）
+func BenchmarkSendToGroupDefaultGroup(b *testing.B) {
+	for _, n := range benchJoinScale {
+		b.Run(fmt.Sprintf("serial/%d", n), func(b *testing.B) {
+			hub, groupRepo, cleanup := setupPerfHub(b)
+			defer cleanup()
+			ctx := context.Background()
+			clients := makeBenchClients("sdg", n, 512)
+			registerAll(hub, clients) // 注册时自动加入默认组（__default_ns__）
+
+			// 确保默认组存在并有成员
+			ns := models.DefaultNamespace
+			groupRepo.EnsureSystemGroup(ctx, ns, models.DefaultGroupID)
+			groupRepo.AddMembers(ctx, ns, models.DefaultGroupID, memberIDsFrom(clients))
+
+			msg := makeBenchMsg("bench", "")
+			b.ResetTimer()
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				hub.SendToGroup(ctx, ns, models.DefaultGroupID, msg, false)
+			}
+		})
+	}
+}
+
+// BenchmarkBroadcastToAllGroupsWithDefaultGroup 测量含默认组的全群组广播去重开销
+func BenchmarkBroadcastToAllGroupsWithDefaultGroup(b *testing.B) {
+	for _, n := range benchJoinScale {
+		b.Run(fmt.Sprintf("serial/%d", n), func(b *testing.B) {
+			hub, groupRepo, cleanup := setupPerfHub(b)
+			defer cleanup()
+			ctx := context.Background()
+			clients := makeBenchClients("bad", n, 512)
+			registerAll(hub, clients)
+
+			ns := "bench-ns"
+			// 每个客户端既在业务组也在默认组（模拟自动加群后的真实分布）
+			_, gid := prepareGroup(b, hub, groupRepo, "bench-dup-g", memberIDsFrom(clients))
+			groupRepo.EnsureSystemGroup(ctx, ns, models.DefaultGroupID)
+			groupRepo.AddMembers(ctx, ns, models.DefaultGroupID, memberIDsFrom(clients))
+
+			msg := makeBenchMsg("bench", "")
+			b.ResetTimer()
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				hub.BroadcastToAllGroups(ctx, ns, msg)
+			}
+			_ = gid
+		})
+	}
+}

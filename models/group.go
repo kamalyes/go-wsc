@@ -21,11 +21,11 @@ import (
 // 本地分片索引（agentShards/observerShards）仍保留做 O(1) 缓存，
 // Redis 系统组用于跨节点共享成员关系与显式广播
 const (
-	DefaultNamespace     = "default"   // DefaultNamespace 默认命名空间ID
-	DefaultGroupID       = "default"   // DefaultGroupID 默认群组ID
-	SystemGroupAgents    = "__agents__"    // 客服系统组（每命名空间一个，ns:__agents__）
-	SystemGroupObservers = "__observers__" // 观察者系统组（全局 namespace="" 或命名空间级）
-	SystemGroupPrefix    = "__"            // 系统组前缀，业务组名禁止以此开头
+	DefaultNamespace     = "__default_ns__" // DefaultNamespace 默认命名空间ID
+	DefaultGroupID       = "__default_gp__" // DefaultGroupID 默认群组ID
+	SystemGroupAgents    = "__agents__"     // 客服系统组（每命名空间一个，ns:__agents__）
+	SystemGroupObservers = "__observers__"  // 观察者系统组（全局 namespace="" 或命名空间级）
+	SystemGroupPrefix    = "__"             // 系统组前缀，业务组名禁止以此开头
 )
 
 // IsSystemGroup 判断 groupID 是否为系统保留组（`__` 前缀）

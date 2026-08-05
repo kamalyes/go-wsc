@@ -190,6 +190,12 @@ func TestHubRedisStatistics(t *testing.T) {
 
 // TestHubClusterStatistics 测试多节点集群统计聚合
 func TestHubClusterStatistics(t *testing.T) {
+	// 清除环境变量，确保 generateNodeID 走 IP:Port 回退路径
+	// 否则同一机器上两个 Hub 实例会因 HOSTNAME 相同而产生相同 nodeID，导致集群统计合并为单节点
+	t.Setenv("POD_NAME", "")
+	t.Setenv("HOSTNAME", "")
+	t.Setenv("NODE_ID", "")
+
 	// 1. 创建 Redis 客户端
 	redisClient := NewTestRedisClient(t)
 	// 延迟关闭Redis客户端，确保所有异步操作完成

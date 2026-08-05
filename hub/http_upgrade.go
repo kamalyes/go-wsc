@@ -116,7 +116,6 @@ func (h *Hub) CreateClientFromRequest(r *http.Request, conn *websocket.Conn, att
 		// 从 Hub 生命周期 ctx 派生连接级 ctx（r.Context() 在 WebSocket 升级后会取消，不适合长连接）
 		WithContext(context.WithValue(h.ctx, ContextKeySenderID, attrs.UserID))
 
-
 	// 初始化客户端 SendChan（根据客户端类型使用配置的容量）
 	h.initClientSendChan(client)
 	return client
@@ -149,6 +148,7 @@ func (h *Hub) extractClientAttributes(r *http.Request) *ClientAttributes {
 			userType := claims.UserType
 			deviceID := claims.DeviceID
 			namespace := claims.Namespace
+			groupID := claims.GroupID
 			// UserType 默认值为 visitor
 			userType = mathx.IfEmpty(userType, string(UserTypeVisitor))
 			// 基于 UserID + DeviceID + UserType 时间窗口哈希生成 ClientID
@@ -159,6 +159,7 @@ func (h *Hub) extractClientAttributes(r *http.Request) *ClientAttributes {
 				UserType:  UserType(userType),
 				DeviceID:  deviceID,
 				Namespace: namespace,
+				GroupID:   groupID,
 			}
 		}
 	}
@@ -296,7 +297,6 @@ func (h *Hub) HandleWebSocketUpgrade(w http.ResponseWriter, r *http.Request) {
 	client = h.CreateClientFromRequest(r, conn, attrs)
 	h.Register(client)
 	success = true
-
 
 	// 发送客户端注册成功确认消息（如果配置启用）
 	if h.config.ResponseHeaders.SendRegisteredMessage {

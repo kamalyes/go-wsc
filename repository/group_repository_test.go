@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/kamalyes/go-wsc/models"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -46,7 +47,7 @@ func TestCreateGroup(t *testing.T) {
 		now := time.Now().Truncate(time.Second)
 		g := &Group{
 			GroupID:    "g-create",
-			Namespace:   "tenantA",
+			Namespace:  "tenantA",
 			Name:       "测试群",
 			OwnerID:    "u-owner",
 			MaxMembers: 100,
@@ -82,18 +83,18 @@ func TestCreateGroup(t *testing.T) {
 		}
 		require.NoError(t, repo.CreateGroup(ctx, g))
 
-		// 应能在 default 命名空间下查到（CreateGroup 内部按 GetNamespace 解析 key）
-		got, err := repo.GetGroup(ctx, "default", "g-default-tenant")
+		// 应能在 DefaultNamespace 下查到（CreateGroup 内部按 GetNamespace 解析 key）
+		got, err := repo.GetGroup(ctx, models.DefaultNamespace, "g-default-tenant")
 		require.NoError(t, err)
-		// 元信息按原值序列化，Namespace 字段保持空串，但语义上归入 default
-		assert.Equal(t, "default", got.GetNamespace(), "GetNamespace 应解析为 default")
+		// 元信息按原值序列化，Namespace 字段保持空串，但语义上归入 DefaultNamespace
+		assert.Equal(t, models.DefaultNamespace, got.GetNamespace(), "GetNamespace 应解析为 DefaultNamespace")
 
 		// 不应在其他命名空间下查到
 		_, err = repo.GetGroup(ctx, "tenantA", "g-default-tenant")
 		assert.ErrorIs(t, err, ErrGroupNotFound)
 
-		// default 命名空间群组集合应包含该群组
-		namespaceGroups, err := repo.GetNamespaceGroups(ctx, "default")
+		// DefaultNamespace 命名空间群组集合应包含该群组
+		namespaceGroups, err := repo.GetNamespaceGroups(ctx, models.DefaultNamespace)
 		require.NoError(t, err)
 		assert.Contains(t, namespaceGroups, "g-default-tenant")
 	})
@@ -723,7 +724,7 @@ func TestGetGroupNamespace(t *testing.T) {
 	// 创建群组
 	require.NoError(t, repo.CreateGroup(ctx, &Group{
 		GroupID:    "group-1",
-		Namespace:   "tenantA",
+		Namespace:  "tenantA",
 		OwnerID:    "owner-1",
 		MaxMembers: 100,
 	}))
@@ -743,7 +744,7 @@ func TestGetGroupNamespace(t *testing.T) {
 		// tenantB 也创建 group-1（同命名空间唯一，跨命名空间可重复）
 		require.NoError(t, repo.CreateGroup(ctx, &Group{
 			GroupID:    "group-1",
-			Namespace:   "tenantB",
+			Namespace:  "tenantB",
 			OwnerID:    "owner-2",
 			MaxMembers: 100,
 		}))

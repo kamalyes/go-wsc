@@ -620,6 +620,12 @@ func TestHubWelcomeMessage(t *testing.T) {
 
 // TestHubNodeID 测试节点ID
 func TestHubNodeID(t *testing.T) {
+	// 清除环境变量，确保 generateNodeID 走 IP:Port 回退路径（而非 HOSTNAME/POD_NAME）
+	// 否则同一机器上两个 Hub 实例会因 HOSTNAME 相同而产生相同 nodeID
+	t.Setenv("POD_NAME", "")
+	t.Setenv("HOSTNAME", "")
+	t.Setenv("NODE_ID", "")
+
 	hub := NewHub(wscconfig.Default())
 	defer hub.Shutdown()
 

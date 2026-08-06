@@ -106,11 +106,13 @@ func (h *Hub) handleHeartbeatMessage(client *Client) {
 	// 💓 记录心跳日志
 	h.logWithClient(logger.DEBUG, "💓 收到心跳消息", client)
 
-	// 异步更新 Redis 中的在线状态和心跳时间（不阻塞心跳主流程）
+	// 异步重建 Redis 在线索引与跨节点路由（不阻塞心跳主流程）
 	// 使用单 goroutine worker 消费 channel，替代每次心跳创建独立 goroutine
+	// 投递 *Client：worker 直接调用 SetClientOnline 无条件刷新 ZSET 分数，
+	// 即使 Redis 中 client:<id> 键已过期/被淘汰，也能基于内存客户端重建索引
 	if h.onlineStatusRepo != nil {
 		select {
-		case h.heartbeatRedisCh <- client.ID:
+		case h.heartbeatRedisCh <- client:
 		default:
 			// channel 满，跳过本次 Redis 更新（心跳下次还会来）
 		}

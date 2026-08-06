@@ -17,7 +17,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-wsc/repository"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -292,4 +295,101 @@ func TestMultipleGoroutinesSendingToSameClient(t *testing.T) {
 
 	wg.Wait()
 	assert.True(t, true, "多发送者测试完成，没有发生 panic")
+}
+
+// TestHeartbeatRedisWorkerNoDeadlock 验证心跳 Redis worker 在「并发心跳 + 并发断开 + 关闭」下无死锁
+//
+// 覆盖修改后的完整路径：
+//  1. handleHeartbeatMessage 投递 *Client 到 heartbeatRedisCh（chan *Client，非阻塞 send）
+//  2. processHeartbeatRedisUpdates worker flush 调用 BatchSetClientsOnline（json.Marshal + Lua）
+//  3. IsClosed() 过滤已断开客户端
+//  4. SafeShutdown：h.cancel() → worker flush 残余 → h.wg.Wait()
+//
+// 使用 miniredis 提供真实 Redis 语义，确保 Lua 脚本执行路径被覆盖
+// 带死锁守护：30s 未完成则判定死锁并失败
+func TestHeartbeatRedisWorkerNoDeadlock(t *testing.T) {
+	mr := miniredis.RunT(t)
+	redisClient := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer redisClient.Close()
+
+	config := wscconfig.Default().
+		WithNodeInfo("127.0.0.1", 18081).
+		WithHeartbeatInterval(30 * time.Second).
+		WithMessageBufferSize(256)
+
+	hub := NewHub(config)
+	onlineStatusRepo := repository.NewRedisOnlineStatusRepository(redisClient, &wscconfig.OnlineStatus{
+		KeyPrefix: "wsc:test:online:",
+		TTL:       60 * time.Second,
+	})
+	hub.SetOnlineStatusRepository(onlineStatusRepo)
+
+	go hub.Run()
+	hub.WaitForStart()
+	// defer SafeShutdown 本身也验证关闭路径（cancel → flush → wg.Wait）无死锁
+	defer func() { _ = hub.SafeShutdown() }()
+
+	const numClients = 60
+	const heartbeatsPerClient = 10
+	clients := make([]*Client, numClients)
+	for i := 0; i < numClients; i++ {
+		// SendChan 缓冲需 >= heartbeatsPerClient，避免 pong 阻塞 sendPongResponse
+		c := &Client{
+			ID:            hub.idGenerator.GenerateRequestID(),
+			UserID:        hub.idGenerator.GenerateRequestID(),
+			UserType:      UserTypeCustomer,
+			Status:        UserStatusOnline,
+			NodeID:        "test-node", // BatchSetClientsOnline 要求 NodeID 非空
+			LastSeen:      time.Now(),
+			LastHeartbeat: time.Now(),
+			SendChan:      make(chan []byte, heartbeatsPerClient+4),
+			Context:       context.Background(),
+		}
+		clients[i] = c
+		hub.Register(c)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var wg sync.WaitGroup
+
+		// 并发心跳：向 heartbeatRedisCh 投递 *Client
+		for _, c := range clients {
+			wg.Add(1)
+			go func(cl *Client) {
+				defer wg.Done()
+				for j := 0; j < heartbeatsPerClient; j++ {
+					hub.handleHeartbeatMessage(cl)
+					time.Sleep(time.Millisecond)
+				}
+			}(c)
+		}
+
+		// 并发注销前一半客户端：触发 worker 的 IsClosed() 过滤路径
+		for i := 0; i < numClients/2; i++ {
+			wg.Add(1)
+			go func(cl *Client) {
+				defer wg.Done()
+				time.Sleep(5 * time.Millisecond)
+				hub.Unregister(cl)
+			}(clients[i])
+		}
+
+		wg.Wait()
+		// 让 worker 的 2s ticker 至少触发一次，确保 BatchSetClientsOnline 真正执行
+		time.Sleep(2500 * time.Millisecond)
+	}()
+
+	select {
+	case <-done:
+		// 正常完成
+	case <-time.After(30 * time.Second):
+		t.Fatal("检测到死锁：心跳 Redis worker 在 30s 内未完成")
+	}
+
+	// 验证在线索引确实被 worker 重建（后半部分客户端仍在线）
+	online, err := hub.IsUserOnline(clients[numClients-1].UserID)
+	assert.NoError(t, err)
+	assert.True(t, online, "在线客户端应被心跳 worker 重建到 Redis 在线索引")
 }

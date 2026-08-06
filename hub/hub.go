@@ -385,7 +385,9 @@ type Hub struct {
 	clusterBatcher *ClusterDispatchBatcher
 
 	// 心跳 Redis 更新通道（替代每次心跳创建 goroutine）
-	heartbeatRedisCh chan string
+	// 携带 *Client 而非 clientID，使 worker 在 Redis 中 client:<id> 键缺失/过期时
+	// 仍能基于内存客户端重建在线索引与跨节点路由信息
+	heartbeatRedisCh chan *Client
 
 	// 消息统计原子计数器（替代每次消息创建 goroutine 更新 Redis）
 	msgSentCount       atomic.Int64
@@ -471,7 +473,7 @@ func NewHub(config *wscconfig.WSC) *Hub {
 		ctx:              ctx,
 		cancel:           cancel,
 		startCh:          make(chan struct{}),
-		heartbeatRedisCh: make(chan string, 1024),
+		heartbeatRedisCh: make(chan *Client, 1024),
 		config:           config,
 		logger:           InitLogger(config),
 		msgPool: sync.Pool{

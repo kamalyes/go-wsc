@@ -216,12 +216,22 @@ func (h *Hub) reportPerformanceMetrics() {
 
 // processHeartbeatRedisUpdates 单 goroutine 处理所有客户端的心跳 Redis 更新
 // 替代每次心跳创建独立 goroutine 的模式，大幅减少 goroutine 创建/GC 压力
+//
+// 关键设计：投递 *Client，flush 时直接调用 BatchSetClientsOnline 无条件重建
+// 在线索引（SETEX client:<id> + ZADD user_clients/node_clients/all_users/type，
+// 全部以最新 expireTime 刷新 score）。这样即使 Redis 中 client:<id> 键已过期或
+// 被 maxmemory 淘汰，心跳仍能重建索引，避免「用户实际在线但查询为离线」、
+// 跨节点路由 GetUserNodes 返回空的问题
+//
+// 断开竞态保护：removeClientUnsafe 中 closeClientChannel(MarkClosed) 先于
+// removeOnlineStatusFromRedis(SetClientOffline) 执行，故 flush 时用 IsClosed()
+// 过滤已断开客户端，避免为已下线客户端重新写入在线索引
 func (h *Hub) processHeartbeatRedisUpdates() {
 	h.wg.Add(1)
 	defer h.wg.Done()
 
-	// 批量收集 clientID，定时刷写
-	batch := make(map[string]struct{}, 256)
+	// 按 clientID 去重收集客户端（同一客户端多次心跳只保留最新指针）
+	batch := make(map[string]*Client, 256)
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
@@ -229,20 +239,36 @@ func (h *Hub) processHeartbeatRedisUpdates() {
 		if len(batch) == 0 {
 			return
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		for clientID := range batch {
-			if err := h.onlineStatusRepo.UpdateClientHeartbeat(ctx, clientID); err != nil {
-				h.logger.DebugKV("更新 Redis 心跳失败", "client_id", clientID, "error", err)
-			}
+
+		// 过滤已断开客户端，避免为其重建在线索引（断开竞态保护）
+		liveClients := make([]*Client, 0, len(batch))
+		for clientID, client := range batch {
 			delete(batch, clientID)
+			if client != nil && !client.IsClosed() {
+				liveClients = append(liveClients, client)
+			}
 		}
-		cancel()
+		if len(liveClients) == 0 {
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+
+		// 无条件重建在线索引与跨节点路由信息（刷新所有 ZSET score + client:<id> 键）
+		if err := h.onlineStatusRepo.BatchSetClientsOnline(ctx, liveClients); err != nil {
+			h.logger.DebugKV("重建 Redis 在线状态失败",
+				"count", len(liveClients), "error", err)
+		}
 	}
 
 	for {
 		select {
-		case clientID := <-h.heartbeatRedisCh:
-			batch[clientID] = struct{}{}
+		case client := <-h.heartbeatRedisCh:
+			if client == nil {
+				continue
+			}
+			batch[client.ID] = client
 			// 批量到达阈值时提前刷写
 			if len(batch) >= 256 {
 				flush()
@@ -358,6 +384,11 @@ func (h *Hub) SafeShutdown() error {
 	if !h.shutdown.CompareAndSwap(false, true) {
 		return nil // 已经在关闭中
 	}
+
+	// 停止 workerPool：defer 保证在 h.wg.Wait() 完成后才执行（LIFO），
+	// 此时所有 wg 管理的 goroutine 已退出，不会再向 workerPool 提交任务，
+	// 可安全关闭 4 个子池（Message/Callback/Record/Distributed），避免 worker goroutine 泄漏
+	defer h.workerPool.Stop()
 
 	// 使用 Console 分组记录关闭流程
 	cg := h.logger.NewConsoleGroup()

@@ -13,7 +13,7 @@ require (
 	github.com/kamalyes/go-config v0.21.11
 	github.com/kamalyes/go-logger v0.5.6
 	github.com/kamalyes/go-pbmo v0.1.8
-	github.com/kamalyes/go-sqlbuilder v0.6.0
+	github.com/kamalyes/go-sqlbuilder v0.6.1
 	github.com/kamalyes/go-toolbox v0.15.7
 	github.com/redis/go-redis/v9 v9.21.0
 	github.com/stretchr/testify v1.11.1

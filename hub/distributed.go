@@ -72,14 +72,21 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMe
 
 	// 3. 没有其他节点 → 本地发送
 	if len(otherNodes) == 0 {
+		h.logger.InfoKV("📍 [投递诊断] 用户仅在本节点，走本地投递",
+			"user_id", userID,
+			"message_id", msg.MessageID,
+			"node_id", h.nodeID,
+			"all_nodes", nodeIDs,
+		)
 		return false, nil
 	}
 
-	h.logger.DebugKV("跨节点路由消息",
+	h.logger.InfoKV("📍 [投递诊断] 用户在其他节点，发起跨节点路由",
 		"message_id", msg.MessageID,
 		"user_id", userID,
 		"from_node", h.nodeID,
 		"to_nodes", otherNodes,
+		"all_nodes", nodeIDs,
 		"grpc_enabled", h.IsGRPCEnabled(),
 	)
 
@@ -226,9 +233,21 @@ func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *Distrib
 
 	// 快速检查用户是否存在（避免无用户时序列化开销）
 	if !h.shardedRegistry.HasUser(distMsg.TargetID) {
-		h.logger.DebugKV("用户不在本节点", "user_id", distMsg.TargetID)
+		h.logger.DebugKV("[跨Pod] 用户不在本节点，跳过",
+			"user_id", distMsg.TargetID,
+			"message_id", distMsg.Message.MessageID,
+			"from_node", distMsg.NodeID,
+			"node_id", h.nodeID,
+		)
 		return fmt.Errorf("user not found on this node: %s", distMsg.TargetID)
 	}
+
+	h.logger.InfoKV("✅ [跨Pod] 消息命中本节点，准备投递给本地客户端",
+		"user_id", distMsg.TargetID,
+		"message_id", distMsg.Message.MessageID,
+		"from_node", distMsg.NodeID,
+		"node_id", h.nodeID,
+	)
 
 	// 序列化消息为字节（预序列化一次，多设备复用）
 	msgData, err := json.Marshal(distMsg.Message)
@@ -263,10 +282,12 @@ func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *Distrib
 		return fmt.Errorf("failed to send to any client: %s", distMsg.TargetID)
 	}
 
-	h.logger.DebugKV("跨节点消息已发送到本地客户端",
+	h.logger.InfoKV("✅ [跨Pod] 消息已投递到本地客户端",
 		"message_id", distMsg.Message.MessageID,
 		"user_id", distMsg.TargetID,
 		"success_count", successCount,
+		"from_node", distMsg.NodeID,
+		"node_id", h.nodeID,
 	)
 
 	// 🔔 通知观察者（跨节点消息也需要通知观察者）

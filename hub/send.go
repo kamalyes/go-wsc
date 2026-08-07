@@ -35,6 +35,41 @@ const (
 	ContextKeySenderID ContextKey = "sender_id"
 )
 
+// routeToClusterForOfflineUser 当用户在本地和 Redis 索引中都判定为离线时，
+// 仍通过 routeToCluster pubsub 广播到其他节点
+//
+// 场景：多 Pod 部署中，用户在 Pod A 连接，但 Redis 在线索引因心跳 batch 延迟（2s）、
+// channel 满、或 Redis 抖动暂时为空，导致 Pod B 的 checkUserOnline 返回 false。
+// 若不广播，消息只存离线不跨节点投递，用户收不到实时消息
+//
+// 安全性：与离线存储配合使用，不会丢消息也不会重复：
+//   - 用户在其他节点在线 → pubsub 投递成功，离线消息不会被推送（用户已在线不触发上线推送）
+//   - 用户确实离线 → pubsub 无节点投递，离线消息在上线时推送
+func (h *Hub) routeToClusterForOfflineUser(ctx context.Context, userID string, msg *HubMessage) {
+	if h.pubsub == nil && !h.IsGRPCEnabled() {
+		return // 单机模式，无需跨节点
+	}
+	opts := ClusterDispatchOptions{
+		Operation:    OperationTypeSendMessage,
+		TargetUserID: userID,
+	}
+	h.logger.InfoKV("🔍 [跨Pod] 用户本地+Redis索引判定离线，发起pubsub跨节点投递",
+		"user_id", userID,
+		"message_id", msg.MessageID,
+		"sender", msg.Sender,
+		"node_id", h.nodeID,
+		"grpc_enabled", h.IsGRPCEnabled(),
+		"has_pubsub", h.pubsub != nil,
+	)
+	if err := h.routeToCluster(ctx, msg, opts); err != nil {
+		h.logger.WarnKV("离线用户跨节点广播失败",
+			"user_id", userID,
+			"message_id", msg.MessageID,
+			"error", err,
+		)
+	}
+}
+
 // sendToUser 发送消息给指定用户（内部方法）
 // 自动支持分布式：如果用户在其他节点，会自动路由过去
 func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) error {
@@ -135,7 +170,19 @@ func (h *Hub) SendToUserWithRetry(ctx context.Context, toUserID string, msg *Hub
 
 	// 检查用户是否在线
 	isOnline := h.checkUserOnline(toUserID)
+	h.logger.InfoKV("📍 [投递诊断] 用户在线检查",
+		"user_id", toUserID,
+		"message_id", msg.MessageID,
+		"is_online", isOnline,
+		"node_id", h.nodeID,
+	)
 	if !isOnline {
+		// 用户不在本节点且 Redis 全局索引未查到
+		// 先通过 pubsub 广播到其他节点：防止 Redis 索引短暂不可用（心跳 batch 延迟/channel 满）
+		// 导致消息不跨节点投递 其他节点收到后检查本地是否有该用户，有则投递
+		// 若用户确实不在任何节点，下方的离线存储保证消息不丢（上线时推送）
+		h.routeToClusterForOfflineUser(ctx, toUserID, msg)
+
 		// 用户离线 - 自动存储到离线队列/数据库
 		if h.offlineMessageHandler != nil {
 			// 存储离线消息

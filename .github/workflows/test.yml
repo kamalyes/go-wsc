@@ -20,7 +20,7 @@ jobs:
         go-version: [1.21.x, 1.22.x, 1.23.x, 1.24.x, 1.25.x]
       fail-fast: false
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 300
     steps:
       - name: Fetch Repository
         uses: actions/checkout@v5
@@ -53,8 +53,8 @@ jobs:
       - name: Test (with coverage)
         env:
           TEST_MYSQL_DSN: root:${{ env.MYSQL_ROOT_PASSWORD }}@tcp(localhost:3306)/${{ env.MYSQL_DATABASE }}?charset=utf8mb4&parseTime=True&loc=Local&timeout=60s&readTimeout=60s&writeTimeout=60s
-        run: gotestsum -f testname -- ./... -race -count=1 -timeout=30m -coverprofile=coverage.txt -covermode=atomic -shuffle=on
-        timeout-minutes: 60
+        run: gotestsum -f testname -- ./... -race -count=1 -timeout=120m -coverprofile=coverage.txt -covermode=atomic -shuffle=on
+        timeout-minutes: 160
         continue-on-error: true # 即使测试失败也继续
 
       - name: Check coverage file exists

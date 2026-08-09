@@ -10,7 +10,7 @@ require (
 	github.com/jpillora/backoff v1.0.0
 	github.com/kamalyes/go-argus v0.3.1
 	github.com/kamalyes/go-cachex v0.3.4
-	github.com/kamalyes/go-config v0.21.12
+	github.com/kamalyes/go-config v0.21.13
 	github.com/kamalyes/go-logger v0.5.7
 	github.com/kamalyes/go-pbmo v0.1.8
 	github.com/kamalyes/go-sqlbuilder v0.6.2

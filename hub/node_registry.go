@@ -44,7 +44,7 @@ const (
 
 // NodeRegistry 管理节点发现与 gRPC 地址映射
 type NodeRegistry struct {
-	redisClient  *redis.Client
+	redisClient  redis.UniversalClient
 	localNodeID  string
 	grpcAddr     string
 	grpcKey      string // 节点 gRPC 地址 Hash key（从配置获取）
@@ -64,7 +64,7 @@ type NodeRegistry struct {
 
 // NewNodeRegistry 创建节点注册中心
 // grpcKey/heartbeatKey 来自 go-config NodeGRPC 配置，默认 "wsc:nodes:grpc" / "wsc:nodes:heartbeat"
-func NewNodeRegistry(redisClient *redis.Client, nodeID, grpcAddr, grpcKey, heartbeatKey string) *NodeRegistry {
+func NewNodeRegistry(redisClient redis.UniversalClient, nodeID, grpcAddr, grpcKey, heartbeatKey string) *NodeRegistry {
 	return &NodeRegistry{
 		redisClient:  redisClient,
 		localNodeID:  nodeID,

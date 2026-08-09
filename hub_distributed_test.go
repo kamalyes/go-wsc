@@ -45,7 +45,7 @@ func setupClientWithMessageReceiver(client *Client) chan *HubMessage {
 
 // newSharedMiniRedisClient 创建一个基于 miniredis 的 Redis 客户端，供需要多 Hub 共享 Redis 的测试使用
 // miniredis 实例通过 t.Cleanup 自动释放
-func newSharedMiniRedisClient(t *testing.T) *redis.Client {
+func newSharedMiniRedisClient(t *testing.T) redis.UniversalClient {
 	t.Helper()
 	mr := miniredis.RunT(t)
 	return redis.NewClient(&redis.Options{Addr: mr.Addr()})
@@ -55,8 +55,8 @@ func newSharedMiniRedisClient(t *testing.T) *redis.Client {
 //
 // sharedClient 用于让同一测试中的多个 Hub 共享同一个 Redis 实例（节点发现/分布式锁等需要）
 // 若传入 nil，则自动创建独立的 miniredis 实例
-func createTestHubWithDistributed(t *testing.T, nodeID string, sharedClient ...*redis.Client) *Hub {
-	var redisClient *redis.Client
+func createTestHubWithDistributed(t *testing.T, nodeID string, sharedClient ...redis.UniversalClient) *Hub {
+	var redisClient redis.UniversalClient
 	if len(sharedClient) > 0 && sharedClient[0] != nil {
 		redisClient = sharedClient[0]
 	} else {

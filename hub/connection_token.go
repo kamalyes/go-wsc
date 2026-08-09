@@ -64,13 +64,13 @@ type ConnectionTokenDecoder interface {
 // jwtConnectionTokenDecoder 基于 JWT 的连接 Token 解码器实现
 type jwtConnectionTokenDecoder struct {
 	config   *wscconfig.ConnectionToken
-	redisCli *redis.Client
+	redisCli redis.UniversalClient
 	logger   WSCLogger
 }
 
 // NewConnectionTokenDecoder 创建连接 Token 解码器
 // redisCli 可为 nil（当 UseRedis=false 时不需要 Redis）
-func NewConnectionTokenDecoder(cfg *wscconfig.ConnectionToken, redisCli *redis.Client, logger WSCLogger) ConnectionTokenDecoder {
+func NewConnectionTokenDecoder(cfg *wscconfig.ConnectionToken, redisCli redis.UniversalClient, logger WSCLogger) ConnectionTokenDecoder {
 	return &jwtConnectionTokenDecoder{
 		config:   cfg,
 		redisCli: redisCli,
@@ -170,7 +170,7 @@ func (d *jwtConnectionTokenDecoder) checkWhitelist(ctx context.Context, tokenStr
 // 返回:
 //   - string: 签名后的 JWT token
 //   - error: 生成或写入 Redis 失败时返回
-func IssueConnectionToken(cfg *wscconfig.ConnectionToken, redisCli *redis.Client, claims *ConnectionClaims) (string, error) {
+func IssueConnectionToken(cfg *wscconfig.ConnectionToken, redisCli redis.UniversalClient, claims *ConnectionClaims) (string, error) {
 	if cfg == nil {
 		return "", fmt.Errorf("connection token config is nil")
 	}
@@ -231,7 +231,7 @@ func IssueConnectionToken(cfg *wscconfig.ConnectionToken, redisCli *redis.Client
 //
 // 返回:
 //   - error: 删除失败时返回（token 本身仍有效，直到自然过期）
-func RevokeConnectionToken(cfg *wscconfig.ConnectionToken, redisCli *redis.Client, tokenStr string) error {
+func RevokeConnectionToken(cfg *wscconfig.ConnectionToken, redisCli redis.UniversalClient, tokenStr string) error {
 	if cfg == nil || !cfg.IsRedisEnabled() || redisCli == nil {
 		return nil
 	}

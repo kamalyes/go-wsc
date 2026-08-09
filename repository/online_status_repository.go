@@ -294,7 +294,7 @@ type OnlineStatusRepository interface {
 
 // RedisOnlineStatusRepository Redis 实现
 type RedisOnlineStatusRepository struct {
-	client             *redis.Client
+	client             redis.UniversalClient
 	keyPrefix          string        // key 前缀
 	ttl                time.Duration // 过期时间
 	enableCompression  bool          // 是否启用压缩
@@ -302,7 +302,7 @@ type RedisOnlineStatusRepository struct {
 }
 
 // NewRedisOnlineStatusRepository 创建 Redis 在线状态仓库
-func NewRedisOnlineStatusRepository(client *redis.Client, config *wscconfig.OnlineStatus) OnlineStatusRepository {
+func NewRedisOnlineStatusRepository(client redis.UniversalClient, config *wscconfig.OnlineStatus) OnlineStatusRepository {
 	return &RedisOnlineStatusRepository{
 		client:             client,
 		keyPrefix:          mathx.IfNotEmpty(config.KeyPrefix, DefaultOnlineKeyPrefix),

@@ -35,7 +35,7 @@ import (
 //
 // 返回:
 //   - error: 初始化失败时返回错误
-func (h *Hub) InitializeRepositories(redisClient *redis.Client, db *gorm.DB) error {
+func (h *Hub) InitializeRepositories(redisClient redis.UniversalClient, db *gorm.DB) error {
 	if redisClient == nil {
 		return ErrOnlineStatusRepositoryNotSet
 	}

@@ -44,7 +44,7 @@ type RouterCache struct {
 // redisClient: Redis 客户端（从 PubSub.GetClient() 获取）
 // onlineRepo: 在线状态仓库（用于 BatchLoader 回源查询）
 // cfg: 缓存配置（nil 使用默认值）
-func NewRouterCache(redisClient *redis.Client, onlineRepo OnlineStatusRepository, cfg *wscconfig.RouterCacheConfig) *RouterCache {
+func NewRouterCache(redisClient redis.UniversalClient, onlineRepo OnlineStatusRepository, cfg *wscconfig.RouterCacheConfig) *RouterCache {
 	// BatchLoader: 缓存未命中时，回源查询 online_status_repo
 	// 使用 BatchGetUserNodes 批量查询（Pipeline 优化），避免 N+1 网络往返
 	//

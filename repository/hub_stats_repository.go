@@ -196,7 +196,7 @@ type ClusterStats struct {
 
 // RedisHubStatsRepository Redis 实现的 Hub 统计仓库
 type RedisHubStatsRepository struct {
-	client                 *redis.Client
+	client                 redis.UniversalClient
 	keyPrefix              string        // Redis key 前缀，例如 "wsc:stats:"
 	statsExpire            time.Duration // 统计数据过期时间，默认 7 天
 	expireRefreshThreshold int64         // 续期阈值（秒）：仅当 TTL 低于此值时才调用 EXPIRE
@@ -206,7 +206,7 @@ type RedisHubStatsRepository struct {
 // 参数:
 //   - client: Redis 客户端 (github.com/redis/go-redis/v9)
 //   - config: 统计配置对象
-func NewRedisHubStatsRepository(client *redis.Client, config *wscconfig.Stats) *RedisHubStatsRepository {
+func NewRedisHubStatsRepository(client redis.UniversalClient, config *wscconfig.Stats) *RedisHubStatsRepository {
 	keyPrefix := mathx.IF(config.KeyPrefix == "", DefaultStatsKeyPrefix, config.KeyPrefix)
 	ttl := mathx.IF(config.TTL == 0, 7*24*time.Hour, config.TTL)
 

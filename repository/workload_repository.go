@@ -87,7 +87,7 @@ type WorkloadRepository interface {
 
 // RedisWorkloadRepository Redis + DB 双层存储实现
 type RedisWorkloadRepository struct {
-	client        *redis.Client
+	client        redis.UniversalClient
 	db            *gorm.DB
 	keyPrefix     string         // key 前缀
 	maxCandidates int            // 获取负载最小客服时的最大候选数量
@@ -99,7 +99,7 @@ type RedisWorkloadRepository struct {
 //   - client: Redis 客户端 (github.com/redis/go-redis/v9)
 //   - config: 负载管理配置对象
 //   - log: 日志记录器
-func NewRedisWorkloadRepository(client *redis.Client, db *gorm.DB, config *wscconfig.Workload, log logger.ILogger) WorkloadRepository {
+func NewRedisWorkloadRepository(client redis.UniversalClient, db *gorm.DB, config *wscconfig.Workload, log logger.ILogger) WorkloadRepository {
 	keyPrefix := mathx.IF(config.KeyPrefix == "", DefaultWorkloadKeyPrefix, config.KeyPrefix)
 	maxCandidates := config.GetMaxCandidates()
 

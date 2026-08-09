@@ -139,7 +139,7 @@ func TestUserOnlineEvent(t *testing.T) {
 	defer hub.Shutdown()
 
 	// 使用唯一的命名空间避免测试间干扰
-	pubsub := cachex.NewPubSub(redisClient, cachex.PubSubConfig{Namespace: getUniqueNamespace()})
+	pubsub := cachex.NewPubSub(redisClient, cachex.WithPubSubNamespace(getUniqueNamespace()))
 	hub.SetPubSub(pubsub)
 
 	StartTestHub(t, hub)
@@ -191,9 +191,7 @@ func TestUserOfflineEvent(t *testing.T) {
 	defer hub.Shutdown()
 
 	// 设置 PubSub
-	pubsub := cachex.NewPubSub(redisClient, cachex.PubSubConfig{
-		Namespace: getUniqueNamespace(),
-	})
+	pubsub := cachex.NewPubSub(redisClient, cachex.WithPubSubNamespace(getUniqueNamespace()))
 	hub.SetPubSub(pubsub)
 
 	StartTestHub(t, hub)
@@ -245,9 +243,7 @@ func TestMultipleSubscribers(t *testing.T) {
 
 	// 使用唯一的命名空间避免测试间干扰
 	namespace := fmt.Sprintf("wsc_test_%d", time.Now().UnixNano())
-	pubsub := cachex.NewPubSub(redisClient, cachex.PubSubConfig{
-		Namespace: namespace,
-	})
+	pubsub := cachex.NewPubSub(redisClient, cachex.WithPubSubNamespace(namespace))
 	hub.SetPubSub(pubsub)
 
 	StartTestHub(t, hub)
@@ -310,9 +306,7 @@ func TestTicketQueuePushedEvent(t *testing.T) {
 	defer hub.Shutdown()
 
 	// 设置 PubSub
-	pubsub := cachex.NewPubSub(redisClient, cachex.PubSubConfig{
-		Namespace: getUniqueNamespace(),
-	})
+	pubsub := cachex.NewPubSub(redisClient, cachex.WithPubSubNamespace(getUniqueNamespace()))
 	hub.SetPubSub(pubsub)
 
 	StartTestHub(t, hub)
@@ -366,9 +360,7 @@ func TestUnsubscribe(t *testing.T) {
 	defer hub.Shutdown()
 
 	// 设置 PubSub
-	pubsub := cachex.NewPubSub(redisClient, cachex.PubSubConfig{
-		Namespace: getUniqueNamespace(),
-	})
+	pubsub := cachex.NewPubSub(redisClient, cachex.WithPubSubNamespace(getUniqueNamespace()))
 	hub.SetPubSub(pubsub)
 
 	StartTestHub(t, hub)
@@ -456,11 +448,9 @@ func TestCrossNodeEvents(t *testing.T) {
 	defer hub2.Shutdown()
 
 	// 为两个 Hub 设置相同的 PubSub（模拟共享 Redis）
-	pubsubConfig := cachex.PubSubConfig{
-		Namespace: getUniqueNamespace(),
-	}
-	pubsub1 := cachex.NewPubSub(redisClient, pubsubConfig)
-	pubsub2 := cachex.NewPubSub(redisClient, pubsubConfig)
+	namespace := getUniqueNamespace()
+	pubsub1 := cachex.NewPubSub(redisClient, cachex.WithPubSubNamespace(namespace))
+	pubsub2 := cachex.NewPubSub(redisClient, cachex.WithPubSubNamespace(namespace))
 
 	hub1.SetPubSub(pubsub1)
 	hub2.SetPubSub(pubsub2)
@@ -514,9 +504,7 @@ func TestEventsConcurrency(t *testing.T) {
 	hub := CreateTestHub(t, config)
 	defer hub.Shutdown()
 
-	pubsub := cachex.NewPubSub(redisClient, cachex.PubSubConfig{
-		Namespace: getUniqueNamespace(),
-	})
+	pubsub := cachex.NewPubSub(redisClient, cachex.WithPubSubNamespace(getUniqueNamespace()))
 	hub.SetPubSub(pubsub)
 
 	StartTestHub(t, hub)
@@ -573,9 +561,7 @@ func TestEventHandlerError(t *testing.T) {
 	hub := CreateTestHub(t, config)
 	defer hub.Shutdown()
 
-	pubsub := cachex.NewPubSub(redisClient, cachex.PubSubConfig{
-		Namespace: getUniqueNamespace(),
-	})
+	pubsub := cachex.NewPubSub(redisClient, cachex.WithPubSubNamespace(getUniqueNamespace()))
 	hub.SetPubSub(pubsub)
 
 	StartTestHub(t, hub)
@@ -621,9 +607,7 @@ func TestEventContent(t *testing.T) {
 	hub := CreateTestHub(t, config)
 	defer hub.Shutdown()
 
-	pubsub := cachex.NewPubSub(redisClient, cachex.PubSubConfig{
-		Namespace: getUniqueNamespace(),
-	})
+	pubsub := cachex.NewPubSub(redisClient, cachex.WithPubSubNamespace(getUniqueNamespace()))
 	hub.SetPubSub(pubsub)
 
 	StartTestHub(t, hub)

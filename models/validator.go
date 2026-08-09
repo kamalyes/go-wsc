@@ -30,6 +30,7 @@ var (
 		UserTypeBot,
 		UserTypeVIP,
 		UserTypeSystem,
+		UserTypeObserver,
 	)
 
 	// UserStatusValidator 用户状态验证器

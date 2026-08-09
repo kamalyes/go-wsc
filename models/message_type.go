@@ -120,7 +120,7 @@ const (
 	MessageTypeOpenWindow           MessageType = "open_window"            // 打开窗口消息
 	MessageTypeCloseWindow          MessageType = "close_window"           // 关闭窗口消息
 	MessageTypeBStatusReminder      MessageType = "b_status_reminder"      // 业务状态提醒消息
-	MessageTypeGroupChanged         MessageType = "group_changed"         // 群组变更通知（成员被 move 时下发，告知客户端已切换群组）
+	MessageTypeGroupChanged         MessageType = "group_changed"          // 群组变更通知（成员被 move 时下发，告知客户端已切换群组）
 )
 
 // String 实现Stringer接口
@@ -291,13 +291,13 @@ var MessageTypeEmojiMap = map[MessageType]string{
 	MessageTypeOpenWindow:  "🟢",
 	MessageTypeCloseWindow: "🔴",
 	// 状态消息
-	MessageTypeTyping:    "⌨️",
-	MessageTypeRead:      "👁️",
-	MessageTypeDelivered: "✅",
-	MessageTypeAck:       "✔️",
-	MessageTypeReaction:  "❤️",
-	MessageTypeEdit:      "✏️",
-	MessageTypeRecall:    "↩️",
+	MessageTypeTyping:          "⌨️",
+	MessageTypeRead:            "👁️",
+	MessageTypeDelivered:       "✅",
+	MessageTypeAck:             "✔️",
+	MessageTypeReaction:        "❤️",
+	MessageTypeEdit:            "✏️",
+	MessageTypeRecall:          "↩️",
 	MessageTypeBStatusReminder: "⏰",
 }
 
@@ -412,6 +412,11 @@ func (t MessageType) GetCategory() string {
 	if t.IsInteractiveType() {
 		return "interactive"
 	}
+	// IsRecallType 必须在 IsStatusType 之前检查，
+	// 因为 MessageTypeRecall/Edit/Reaction 同时属于两种类型，但分类应优先为 recall
+	if t.IsRecallType() {
+		return "recall"
+	}
 	if t.IsStatusType() {
 		return "status"
 	}
@@ -435,9 +440,6 @@ func (t MessageType) GetCategory() string {
 	}
 	if t.IsServerType() {
 		return "server"
-	}
-	if t.IsRecallType() {
-		return "recall"
 	}
 	if t.IsThreadType() {
 		return "thread"

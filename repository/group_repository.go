@@ -83,13 +83,13 @@ type GroupRepository interface {
 
 // RedisGroupRepository Redis 群组仓库实现
 type RedisGroupRepository struct {
-	client    *redis.Client
+	client    redis.UniversalClient
 	keyPrefix string
 }
 
 // NewRedisGroupRepository 创建 Redis 群组仓库
 // keyPrefix 为空时使用 DefaultGroupKeyPrefix
-func NewRedisGroupRepository(client *redis.Client, keyPrefix string) GroupRepository {
+func NewRedisGroupRepository(client redis.UniversalClient, keyPrefix string) GroupRepository {
 	return &RedisGroupRepository{
 		client:    client,
 		keyPrefix: mathx.IfNotEmpty(keyPrefix, DefaultGroupKeyPrefix),

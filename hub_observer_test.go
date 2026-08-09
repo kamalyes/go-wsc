@@ -330,12 +330,10 @@ func TestObserverMultiNodeReceive(t *testing.T) {
 	result := hub3.SendToUserWithRetry(ctx, user2.UserID, msg)
 	assert.NoError(t, result.FinalError)
 
-	// 等待消息传播
-	time.Sleep(300 * time.Millisecond)
-
-	// 验证节点1和节点2的观察者都收到了消息
-	assert.Greater(t, len(observer1.SendChan), 0, "节点1的观察者应该收到消息")
-	assert.Greater(t, len(observer2.SendChan), 0, "节点2的观察者应该收到消息")
+	// 等待消息跨节点传播到观察者
+	require.Eventually(t, func() bool {
+		return len(observer1.SendChan) > 0 && len(observer2.SendChan) > 0
+	}, 3*time.Second, 50*time.Millisecond, "节点1和节点2的观察者应该都收到消息")
 }
 
 // TestObserverReceiveBroadcastMessages 测试观察者接收广播消息

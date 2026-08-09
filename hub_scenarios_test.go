@@ -20,6 +20,7 @@ import (
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestHub200Scenarios 200个场景的综合测试
@@ -243,7 +244,11 @@ func testRoutingScenarios(t *testing.T, hub *Hub) {
 
 				hub.Register(sender)
 				hub.Register(receiver)
-				time.Sleep(50 * time.Millisecond)
+				// 等待 receiver 注册完成，避免 race detector 下 50ms 不够导致 flaky
+				require.Eventually(t, func() bool {
+					online, _ := hub.IsUserOnline(receiver.UserID)
+					return online
+				}, 2*time.Second, 10*time.Millisecond)
 
 				msg := createTestHubMessage(MessageTypeText)
 

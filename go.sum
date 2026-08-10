@@ -67,10 +67,10 @@ github.com/kamalyes/go-config v0.21.13 h1:A4pVT/6QX3y5Z+RLPiiw5SoWAiFu+UdDjhLxb/
 github.com/kamalyes/go-config v0.21.13/go.mod h1:OxyTcQKBTmcYlzC4VY7sjrvWA3zi6iQ7EGcnDA4CxSo=
 github.com/kamalyes/go-logger v0.5.8 h1:cajzDcL9+2VcwLhG7IiTw52S2H8NtVoSKsrbLZSpKeM=
 github.com/kamalyes/go-logger v0.5.8/go.mod h1:1ykAWwvunTCSGtOImUug3MxfXrOoVgrQVZ9ArmFzRis=
-github.com/kamalyes/go-pbmo v0.1.8 h1:/MiHobt4MfhYsZ9m4jJCf0NSxp3Zp/ALtvGd8WiLqHc=
-github.com/kamalyes/go-pbmo v0.1.8/go.mod h1:BAQwUc45VCcj4qanJlsPQbKZq5HdOxvviAm/zcMXcRs=
-github.com/kamalyes/go-sqlbuilder v0.6.2 h1:I2ek0eaSCCt7Qsxo5bazfVKPzaAIbQi9TGT9YufuUsI=
-github.com/kamalyes/go-sqlbuilder v0.6.2/go.mod h1:utRqSQpC8aXz+81EkW/EROBE1JxUG027Yf4QlciYNGE=
+github.com/kamalyes/go-pbmo v0.1.9 h1:EHzhnlw9E/54TmtqlSQInnhwQJ6k5Q5H/ZlpkUCjMQE=
+github.com/kamalyes/go-pbmo v0.1.9/go.mod h1:7DIs14ZGa0K98CZjgD7YaCPj5h8skNRrCSTfQW7T554=
+github.com/kamalyes/go-sqlbuilder v0.6.3 h1:oFZMBmPgdegQ5+u7eEPh4rjHJmkqh27KLq8pqUL2X7o=
+github.com/kamalyes/go-sqlbuilder v0.6.3/go.mod h1:Ci6qogRJc8/uClDKegKPMdfSEb6alcAzAPWtBKLk5b4=
 github.com/kamalyes/go-toolbox v0.15.9 h1:orrrzyKlI6GPglkIPAvIIp9YwPfmxYWYZliwEUoi314=
 github.com/kamalyes/go-toolbox v0.15.9/go.mod h1:BJriH1vHBjcok+2mwjccrtbSOyCYMrMFEW8OrncsbEU=
 github.com/klauspost/cpuid/v2 v2.3.0 h1:S4CRMLnYUhGeDFDqkGriYKdfoFlDnMtqTiI/sFzhA9Y=

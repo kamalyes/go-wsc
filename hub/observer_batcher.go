@@ -63,8 +63,8 @@ func NewObserverNotificationBatcher(hub *Hub, queueSize, batchSize int, flushInt
 	b := &ObserverNotificationBatcher{hub: hub}
 	b.processor = syncx.NewBatchProcessor(
 		queueSize, batchSize, flushInterval, b.flush,
-		syncx.WithClone(cloneObserverNotifyItem),
-		syncx.WithName[*observerNotifyItem]("observer-notify"),
+		syncx.WithBatchProcessorClone(cloneObserverNotifyItem),
+		syncx.WithBatchProcessorName[*observerNotifyItem]("observer-notify"),
 	)
 	return b
 }

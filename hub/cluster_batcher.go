@@ -67,8 +67,8 @@ func NewClusterDispatchBatcher(hub *Hub, queueSize, batchSize int, flushInterval
 	b := &ClusterDispatchBatcher{hub: hub}
 	b.processor = syncx.NewBatchProcessor(
 		queueSize, batchSize, flushInterval, b.flush,
-		syncx.WithClone(cloneClusterDispatchItem),
-		syncx.WithName[*clusterDispatchItem]("cluster-dispatch"),
+		syncx.WithBatchProcessorClone(cloneClusterDispatchItem),
+		syncx.WithBatchProcessorName[*clusterDispatchItem]("cluster-dispatch"),
 	)
 	return b
 }

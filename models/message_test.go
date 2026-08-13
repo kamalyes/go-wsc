@@ -25,13 +25,14 @@ import (
 
 // TestHubMessage_SizeAndAlignment 验证 HubMessage 结构体大小与字段对齐
 // 优化后：3 个 bool 字段集中在末尾，避免散落导致的 padding
-// 期望大小：352 字节（19 个 string*16 + map*8 + time.Time*24 + int64*8 + 3 bool + 5 padding）
+// 期望大小：368 字节（20 个 string*16 + map*8 + time.Time*24 + int64*8 + 3 bool + padding）
+// 新增 TraceID string 字段（16 字节），从 352 → 368
 func TestHubMessage_SizeAndAlignment(t *testing.T) {
 	size := unsafe.Sizeof(HubMessage{})
 
-	// 352 是优化后的预期大小；360 是优化前的原始大小
-	// 由于 Go 版本/平台差异，允许 ±8 字节浮动，但必须 < 360
-	assert.Less(t, size, uintptr(360), "HubMessage size should be optimized (< 360 bytes), got %d", size)
+	// 368 是新增 TraceID 后的预期大小
+	// 由于 Go 版本/平台差异，允许 ±8 字节浮动，但必须 < 376
+	assert.Less(t, size, uintptr(376), "HubMessage size should be optimized (< 376 bytes), got %d", size)
 
 	// 验证 3 个 bool 字段位于结构体末尾（地址偏移接近 size）
 	msg := HubMessage{}

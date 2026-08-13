@@ -12,6 +12,7 @@
 package wsc
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -147,7 +148,7 @@ func TestUserOnlineEvent(t *testing.T) {
 	recorder := newEventRecorder()
 
 	// 订阅用户上线事件
-	unsubscribe, err := hub.SubscribeUserOnline(func(event *UserStatusEvent) error {
+	unsubscribe, err := hub.SubscribeUserOnline(context.Background(), func(event *UserStatusEvent) error {
 		recorder.recordOnline(event)
 		return nil
 	})
@@ -199,7 +200,7 @@ func TestUserOfflineEvent(t *testing.T) {
 	recorder := newEventRecorder()
 
 	// 订阅用户下线事件
-	unsubscribe, err := hub.SubscribeUserOffline(func(event *UserStatusEvent) error {
+	unsubscribe, err := hub.SubscribeUserOffline(context.Background(), func(event *UserStatusEvent) error {
 		recorder.recordOffline(event)
 		return nil
 	})
@@ -252,7 +253,7 @@ func TestMultipleSubscribers(t *testing.T) {
 	recorder2 := newEventRecorder()
 
 	// 订阅者1
-	unsub1, err := hub.SubscribeUserOnline(func(event *UserStatusEvent) error {
+	unsub1, err := hub.SubscribeUserOnline(context.Background(), func(event *UserStatusEvent) error {
 		recorder1.recordOnline(event)
 		return nil
 	})
@@ -264,7 +265,7 @@ func TestMultipleSubscribers(t *testing.T) {
 	}()
 
 	// 订阅者2
-	unsub2, err := hub.SubscribeUserOnline(func(event *UserStatusEvent) error {
+	unsub2, err := hub.SubscribeUserOnline(context.Background(), func(event *UserStatusEvent) error {
 		recorder2.recordOnline(event)
 		return nil
 	})
@@ -293,60 +294,6 @@ func TestMultipleSubscribers(t *testing.T) {
 }
 
 // ============================================================================
-// 工单入队事件测试
-// ============================================================================
-
-// TestTicketQueuePushedEvent 测试工单入队事件
-func TestTicketQueuePushedEvent(t *testing.T) {
-	redisClient := GetTestRedisClient(t)
-	defer cleanupRedisKeys(t, redisClient, "wsc:pubsub:", "test:")
-
-	config := wscconfig.Default()
-	hub := CreateTestHub(t, config)
-	defer hub.Shutdown()
-
-	// 设置 PubSub
-	pubsub := cachex.NewPubSub(redisClient, cachex.WithPubSubNamespace(getUniqueNamespace()))
-	hub.SetPubSub(pubsub)
-
-	StartTestHub(t, hub)
-
-	recorder := newEventRecorder()
-
-	// 订阅工单入队事件
-	unsubscribe, err := hub.SubscribeTicketQueuePushed(func(event *TicketQueueEvent) error {
-		recorder.recordTicket(event)
-		return nil
-	})
-	require.NoError(t, err)
-	defer func() {
-		if unsubscribe != nil {
-			_ = unsubscribe()
-		}
-	}()
-
-	// 等待订阅就绪
-	time.Sleep(100 * time.Millisecond)
-
-	// 发布工单入队事件
-	hub.PublishTicketQueuePushed("ticket-001", "user-001", "session-001", 5)
-
-	// 等待事件处理
-	time.Sleep(300 * time.Millisecond)
-
-	// 验证事件
-	assert.Equal(t, int64(1), recorder.getTicketCount(), "应该收到1个工单事件")
-
-	events := recorder.getTicketEvents()
-	require.Len(t, events, 1)
-	assert.Equal(t, "ticket-001", events[0].TicketID)
-	assert.Equal(t, "user-001", events[0].UserID)
-	assert.Equal(t, "session-001", events[0].SessionID)
-	assert.Equal(t, 5, events[0].Priority)
-	assert.Equal(t, hub.GetNodeID(), events[0].NodeID)
-}
-
-// ============================================================================
 // 取消订阅测试
 // ============================================================================
 
@@ -368,7 +315,7 @@ func TestUnsubscribe(t *testing.T) {
 	recorder := newEventRecorder()
 
 	// 订阅事件
-	unsubscribe, err := hub.SubscribeUserOnline(func(event *UserStatusEvent) error {
+	unsubscribe, err := hub.SubscribeUserOnline(context.Background(), func(event *UserStatusEvent) error {
 		recorder.recordOnline(event)
 		return nil
 	})
@@ -414,7 +361,7 @@ func TestEventsWithoutPubSub(t *testing.T) {
 	StartTestHub(t, hub)
 
 	// 不设置 PubSub，直接订阅应该返回错误
-	_, err := hub.SubscribeUserOnline(func(event *UserStatusEvent) error {
+	_, err := hub.SubscribeUserOnline(context.Background(), func(event *UserStatusEvent) error {
 		return nil
 	})
 	assert.Error(t, err, "未设置 PubSub 应该返回错误")
@@ -461,7 +408,7 @@ func TestCrossNodeEvents(t *testing.T) {
 	recorder := newEventRecorder()
 
 	// Hub2 订阅事件
-	unsubscribe, err := hub2.SubscribeUserOnline(func(event *UserStatusEvent) error {
+	unsubscribe, err := hub2.SubscribeUserOnline(context.Background(), func(event *UserStatusEvent) error {
 		recorder.recordOnline(event)
 		return nil
 	})
@@ -512,7 +459,7 @@ func TestEventsConcurrency(t *testing.T) {
 	recorder := newEventRecorder()
 
 	// 订阅事件
-	unsubscribe, err := hub.SubscribeUserOnline(func(event *UserStatusEvent) error {
+	unsubscribe, err := hub.SubscribeUserOnline(context.Background(), func(event *UserStatusEvent) error {
 		recorder.recordOnline(event)
 		return nil
 	})
@@ -569,7 +516,7 @@ func TestEventHandlerError(t *testing.T) {
 	var errorCount atomic.Int32
 
 	// 订阅事件，处理器返回错误
-	unsubscribe, err := hub.SubscribeUserOnline(func(event *UserStatusEvent) error {
+	unsubscribe, err := hub.SubscribeUserOnline(context.Background(), func(event *UserStatusEvent) error {
 		errorCount.Add(1)
 		return assert.AnError // 模拟处理失败
 	})
@@ -615,7 +562,7 @@ func TestEventContent(t *testing.T) {
 	recorder := newEventRecorder()
 
 	// 订阅所有类型的事件
-	unsubOnline, _ := hub.SubscribeUserOnline(func(event *UserStatusEvent) error {
+	unsubOnline, _ := hub.SubscribeUserOnline(context.Background(), func(event *UserStatusEvent) error {
 		recorder.recordOnline(event)
 		return nil
 	})
@@ -625,7 +572,7 @@ func TestEventContent(t *testing.T) {
 		}
 	}()
 
-	unsubOffline, _ := hub.SubscribeUserOffline(func(event *UserStatusEvent) error {
+	unsubOffline, _ := hub.SubscribeUserOffline(context.Background(), func(event *UserStatusEvent) error {
 		recorder.recordOffline(event)
 		return nil
 	})

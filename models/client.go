@@ -12,6 +12,7 @@ package models
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"net/http"
 	"strings"
@@ -64,8 +65,12 @@ type Client struct {
 	// Status 的原子镜像（消除 ResetClientStatus 并发写与 GetUserStatus 并发读的数据竞争）
 	statusVal atomic.Int32 `json:"-"`
 
-	// Metadata 互斥锁（保护 map[string]interface{} 的并发读写）
-	metadataMu sync.RWMutex `json:"-"`
+	// 客户端可变字段读写锁：保护 Metadata 及所有“注册后仍可能被 With*/Set* 并发写入、
+	// 且 MarshalJSON 会反射读取”的非原子字段（GroupID/Namespace/Role/ClientIP/Department/
+	// Skills/MaxTickets/NodeID/NodeIP/NodePort/ClientType/ConnectionType）
+	// MarshalJSON 在整段 json.Marshal 期间持 RLock，与所有 With*/SetMetadataValue/SetGroupID
+	// 的 Lock 互斥 原子镜像字段（Status/VIPLevel/LastHeartbeat/LastSeen/LastPong）另走 atomic，不经此锁
+	mu sync.RWMutex `json:"-"`
 
 	// SSE 专用字段（仅当 ConnectionType 为 SSE 时使用）
 	SSEWriter    http.ResponseWriter `json:"-"` // SSE Writer（不序列化）
@@ -111,8 +116,8 @@ func (c *Client) GetStatus() UserStatus {
 
 // GetMetadataValue 线程安全地读取元数据值
 func (c *Client) GetMetadataValue(key string) (interface{}, bool) {
-	c.metadataMu.RLock()
-	defer c.metadataMu.RUnlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if c.Metadata == nil {
 		return nil, false
 	}
@@ -122,8 +127,8 @@ func (c *Client) GetMetadataValue(key string) (interface{}, bool) {
 
 // SetMetadataValue 线程安全地写入元数据值
 func (c *Client) SetMetadataValue(key string, value interface{}) {
-	c.metadataMu.Lock()
-	defer c.metadataMu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.Metadata == nil {
 		c.Metadata = make(map[string]interface{})
 	}
@@ -132,8 +137,8 @@ func (c *Client) SetMetadataValue(key string, value interface{}) {
 
 // GetMetadataSnapshot 线程安全地获取元数据的只读副本（用于序列化/日志）
 func (c *Client) GetMetadataSnapshot() map[string]interface{} {
-	c.metadataMu.RLock()
-	defer c.metadataMu.RUnlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if c.Metadata == nil {
 		return nil
 	}
@@ -142,6 +147,67 @@ func (c *Client) GetMetadataSnapshot() map[string]interface{} {
 		snapshot[k] = v
 	}
 	return snapshot
+}
+
+// MarshalJSON 自定义 JSON 序列化，确保对仍在 Hub 中、被业务并发修改的活 *Client
+// 进行 json.Marshal 时不会触发 "fatal error: concurrent map iteration and map write"，
+// 也不会与 With*/Set* 并发写产生数据竞争
+//
+// 背景：Client.Metadata 是普通 map，encoding/json 通过反射遍历它时不持 mu，
+// 一旦与 SetMetadataValue / Hub.UpdateClientMetadata 并发即导致进程级 fatal（不可 recover）
+// 此外 Namespace/Role/ClientIP/Department/Skills/MaxTickets/NodeID/NodeIP/NodePort/
+// ClientType/ConnectionType 等字段注册后仍会被 With* 并发写入，反射裸读同样构成数据竞争
+// 该方法一次堵住所有 json.Marshal(client) 调用点（如在线状态入库 BatchSetClientsOnline）
+//
+// 实现要点：
+//  1. 整段 json.Marshal 期间持 mu.RLock，与所有 With*/SetMetadataValue/SetGroupID 的 Lock 互斥，
+//     覆盖别名提升字段（*clientAlias）的反射读路径；
+//  2. type clientAlias Client 定义本地别名类型，剥离 *Client 的 MarshalJSON 方法，
+//     避免 json.Marshal 递归调用自身；别名以指针嵌入，不拷贝整个 Client（内含
+//     sync.RWMutex/sync.Mutex/atomic，值拷贝会触发 copylocks），其余字段沿用默认序列化；
+//  3. sync.RWMutex 不可重入：已持 RLock 时不能再调 GetMetadataSnapshot/GetGroupIDRaw（会再次 RLock），
+//     故 Metadata 快照与 GroupID 读均内联在此处直接读取；
+//  4. 对“注册后仍会被并发写入”的字段，覆盖别名提升的同名字段，改用并发安全取值：
+//     - Metadata 内联快照（与 hub/connection_record.go 入库语义一致）
+//     - GroupID 直接读字段（已持 RLock，与 SetGroupID/WithGroupID 互斥）
+//     - LastHeartbeat/LastSeen/LastPong 走原子读（Set* 仅更新原子镜像、从不更新 time.Time 字段，
+//     直接读字段会得到 NewClient 时的过期值且存在数据竞争）
+//     - Status/VIPLevel 走原子读（消除与 SetStatus/SetVIPLevel 并发写的数据竞争，atomic 不依赖 mu 可安全调用）
+//
+// JSON 字段集合与原 json.Marshal(client) 完全一致，仅取值路径变为并发安全
+func (c *Client) MarshalJSON() ([]byte, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// 内联 Metadata 快照：已持 RLock，不能再调 GetMetadataSnapshot（会再次 RLock 导致死锁/阻塞）
+	var metadataSnapshot map[string]interface{}
+	if c.Metadata != nil {
+		metadataSnapshot = make(map[string]interface{}, len(c.Metadata))
+		for k, v := range c.Metadata {
+			metadataSnapshot[k] = v
+		}
+	}
+
+	type clientAlias Client
+	return json.Marshal(&struct {
+		*clientAlias
+		Metadata      map[string]interface{} `json:"metadata"`
+		GroupID       string                 `json:"group_id,omitempty"`
+		LastHeartbeat time.Time              `json:"last_heartbeat"`
+		LastSeen      time.Time              `json:"last_seen"`
+		LastPong      time.Time              `json:"last_pong"`
+		Status        UserStatus             `json:"status"`
+		VIPLevel      VIPLevel               `json:"vip_level"`
+	}{
+		clientAlias:   (*clientAlias)(c),
+		Metadata:      metadataSnapshot,
+		GroupID:       c.GroupID, // 已持 RLock，与 SetGroupID/WithGroupID 互斥
+		LastHeartbeat: c.GetLastHeartbeat(),
+		LastSeen:      c.GetLastSeen(),
+		LastPong:      c.GetLastPong(),
+		Status:        c.GetStatus(),
+		VIPLevel:      c.GetVIPLevel(),
+	})
 }
 
 // SetLastHeartbeat 原子更新最后心跳时间（仅写原子镜像，消除 time.Time 并发写数据竞争）
@@ -186,10 +252,10 @@ func (c *Client) GetLastPong() time.Time {
 	return time.Unix(0, nano)
 }
 
-// WithVIPLevel 设置VIP等级（仅用于构造期，并发场景使用 SetVIPLevel）
+// WithVIPLevel 设置VIP等级
+// 线程安全（复用 SetVIPLevel 同步更新 VIPLevel 字段与 vipLevelVal 原子镜像）
 func (c *Client) WithVIPLevel(level VIPLevel) *Client {
-	c.VIPLevel = level
-	c.vipLevelVal.Store(int32(level.GetLevel()))
+	c.SetVIPLevel(level)
 	return c
 }
 
@@ -205,7 +271,10 @@ func (c *Client) GetVIPLevel() VIPLevel {
 }
 
 // WithNamespace 设置命名空间ID
+// 线程安全（持 mu），与 MarshalJSON 反射读互斥
 func (c *Client) WithNamespace(namespace string) *Client {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.Namespace = namespace
 	return c
 }
@@ -220,22 +289,23 @@ func (c *Client) GetNamespace() string {
 
 // WithGroupID 设置群组ID
 // 普通用户：连接后自动加入该群组；观察者：只接收指定命名空间+群组的消息通知
+// 线程安全（复用 SetGroupID 持 mu），注册后并发调用也安全
 func (c *Client) WithGroupID(groupID string) *Client {
-	c.GroupID = groupID
+	c.SetGroupID(groupID)
 	return c
 }
 
 // SetGroupID 并发安全更新群组ID（用于 MoveGroupMember 等运行时变更场景）
 func (c *Client) SetGroupID(groupID string) {
-	c.metadataMu.Lock()
+	c.mu.Lock()
 	c.GroupID = groupID
-	c.metadataMu.Unlock()
+	c.mu.Unlock()
 }
 
 // GetGroupIDRaw 并发安全获取原始群组ID（不加默认值，用于索引判断）
 func (c *Client) GetGroupIDRaw() string {
-	c.metadataMu.RLock()
-	defer c.metadataMu.RUnlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.GroupID
 }
 
@@ -248,26 +318,38 @@ func (c *Client) GetGroupID() string {
 }
 
 // WithRole 设置用户角色
+// 线程安全（持 mu），与 MarshalJSON 反射读互斥
 func (c *Client) WithRole(role UserRole) *Client {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.Role = role
 	return c
 }
 
 // WithClientIP 设置客户端IP
+// 线程安全（持 mu），与 MarshalJSON 反射读互斥
 func (c *Client) WithClientIP(ip string) *Client {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.ClientIP = ip
 	return c
 }
 
 // WithWebSocketConn 设置WebSocket连接
+// 线程安全（持 mu 保护 ConnectionType 序列化字段）
 func (c *Client) WithWebSocketConn(conn *websocket.Conn) *Client {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.Conn = conn
 	c.ConnectionType = ConnectionTypeWebSocket
 	return c
 }
 
 // WithSSEWriter 设置SSE Writer
+// 线程安全（持 mu 保护 ConnectionType 序列化字段）
 func (c *Client) WithSSEWriter(w http.ResponseWriter, flusher http.Flusher) *Client {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.SSEWriter = w
 	c.SSEFlusher = flusher
 	c.ConnectionType = ConnectionTypeSSE
@@ -275,31 +357,45 @@ func (c *Client) WithSSEWriter(w http.ResponseWriter, flusher http.Flusher) *Cli
 }
 
 // WithStatus 设置用户状态
+// 线程安全（复用 SetStatus 同步更新 Status 字段与 statusVal 原子镜像，
+// 避免构造期设置后 GetStatus/MarshalJSON 读到 NewClient 的旧原子值）
 func (c *Client) WithStatus(status UserStatus) *Client {
-	c.Status = status
+	c.SetStatus(status)
 	return c
 }
 
 // WithDepartment 设置部门
+// 线程安全（持 mu），与 MarshalJSON 反射读互斥
 func (c *Client) WithDepartment(dept Department) *Client {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.Department = dept
 	return c
 }
 
 // WithSkills 设置技能列表
+// 线程安全（持 mu），与 MarshalJSON 反射读互斥
 func (c *Client) WithSkills(skills []Skill) *Client {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.Skills = skills
 	return c
 }
 
 // WithMaxTickets 设置最大工单数
+// 线程安全（持 mu），与 MarshalJSON 反射读互斥
 func (c *Client) WithMaxTickets(max int) *Client {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.MaxTickets = max
 	return c
 }
 
 // WithNodeInfo 设置节点信息
+// 线程安全（持 mu），与 MarshalJSON 反射读互斥
 func (c *Client) WithNodeInfo(nodeID, nodeIP string, nodePort int) *Client {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.NodeID = nodeID
 	c.NodeIP = nodeIP
 	c.NodePort = nodePort
@@ -307,22 +403,27 @@ func (c *Client) WithNodeInfo(nodeID, nodeIP string, nodePort int) *Client {
 }
 
 // WithClientType 设置客户端类型
+// 线程安全（持 mu），与 MarshalJSON 反射读互斥
 func (c *Client) WithClientType(clientType ClientType) *Client {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.ClientType = clientType
 	return c
 }
 
 // WithMetadata 设置元数据
+// 线程安全（复用 SetMetadataValue 持 mu），注册后并发调用也安全；
+// 通常用于构造期链式构造，运行期写入推荐直接使用 SetMetadataValue / Hub.UpdateClientMetadata
 func (c *Client) WithMetadata(key string, value interface{}) *Client {
-	if c.Metadata == nil {
-		c.Metadata = make(map[string]interface{})
-	}
-	c.Metadata[key] = value
+	c.SetMetadataValue(key, value)
 	return c
 }
 
 // WithMetadataMap 批量设置元数据
+// 线程安全（持锁一次性写入，避免注册后与 MarshalJSON 等序列化路径在 map 上数据竞争）
 func (c *Client) WithMetadataMap(metadata map[string]interface{}) *Client {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.Metadata == nil {
 		c.Metadata = make(map[string]interface{})
 	}

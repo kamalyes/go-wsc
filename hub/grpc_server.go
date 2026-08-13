@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"net"
 
+	"github.com/kamalyes/go-logger"
+	"github.com/kamalyes/go-toolbox/pkg/netx"
 	wscpb "github.com/kamalyes/go-wsc/models/pb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -47,7 +49,11 @@ func NewGRPCServer(hub *Hub) *GRPCServer {
 }
 
 // Start 启动 gRPC 服务端，监听指定地址并异步提供服务
+// addr 支持 IPv4（host:port）和 IPv6（[host]:port 或裸 IPv6 地址）
 func (s *GRPCServer) Start(ctx context.Context, addr string) error {
+	// 规范化监听地址：裸 IPv6 地址（含冒号但无方括号）自动加方括号
+	addr = netx.NormalizeListenAddr(addr)
+
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("监听地址 %s 失败: %w", addr, err)
@@ -84,11 +90,17 @@ func (s *GRPCServer) Stop() {
 // SendToUser 向本节点的指定用户发送消息（点对点投递）
 // 使用 ForEachUserClient 零拷贝遍历 + 预序列化，替代 GetClientsByUserID 切片拷贝 + 逐客户端序列化
 func (s *GRPCServer) SendToUser(ctx context.Context, req *wscpb.SendToUserRequest) (*wscpb.SendToUserResponse, error) {
+	// 从 gRPC incoming metadata 恢复 trace_id 到 ctx（跨节点链路串联）
+	ctx = logger.RestoreTraceFromIncoming(ctx)
+
 	// 反序列化消息
 	msg, err := wscpb.UnmarshalHubMessage(req.GetMessageData())
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "反序列化消息失败: %v", err)
 	}
+
+	// 消息体也携带 trace_id，补充恢复（metadata 优先，消息体 fallback）
+	ctx = msg.ContextFromMessage(ctx)
 
 	userID := req.GetUserId()
 
@@ -138,6 +150,9 @@ func (s *GRPCServer) CheckUsersOnline(ctx context.Context, req *wscpb.CheckUsers
 
 // BroadcastGroup 向本节点的群组成员广播消息
 func (s *GRPCServer) BroadcastGroup(ctx context.Context, req *wscpb.BroadcastGroupRequest) (*wscpb.BroadcastGroupResponse, error) {
+	// 从 gRPC incoming metadata 恢复 trace_id 到 ctx（跨节点链路串联）
+	ctx = logger.RestoreTraceFromIncoming(ctx)
+
 	// 群组仓库未配置，无法获取成员
 	if s.hub.groupRepo == nil {
 		return &wscpb.BroadcastGroupResponse{Delivered: 0}, nil
@@ -158,6 +173,9 @@ func (s *GRPCServer) BroadcastGroup(ctx context.Context, req *wscpb.BroadcastGro
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "反序列化消息失败: %v", err)
 	}
+
+	// 消息体也携带 trace_id，补充恢复（metadata 优先，消息体 fallback）
+	ctx = msg.ContextFromMessage(ctx)
 
 	// 构建成员集合用于 O(1) 过滤
 	memberSet := make(map[string]struct{}, len(members))
@@ -188,11 +206,17 @@ func (s *GRPCServer) BroadcastGroup(ctx context.Context, req *wscpb.BroadcastGro
 // NotifyObservers 通知本节点的观察者
 // group_id 非空时通过三级索引查找订阅该群组的观察者，为空时查找命名空间级观察者
 func (s *GRPCServer) NotifyObservers(ctx context.Context, req *wscpb.NotifyObserversRequest) (*wscpb.NotifyObserversResponse, error) {
+	// 从 gRPC incoming metadata 恢复 trace_id 到 ctx（跨节点链路串联）
+	ctx = logger.RestoreTraceFromIncoming(ctx)
+
 	// 反序列化消息
 	msg, err := wscpb.UnmarshalHubMessage(req.GetMessageData())
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "反序列化消息失败: %v", err)
 	}
+
+	// 消息体也携带 trace_id，补充恢复（metadata 优先，消息体 fallback）
+	ctx = msg.ContextFromMessage(ctx)
 
 	// 三级索引查找：全局 + 命名空间 + 命名空间+群组
 	observers := s.hub.GetObserversForMessage(req.GetNamespace(), req.GetGroupId())
@@ -211,6 +235,9 @@ func (s *GRPCServer) NotifyObservers(ctx context.Context, req *wscpb.NotifyObser
 
 // KickUser 踢出本节点上的用户
 func (s *GRPCServer) KickUser(ctx context.Context, req *wscpb.KickUserRequest) (*wscpb.KickUserResponse, error) {
+	// 从 gRPC incoming metadata 恢复 trace_id 到 ctx（跨节点链路串联）
+	ctx = logger.RestoreTraceFromIncoming(ctx)
+
 	kicked := s.hub.KickUserSimple(req.GetUserId(), req.GetReason())
 	return &wscpb.KickUserResponse{
 		Success:           true,

@@ -106,6 +106,9 @@ func (h *Hub) routeToCluster(ctx context.Context, msg *HubMessage, opts ClusterD
 		Namespace: namespace,
 	}
 
+	// 从 ctx 注入 trace_id（消息已有则复用，跨节点保留源 trace）
+	dispatch.InjectContext(ctx)
+
 	// 构建分发信封时携带 GroupIDs（批量群组广播）
 	if len(opts.GroupIDs) > 0 {
 		dispatch.GroupIDs = opts.GroupIDs

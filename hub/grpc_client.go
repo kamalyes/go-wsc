@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/kamalyes/go-logger"
 	wscpb "github.com/kamalyes/go-wsc/models/pb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -90,6 +91,8 @@ func (p *GRPCClientPool) SendToUser(ctx context.Context, addr, userID string, ms
 	if err != nil {
 		return nil, err
 	}
+	// 注入 trace_id 到 gRPC metadata（跨节点传播）
+	ctx = logger.InjectTraceToOutgoing(ctx, logger.ExtractTraceID(ctx))
 	return client.SendToUser(ctx, &wscpb.SendToUserRequest{
 		UserId:      userID,
 		MessageData: msgData,
@@ -117,6 +120,8 @@ func (p *GRPCClientPool) BroadcastGroup(ctx context.Context, addr, namespace, gr
 	if err != nil {
 		return 0, err
 	}
+	// 注入 trace_id 到 gRPC metadata（跨节点传播）
+	ctx = logger.InjectTraceToOutgoing(ctx, logger.ExtractTraceID(ctx))
 	resp, err := client.BroadcastGroup(ctx, &wscpb.BroadcastGroupRequest{
 		Namespace:     namespace,
 		GroupId:       groupID,
@@ -137,6 +142,8 @@ func (p *GRPCClientPool) NotifyObservers(ctx context.Context, addr, namespace, g
 	if err != nil {
 		return 0, err
 	}
+	// 注入 trace_id 到 gRPC metadata（跨节点传播）
+	ctx = logger.InjectTraceToOutgoing(ctx, logger.ExtractTraceID(ctx))
 	resp, err := client.NotifyObservers(ctx, &wscpb.NotifyObserversRequest{
 		Namespace:   namespace,
 		GroupId:     groupID,

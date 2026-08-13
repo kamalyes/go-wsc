@@ -11,7 +11,10 @@
 package models
 
 import (
+	"context"
 	"time"
+
+	"github.com/kamalyes/go-logger"
 )
 
 // IDGenerator ID生成器接口
@@ -47,11 +50,32 @@ type DistributedMessage struct {
 	Type      OperationType `json:"type"`                // 操作类型
 	NodeID    string        `json:"node_id"`             // 源节点ID
 	TargetID  string        `json:"target_id"`           // 目标ID（用户ID、节点ID等）
+	TraceID   string        `json:"trace_id,omitempty"`  // 全链路追踪ID（从 ctx 自动注入，跨节点序列化携带）
 	Message   *HubMessage   `json:"message"`             // 消息数据（用于 send_message, broadcast, observer_notify）
 	Reason    string        `json:"reason"`              // 原因
 	Timestamp time.Time     `json:"timestamp"`           // 时间戳
 	Namespace string        `json:"namespace,omitempty"` // 命名空间ID（路由信封携带，空=全命名空间广播，非空=指定命名空间）
 	GroupIDs  []string      `json:"group_ids,omitempty"` // 批量群组广播时的群组ID列表（Operation=GroupsBroadcast 时使用）
+}
+
+// InjectContext 从 ctx 注入上下文信息到分布式消息（trace_id 等）
+// 优先从 OTel span 提取 trace_id，fallback 到 ctx.Value(logger.ContextKeyTraceID)
+// 已有 trace_id 时不覆盖（跨节点消息保留源 trace）
+func (dm *DistributedMessage) InjectContext(ctx context.Context) *DistributedMessage {
+	if dm.TraceID != "" {
+		return dm // 已有则不覆盖
+	}
+	dm.TraceID = logger.ExtractTraceID(ctx)
+	return dm
+}
+
+// ContextFromMessage 基于分布式消息的 trace_id 创建一个携带 trace 信息的 context
+// 用于消息流转路径中恢复 ctx（如 PubSub 消费端、回调等场景）
+func (dm *DistributedMessage) ContextFromMessage(parent context.Context) context.Context {
+	if dm.TraceID == "" {
+		return parent
+	}
+	return logger.ContextWithTraceID(parent, dm.TraceID)
 }
 
 // SendAttempt 发送尝试记录

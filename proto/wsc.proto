@@ -11,6 +11,7 @@ import "google/protobuf/timestamp.proto";
 // [EN] HubMessageProto is the protobuf representation of a Hub message.
 message HubMessageProto {
   string id = 1; // 消息ID | [EN] Message ID
+  string trace_id = 26; // 全链路追踪ID | [EN] Trace ID
   string message_type = 2; // 消息类型 | [EN] Message Type
   string sender = 3; // 发送者 | [EN] Sender
   string sender_name = 4; // 发送者名称 | [EN] Sender Name
@@ -44,6 +45,7 @@ message DistributedMessageProto {
   string type = 1;            // 操作类型 | [EN] Operation Type
   string node_id = 2;         // 源节点ID | [EN] Source Node ID
   string target_id = 3;       // 目标ID（用户ID、节点ID等） | [EN] Target ID
+  string trace_id = 9;        // 全链路追踪ID | [EN] Trace ID
   HubMessageProto message = 4; // 消息数据 | [EN] Message Data
   string reason = 5;          // 原因 | [EN] Reason
   google.protobuf.Timestamp timestamp = 6; // 时间戳 | [EN] Timestamp

@@ -37,16 +37,18 @@ func init() {
 	// 字段名差异通过 WithFieldMapping 显式映射
 	pbmo.RegisterWith[models.HubMessage, HubMessageProto]().
 		WithFieldMapping("ID", "Id").
+		WithFieldMapping("TraceID", "TraceId").
 		WithFieldMapping("MessageID", "MessageId").
 		WithFieldMapping("SessionID", "SessionId").
 		WithFieldMapping("ReplyToMsgID", "ReplyToMsgId")
 
 	// DistributedMessage ↔ DistributedMessageProto
 	// 嵌套的 Message 字段会自动递归转换（已注册 HubMessage 转换器）
-	// NodeID/GroupIDs 字段名差异通过 WithFieldMapping 显式映射（ID→Id, GroupIDs→GroupIds）
+	// NodeID/GroupIDs/TraceID 字段名差异通过 WithFieldMapping 显式映射（ID→Id, GroupIDs→GroupIds）
 	// Namespace 字段名一致，自动匹配
 	pbmo.RegisterWith[models.DistributedMessage, DistributedMessageProto]().
 		WithFieldMapping("NodeID", "NodeId").
+		WithFieldMapping("TraceID", "TraceId").
 		WithFieldMapping("GroupIDs", "GroupIds")
 }
 

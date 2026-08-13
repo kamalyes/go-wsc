@@ -196,7 +196,11 @@ func (h *Hub) handleDistributedMessage(ctx context.Context, distMsg *Distributed
 		return fmt.Errorf("distributed message is nil")
 	}
 
-	h.logger.DebugKV("收到分布式消息",
+	// 从分布式消息恢复 trace_id 到 ctx（PubSub 跨节点链路串联）
+	// 确保 logger.DebugContextKV 等日志自动输出 trace_id
+	ctx = distMsg.ContextFromMessage(ctx)
+
+	h.logger.DebugContextKV(ctx, "收到分布式消息",
 		"type", distMsg.Type,
 		"from_node", distMsg.NodeID,
 		"target_id", distMsg.TargetID,

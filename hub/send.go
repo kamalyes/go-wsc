@@ -146,6 +146,9 @@ func (h *Hub) SendToUserWithRetry(ctx context.Context, toUserID string, msg *Hub
 	// 立即创建消息副本，避免并发修改原始消息
 	msg = msg.Clone()
 
+	// 从 ctx 注入 trace_id（OTel span > ctx.Value fallback，已有则不覆盖）
+	msg.InjectContext(ctx)
+
 	// 修改副本对象
 	if msg.Sender == "" {
 		if senderID, ok := ctx.Value(ContextKeySenderID).(string); ok {

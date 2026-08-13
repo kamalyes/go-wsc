@@ -110,8 +110,10 @@ func (b *ClusterDispatchBatcher) flush(items []*clusterDispatchItem) {
 	}
 	for _, item := range items {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		// 从消息体恢复 trace_id（Broadcast/SendToUserWithRetry 已通过 InjectContext 注入）
+		ctx = item.msg.ContextFromMessage(ctx)
 		if err := b.hub.routeToCluster(ctx, item.msg, item.opts); err != nil {
-			b.hub.logger.WarnKV("批量集群分发失败",
+			b.hub.logger.WarnContextKV(ctx, "批量集群分发失败",
 				"error", err,
 				"operation", item.opts.Operation,
 				"message_id", item.msg.GetMessageID(),

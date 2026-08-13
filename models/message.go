@@ -11,8 +11,11 @@
 package models
 
 import (
+	"context"
 	"encoding/json"
 	"time"
+
+	"github.com/kamalyes/go-logger"
 )
 
 // Data 字段的常量 key
@@ -33,6 +36,7 @@ const (
 type HubMessage struct {
 	// ========== 标识与路由（热点字段，置于头部以利用 cache line） ==========
 	ID           string      `json:"id"`                      // 消息ID（用于ACK）
+	TraceID      string      `json:"trace_id,omitempty"`      // 全链路追踪ID（从 ctx 自动注入，跨节点序列化携带）
 	MessageType  MessageType `json:"message_type"`            // 消息类型
 	Sender       string      `json:"sender"`                  // 发送者 (从上下文获取)
 	SenderName   string      `json:"sender_name"`             // 发送者昵称
@@ -75,6 +79,26 @@ type HubMessage struct {
 func (m *HubMessage) SetID(id string) *HubMessage {
 	m.ID = id
 	return m
+}
+
+// InjectContext 从 ctx 注入上下文信息到消息（trace_id 等）
+// 优先从 OTel span 提取 trace_id，fallback 到 ctx.Value(logger.ContextKeyTraceID)
+// 已有 trace_id 时不覆盖（跨节点消息保留源 trace）
+func (m *HubMessage) InjectContext(ctx context.Context) *HubMessage {
+	if m.TraceID != "" {
+		return m // 已有则不覆盖
+	}
+	m.TraceID = logger.ExtractTraceID(ctx)
+	return m
+}
+
+// ContextFromMessage 基于消息的 trace_id 创建一个携带 trace 信息的 context
+// 用于消息流转路径中恢复 ctx（如 PubSub 消费端、回调等场景）
+func (m *HubMessage) ContextFromMessage(parent context.Context) context.Context {
+	if m.TraceID == "" {
+		return parent
+	}
+	return logger.ContextWithTraceID(parent, m.TraceID)
 }
 
 // SetMessageType 设置消息类型
@@ -389,6 +413,11 @@ func (m *HubMessage) GetMetadataJSON() string {
 		return string(jsonBytes)
 	}
 	return "{}"
+}
+
+// GetTraceID 获取 trace_id，优先自身字段，fallback 到 metadata
+func (m *HubMessage) GetTraceID() string {
+	return m.TraceID
 }
 
 // Clone 创建消息的深拷贝，避免并发修改问题

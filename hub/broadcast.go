@@ -29,6 +29,9 @@ import (
 // 自动支持分布式：统一走 routeToCluster（gRPC 直连优先，PubSub 兜底）
 // 全命名空间广播（不按命名空间过滤）
 func (h *Hub) Broadcast(ctx context.Context, msg *HubMessage) {
+	// 从 ctx 注入 trace_id（OTel span > ctx.Value fallback，已有则不覆盖）
+	msg.InjectContext(ctx)
+
 	// 创建消息副本，避免并发修改
 	msg = msg.Clone()
 

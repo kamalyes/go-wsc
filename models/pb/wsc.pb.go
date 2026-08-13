@@ -29,6 +29,7 @@ const (
 type HubMessageProto struct {
 	state               protoimpl.MessageState `protogen:"open.v1"`
 	Id                  string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`                                                                  // 消息ID | [EN] Message ID
+	TraceId             string                 `protobuf:"bytes,26,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`                                        // 全链路追踪ID | [EN] Trace ID
 	MessageType         string                 `protobuf:"bytes,2,opt,name=message_type,json=messageType,proto3" json:"message_type,omitempty"`                             // 消息类型 | [EN] Message Type
 	Sender              string                 `protobuf:"bytes,3,opt,name=sender,proto3" json:"sender,omitempty"`                                                          // 发送者 | [EN] Sender
 	SenderName          string                 `protobuf:"bytes,4,opt,name=sender_name,json=senderName,proto3" json:"sender_name,omitempty"`                                // 发送者名称 | [EN] Sender Name
@@ -90,6 +91,13 @@ func (*HubMessageProto) Descriptor() ([]byte, []int) {
 func (x *HubMessageProto) GetId() string {
 	if x != nil {
 		return x.Id
+	}
+	return ""
+}
+
+func (x *HubMessageProto) GetTraceId() string {
+	if x != nil {
+		return x.TraceId
 	}
 	return ""
 }
@@ -270,6 +278,7 @@ type DistributedMessageProto struct {
 	Type          string                 `protobuf:"bytes,1,opt,name=type,proto3" json:"type,omitempty"`                         // 操作类型 | [EN] Operation Type
 	NodeId        string                 `protobuf:"bytes,2,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`       // 源节点ID | [EN] Source Node ID
 	TargetId      string                 `protobuf:"bytes,3,opt,name=target_id,json=targetId,proto3" json:"target_id,omitempty"` // 目标ID（用户ID、节点ID等） | [EN] Target ID
+	TraceId       string                 `protobuf:"bytes,9,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`    // 全链路追踪ID | [EN] Trace ID
 	Message       *HubMessageProto       `protobuf:"bytes,4,opt,name=message,proto3" json:"message,omitempty"`                   // 消息数据 | [EN] Message Data
 	Reason        string                 `protobuf:"bytes,5,opt,name=reason,proto3" json:"reason,omitempty"`                     // 原因 | [EN] Reason
 	Timestamp     *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=timestamp,proto3" json:"timestamp,omitempty"`               // 时间戳 | [EN] Timestamp
@@ -326,6 +335,13 @@ func (x *DistributedMessageProto) GetNodeId() string {
 func (x *DistributedMessageProto) GetTargetId() string {
 	if x != nil {
 		return x.TargetId
+	}
+	return ""
+}
+
+func (x *DistributedMessageProto) GetTraceId() string {
+	if x != nil {
+		return x.TraceId
 	}
 	return ""
 }
@@ -463,9 +479,10 @@ var File_wsc_proto protoreflect.FileDescriptor
 
 const file_wsc_proto_rawDesc = "" +
 	"\n" +
-	"\twsc.proto\x12\x03wsc\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xef\x06\n" +
+	"\twsc.proto\x12\x03wsc\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x8a\a\n" +
 	"\x0fHubMessageProto\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12!\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x19\n" +
+	"\btrace_id\x18\x1a \x01(\tR\atraceId\x12!\n" +
 	"\fmessage_type\x18\x02 \x01(\tR\vmessageType\x12\x16\n" +
 	"\x06sender\x18\x03 \x01(\tR\x06sender\x12\x1f\n" +
 	"\vsender_name\x18\x04 \x01(\tR\n" +
@@ -495,11 +512,12 @@ const file_wsc_proto_rawDesc = "" +
 	"\tpush_type\x18\x16 \x01(\tR\bpushType\x12%\n" +
 	"\x0ebroadcast_type\x18\x17 \x01(\tR\rbroadcastType\x122\n" +
 	"\x15skip_database_storage\x18\x18 \x01(\bR\x13skipDatabaseStorage\x12-\n" +
-	"\x13skip_send_to_client\x18\x19 \x01(\bR\x10skipSendToClient\"\xa0\x02\n" +
+	"\x13skip_send_to_client\x18\x19 \x01(\bR\x10skipSendToClient\"\xbb\x02\n" +
 	"\x17DistributedMessageProto\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12\x17\n" +
 	"\anode_id\x18\x02 \x01(\tR\x06nodeId\x12\x1b\n" +
-	"\ttarget_id\x18\x03 \x01(\tR\btargetId\x12.\n" +
+	"\ttarget_id\x18\x03 \x01(\tR\btargetId\x12\x19\n" +
+	"\btrace_id\x18\t \x01(\tR\atraceId\x12.\n" +
 	"\amessage\x18\x04 \x01(\v2\x14.wsc.HubMessageProtoR\amessage\x12\x16\n" +
 	"\x06reason\x18\x05 \x01(\tR\x06reason\x128\n" +
 	"\ttimestamp\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x12\x1c\n" +

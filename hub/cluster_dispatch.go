@@ -130,7 +130,7 @@ func (h *Hub) routeToCluster(ctx context.Context, msg *HubMessage, opts ClusterD
 	// ③ PubSub 兜底：gRPC 未覆盖的节点走广播
 	if h.pubsub != nil {
 		if err := h.publishToCluster(ctx, dispatch); err != nil {
-			h.logger.WarnKV("PubSub 兜底发布失败",
+			h.logger.WarnContextKV(ctx, "PubSub 兜底发布失败",
 				"operation", opts.Operation,
 				"error", err,
 				"grpc_delivered", result.grpcDelivered,
@@ -183,7 +183,7 @@ func (h *Hub) dispatchViaGRPC(ctx context.Context, msg *HubMessage, opts Cluster
 
 	msgData, err := wscpb.MarshalHubMessage(msg)
 	if err != nil {
-		h.logger.WarnKV("gRPC 序列化失败，全部降级 PubSub",
+		h.logger.WarnContextKV(ctx, "gRPC 序列化失败，全部降级 PubSub",
 			"operation", opts.Operation, "error", err)
 		result.pubsubFallback = h.getAllClusterNodeIDs()
 		return result
@@ -255,7 +255,7 @@ func (h *Hub) executeGRPCDispatch(ctx context.Context, addr string, msgData []by
 		_, err = grpcClient.BroadcastGroup(ctx, addr, opts.Namespace, "", msgData, false, "")
 
 	default:
-		h.logger.WarnKV("未知集群操作类型，跳过 gRPC", "operation", opts.Operation)
+		h.logger.WarnContextKV(ctx, "未知集群操作类型，跳过 gRPC", "operation", opts.Operation)
 		return false
 	}
 

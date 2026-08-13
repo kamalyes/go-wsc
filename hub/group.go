@@ -48,11 +48,11 @@ func (h *Hub) DisbandGroup(ctx context.Context, namespace, groupID string) error
 		return ErrGroupRepoNotSet
 	}
 	if err := h.groupRepo.DisbandGroup(ctx, namespace, groupID); err != nil {
-		h.logger.ErrorKV("解散群组失败",
+		h.logger.ErrorContextKV(ctx, "解散群组失败",
 			"namespace", namespace, "group_id", groupID, "error", err)
 		return err
 	}
-	h.logger.InfoKV("群组已解散", "namespace", namespace, "group_id", groupID)
+	h.logger.InfoContextKV(ctx, "群组已解散", "namespace", namespace, "group_id", groupID)
 
 	// 🔔 异步触发群组解散回调
 	if h.groupDisbandCallback != nil {
@@ -87,11 +87,11 @@ func (h *Hub) AddGroupMembers(ctx context.Context, namespace, groupID string, us
 			CreatedAt: time.Now(),
 		}
 		if err := h.groupRepo.CreateGroup(ctx, newGroup); err != nil && !errors.Is(err, ErrGroupExisted) {
-			h.logger.ErrorKV("自动创建群组失败",
+			h.logger.ErrorContextKV(ctx, "自动创建群组失败",
 				"namespace", namespace, "group_id", groupID, "error", err)
 			return err
 		}
-		h.logger.InfoKV("群组自动创建成功", "namespace", namespace, "group_id", groupID)
+		h.logger.InfoContextKV(ctx, "群组自动创建成功", "namespace", namespace, "group_id", groupID)
 		group = newGroup
 	}
 	// 校验群组人数上限（排除已存在成员，避免重连用户被误判超限）
@@ -116,11 +116,11 @@ func (h *Hub) AddGroupMembers(ctx context.Context, namespace, groupID string, us
 		}
 	}
 	if err := h.groupRepo.AddMembers(ctx, namespace, groupID, userIDs); err != nil {
-		h.logger.ErrorKV("添加群组成员失败",
+		h.logger.ErrorContextKV(ctx, "添加群组成员失败",
 			"namespace", namespace, "group_id", groupID, "users", userIDs, "error", err)
 		return err
 	}
-	h.logger.InfoKV("群组成员添加成功",
+	h.logger.InfoContextKV(ctx, "群组成员添加成功",
 		"namespace", namespace, "group_id", groupID, "users", userIDs)
 	return nil
 }
@@ -149,11 +149,11 @@ func (h *Hub) RemoveGroupMembers(ctx context.Context, namespace, groupID string,
 		return nil
 	}
 	if err := h.groupRepo.RemoveMembers(ctx, namespace, groupID, userIDs); err != nil {
-		h.logger.ErrorKV("移除群组成员失败",
+		h.logger.ErrorContextKV(ctx, "移除群组成员失败",
 			"namespace", namespace, "group_id", groupID, "users", userIDs, "error", err)
 		return err
 	}
-	h.logger.InfoKV("群组成员移除成功",
+	h.logger.InfoContextKV(ctx, "群组成员移除成功",
 		"namespace", namespace, "group_id", groupID, "users", userIDs)
 
 	// 🔔 异步触发群组成员离开回调（复制切片避免调用方后续修改）
@@ -236,7 +236,7 @@ func (h *Hub) SendToGroup(ctx context.Context, namespace, groupID string, msg *H
 	members, err := h.groupRepo.GetMembers(ctx, namespace, groupID)
 	if err != nil {
 		result.Errors = append(result.Errors, err)
-		h.logger.ErrorKV("获取群组成员失败",
+		h.logger.ErrorContextKV(ctx, "获取群组成员失败",
 			"namespace", namespace, "group_id", groupID, "error", err)
 		return result
 	}
@@ -316,7 +316,7 @@ func (h *Hub) SendToGroup(ctx context.Context, namespace, groupID string, msg *H
 	// 🔔 通知观察者（异步，三级索引 O(k) 查找命名空间+群组级观察者）
 	h.notifyObservers(ctx, msg, namespace, groupID)
 
-	h.logger.InfoKV("✅ 群组消息投递完成",
+	h.logger.InfoContextKV(ctx, "✅ 群组消息投递完成",
 		"namespace", namespace,
 		"group_id", groupID,
 		"message_id", msg.MessageID,
@@ -352,7 +352,7 @@ func (h *Hub) SendToGroup(ctx context.Context, namespace, groupID string, msg *H
 // 返回本地成功投递数（跨节点投递为异步，不计入返回值）
 func (h *Hub) BroadcastToGroupMembers(ctx context.Context, namespace, groupID string, msg *HubMessage, excludeSender bool) int {
 	if h.groupRepo == nil {
-		h.logger.WarnKV("群组仓库未设置，无法广播",
+		h.logger.WarnContextKV(ctx, "群组仓库未设置，无法广播",
 			"namespace", namespace, "group_id", groupID)
 		return 0
 	}
@@ -366,7 +366,7 @@ func (h *Hub) BroadcastToGroupMembers(ctx context.Context, namespace, groupID st
 	// 1. 获取群组成员列表
 	members, err := h.groupRepo.GetMembers(ctx, namespace, groupID)
 	if err != nil {
-		h.logger.ErrorKV("群组广播：获取群组成员失败",
+		h.logger.ErrorContextKV(ctx, "群组广播：获取群组成员失败",
 			"namespace", namespace, "group_id", groupID, "error", err)
 		return 0
 	}
@@ -396,7 +396,7 @@ func (h *Hub) BroadcastToGroupMembers(ctx context.Context, namespace, groupID st
 	// 4. 跨节点广播：优先 gRPC 直连，降级 PubSub
 	h.crossNodeGroupBroadcast(ctx, namespace, groupID, msg, excludeSender)
 
-	h.logger.InfoKV("📢 群组广播已发起",
+	h.logger.InfoContextKV(ctx, "📢 群组广播已发起",
 		"namespace", namespace,
 		"group_id", groupID,
 		"message_id", msg.MessageID,
@@ -460,7 +460,7 @@ func (h *Hub) batchGetGroupMembers(ctx context.Context, namespace string, groupI
 
 	groupMembers, err := h.groupRepo.GetMultiGroupMembers(ctx, namespace, groupIDs)
 	if err != nil {
-		h.logger.WarnKV("批量获取群组成员失败",
+		h.logger.WarnContextKV(ctx, "批量获取群组成员失败",
 			"namespace", namespace, "group_count", len(groupIDs), "error", err)
 		return memberSet
 	}
@@ -491,7 +491,7 @@ func (h *Hub) BroadcastToAllGroups(ctx context.Context, namespace string, msg *H
 	// 1. 获取命名空间所有群组ID
 	groupIDs, err := h.groupRepo.GetNamespaceGroups(ctx, namespace)
 	if err != nil {
-		h.logger.WarnKV("获取命名空间群组列表失败", "namespace", namespace, "error", err)
+		h.logger.WarnContextKV(ctx, "获取命名空间群组列表失败", "namespace", namespace, "error", err)
 		return 0
 	}
 	if len(groupIDs) == 0 {
@@ -560,13 +560,13 @@ func (h *Hub) crossNodeGroupsBroadcast(ctx context.Context, namespace string, gr
 //   - 故障隔离：单个命名空间失败不影响其他命名空间
 func (h *Hub) BroadcastToAllNamespacesAllGroups(ctx context.Context, msg *HubMessage) int {
 	if h.groupRepo == nil {
-		h.logger.WarnKV("群组仓库未设置，无法广播")
+		h.logger.WarnContextKV(ctx, "群组仓库未设置，无法广播")
 		return 0
 	}
 
 	namespaces, err := h.groupRepo.GetAllNamespaces(ctx)
 	if err != nil {
-		h.logger.WarnKV("获取所有命名空间失败", "error", err)
+		h.logger.WarnContextKV(ctx, "获取所有命名空间失败", "error", err)
 		return 0
 	}
 	if len(namespaces) == 0 {
@@ -618,14 +618,14 @@ func (h *Hub) BroadcastToAllNamespacesAllGroups(ctx context.Context, msg *HubMes
 //   - 按命名空间分组跨节点路由（每命名空间一条消息，携带该命名空间的 GroupIDs）
 func (h *Hub) BroadcastToGroups(ctx context.Context, namespaces, groupIDs []string, msg *HubMessage) int {
 	if h.groupRepo == nil {
-		h.logger.WarnKV("群组仓库未设置，无法广播")
+		h.logger.WarnContextKV(ctx, "群组仓库未设置，无法广播")
 		return 0
 	}
 
 	// 1. 解析目标 (namespace → []groupID) 映射
 	namespaceGroups, err := h.resolveTargetGroups(ctx, namespaces, groupIDs)
 	if err != nil {
-		h.logger.WarnKV("BroadcastToGroups 解析目标群组失败", "error", err)
+		h.logger.WarnContextKV(ctx, "BroadcastToGroups 解析目标群组失败", "error", err)
 		return 0
 	}
 	if len(namespaceGroups) == 0 {
@@ -637,7 +637,7 @@ func (h *Hub) BroadcastToGroups(ctx context.Context, namespaces, groupIDs []stri
 	for namespace, gids := range namespaceGroups {
 		members, mErr := h.groupRepo.GetMultiGroupMembers(ctx, namespace, gids)
 		if mErr != nil {
-			h.logger.DebugKV("批量获取群组成员失败，跳过该命名空间",
+			h.logger.DebugContextKV(ctx, "批量获取群组成员失败，跳过该命名空间",
 				"namespace", namespace, "error", mErr)
 			continue
 		}
@@ -661,7 +661,7 @@ func (h *Hub) BroadcastToGroups(ctx context.Context, namespaces, groupIDs []stri
 	// 4. 按命名空间分组跨节点路由（每命名空间一条消息，携带该命名空间的 GroupIDs）
 	h.crossNodeMultiNamespaceGroupsBroadcast(ctx, namespaceGroups, msg)
 
-	h.logger.DebugKV("BroadcastToGroups 完成",
+	h.logger.DebugContextKV(ctx, "BroadcastToGroups 完成",
 		"namespace_count", len(namespaceGroups),
 		"local_delivered", localCount,
 		"message_id", msg.MessageID,
@@ -853,12 +853,12 @@ func (h *Hub) leaveSystemGroupsOnDisconnect(ctx context.Context, client *Client)
 // 加入成功后触发 OnGroupMemberJoin 回调（observer/agent 自动入群也通知业务层）
 func (h *Hub) ensureAndJoinSystemGroup(ctx context.Context, namespace, groupID, userID string) {
 	if err := h.groupRepo.EnsureSystemGroup(ctx, namespace, groupID); err != nil {
-		h.logger.WarnKV("ensureSystemGroup 失败",
+		h.logger.WarnContextKV(ctx, "ensureSystemGroup 失败",
 			"namespace", namespace, "group_id", groupID, "error", err)
 		return
 	}
 	if err := h.groupRepo.AddMembers(ctx, namespace, groupID, []string{userID}); err != nil {
-		h.logger.WarnKV("加入系统组失败",
+		h.logger.WarnContextKV(ctx, "加入系统组失败",
 			"namespace", namespace, "group_id", groupID, "user_id", userID, "error", err)
 		return
 	}

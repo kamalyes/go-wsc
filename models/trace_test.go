@@ -56,7 +56,7 @@ func TestHubMessage_InjectContext_NoOverwrite(t *testing.T) {
 func TestHubMessage_InjectContext_NilCtx(t *testing.T) {
 	msg := NewHubMessage()
 	assert.NotPanics(t, func() {
-		msg.InjectContext(nil)
+		msg.InjectContext(context.TODO())
 	}, "InjectContext should not panic with nil ctx")
 	assert.Equal(t, "", msg.TraceID, "TraceID should be empty with nil ctx")
 }

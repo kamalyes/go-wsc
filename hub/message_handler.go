@@ -198,7 +198,7 @@ func (h *Hub) handleTextMessage(ctx context.Context, client *Client, data []byte
 func (h *Hub) handleForwardableMessage(ctx context.Context, msg *HubMessage) error {
 	emoji := msg.MessageType.GetEmoji()
 
-	h.logger.DebugKV(emoji+" 自动转发消息",
+	h.logger.DebugContextKV(ctx, emoji+" 自动转发消息",
 		"message_type", msg.MessageType,
 		"from", msg.Sender,
 		"to", msg.Receiver,
@@ -207,7 +207,7 @@ func (h *Hub) handleForwardableMessage(ctx context.Context, msg *HubMessage) err
 
 	// 检查接收者是否指定
 	if msg.Receiver == "" {
-		h.logger.WarnKV("可转发消息缺少接收者",
+		h.logger.WarnContextKV(ctx, "可转发消息缺少接收者",
 			"message_type", msg.MessageType,
 			"sender", msg.Sender,
 		)
@@ -219,7 +219,7 @@ func (h *Hub) handleForwardableMessage(ctx context.Context, msg *HubMessage) err
 	result := h.SendToUserWithRetry(ctx, msg.Receiver, msg)
 
 	if !result.Success {
-		h.logger.ErrorKV(emoji+" 转发失败", "from", msg.Sender, "to", msg.Receiver, "error", result.FinalError)
+		h.logger.ErrorContextKV(ctx, emoji+" 转发失败", "from", msg.Sender, "to", msg.Receiver, "error", result.FinalError)
 		return result.FinalError
 	}
 	return nil

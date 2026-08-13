@@ -65,11 +65,11 @@ func (s *GRPCServer) Start(ctx context.Context, addr string) error {
 
 	go func() {
 		if err := s.server.Serve(listener); err != nil {
-			s.hub.logger.ErrorKV("gRPC 服务端运行异常", "error", err, "addr", addr)
+			s.hub.logger.ErrorContextKV(ctx, "gRPC 服务端运行异常", "error", err, "addr", addr)
 		}
 	}()
 
-	s.hub.logger.InfoKV("gRPC 服务端已启动", "addr", addr, "node_id", s.hub.GetNodeID())
+	s.hub.logger.InfoContextKV(ctx, "gRPC 服务端已启动", "addr", addr, "node_id", s.hub.GetNodeID())
 	return nil
 }
 

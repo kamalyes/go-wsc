@@ -36,7 +36,7 @@ func (h *Hub) SendToUserWithAck(ctx context.Context, toUserID string, msg *HubMe
 		return nil, result.FinalError
 	}
 	msg.RequireAck = true // 记录ACK发送开始
-	h.logger.InfoKV("ACK消息发送开始",
+	h.logger.InfoContextKV(ctx, "ACK消息发送开始",
 		"message_id", msg.MessageID,
 		"to_user", toUserID,
 		"timeout", timeout,
@@ -111,13 +111,13 @@ func (h *Hub) handleOfflineAckMessage(ctx context.Context, toUserID string, msg 
 	if h.offlineMessageHandler != nil {
 		// 存储离线消息
 		if err := h.offlineMessageHandler.StoreOfflineMessage(ctx, toUserID, msg); err != nil {
-			h.logger.ErrorKV("ACK消息-存储离线消息失败",
+			h.logger.ErrorContextKV(ctx, "ACK消息-存储离线消息失败",
 				"message_id", msg.MessageID,
 				"user_id", toUserID,
 				"error", err,
 			)
 		} else {
-			h.logger.InfoKV("ACK消息-用户离线，已存储离线消息",
+			h.logger.InfoContextKV(ctx, "ACK消息-用户离线，已存储离线消息",
 				"message_id", msg.MessageID,
 				"user_id", toUserID,
 			)

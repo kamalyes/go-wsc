@@ -72,7 +72,7 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMe
 
 	// 3. 没有其他节点 → 本地发送
 	if len(otherNodes) == 0 {
-		h.logger.InfoKV("📍 [投递诊断] 用户仅在本节点，走本地投递",
+		h.logger.InfoContextKV(ctx, "📍 [投递诊断] 用户仅在本节点，走本地投递",
 			"user_id", userID,
 			"message_id", msg.MessageID,
 			"node_id", h.nodeID,
@@ -81,7 +81,7 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMe
 		return false, nil
 	}
 
-	h.logger.InfoKV("📍 [投递诊断] 用户在其他节点，发起跨节点路由",
+	h.logger.InfoContextKV(ctx, "📍 [投递诊断] 用户在其他节点，发起跨节点路由",
 		"message_id", msg.MessageID,
 		"user_id", userID,
 		"from_node", h.nodeID,
@@ -156,12 +156,12 @@ func (h *Hub) SubscribeNodeMessages(ctx context.Context) error {
 
 	channel := h.config.RedisRepository.PubSub.GetNodeChannelPrefix() + h.nodeID
 
-	h.logger.InfoKV("订阅节点消息通道", "channel", channel)
+	h.logger.InfoContextKV(ctx, "订阅节点消息通道", "channel", channel)
 
 	// 使用 EventLoop 包装订阅过程，提供 panic 恢复和优雅关闭
 	syncx.Go(ctx).
 		OnPanic(func(r any) {
-			h.logger.ErrorKV("节点消息订阅 panic", "panic", r, "stack", string(debug.Stack()), "channel", channel)
+			h.logger.ErrorContextKV(ctx, "节点消息订阅 panic", "panic", r, "stack", string(debug.Stack()), "channel", channel)
 		}).
 		Exec(func() {
 			_, err := h.pubsub.Subscribe([]string{channel}, func(subCtx context.Context, ch string, msg string) error {
@@ -175,13 +175,13 @@ func (h *Hub) SubscribeNodeMessages(ctx context.Context) error {
 			})
 
 			if err != nil {
-				h.logger.ErrorKV("订阅节点消息失败", "error", err, "channel", channel)
+				h.logger.ErrorContextKV(ctx, "订阅节点消息失败", "error", err, "channel", channel)
 			}
 
 			// 使用 EventLoop 保持订阅活跃，直到 context 取消
 			syncx.NewEventLoop(ctx).
 				OnShutdown(func() {
-					h.logger.InfoKV("节点消息订阅已停止", "channel", channel)
+					h.logger.InfoContextKV(ctx, "节点消息订阅已停止", "channel", channel)
 				}).
 				Run()
 		})
@@ -223,7 +223,7 @@ func (h *Hub) handleDistributedMessage(ctx context.Context, distMsg *Distributed
 		return h.handleDistributedObserverNotify(ctx, distMsg)
 
 	default:
-		h.logger.WarnKV("未知的分布式消息类型", "type", distMsg.Type)
+		h.logger.WarnContextKV(ctx, "未知的分布式消息类型", "type", distMsg.Type)
 		return fmt.Errorf("unknown message type: %s", distMsg.Type)
 	}
 }
@@ -237,7 +237,7 @@ func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *Distrib
 
 	// 快速检查用户是否存在（避免无用户时序列化开销）
 	if !h.shardedRegistry.HasUser(distMsg.TargetID) {
-		h.logger.DebugKV("[跨Pod] 用户不在本节点，跳过",
+		h.logger.DebugContextKV(ctx, "[跨Pod] 用户不在本节点，跳过",
 			"user_id", distMsg.TargetID,
 			"message_id", distMsg.Message.MessageID,
 			"from_node", distMsg.NodeID,
@@ -246,7 +246,7 @@ func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *Distrib
 		return fmt.Errorf("user not found on this node: %s", distMsg.TargetID)
 	}
 
-	h.logger.InfoKV("✅ [跨Pod] 消息命中本节点，准备投递给本地客户端",
+	h.logger.InfoContextKV(ctx, "✅ [跨Pod] 消息命中本节点，准备投递给本地客户端",
 		"user_id", distMsg.TargetID,
 		"message_id", distMsg.Message.MessageID,
 		"from_node", distMsg.NodeID,
@@ -265,7 +265,7 @@ func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *Distrib
 		if client.TrySend(msgData) {
 			successCount++
 		} else {
-			h.logger.WarnKV("跨节点消息发送失败：发送缓冲区满或已关闭",
+			h.logger.WarnContextKV(ctx, "跨节点消息发送失败：发送缓冲区满或已关闭",
 				"client_id", client.ID,
 				"user_id", distMsg.TargetID,
 				"message_id", distMsg.Message.MessageID,
@@ -286,7 +286,7 @@ func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *Distrib
 		return fmt.Errorf("failed to send to any client: %s", distMsg.TargetID)
 	}
 
-	h.logger.InfoKV("✅ [跨Pod] 消息已投递到本地客户端",
+	h.logger.InfoContextKV(ctx, "✅ [跨Pod] 消息已投递到本地客户端",
 		"message_id", distMsg.Message.MessageID,
 		"user_id", distMsg.TargetID,
 		"success_count", successCount,
@@ -343,7 +343,7 @@ func (h *Hub) handleDistributedBroadcast(ctx context.Context, distMsg *Distribut
 		case <-ctx.Done():
 			return fmt.Errorf("context cancelled: %w", ctx.Err())
 		default:
-			h.logger.WarnKV("广播队列已满", "message_id", distMsg.Message.MessageID)
+			h.logger.WarnContextKV(ctx, "广播队列已满", "message_id", distMsg.Message.MessageID)
 			return nil
 		}
 	}
@@ -353,7 +353,7 @@ func (h *Hub) handleDistributedBroadcast(ctx context.Context, distMsg *Distribut
 		return c.Namespace == namespace
 	}, distMsg.Message)
 
-	h.logger.DebugKV("跨节点命名空间广播已处理",
+	h.logger.DebugContextKV(ctx, "跨节点命名空间广播已处理",
 		"namespace", namespace,
 		"message_id", distMsg.Message.MessageID,
 		"local_delivered", count,
@@ -458,7 +458,7 @@ func (h *Hub) handleDistributedGroupsBroadcast(ctx context.Context, distMsg *Dis
 	// Pipeline 批量获取所有群组成员（1 次 RTT，单群组场景等价于单次 SMEMBERS）
 	groupMembers, err := h.groupRepo.GetMultiGroupMembers(ctx, namespace, groupIDs)
 	if err != nil {
-		h.logger.WarnKV("跨节点群组广播：获取群组成员失败",
+		h.logger.WarnContextKV(ctx, "跨节点群组广播：获取群组成员失败",
 			"namespace", namespace, "group_count", len(groupIDs), "error", err)
 		return err
 	}
@@ -482,7 +482,7 @@ func (h *Hub) handleDistributedGroupsBroadcast(ctx context.Context, distMsg *Dis
 	}
 	count := h.broadcastToUserIDs(ctx, memberList, distMsg.Message)
 
-	h.logger.DebugKV("跨节点群组广播已处理",
+	h.logger.DebugContextKV(ctx, "跨节点群组广播已处理",
 		"namespace", namespace,
 		"group_count", len(groupIDs),
 		"unique_members", len(memberSet),
@@ -563,7 +563,7 @@ func (h *Hub) handleDistributedObserverNotify(ctx context.Context, distMsg *Dist
 			)
 		}).
 		OnPanic(func(idx int, client *Client, panicVal any) {
-			h.logger.WarnKV("跨节点通知观察者时发生 panic(通道可能已关闭)",
+			h.logger.WarnContextKV(ctx, "跨节点通知观察者时发生 panic(通道可能已关闭)",
 				"observer_id", client.UserID,
 				"client_id", client.ID,
 				"message_id", msgID,
@@ -593,12 +593,12 @@ func (h *Hub) SubscribeBroadcastChannel(ctx context.Context) error {
 
 	channel := h.config.RedisRepository.PubSub.GetBroadcastChannel()
 
-	h.logger.InfoKV("订阅全局广播频道", "channel", channel)
+	h.logger.InfoContextKV(ctx, "订阅全局广播频道", "channel", channel)
 
 	// 使用 EventLoop 包装订阅过程，提供 panic 恢复和优雅关闭
 	syncx.Go(ctx).
 		OnPanic(func(r any) {
-			h.logger.ErrorKV("广播频道订阅 panic", "panic", r, "stack", string(debug.Stack()), "channel", channel)
+			h.logger.ErrorContextKV(ctx, "广播频道订阅 panic", "panic", r, "stack", string(debug.Stack()), "channel", channel)
 		}).
 		Exec(func() {
 			_, err := h.pubsub.Subscribe([]string{channel}, func(subCtx context.Context, ch string, msg string) error {
@@ -617,13 +617,13 @@ func (h *Hub) SubscribeBroadcastChannel(ctx context.Context) error {
 			})
 
 			if err != nil {
-				h.logger.ErrorKV("订阅广播频道失败", "error", err, "channel", channel)
+				h.logger.ErrorContextKV(ctx, "订阅广播频道失败", "error", err, "channel", channel)
 			}
 
 			// 使用 EventLoop 保持订阅活跃，直到 context 取消
 			syncx.NewEventLoop(ctx).
 				OnShutdown(func() {
-					h.logger.InfoKV("广播频道订阅已停止", "channel", channel)
+					h.logger.InfoContextKV(ctx, "广播频道订阅已停止", "channel", channel)
 				}).
 				Run()
 		})
@@ -639,12 +639,12 @@ func (h *Hub) SubscribeObserverChannel(ctx context.Context) error {
 
 	channel := h.config.RedisRepository.PubSub.GetObserverChannel()
 
-	h.logger.InfoKV("订阅观察者通知频道", "channel", channel)
+	h.logger.InfoContextKV(ctx, "订阅观察者通知频道", "channel", channel)
 
 	// 使用 EventLoop 包装订阅过程，提供 panic 恢复和优雅关闭
 	syncx.Go(ctx).
 		OnPanic(func(r any) {
-			h.logger.ErrorKV("观察者频道订阅 panic", "panic", r, "stack", string(debug.Stack()), "channel", channel)
+			h.logger.ErrorContextKV(ctx, "观察者频道订阅 panic", "panic", r, "stack", string(debug.Stack()), "channel", channel)
 		}).
 		Exec(func() {
 			_, err := h.pubsub.Subscribe([]string{channel}, func(subCtx context.Context, ch string, msg string) error {
@@ -658,13 +658,13 @@ func (h *Hub) SubscribeObserverChannel(ctx context.Context) error {
 			})
 
 			if err != nil {
-				h.logger.ErrorKV("订阅观察者频道失败", "error", err, "channel", channel)
+				h.logger.ErrorContextKV(ctx, "订阅观察者频道失败", "error", err, "channel", channel)
 			}
 
 			// 使用 EventLoop 保持订阅活跃，直到 context 取消
 			syncx.NewEventLoop(ctx).
 				OnShutdown(func() {
-					h.logger.InfoKV("观察者频道订阅已停止", "channel", channel)
+					h.logger.InfoContextKV(ctx, "观察者频道订阅已停止", "channel", channel)
 				}).
 				Run()
 		})

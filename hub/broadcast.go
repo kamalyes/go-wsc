@@ -53,7 +53,7 @@ func (h *Hub) Broadcast(ctx context.Context, msg *HubMessage) {
 		Namespace: "", // 全命名空间广播
 	}
 	if !h.clusterBatcher.Submit(msg, opts) {
-		h.logger.WarnKV("集群分发队列已满，丢弃跨节点广播",
+		h.logger.WarnContextKV(ctx, "集群分发队列已满，丢弃跨节点广播",
 			"message_id", msg.MessageID)
 	}
 
@@ -63,7 +63,7 @@ func (h *Hub) Broadcast(ctx context.Context, msg *HubMessage) {
 		// 成功放入广播队列
 	default:
 		// broadcast队列满，尝试放入待发送队列
-		h.logger.WarnKV("广播队列已满，尝试使用待发送队列",
+		h.logger.WarnContextKV(ctx, "广播队列已满，尝试使用待发送队列",
 			"message_id", msg.MessageID,
 			"sender", msg.Sender,
 			"message_type", msg.MessageType,
@@ -73,7 +73,7 @@ func (h *Hub) Broadcast(ctx context.Context, msg *HubMessage) {
 			// 成功放入待发送队列
 		default:
 			// 两个队列都满，静默丢弃（广播消息不返回错误）
-			h.logger.ErrorKV("所有队列已满，丢弃广播消息",
+			h.logger.ErrorContextKV(ctx, "所有队列已满，丢弃广播消息",
 				"message_id", msg.MessageID,
 				"sender", msg.Sender,
 				"message_type", msg.MessageType,

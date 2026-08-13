@@ -53,7 +53,7 @@ func (h *Hub) routeToClusterForOfflineUser(ctx context.Context, userID string, m
 		Operation:    OperationTypeSendMessage,
 		TargetUserID: userID,
 	}
-	h.logger.InfoKV("🔍 [跨Pod] 用户本地+Redis索引判定离线，发起pubsub跨节点投递",
+	h.logger.InfoContextKV(ctx, "🔍 [跨Pod] 用户本地+Redis索引判定离线，发起pubsub跨节点投递",
 		"user_id", userID,
 		"message_id", msg.MessageID,
 		"sender", msg.Sender,
@@ -62,7 +62,7 @@ func (h *Hub) routeToClusterForOfflineUser(ctx context.Context, userID string, m
 		"has_pubsub", h.pubsub != nil,
 	)
 	if err := h.routeToCluster(ctx, msg, opts); err != nil {
-		h.logger.WarnKV("离线用户跨节点广播失败",
+		h.logger.WarnContextKV(ctx, "离线用户跨节点广播失败",
 			"user_id", userID,
 			"message_id", msg.MessageID,
 			"error", err,
@@ -87,7 +87,7 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 		// 路由失败，记录错误但继续尝试本地发送
 		// 注意：此处不将消息标记为失败，因为会 fallback 到本地发送
 		// 如果本地发送也失败，下游的 default 分支会标记为 QueueFull 失败
-		h.logger.WarnKV("跨节点路由失败，尝试本地发送",
+		h.logger.WarnContextKV(ctx, "跨节点路由失败，尝试本地发送",
 			"user_id", toUserID,
 			"message_id", msgCopy.MessageID,
 			"error", err,
@@ -173,7 +173,7 @@ func (h *Hub) SendToUserWithRetry(ctx context.Context, toUserID string, msg *Hub
 
 	// 检查用户是否在线
 	isOnline := h.checkUserOnline(toUserID)
-	h.logger.InfoKV("📍 [投递诊断] 用户在线检查",
+	h.logger.InfoContextKV(ctx, "📍 [投递诊断] 用户在线检查",
 		"user_id", toUserID,
 		"message_id", msg.MessageID,
 		"is_online", isOnline,
@@ -190,7 +190,7 @@ func (h *Hub) SendToUserWithRetry(ctx context.Context, toUserID string, msg *Hub
 		if h.offlineMessageHandler != nil {
 			// 存储离线消息
 			if err := h.offlineMessageHandler.StoreOfflineMessage(ctx, toUserID, msg); err != nil {
-				h.logger.ErrorKV("存储离线消息失败",
+				h.logger.ErrorContextKV(ctx, "存储离线消息失败",
 					"user_id", toUserID,
 					"message_id", msg.MessageID,
 					"error", err,
@@ -200,7 +200,7 @@ func (h *Hub) SendToUserWithRetry(ctx context.Context, toUserID string, msg *Hub
 				h.invokeMessageSendCallback(msg, result)
 				return result
 			}
-			h.logger.InfoKV("用户离线，消息已存储，将在用户上线时推送",
+			h.logger.InfoContextKV(ctx, "用户离线，消息已存储，将在用户上线时推送",
 				"user_id", toUserID,
 				"message_id", msg.MessageID,
 			)
@@ -401,7 +401,7 @@ func (h *Hub) SendToGroupMembers(ctx context.Context, memberIDs []string, msg *H
 		filteredIDs = mathx.FilterSlice(memberIDs, func(id string) bool {
 			return id != msg.Sender
 		})
-		h.logger.DebugKV("🔄 过滤发送者后的成员列表",
+		h.logger.DebugContextKV(ctx, "🔄 过滤发送者后的成员列表",
 			"original_count", len(memberIDs),
 			"filtered_count", len(filteredIDs),
 			"excluded_sender", msg.Sender,
@@ -450,7 +450,7 @@ func (h *Hub) SendToGroupMembers(ctx context.Context, memberIDs []string, msg *H
 			return sendResult, nil
 		})
 
-	h.logger.DebugKV("✅ 会话消息发送完成",
+	h.logger.DebugContextKV(ctx, "✅ 会话消息发送完成",
 		"session_id", msg.SessionID,
 		"message_id", msg.MessageID,
 		"total", result.Total,
@@ -504,6 +504,8 @@ func (h *Hub) recordMessageToDatabase(msg *HubMessage, sendErr error) {
 	h.workerPool.TrySubmitRecord(func() {
 		ctx, cancel := context.WithTimeout(h.ctx, 3*time.Second)
 		defer cancel()
+		// 从消息体恢复 trace_id（SendToUserWithRetry 已注入）
+		ctx = msg.ContextFromMessage(ctx)
 
 		now := time.Now()
 
@@ -542,7 +544,7 @@ func (h *Hub) recordMessageToDatabase(msg *HubMessage, sendErr error) {
 		}
 
 		if err := h.messageRecordRepo.Create(ctx, record); err != nil {
-			h.logger.DebugKV("记录消息到数据库失败",
+			h.logger.DebugContextKV(ctx, "记录消息到数据库失败",
 				"message_id", msg.MessageID,
 				"error", err,
 			)

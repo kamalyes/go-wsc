@@ -74,10 +74,10 @@ func (h *Hub) disconnectKickedClient(ctx context.Context, client *Client, reason
 	if h.clientDisconnectCallback != nil {
 		syncx.Go().
 			OnPanic(func(r any) {
-				h.logger.ErrorKV("踢出用户断开回调 panic", "panic", r, "stack", string(debug.Stack()), "client_id", client.ID)
+				h.logger.ErrorContextKV(ctx, "踢出用户断开回调 panic", "panic", r, "stack", string(debug.Stack()), "client_id", client.ID)
 			}).
 			OnError(func(err error) {
-				h.logger.ErrorKV("踢出用户时断开回调执行失败",
+				h.logger.ErrorContextKV(ctx, "踢出用户时断开回调执行失败",
 					"client_id", client.ID,
 					"user_id", client.UserID,
 					"error", err,
@@ -92,7 +92,7 @@ func (h *Hub) disconnectKickedClient(ctx context.Context, client *Client, reason
 	}
 
 	// 关闭连接
-	h.logger.InfoKV("关闭被踢用户的连接",
+	h.logger.InfoContextKV(ctx, "关闭被踢用户的连接",
 		"client_id", client.ID,
 		"user_id", client.UserID,
 		"reason", reason,

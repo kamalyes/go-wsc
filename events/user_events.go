@@ -12,11 +12,12 @@
 package events
 
 import (
+	"context"
 	"time"
 )
 
 // PublishUserOnline 发布用户上线事件（支持所有用户类型）
-func PublishUserOnline(p Publisher, userID string, userType UserType, clientID string) {
+func PublishUserOnline(ctx context.Context, p Publisher, userID string, userType UserType, clientID string) {
 	event := UserStatusEvent{
 		UserID:    userID,
 		UserType:  userType,
@@ -26,7 +27,7 @@ func PublishUserOnline(p Publisher, userID string, userType UserType, clientID s
 		ClientID:  clientID,
 	}
 
-	publishEventHelper(p, EventUserOnline, event, map[string]interface{}{
+	publishEventHelper(ctx, p, EventUserOnline, event, map[string]interface{}{
 		"user_id":   userID,
 		"user_type": userType,
 		"client_id": clientID,
@@ -34,7 +35,7 @@ func PublishUserOnline(p Publisher, userID string, userType UserType, clientID s
 }
 
 // PublishUserOffline 发布用户下线事件（支持所有用户类型）
-func PublishUserOffline(p Publisher, userID string, userType UserType, clientID string) {
+func PublishUserOffline(ctx context.Context, p Publisher, userID string, userType UserType, clientID string) {
 	event := UserStatusEvent{
 		UserID:    userID,
 		UserType:  userType,
@@ -44,7 +45,7 @@ func PublishUserOffline(p Publisher, userID string, userType UserType, clientID 
 		ClientID:  clientID,
 	}
 
-	publishEventHelper(p, EventUserOffline, event, map[string]interface{}{
+	publishEventHelper(ctx, p, EventUserOffline, event, map[string]interface{}{
 		"user_id":   userID,
 		"user_type": userType,
 		"client_id": clientID,
@@ -53,18 +54,18 @@ func PublishUserOffline(p Publisher, userID string, userType UserType, clientID 
 
 // SubscribeUserOnline 订阅用户上线事件（支持多个callback注册）
 // 返回取消订阅函数，调用后将停止接收该事件
-func SubscribeUserOnline(p Publisher, handler UserStatusEventHandler) (func() error, error) {
-	return subscribeEventHelper(p, []string{EventUserOnline}, handler, "用户上线事件")
+func SubscribeUserOnline(ctx context.Context, p Publisher, handler UserStatusEventHandler) (func() error, error) {
+	return subscribeEventHelper(ctx, p, []string{EventUserOnline}, handler, "用户上线事件")
 }
 
 // SubscribeUserOffline 订阅用户下线事件（支持多个callback注册）
 // 返回取消订阅函数，调用后将停止接收该事件
-func SubscribeUserOffline(p Publisher, handler UserStatusEventHandler) (func() error, error) {
-	return subscribeEventHelper(p, []string{EventUserOffline}, handler, "用户下线事件")
+func SubscribeUserOffline(ctx context.Context, p Publisher, handler UserStatusEventHandler) (func() error, error) {
+	return subscribeEventHelper(ctx, p, []string{EventUserOffline}, handler, "用户下线事件")
 }
 
 // SubscribeAllUserEvents 订阅所有用户事件（上线+下线）
 // 返回取消订阅函数，调用后将停止接收所有用户事件
-func SubscribeAllUserEvents(p Publisher, handler UserStatusEventHandler) (func() error, error) {
-	return subscribeEventHelper(p, []string{EventUserOnline, EventUserOffline}, handler, "所有用户事件")
+func SubscribeAllUserEvents(ctx context.Context, p Publisher, handler UserStatusEventHandler) (func() error, error) {
+	return subscribeEventHelper(ctx, p, []string{EventUserOnline, EventUserOffline}, handler, "所有用户事件")
 }

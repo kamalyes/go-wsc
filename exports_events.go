@@ -12,6 +12,8 @@
 package wsc
 
 import (
+	"context"
+
 	"github.com/kamalyes/go-wsc/events"
 )
 
@@ -29,28 +31,6 @@ var SubscribeUserOnline = events.SubscribeUserOnline
 // SubscribeUserOffline 订阅用户下线事件
 var SubscribeUserOffline = events.SubscribeUserOffline
 
-// ==================== 工单入队事件 ====================
-
-// PublishTicketQueuePushed 发布工单入队事件
-var PublishTicketQueuePushed = events.PublishTicketQueuePushed
-
-// SubscribeTicketQueuePushed 订阅工单入队事件
-var SubscribeTicketQueuePushed = events.SubscribeTicketQueuePushed
-
-// ==================== 工单分配事件 ====================
-
-// PublishTicketAssigned 发布工单分配成功事件
-var PublishTicketAssigned = events.PublishTicketAssigned
-
-// SubscribeTicketAssigned 订阅工单分配成功事件
-var SubscribeTicketAssigned = events.SubscribeTicketAssigned
-
-// PublishTicketAssignmentFailed 发布工单分配失败事件
-var PublishTicketAssignmentFailed = events.PublishTicketAssignmentFailed
-
-// SubscribeTicketAssignmentFailed 订阅工单分配失败事件
-var SubscribeTicketAssignmentFailed = events.SubscribeTicketAssignmentFailed
-
 // ==================== 通用事件发布订阅 ====================
 
 // PublishEvent 发布自定义事件
@@ -64,7 +44,7 @@ type Publisher = events.Publisher
 
 // SubscribeEventTyped 订阅自定义事件（类型安全版本，泛型函数）
 // 由于是泛型函数，需要在调用时指定类型参数
-// 使用示例: wsc.SubscribeEventTyped[MyEventType](publisher, eventTypes, handler)
-func SubscribeEventTyped[T any](p Publisher, eventTypes []string, handler func(*T) error) (func() error, error) {
-	return events.SubscribeEventTyped(p, eventTypes, handler)
+// 使用示例: wsc.SubscribeEventTyped[MyEventType](ctx, publisher, eventTypes, handler)
+func SubscribeEventTyped[T any](ctx context.Context, p Publisher, eventTypes []string, handler func(*T) error) (func() error, error) {
+	return events.SubscribeEventTyped(ctx, p, eventTypes, handler)
 }

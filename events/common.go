@@ -19,25 +19,27 @@ import (
 
 // PublishEvent 发布自定义事件（通用方法）
 // 参数：
+//   - ctx: 上下文（透传 trace_id）
+//   - p: Publisher 发布器
 //   - eventType: 事件类型（建议使用命名空间，如 "app.user.created"）
 //   - data: 事件数据（任意类型，会自动序列化为JSON）
-func PublishEvent(p Publisher, eventType string, data interface{}) error {
+func PublishEvent(ctx context.Context, p Publisher, eventType string, data interface{}) error {
 	pubsub := p.GetPubSub()
 	if pubsub == nil {
 		return ErrPubSubNotSet
 	}
 
-	ctx, cancel := context.WithTimeout(p.GetContext(), time.Second*5)
+	pubCtx, cancel := context.WithTimeout(ctx, time.Second*5)
 	defer cancel()
 
-	if err := pubsub.Publish(ctx, eventType, data); err != nil {
+	if err := pubsub.Publish(pubCtx, eventType, data); err != nil {
 		// 区分上下文取消和其他错误
-		if ctx.Err() == context.Canceled || p.GetContext().Err() != nil {
-			p.GetLogger().DebugKV("发布自定义事件被取消（Hub可能正在关闭）",
+		if pubCtx.Err() == context.Canceled || ctx.Err() != nil {
+			p.GetLogger().DebugContextKV(ctx, "发布自定义事件被取消（Hub可能正在关闭）",
 				"event_type", eventType,
 			)
 		} else {
-			p.GetLogger().WarnKV("发布自定义事件失败",
+			p.GetLogger().WarnContextKV(ctx, "发布自定义事件失败",
 				"event_type", eventType,
 				"error", err,
 			)
@@ -45,7 +47,7 @@ func PublishEvent(p Publisher, eventType string, data interface{}) error {
 		return err
 	}
 
-	p.GetLogger().DebugKV("📢 发布自定义事件",
+	p.GetLogger().DebugContextKV(ctx, "📢 发布自定义事件",
 		"event_type", eventType,
 	)
 	return nil
@@ -53,6 +55,8 @@ func PublishEvent(p Publisher, eventType string, data interface{}) error {
 
 // SubscribeEvent 订阅自定义事件（通用方法）
 // 参数：
+//   - ctx: 上下文（透传 trace_id）
+//   - p: Publisher 发布器
 //   - eventTypes: 要订阅的事件类型列表
 //   - handler: 事件处理函数，接收 (context, channel, message) 参数
 //
@@ -62,7 +66,7 @@ func PublishEvent(p Publisher, eventType string, data interface{}) error {
 //
 // 使用示例：
 //
-//	unsubscribe, err := SubscribeEvent(publisher, []string{"app.user.created"}, func(ctx context.Context, channel string, message string) error {
+//	unsubscribe, err := SubscribeEvent(ctx, publisher, []string{"app.user.created"}, func(ctx context.Context, channel string, message string) error {
 //	    var event MyCustomEvent
 //	    json.Unmarshal([]byte(message), &event)
 //	    处理事件...
@@ -70,13 +74,13 @@ func PublishEvent(p Publisher, eventType string, data interface{}) error {
 //	})
 //	if err != nil { return err }
 //	defer unsubscribe() // 需要时取消订阅
-func SubscribeEvent(p Publisher, eventTypes []string, handler func(ctx context.Context, channel string, message string) error) (func() error, error) {
+func SubscribeEvent(ctx context.Context, p Publisher, eventTypes []string, handler func(ctx context.Context, channel string, message string) error) (func() error, error) {
 	pubsub := p.GetPubSub()
 	if pubsub == nil {
 		return nil, ErrPubSubNotSet
 	}
 
-	p.GetLogger().InfoKV("📡 订阅自定义事件", "event_types", eventTypes)
+	p.GetLogger().InfoContextKV(ctx, "📡 订阅自定义事件", "event_types", eventTypes)
 
 	subscriber, err := pubsub.Subscribe(eventTypes, handler)
 	if err != nil {
@@ -90,6 +94,7 @@ func SubscribeEvent(p Publisher, eventTypes []string, handler func(ctx context.C
 
 // SubscribeEventTyped 订阅自定义事件（类型安全版本，泛型函数）
 // 参数：
+//   - ctx: 上下文（透传 trace_id）
 //   - p: Publisher 发布器
 //   - eventTypes: 要订阅的事件类型列表
 //   - handler: 类型安全的事件处理函数
@@ -101,26 +106,26 @@ func SubscribeEvent(p Publisher, eventTypes []string, handler func(ctx context.C
 // 使用示例：
 //
 //	type MyEvent struct { Name string `json:"name"` }
-//	unsubscribe, err := SubscribeEventTyped[MyEvent](publisher, []string{"my.event"}, func(event *MyEvent) error {
+//	unsubscribe, err := SubscribeEventTyped[MyEvent](ctx, publisher, []string{"my.event"}, func(event *MyEvent) error {
 //	    log.Printf("收到事件: %s", event.Name)
 //	    return nil
 //	})
 //	if err != nil { return err }
 //	defer unsubscribe() // 需要时取消订阅
-func SubscribeEventTyped[T any](p Publisher, eventTypes []string, handler func(event *T) error) (func() error, error) {
+func SubscribeEventTyped[T any](ctx context.Context, p Publisher, eventTypes []string, handler func(event *T) error) (func() error, error) {
 	pubsub := p.GetPubSub()
 	if pubsub == nil {
 		return nil, ErrPubSubNotSet
 	}
 
-	p.GetLogger().InfoKV("📡 订阅自定义事件（类型安全）", "event_types", eventTypes)
+	p.GetLogger().InfoContextKV(ctx, "📡 订阅自定义事件（类型安全）", "event_types", eventTypes)
 
 	subscriber, err := pubsub.Subscribe(
 		eventTypes,
-		func(ctx context.Context, channel string, message string) error {
+		func(subCtx context.Context, channel string, message string) error {
 			var event T
 			if err := json.Unmarshal([]byte(message), &event); err != nil {
-				p.GetLogger().WarnKV("事件反序列化失败",
+				p.GetLogger().WarnContextKV(subCtx, "事件反序列化失败",
 					"channel", channel,
 					"error", err,
 					"message", message,

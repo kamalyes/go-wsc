@@ -129,7 +129,7 @@ func (h *Hub) handleRegister(client *Client) {
 	// Phase 3: 非临界区 - IO 操作异步执行（WorkerPool 控制并发）
 	// 不再持有任何锁，避免阻塞其他客户端的注册/注销/发送
 	// ============================================================
-	ctx := context.Background()
+	ctx := client.Context
 
 	// 统计同步 + 日志（提交到记录池，可丢弃）
 	h.workerPool.TrySubmitRecord(func() {
@@ -172,7 +172,7 @@ func (h *Hub) handleRegister(client *Client) {
 
 	// 📡 发布用户上线事件（提交到回调池）
 	h.workerPool.TrySubmitCallback(func() {
-		events.PublishUserOnline(h, client.UserID, client.UserType, client.ID)
+		events.PublishUserOnline(ctx, h, client.UserID, client.UserType, client.ID)
 	})
 
 	// 发送欢迎消息（提交到消息池）
@@ -203,14 +203,14 @@ func (h *Hub) GetMaxConnectionsPerNode() int {
 
 // handleUnregister 处理客户端注销（内部方法）
 func (h *Hub) handleUnregister(client *Client) {
+	// 从客户端连接级上下文获取 ctx（携带 trace_id）
+	ctx := client.Context
+
 	// 📡 发布用户下线事件（在锁外发布，避免阻塞）
-	go events.PublishUserOffline(h, client.UserID, client.UserType, client.ID)
+	go events.PublishUserOffline(ctx, h, client.UserID, client.UserType, client.ID)
 
 	// Phase 1: 临界区 - 仅从注册表移除（shardedRegistry 分片锁）
 	h.removeClientUnsafe(client)
-
-	// Phase 2: 非临界区 - IO 操作异步执行
-	ctx := context.Background()
 
 	// 系统组离开（提交到分布式池，与在线状态清理并行）
 	h.workerPool.TrySubmitDistributed(func() {

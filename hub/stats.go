@@ -198,6 +198,7 @@ func (h *Hub) trackHeartbeatStats(client *Client) {
 // ============================================================================
 
 // logWithClient 带客户端信息的日志记录辅助方法
+// 使用 client.Context 而非 h.ctx，确保连接级 trace_id 自动输出
 func (h *Hub) logWithClient(level logger.LogLevel, msg string, client *Client, extraFields ...interface{}) {
 	fields := []interface{}{
 		"client_id", client.ID,
@@ -207,14 +208,20 @@ func (h *Hub) logWithClient(level logger.LogLevel, msg string, client *Client, e
 	}
 	fields = append(fields, extraFields...)
 
+	// 优先使用 client.Context（携带连接级 trace_id），fallback 到 h.ctx
+	ctx := client.Context
+	if ctx == nil {
+		ctx = h.ctx
+	}
+
 	switch level {
 	case logger.INFO:
-		h.logger.InfoContextKV(h.ctx, msg, fields...)
+		h.logger.InfoContextKV(ctx, msg, fields...)
 	case logger.WARN:
-		h.logger.WarnContextKV(h.ctx, msg, fields...)
+		h.logger.WarnContextKV(ctx, msg, fields...)
 	case logger.ERROR:
-		h.logger.ErrorContextKV(h.ctx, msg, fields...)
+		h.logger.ErrorContextKV(ctx, msg, fields...)
 	case logger.DEBUG:
-		h.logger.DebugContextKV(h.ctx, msg, fields...)
+		h.logger.DebugContextKV(ctx, msg, fields...)
 	}
 }

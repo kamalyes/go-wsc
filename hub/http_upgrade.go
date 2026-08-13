@@ -18,6 +18,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	gccommon "github.com/kamalyes/go-config/pkg/common"
+	"github.com/kamalyes/go-logger"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/metadata"
 )
@@ -114,7 +115,15 @@ func (h *Hub) CreateClientFromRequest(r *http.Request, conn *websocket.Conn, att
 		WithGroupID(attrs.GroupID).
 		WithMetadataMap(metaMap).
 		// 从 Hub 生命周期 ctx 派生连接级 ctx（r.Context() 在 WebSocket 升级后会取消，不适合长连接）
-		WithContext(context.WithValue(h.ctx, ContextKeySenderID, attrs.UserID))
+		// 但需要从 r.Context() 提取 trace_id 注入，保证客户端生命周期内的日志都有 trace_id
+		WithContext(func() context.Context {
+			connCtx := context.WithValue(h.ctx, ContextKeySenderID, attrs.UserID)
+			// 从 HTTP 请求 ctx 提取 trace_id（OTel span > ctx.Value fallback），注入到连接级 ctx
+			if traceID := logger.ExtractTraceID(r.Context()); traceID != "" {
+				connCtx = logger.ContextWithTraceID(connCtx, traceID)
+			}
+			return connCtx
+		}())
 
 	// 初始化客户端 SendChan（根据客户端类型使用配置的容量）
 	h.initClientSendChan(client)

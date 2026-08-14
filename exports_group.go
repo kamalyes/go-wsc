@@ -108,8 +108,8 @@ var (
 // - GetNamespaceGroups(ctx context.Context, namespace string) ([]string, error): 获取命名空间下所有群组ID
 // - GetGroupRepository() GroupRepository: 获取群组仓库
 //
-// 群组消息投递方法（namespace 由参数传入，HubMessage 不携带路由元数据）：
-// - SendToGroup(ctx context.Context, namespace, groupID string, msg *HubMessage, excludeSender bool) *GroupSendResult: 向群组发送消息（可靠投递，含离线存储与重试）
+// 群组消息投递方法（namespace/groupID 统一从 ctx 取，调用方使用 routing.WithNamespaceGroupIDs 注入）：
+// - SendToGroup(ctx context.Context, msg *HubMessage, excludeSender bool) *GroupSendResult: 向群组发送消息（可靠投递，含离线存储与重试；ctx 必须注入 namespace 且至少 1 个 groupID）
 // - BroadcastToGroupMembers(ctx context.Context, namespace, groupID string, msg *HubMessage, excludeSender bool) int: 向群组在线成员广播（fire-and-forget，性能最优）
 // - BroadcastToGroup(ctx context.Context, namespace, groupID string, msg *HubMessage, excludeSender bool) int: 向指定命名空间的指定群组广播（便捷方法，委托给 BroadcastToGroupMembers）
 // - BroadcastToAllGroups(ctx context.Context, namespace string, msg *HubMessage) int: 向指定命名空间的所有群组广播（Pipeline 批量查询+成员去重+一次路由）

@@ -23,6 +23,7 @@ import (
 	"github.com/kamalyes/go-logger"
 	"github.com/kamalyes/go-toolbox/pkg/netx"
 	wscpb "github.com/kamalyes/go-wsc/models/pb"
+	"github.com/kamalyes/go-wsc/routing"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -92,6 +93,9 @@ func (s *GRPCServer) Stop() {
 func (s *GRPCServer) SendToUser(ctx context.Context, req *wscpb.SendToUserRequest) (*wscpb.SendToUserResponse, error) {
 	// 从 gRPC incoming metadata 恢复 trace_id 到 ctx（跨节点链路串联）
 	ctx = logger.RestoreTraceFromIncoming(ctx)
+	// 从 gRPC incoming metadata 恢复路由元数据（namespace/groupIDs）
+	// 与 DistributedMessage 外层信封 / HubMessage 自身信封 三处路由来源互为兜底
+	ctx = routing.RestoreFromIncomingMetadata(ctx)
 
 	// 反序列化消息
 	msg, err := wscpb.UnmarshalHubMessage(req.GetMessageData())
@@ -100,7 +104,10 @@ func (s *GRPCServer) SendToUser(ctx context.Context, req *wscpb.SendToUserReques
 	}
 
 	// 消息体也携带 trace_id，补充恢复（metadata 优先，消息体 fallback）
-	ctx = msg.ContextFromMessage(ctx)
+	ctx = msg.ContextFrom(ctx)
+	// 🔏 路由信封兜底同步：
+	//   新节点：HubMessage protobuf 自带 namespace/group_ids → InjectRoute 幂等（不覆盖已有有效值）
+	ctx = msg.InjectRoute(ctx)
 
 	userID := req.GetUserId()
 
@@ -119,15 +126,17 @@ func (s *GRPCServer) SendToUser(ctx context.Context, req *wscpb.SendToUserReques
 		return nil, status.Errorf(codes.Internal, "消息序列化失败: %v", err)
 	}
 
-	// 零拷贝遍历：ForEachUserClient 持读锁遍历，sendToClientSerialized 非阻塞发送
-	s.hub.shardedRegistry.ForEachUserClient(userID, func(_ string, client *Client) bool {
+	// 零拷贝遍历：仅对路由匹配的设备投递，避免跨 namespace 串扰
+	// （路由信封来自 msg 自身，跨节点 gRPC 调用链已丢失原 ctx 路由信息）
+	s.hub.shardedRegistry.ForEachUserClientFiltered(userID, msg.Namespace, msg.GroupIDs, func(_ string, client *Client) bool {
 		s.hub.sendToClientSerialized(ctx, client, msg, preSerialized)
 		return true
 	})
 
 	// 🔔 通知本节点观察者（跨节点 gRPC 消息也需要通知观察者，与本地 broadcast 流程一致）
-	// SendToUserRequest 不携带 namespace/groupID，传空值通知所有全局/命名空间级观察者
-	s.hub.notifyObservers(ctx, msg, "", "")
+	// 路由来源：直接从 msg 信封取（不再"猜"接收者 client 的 ns/group，跨节点场景下 user 可能本节点无 client）
+	observerCtx := routing.WithNamespaceGroupIDs(ctx, msg.Namespace, msg.GroupIDs)
+	s.hub.notifyObservers(observerCtx, msg)
 
 	return &wscpb.SendToUserResponse{
 		Success:    true,
@@ -150,16 +159,25 @@ func (s *GRPCServer) CheckUsersOnline(ctx context.Context, req *wscpb.CheckUsers
 
 // BroadcastGroup 向本节点的群组成员广播消息
 func (s *GRPCServer) BroadcastGroup(ctx context.Context, req *wscpb.BroadcastGroupRequest) (*wscpb.BroadcastGroupResponse, error) {
-	// 从 gRPC incoming metadata 恢复 trace_id 到 ctx（跨节点链路串联）
+	// 从 gRPC incoming metadata 恢复 trace_id + 路由元数据 到 ctx（跨节点链路串联）
 	ctx = logger.RestoreTraceFromIncoming(ctx)
+	ctx = routing.RestoreFromIncomingMetadata(ctx)
 
 	// 群组仓库未配置，无法获取成员
 	if s.hub.groupRepo == nil {
 		return &wscpb.BroadcastGroupResponse{Delivered: 0}, nil
 	}
 
+	namespace := routing.NamespaceFromContext(ctx)
+	groupIDs := routing.GroupIDsFromContext(ctx)
+	// BroadcastGroup RPC 语义为单群组广播（cluster_dispatch 每次传单群组），取首元素
+	groupID := ""
+	if len(groupIDs) > 0 {
+		groupID = groupIDs[0]
+	}
+
 	// 获取群组成员列表
-	members, err := s.hub.groupRepo.GetMembers(ctx, req.GetNamespace(), req.GetGroupId())
+	members, err := s.hub.groupRepo.GetMembers(ctx, namespace, groupID)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "获取群组成员失败: %v", err)
 	}
@@ -175,7 +193,16 @@ func (s *GRPCServer) BroadcastGroup(ctx context.Context, req *wscpb.BroadcastGro
 	}
 
 	// 消息体也携带 trace_id，补充恢复（metadata 优先，消息体 fallback）
-	ctx = msg.ContextFromMessage(ctx)
+	ctx = msg.ContextFrom(ctx)
+
+	// ⚠️ 此处【不】调用 msg.InjectRoute(ctx)：
+	// BroadcastGroup 的 ctx 携带的是"业务群组ID"（如 g-srv），而 broadcastToFiltered →
+	// ClientMatchesEnvelope 会用 msg.GroupIDs 去匹配 client 的"连接级系统组"（如 __default_gp__），
+	// 两个维度不同，强行注入会导致群成员设备全部被过滤（delivered=0）。
+	// 群组成员过滤已由 groupRepo.GetMembers + memberSet 完成，下面清除 ctx 的 groupIDs 后，
+	// 下游 broadcastToFiltered 调 InjectRoute 时只会注入 namespace（msg.GroupIDs 保持 nil），
+	// ClientMatchesEnvelope 仅做 namespace 隔离，不再触碰系统组维度。
+	ctx = routing.WithNamespaceGroupIDs(ctx, namespace, nil)
 
 	// 构建成员集合用于 O(1) 过滤
 	memberSet := make(map[string]struct{}, len(members))
@@ -204,10 +231,11 @@ func (s *GRPCServer) BroadcastGroup(ctx context.Context, req *wscpb.BroadcastGro
 }
 
 // NotifyObservers 通知本节点的观察者
-// group_id 非空时通过三级索引查找订阅该群组的观察者，为空时查找命名空间级观察者
+// namespace/groupID 从 gRPC incoming metadata 恢复到 ctx 后提取
 func (s *GRPCServer) NotifyObservers(ctx context.Context, req *wscpb.NotifyObserversRequest) (*wscpb.NotifyObserversResponse, error) {
-	// 从 gRPC incoming metadata 恢复 trace_id 到 ctx（跨节点链路串联）
+	// 从 gRPC incoming metadata 恢复 trace_id + 路由元数据 到 ctx（跨节点链路串联）
 	ctx = logger.RestoreTraceFromIncoming(ctx)
+	ctx = routing.RestoreFromIncomingMetadata(ctx)
 
 	// 反序列化消息
 	msg, err := wscpb.UnmarshalHubMessage(req.GetMessageData())
@@ -216,10 +244,15 @@ func (s *GRPCServer) NotifyObservers(ctx context.Context, req *wscpb.NotifyObser
 	}
 
 	// 消息体也携带 trace_id，补充恢复（metadata 优先，消息体 fallback）
-	ctx = msg.ContextFromMessage(ctx)
+	ctx = msg.ContextFrom(ctx)
+	// 🔏 路由信封兜底同步：与 SendToUser 一致，确保 msg 信封恒有路由值
+	// InjectRoute 同时回写 ctx，保证下游 ctx 与信封一致
+	ctx = msg.InjectRoute(ctx)
 
 	// 三级索引查找：全局 + 命名空间 + 命名空间+群组
-	observers := s.hub.GetObserversForMessage(req.GetNamespace(), req.GetGroupId())
+	namespace := routing.NamespaceFromContext(ctx)
+	groupIDs := routing.GroupIDsFromContext(ctx)
+	observers := s.hub.GetObserversForMessage(namespace, groupIDs...)
 
 	// 逐个投递
 	var notified int32

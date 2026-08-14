@@ -14,6 +14,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -21,13 +22,16 @@ import (
 
 	"github.com/gorilla/websocket"
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-wsc/models"
+	"github.com/kamalyes/go-wsc/routing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // TestOfflineMessageRealWorldScenario 真实场景：用户离线 → 发送消息 → 用户上线 → 接收离线消息
 func TestOfflineMessageRealWorldScenario(t *testing.T) {
-	ctx := context.Background()
+	// 源头注入 routing namespace（与 hub handleTextMessage 源头注入一致），避免 namespace 空串触发 GORM default 回退
+	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
 
 	// ========== 阶段0: 准备环境 ==========
 	t.Log("========== 阶段0: 初始化 Hub 和存储 ==========")
@@ -76,9 +80,9 @@ func TestOfflineMessageRealWorldScenario(t *testing.T) {
 
 	// 清理测试数据
 	defer func() {
-		_ = offlineHandler.ClearOfflineMessages(ctx, user1)
-		_ = offlineHandler.ClearOfflineMessages(ctx, user2)
-		_ = offlineHandler.ClearOfflineMessages(ctx, user3)
+		_ = offlineHandler.ClearOfflineMessages(ctx, user1, nil)
+		_ = offlineHandler.ClearOfflineMessages(ctx, user2, nil)
+		_ = offlineHandler.ClearOfflineMessages(ctx, user3, nil)
 	}()
 
 	t.Logf("✅ Hub 已启动，服务地址: %s", srv.URL)
@@ -173,6 +177,7 @@ func TestOfflineMessageRealWorldScenario(t *testing.T) {
 	wsURL := "ws" + srv.URL[len("http"):] + "?user_id=" + user1 + "&user_type=customer&client_ip=192.168.1.101"
 	client1 := New(wsURL)
 	client1.Config.WithAutoReconnect(false)
+	client1.Config.MaxMessageSize = 10 * 1024 * 1024 // 10MB，避免离线消息触发 close 1009
 	defer client1.Close()
 
 	var user1Connected atomic.Bool
@@ -199,8 +204,13 @@ func TestOfflineMessageRealWorldScenario(t *testing.T) {
 		return user1Connected.Load()
 	}, 3*time.Second, 50*time.Millisecond, "user1 应该连接成功")
 
-	// 等待离线消息推送
-	time.Sleep(2 * time.Second)
+	// 等待离线消息推送完成：使用 Eventually 轮询，避免固定 Sleep 的时序问题
+	require.Eventually(t, func() bool {
+		user1MessagesMu.Lock()
+		cnt := len(user1Messages)
+		user1MessagesMu.Unlock()
+		return cnt >= 2
+	}, 10*time.Second, 100*time.Millisecond, "user1 应该在超时前收到至少2条离线消息")
 
 	// 验证收到的消息
 	user1MessagesMu.Lock()
@@ -235,6 +245,7 @@ func TestOfflineMessageRealWorldScenario(t *testing.T) {
 	wsURL2 := "ws" + srv.URL[len("http"):] + "?user_id=" + user2 + "&user_type=customer&client_ip=192.168.1.102"
 	client2 := New(wsURL2)
 	client2.Config.WithAutoReconnect(false)
+	client2.Config.MaxMessageSize = 10 * 1024 * 1024 // 10MB，避免离线消息触发 close 1009
 	defer client2.Close()
 
 	var user2Connected atomic.Bool
@@ -257,6 +268,7 @@ func TestOfflineMessageRealWorldScenario(t *testing.T) {
 	wsURL3 := "ws" + srv.URL[len("http"):] + "?user_id=" + user3 + "&user_type=customer&client_ip=192.168.1.103"
 	client3 := New(wsURL3)
 	client3.Config.WithAutoReconnect(false)
+	client3.Config.MaxMessageSize = 10 * 1024 * 1024 // 10MB，避免离线消息触发 close 1009
 	defer client3.Close()
 
 	var user3Connected atomic.Bool
@@ -284,8 +296,17 @@ func TestOfflineMessageRealWorldScenario(t *testing.T) {
 		return user2Connected.Load() && user3Connected.Load()
 	}, 3*time.Second, 50*time.Millisecond, "user2 和 user3 应该连接成功")
 
-	// 等待离线消息推送
-	time.Sleep(2 * time.Second)
+	// 等待离线消息推送完成：使用 Eventually 轮询，避免固定 Sleep 的时序问题
+	// user2 预期至少1条，user3 预期至少2条
+	require.Eventually(t, func() bool {
+		user2MessagesMu.Lock()
+		cnt2 := len(user2Messages)
+		user2MessagesMu.Unlock()
+		user3MessagesMu.Lock()
+		cnt3 := len(user3Messages)
+		user3MessagesMu.Unlock()
+		return cnt2 >= 1 && cnt3 >= 2
+	}, 10*time.Second, 100*time.Millisecond, "user2 和 user3 应该在超时前收到预期的离线消息")
 
 	// 验证 user2 收到消息
 	user2MessagesMu.Lock()
@@ -381,7 +402,8 @@ func startTestWSServerWithParams(t *testing.T, hub *Hub) *httptest.Server {
 
 // TestOfflineMessage30MessagesStressTest 压力测试：用户有30条离线消息，上线后能否正常接收
 func TestOfflineMessage30MessagesStressTest(t *testing.T) {
-	ctx := context.Background()
+	// 源头注入 routing namespace（与 hub handleTextMessage 源头注入一致），避免 namespace 空串触发 GORM default 回退
+	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
 
 	// ========== 阶段0: 准备环境 ==========
 	t.Log("========== 阶段0: 初始化 Hub 和存储 ==========")
@@ -429,7 +451,7 @@ func TestOfflineMessage30MessagesStressTest(t *testing.T) {
 
 	// 清理测试数据
 	defer func() {
-		_ = offlineHandler.ClearOfflineMessages(ctx, userID)
+		_ = offlineHandler.ClearOfflineMessages(ctx, userID, nil)
 	}()
 
 	t.Logf("✅ Hub 已启动，服务地址: %s", srv.URL)
@@ -448,7 +470,7 @@ func TestOfflineMessage30MessagesStressTest(t *testing.T) {
 	startTime := time.Now()
 
 	for i := 1; i <= totalMessages; i++ {
-		msgID := time.Now().Format("20060102150405.000000") + "-" + userID
+		msgID := time.Now().Format("20060102150405.000000") + "-" + userID + "-" + strconv.Itoa(i)
 		hubMsg := &HubMessage{
 			ID:           msgID,
 			MessageID:    msgID,
@@ -477,8 +499,11 @@ func TestOfflineMessage30MessagesStressTest(t *testing.T) {
 	t.Logf("✅ 完成发送 %d 条消息，耗时: %v (平均 %.2f ms/条)",
 		totalMessages, sendDuration, float64(sendDuration.Milliseconds())/float64(totalMessages))
 
-	// 等待异步存储完成
-	time.Sleep(2 * time.Second)
+	// 等待异步存储完成：使用 Eventually 轮询，避免固定 Sleep 的时序问题
+	require.Eventually(t, func() bool {
+		cnt, cntErr := offlineHandler.GetOfflineMessageCount(ctx, userID)
+		return cntErr == nil && cnt == int64(totalMessages)
+	}, 15*time.Second, 100*time.Millisecond, "应该在超时前完成 %d 条离线消息的异步存储", totalMessages)
 
 	// ========== 阶段3: 验证离线消息已存储 ==========
 	t.Log("========== 阶段3: 验证离线消息已存储到数据库 ==========")
@@ -494,6 +519,7 @@ func TestOfflineMessage30MessagesStressTest(t *testing.T) {
 	wsURL := "ws" + srv.URL[len("http"):] + "?user_id=" + userID + "&user_type=customer&client_ip=192.168.1.30"
 	client := New(wsURL)
 	client.Config.WithAutoReconnect(false)
+	client.Config.MaxMessageSize = 10 * 1024 * 1024 // 10MB，避免离线消息触发 close 1009
 	defer client.Close()
 
 	var connected atomic.Bool
@@ -534,9 +560,15 @@ func TestOfflineMessage30MessagesStressTest(t *testing.T) {
 	connectDuration := time.Since(connectStart)
 	t.Logf("✅ 连接建立成功，耗时: %v", connectDuration)
 
-	// 等待离线消息推送完成（给足够的时间）
+	// 等待离线消息推送完成：使用 Eventually 轮询，避免固定 Sleep 的时序问题
 	t.Log("⏳ 等待离线消息推送...")
-	time.Sleep(10 * time.Second)
+	expectedMin := int(float64(totalMessages) * 0.95)
+	require.Eventually(t, func() bool {
+		messagesMu.Lock()
+		cnt := len(receivedMessages)
+		messagesMu.Unlock()
+		return cnt >= expectedMin
+	}, 30*time.Second, 200*time.Millisecond, "应该在超时前接收到至少95%%的离线消息（预期≥%d，30秒内）", expectedMin)
 
 	// ========== 阶段5: 验证接收结果 ==========
 	t.Log("========== 阶段5: 验证接收结果 ==========")

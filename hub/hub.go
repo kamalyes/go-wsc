@@ -87,6 +87,8 @@ type (
 	HubHealthInfo              = models.HubHealthInfo
 	ConnectionType             = models.ConnectionType
 	ObserverManagerStats       = models.ObserverManagerStats
+	NamespaceObserverStats     = models.NamespaceObserverStats
+	GroupObserverStats         = models.GroupObserverStats
 	ObserverStats              = models.ObserverStats
 	MessageRecordFilter        = repository.MessageRecordFilter
 	OfflineMessageFilter       = repository.OfflineMessageFilter
@@ -143,14 +145,17 @@ const (
 	QueueTypeAllQueues = models.QueueTypeAllQueues
 
 	// FailureReason 常量
-	FailureReasonUnknown   = models.FailureReasonUnknown
-	FailureReasonQueueFull = models.FailureReasonQueueFull
+	FailureReasonUnknown     = models.FailureReasonUnknown
+	FailureReasonQueueFull   = models.FailureReasonQueueFull
+	FailureReasonConnError   = models.FailureReasonConnError
+	FailureReasonUserOffline = models.FailureReasonUserOffline
 
 	// MessageSendStatus 常量
 	MessageSendStatusPending      = models.MessageSendStatusPending
 	MessageSendStatusSending      = models.MessageSendStatusSending
 	MessageSendStatusSuccess      = models.MessageSendStatusSuccess
 	MessageSendStatusFailed       = models.MessageSendStatusFailed
+	MessageSendStatusUserOffline  = models.MessageSendStatusUserOffline
 	MessageTypeHealthCheck        = models.MessageTypeHealthCheck
 	MessageTypeConnectionRejected = models.MessageTypeConnectionRejected
 
@@ -161,7 +166,9 @@ const (
 	MessageSourceOnline  = models.MessageSourceOnline
 	MessageSourceOffline = models.MessageSourceOffline
 
-	BroadcastTypeGlobal = models.BroadcastTypeGlobal
+	BroadcastTypeGlobal  = models.BroadcastTypeGlobal
+	BroadcastTypeSession = models.BroadcastTypeSession
+	BroadcastTypeNone    = models.BroadcastTypeNone
 )
 
 const (
@@ -174,7 +181,8 @@ var (
 	OperationTypeKickUser        = models.OperationTypeKickUser
 	OperationTypeBroadcast       = models.OperationTypeBroadcast
 	OperationTypeObserverNotify  = models.OperationTypeObserverNotify
-	OperationTypeGroupsBroadcast = models.OperationTypeGroupsBroadcast
+	OperationTypeGroupBroadcast  = models.OperationTypeGroupBroadcast  // 单群组广播（跨节点 PubSub 兜底必需）
+	OperationTypeGroupsBroadcast = models.OperationTypeGroupsBroadcast // 批量群组广播
 	MapDeviceTypeToClientType    = models.MapDeviceTypeToClientType
 )
 

@@ -116,7 +116,16 @@ func TestObserverStats(t *testing.T) {
 
 	assert.Equal(t, 2, stats.TotalObservers, "应该有2个观察者用户")
 	assert.Equal(t, 5, stats.TotalDevices, "应该有5个观察者设备")
-	assert.Equal(t, 5, len(stats.ObserverStats), "应该有5条设备统计")
+
+	// 汇总 NamespaceStats 中的设备统计条数
+	var totalDeviceStats int
+	for _, nsStat := range stats.NamespaceStats {
+		totalDeviceStats += len(nsStat.ObserverStats)
+		for _, groupStat := range nsStat.GroupStats {
+			totalDeviceStats += len(groupStat.ObserverStats)
+		}
+	}
+	assert.Equal(t, 5, totalDeviceStats, "应该有5条设备统计")
 }
 
 // TestObserverWithNormalUsers 测试观察者与普通用户混合场景
@@ -319,7 +328,12 @@ func TestObserverMultiNodeReceive(t *testing.T) {
 	hub3.Register(user1)
 	hub3.Register(user2)
 
-	time.Sleep(200 * time.Millisecond)
+	// 等待观察者和用户注册完成（用 Eventually 替代固定 Sleep，避免时序竞争）
+	require.Eventually(t, func() bool {
+		return hub1.HasClient(observer1.ID) &&
+			hub2.HasClient(observer2.ID) &&
+			hub3.HasClient(user1.ID) && hub3.HasClient(user2.ID)
+	}, 2*time.Second, 50*time.Millisecond, "观察者和用户应该都注册成功")
 
 	// 节点3: user-1 发送消息给 user-2
 	msg := createTestHubMessage(MessageTypeText)
@@ -332,8 +346,13 @@ func TestObserverMultiNodeReceive(t *testing.T) {
 
 	// 等待消息跨节点传播到观察者
 	require.Eventually(t, func() bool {
-		return len(observer1.SendChan) > 0 && len(observer2.SendChan) > 0
-	}, 3*time.Second, 50*time.Millisecond, "节点1和节点2的观察者应该都收到消息")
+		obs1Recv := len(observer1.SendChan) > 0
+		obs2Recv := len(observer2.SendChan) > 0
+		if !obs1Recv || !obs2Recv {
+			t.Logf("等待观察者接收: observer1=%v, observer2=%v", obs1Recv, obs2Recv)
+		}
+		return obs1Recv && obs2Recv
+	}, 5*time.Second, 50*time.Millisecond, "节点1和节点2的观察者应该都收到消息")
 }
 
 // TestObserverReceiveBroadcastMessages 测试观察者接收广播消息

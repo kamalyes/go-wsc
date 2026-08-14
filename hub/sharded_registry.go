@@ -181,7 +181,7 @@ func (r *ShardedRegistry) AddClient(client *Client) {
 
 	// 3. 分类索引（按类型写入对应分片）
 	//    始终调用以刷新指针（断线重连覆盖时分类索引可能持有已关闭的旧客户端指针）；
-	//    计数器仅在真正新增时累加，避免覆盖场景重复计数。
+	//    计数器仅在真正新增时累加，避免覆盖场景重复计数
 	if client.ConnectionType == models.ConnectionTypeSSE {
 		r.addSSEClient(client)
 		if isNew {
@@ -584,14 +584,78 @@ func (r *ShardedRegistry) removeObserverClient(client *Client) {
 	r.observerIdx.remove(client)
 }
 
-// GetObserversForMessage 获取应接收指定命名空间+群组消息的观察者（O(k)，k=匹配的观察者数）
-// 合并三级：全局观察者 + 命名空间观察者 + 命名空间+群组观察者
-// groupID 为空时只返回全局+命名空间级观察者（不含群组级）
-func (r *ShardedRegistry) GetObserversForMessage(namespace, groupID string) []*Client {
+// ============================================================================
+// 路由信封投递过滤 helper（避免跨 namespace/group 串扰）
+// ============================================================================
+
+// ClientMatchesEnvelope 判断某个 client 是否应该接收携带指定路由信封的消息
+// 投递匹配规则（严格但符合"没有就是没有"原则，无默认归一化兜底）：
+//  1. namespace 维度：
+//     - msgNamespace 非空（业务指定了 ns） → client.Namespace 必须严格相等才匹配
+//     - msgNamespace == ""  （全局广播/系统通知/没指定 ns）→ 跳过 ns 过滤，所有 ns client 都匹配
+//
+// ⚠️ 不做 msgGroupIDs vs client.GroupID 匹配（与 ForEachUserClientFiltered 对称设计）：
+//   - msg.GroupIDs 存放的是"业务群组ID"（如 g-broadcast），而 client.GroupID 是"连接级系统组"
+//     （如 __default_gp__），两者完全两个维度，强行匹配导致客户端全部被过滤（delivered=0）
+//   - 群组成员过滤已由 groupRepo.GetMembers + memberSet 完成（broadcastToUserIDs 路径），
+//     全局广播（broadcastToFiltered/ForEachClientFiltered）无需也不应做系统组匹配
+//   - msgGroupIDs 参数仅作签名兼容，不参与匹配
+//
+// 本函数为热路径（每次投递遍历 client 都调用）：零分配、内联友好、短路优先
+func ClientMatchesEnvelope(client *models.Client, msgNamespace string, msgGroupIDs []string) bool {
+	if client == nil {
+		return false
+	}
+	// namespace 匹配：非空才强制严格相等；空=全局广播不隔离
+	if msgNamespace != "" && client.Namespace != msgNamespace {
+		return false
+	}
+	return true
+}
+
+// ForEachUserClientFiltered 遍历指定 userID 的所有在线设备，仅对匹配路由信封的 client 调用 fn
+// fn 返回 false 时中止遍历（与 ForEachUserClient 语义一致）
+// 用于 P2P/群组的定向投递：即使同名 userID 跨 namespace 同时在线，也只投递给路由匹配的设备
+// ForEachUserClientFiltered 遍历指定 userID 的所有在线设备，仅对匹配 namespace 的设备调用 fn
+// 设计说明：只做 namespace 隔离（避免同名 userID 跨 ns 串扰），**不对 msgGroupIDs vs client.GroupID 做系统组匹配**
+//   - 场景1（P2P 点对点）：调用方已明确指定 userID 为接收者，msg.GroupIDs=nil → 无 group 维度
+//   - 场景2（群组消息）：调用方已通过 group_repo.GetMembers() 获取业务群组成员 userIDs，
+//     msg.GroupIDs 存放的是"业务群组ID"（如 "g-broadcast"），而 client.GroupID 是"连接级系统组"
+//     （如 __default_gp__），两者完全两个维度，强行匹配导致群成员 device 全部被过滤（delivered=0）
+//
+// namespace 匹配规则（与 ClientMatchesEnvelope 一致，对称设计）：
+//   - msgNamespace 非空（业务指定 ns） → 仅投递给同 ns 的 client 设备，避免串扰
+//   - msgNamespace == ""（未指定 ns/全局）→ 跳过 ns 过滤，投递给 userID 的所有设备
+func (r *ShardedRegistry) ForEachUserClientFiltered(userID, msgNamespace string, msgGroupIDs []string, fn func(clientID string, client *models.Client) bool) {
+	r.ForEachUserClient(userID, func(clientID string, client *models.Client) bool {
+		// msgNamespace 非空时强制同 ns 匹配（为空=全局不隔离，跳过 ns 检查）
+		// msgGroupIDs 仅作签名兼容（不参与系统组 vs 业务群匹配）
+		if client == nil {
+			return true
+		}
+		if msgNamespace != "" && client.Namespace != msgNamespace {
+			return true // 不匹配，跳过继续
+		}
+		return fn(clientID, client)
+	})
+}
+
+// ForEachClientFiltered 遍历注册表所有 client，仅对匹配路由信封的 client 调用 fn
+// 用于全局广播等场景：ns1 的广播只投递给 ns1 的所有在线设备
+func (r *ShardedRegistry) ForEachClientFiltered(msgNamespace string, msgGroupIDs []string, fn func(clientID string, client *models.Client) bool) {
+	r.ForEachClient(func(clientID string, client *models.Client) bool {
+		if !ClientMatchesEnvelope(client, msgNamespace, msgGroupIDs) {
+			return true
+		}
+		return fn(clientID, client)
+	})
+}
+
+func (r *ShardedRegistry) GetObserversForMessage(namespace string, groupIDs ...string) []*Client {
 	if r.observerShards == nil {
 		return nil
 	}
-	return r.observerIdx.getForMessage(namespace, groupID)
+	return r.observerIdx.getForMessage(namespace, groupIDs...)
 }
 
 // ============================================================================
@@ -674,30 +738,35 @@ func (idx *observerIndex) remove(client *Client) {
 	}
 }
 
-// getForMessage 合并三级索引，返回应接收消息的观察者列表
-// O(k) k=匹配的观察者设备数，替代 ForEachObserver 的 O(n) 全量扫描
-func (idx *observerIndex) getForMessage(namespace, groupID string) []*Client {
+// getForMessage 合并三级索引查找观察者（全局 + 命名空间 + 多群组），按 clientID 去重
+func (idx *observerIndex) getForMessage(namespace string, groupIDs ...string) []*Client {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	// 预估容量：全局 + 命名空间 + 群组
+	// 预估容量：全局 + 命名空间 + 各群组
 	estimate := len(idx.global)
 	if ns, ok := idx.byNamespace[namespace]; ok {
 		estimate += len(ns)
 	}
-	if groupID != "" {
-		key := groupIndexKey(namespace, groupID)
-		if group, ok := idx.byGroup[key]; ok {
-			estimate += len(group)
+	for _, gid := range groupIDs {
+		if gid != "" {
+			key := groupIndexKey(namespace, gid)
+			if group, ok := idx.byGroup[key]; ok {
+				estimate += len(group)
+			}
 		}
 	}
 
 	result := make([]*Client, 0, estimate)
+	seen := make(map[string]struct{}, estimate) // 去重
 
 	// 1. 全局观察者
 	for _, c := range idx.global {
 		if !c.IsClosed() {
-			result = append(result, c)
+			if _, ok := seen[c.ID]; !ok {
+				seen[c.ID] = struct{}{}
+				result = append(result, c)
+			}
 		}
 	}
 
@@ -705,18 +774,27 @@ func (idx *observerIndex) getForMessage(namespace, groupID string) []*Client {
 	if ns, ok := idx.byNamespace[namespace]; ok {
 		for _, c := range ns {
 			if !c.IsClosed() {
-				result = append(result, c)
+				if _, ok := seen[c.ID]; !ok {
+					seen[c.ID] = struct{}{}
+					result = append(result, c)
+				}
 			}
 		}
 	}
 
-	// 3. 群组级观察者（仅当 groupID 非空时）
-	if groupID != "" {
-		key := groupIndexKey(namespace, groupID)
+	// 3. 各群组级观察者（遍历所有 groupIDs，去重）
+	for _, gid := range groupIDs {
+		if gid == "" {
+			continue
+		}
+		key := groupIndexKey(namespace, gid)
 		if group, ok := idx.byGroup[key]; ok {
 			for _, c := range group {
 				if !c.IsClosed() {
-					result = append(result, c)
+					if _, ok := seen[c.ID]; !ok {
+						seen[c.ID] = struct{}{}
+						result = append(result, c)
+					}
 				}
 			}
 		}

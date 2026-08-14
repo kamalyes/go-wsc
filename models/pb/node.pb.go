@@ -10,9 +10,13 @@
 // 相比 Redis PubSub 广播模式，gRPC 直连可精确路由到目标节点，降低延迟
 // 当 gRPC 未启用或目标地址未知时，自动降级到 Redis PubSub
 //
-// 消息投递支持 namespace + group 层级：
-//   - namespace：命名空间隔离（空表示全局，默认 "default"）
-//   - group_id：群组定向投递
+// 路由元数据设计（namespace / group_ids）：
+//   - 通过 gRPC metadata headers 传递（非 proto 字段），避免消息体膨胀
+//   - 定义位于独立 routing 包（github.com/kamalyes/go-wsc/routing），全项目共用
+//   - x-routing-namespace：命名空间ID（空表示全局，默认 "default"）
+//   - x-routing-group-ids：群组ID列表（逗号分隔；空表示无群组操作）
+//   - 客户端注入：routing.InjectToOutgoingMetadata（从 context 提取并写入 metadata）
+//   - 服务端恢复：routing.RestoreFromIncomingMetadata（从 metadata 读取并注入 context）
 //
 // Copyright (c) 2026 by kamalyes, All Rights Reserved.
 
@@ -248,14 +252,13 @@ func (x *CheckUsersOnlineResponse) GetOnlineUsers() map[string]bool {
 }
 
 // BroadcastGroupRequest 群组广播请求
-// [EN] Group broadcast request
+// 路由元数据（namespace, group_ids）通过 gRPC metadata 传递，参见文件头注释
+// [EN] Group broadcast request. Routing metadata via gRPC metadata headers, see file header.
 type BroadcastGroupRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Namespace     string                 `protobuf:"bytes,1,opt,name=namespace,proto3" json:"namespace,omitempty"`                               // 命名空间ID | [EN] Namespace ID
-	GroupId       string                 `protobuf:"bytes,2,opt,name=group_id,json=groupId,proto3" json:"group_id,omitempty"`                    // 群组ID | [EN] Group ID
-	MessageData   []byte                 `protobuf:"bytes,3,opt,name=message_data,json=messageData,proto3" json:"message_data,omitempty"`        // 序列化后的 HubMessageProto | [EN] Serialized HubMessageProto
-	ExcludeSender bool                   `protobuf:"varint,4,opt,name=exclude_sender,json=excludeSender,proto3" json:"exclude_sender,omitempty"` // 是否排除发送者 | [EN] Whether to exclude sender
-	SenderId      string                 `protobuf:"bytes,5,opt,name=sender_id,json=senderId,proto3" json:"sender_id,omitempty"`                 // 发送者用户ID（用于排除） | [EN] Sender user ID (for exclusion)
+	MessageData   []byte                 `protobuf:"bytes,1,opt,name=message_data,json=messageData,proto3" json:"message_data,omitempty"`        // 序列化后的 HubMessageProto | [EN] Serialized HubMessageProto
+	ExcludeSender bool                   `protobuf:"varint,2,opt,name=exclude_sender,json=excludeSender,proto3" json:"exclude_sender,omitempty"` // 是否排除发送者 | [EN] Whether to exclude sender
+	SenderId      string                 `protobuf:"bytes,3,opt,name=sender_id,json=senderId,proto3" json:"sender_id,omitempty"`                 // 发送者用户ID（用于排除） | [EN] Sender user ID (for exclusion)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -288,20 +291,6 @@ func (x *BroadcastGroupRequest) ProtoReflect() protoreflect.Message {
 // Deprecated: Use BroadcastGroupRequest.ProtoReflect.Descriptor instead.
 func (*BroadcastGroupRequest) Descriptor() ([]byte, []int) {
 	return file_node_proto_rawDescGZIP(), []int{4}
-}
-
-func (x *BroadcastGroupRequest) GetNamespace() string {
-	if x != nil {
-		return x.Namespace
-	}
-	return ""
-}
-
-func (x *BroadcastGroupRequest) GetGroupId() string {
-	if x != nil {
-		return x.GroupId
-	}
-	return ""
 }
 
 func (x *BroadcastGroupRequest) GetMessageData() []byte {
@@ -372,12 +361,11 @@ func (x *BroadcastGroupResponse) GetDelivered() int32 {
 }
 
 // NotifyObserversRequest 观察者通知请求
-// [EN] Observer notification request
+// 路由元数据（namespace, group_ids）通过 gRPC metadata 传递，参见文件头注释
+// [EN] Observer notification request. Routing metadata via gRPC metadata headers, see file header.
 type NotifyObserversRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Namespace     string                 `protobuf:"bytes,1,opt,name=namespace,proto3" json:"namespace,omitempty"`                        // 命名空间ID（空表示全局） | [EN] Namespace ID (empty for global)
-	MessageData   []byte                 `protobuf:"bytes,2,opt,name=message_data,json=messageData,proto3" json:"message_data,omitempty"` // 序列化后的 HubMessageProto | [EN] Serialized HubMessageProto
-	GroupId       string                 `protobuf:"bytes,3,opt,name=group_id,json=groupId,proto3" json:"group_id,omitempty"`             // 群组ID（空=命名空间级观察者，非空=群组级观察者） | [EN] Group ID (empty=namespace-level, non-empty=group-level)
+	MessageData   []byte                 `protobuf:"bytes,1,opt,name=message_data,json=messageData,proto3" json:"message_data,omitempty"` // 序列化后的 HubMessageProto | [EN] Serialized HubMessageProto
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -412,25 +400,11 @@ func (*NotifyObserversRequest) Descriptor() ([]byte, []int) {
 	return file_node_proto_rawDescGZIP(), []int{6}
 }
 
-func (x *NotifyObserversRequest) GetNamespace() string {
-	if x != nil {
-		return x.Namespace
-	}
-	return ""
-}
-
 func (x *NotifyObserversRequest) GetMessageData() []byte {
 	if x != nil {
 		return x.MessageData
 	}
 	return nil
-}
-
-func (x *NotifyObserversRequest) GetGroupId() string {
-	if x != nil {
-		return x.GroupId
-	}
-	return ""
 }
 
 // NotifyObserversResponse 观察者通知响应
@@ -715,19 +689,15 @@ const file_node_proto_rawDesc = "" +
 	"\fonline_users\x18\x01 \x03(\v20.wscpb.CheckUsersOnlineResponse.OnlineUsersEntryR\vonlineUsers\x1a>\n" +
 	"\x10OnlineUsersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\bR\x05value:\x028\x01\"\xb7\x01\n" +
-	"\x15BroadcastGroupRequest\x12\x1c\n" +
-	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x19\n" +
-	"\bgroup_id\x18\x02 \x01(\tR\agroupId\x12!\n" +
-	"\fmessage_data\x18\x03 \x01(\fR\vmessageData\x12%\n" +
-	"\x0eexclude_sender\x18\x04 \x01(\bR\rexcludeSender\x12\x1b\n" +
-	"\tsender_id\x18\x05 \x01(\tR\bsenderId\"6\n" +
+	"\x05value\x18\x02 \x01(\bR\x05value:\x028\x01\"~\n" +
+	"\x15BroadcastGroupRequest\x12!\n" +
+	"\fmessage_data\x18\x01 \x01(\fR\vmessageData\x12%\n" +
+	"\x0eexclude_sender\x18\x02 \x01(\bR\rexcludeSender\x12\x1b\n" +
+	"\tsender_id\x18\x03 \x01(\tR\bsenderId\"6\n" +
 	"\x16BroadcastGroupResponse\x12\x1c\n" +
-	"\tdelivered\x18\x01 \x01(\x05R\tdelivered\"t\n" +
-	"\x16NotifyObserversRequest\x12\x1c\n" +
-	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12!\n" +
-	"\fmessage_data\x18\x02 \x01(\fR\vmessageData\x12\x19\n" +
-	"\bgroup_id\x18\x03 \x01(\tR\agroupId\"5\n" +
+	"\tdelivered\x18\x01 \x01(\x05R\tdelivered\";\n" +
+	"\x16NotifyObserversRequest\x12!\n" +
+	"\fmessage_data\x18\x01 \x01(\fR\vmessageData\"5\n" +
 	"\x17NotifyObserversResponse\x12\x1a\n" +
 	"\bnotified\x18\x01 \x01(\x05R\bnotified\"B\n" +
 	"\x0fKickUserRequest\x12\x17\n" +

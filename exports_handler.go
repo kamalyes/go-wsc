@@ -40,6 +40,6 @@ var NewHybridOfflineMessageHandler = handler.NewHybridOfflineMessageHandler
 // - GetOfflineMessages(ctx context.Context, userID string, limit int, cursor string) ([]*HubMessage, string, error): 获取离线消息
 // - DeleteOfflineMessages(ctx context.Context, userID string, messageIDs []string) error: 删除离线消息
 // - GetOfflineMessageCount(ctx context.Context, userID string) (int64, error): 获取离线消息数量
-// - ClearOfflineMessages(ctx context.Context, userID string) error: 清空离线消息
+// - ClearOfflineMessages(ctx context.Context, userID string, groupIDs []string) error: 清空离线消息
 // - MarkAsPushed(ctx context.Context, messageIDs []string) error: 标记为已推送
 

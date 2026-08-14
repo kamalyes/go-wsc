@@ -32,6 +32,7 @@ import (
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/protocol"
+	"github.com/kamalyes/go-wsc/routing"
 )
 
 // ============================================================================
@@ -171,9 +172,20 @@ func (h *Hub) handleTextMessage(ctx context.Context, client *Client, data []byte
 		return
 	}
 
+	// 源头注入路由元数据（发送方 namespace + 默认群组）
+	// 下游 handleForwardableMessage / 业务回调 / SendToUserWithRetry → StoreOfflineMessage
+	// 均从此 ctx + msg 信封提取 (ns, group)，保证离线消息按 ns:group:userID 维度正确隔离。
+	// namespace 已在注册时归一化（handleRegister），此处直接取真实值，存储层无需兜底。
+	// 与 handleBroadcast 观察者注入范式一致，全项目统一。
+	ctx = routing.WithNamespaceGroupIDs(ctx, client.Namespace, []string{client.GetGroupIDRaw()})
+	// 🔏 同步 ctx 路由到 msg 信封（异步队列/离线存储/跨节点投递 均可从 msg 直接恢复路由，不丢上下文）
+	msg.ContextWithRoute(ctx, client.Namespace, []string{client.GetGroupIDRaw()})
+
 	// 🔄 自动转发可转发类型的消息（异步执行，避免阻塞）
+	// ⚠️ 必须透传 ctx：syncx.Go(ctx) 保留 trace_id + namespace，否则 handleForwardableMessage
+	// 从 Background ctx 取 namespace 为空，导致 msg.Namespace 被覆盖为空 → 离线消息存到 default 维度 → 丢消息
 	if models.MessageType(msg.MessageType).IsForwardableType() {
-		syncx.Go().
+		syncx.Go(ctx).
 			WithTimeout(5 * time.Second).
 			OnPanic(func(r interface{}) {
 				h.logger.ErrorContextKV(ctx, "转发消息panic", "panic", r, "stack", string(debug.Stack()), "message_id", msg.MessageID)
@@ -196,6 +208,18 @@ func (h *Hub) handleTextMessage(ctx context.Context, client *Client, data []byte
 // handleForwardableMessage 处理可转发类型的消息（窗口消息、状态消息等）
 // 这些消息无需业务层处理，框架自动转发
 func (h *Hub) handleForwardableMessage(ctx context.Context, msg *HubMessage) error {
+	// P2P 转发：group 不参与（nil），覆盖 handleTextMessage 注入的发送方 group
+	// 发送方 group 仅用于观察者通知（handleBroadcast），离线存储必须按 P2P 维度（ns:默认组:userID）
+	// 否则接收方上线时枚举自己的 group + P2P 队列，若不在发送方 group 则取不到 → 丢消息
+	// 🔏 同时覆盖 ctx 和 msg 信封两处路由（ctx 供同步链路，msg 信封供异步队列/离线回放读取）
+	// ⚠️ namespace 优先从 msg 信封取（handleTextMessage 已注入，syncx.Go 异步场景 ctx 可能来自 Background），
+	//    msg 信封为空时 fallback 到 ctx（兼容直接调用场景，如测试）
+	ns := msg.Namespace
+	if ns == "" {
+		ns = routing.NamespaceFromContext(ctx)
+	}
+	ctx = msg.ContextWithRoute(ctx, ns, nil)
+
 	emoji := msg.MessageType.GetEmoji()
 
 	h.logger.DebugContextKV(ctx, emoji+" 自动转发消息",
@@ -335,15 +359,59 @@ func (h *Hub) checkHeartbeat() {
 // ============================================================================
 
 // handleBroadcast 处理广播消息
+//
+// 🔗 trace_id 恢复：广播队列异步消费，原请求 ctx 已不可用。
+// msg 在入队前已通过 InjectContext 注入 trace_id，此处从 msg 恢复到 ctx，
+// 保证下游 handleBroadcastMessage / handleDirectMessage / notifyObservers 日志链路串联。
 func (h *Hub) handleBroadcast(msg *HubMessage) {
-	// 🔍 通知所有观察者（异步，不阻塞主流程）
-	h.notifyObservers(h.ctx, msg, "", "")
+	ctx := msg.ContextFrom(h.ctx)
+
+	// 🔍 通知观察者（异步，不阻塞主流程）
+	// 路由来源优先级：
+	//   1. msg 信封（入口层已注入，跨节点/异步队列场景时最可靠）—— 非空则直接用
+	//   2. msg.Sender 的在线 client（发送者在哪个 ns/group 触发事件，就通知哪些订阅者）
+	//      Observer 语义：订阅者关注"某个 ns/group 发生的事件"，因此发送者位置=路由
+	//   3. 都为空 → 全局 ns+空 group（通知全局观察者）
+	//
+	// 🔥 群组消息（GroupIDs 非空）跳过观察者通知：
+	//   SendToGroup 已在群组级别统一通知观察者（L350），此处若再通知会导致 N+1 重复
+	//   （N=在线成员数：每个成员的 sendToUser → h.broadcast → handleBroadcast 都会触发一次 notifyObservers）
+	//   BroadcastToGroupMembers 走 broadcastToUserIDs 不经过 handleBroadcast，无此问题
+	//   仅 P2P 消息（GroupIDs 为空）和全局广播需要在此通知观察者
+	//
+	// ⚠️ 全局广播（BroadcastTypeGlobal 且 msg.Namespace==""）保持全局语义：
+	//   不 fallback 到 sender client，避免将全局广播的观察者通知错误收窄到 sender 的 ns。
+	//   全局广播投递给所有 ns 的客户端，观察者通知也应保持全局（ns="" → 仅通知全局观察者）。
+	//   若收窄到 sender ns，其他 ns 的命名空间级观察者将收不到本应关注的全局事件。
+	if len(msg.GroupIDs) == 0 {
+		nsForObserver := msg.Namespace
+		var gidsForObserver []string
+
+		// 全局广播保持全局语义；P2P 消息 fallback 找 sender client 补齐 ns+group
+		isGlobalBroadcast := msg.BroadcastType == BroadcastTypeGlobal && nsForObserver == ""
+		if !isGlobalBroadcast {
+			h.shardedRegistry.ForEachUserClient(msg.Sender, func(_ string, senderClient *models.Client) bool {
+				if senderClient != nil {
+					if nsForObserver == "" {
+						nsForObserver = senderClient.Namespace
+					}
+					if sgid := senderClient.GetGroupIDRaw(); sgid != "" {
+						gidsForObserver = []string{sgid}
+					}
+					return false // 取第一个在线 sender client 即停止
+				}
+				return true
+			})
+		}
+		observerCtx := routing.WithNamespaceGroupIDs(ctx, nsForObserver, gidsForObserver)
+		h.notifyObservers(observerCtx, msg)
+	}
 
 	if msg.BroadcastType == BroadcastTypeGlobal {
-		h.handleBroadcastMessage(h.ctx, msg)
+		h.handleBroadcastMessage(ctx, msg)
 		return
 	}
-	h.handleDirectMessage(h.ctx, msg)
+	h.handleDirectMessage(ctx, msg)
 }
 
 // handleDirectMessage 处理点对点消息
@@ -359,14 +427,17 @@ func (h *Hub) handleDirectMessage(ctx context.Context, msg *HubMessage) {
 
 	sent := 0
 	if msg.ReceiverClient != "" {
-		// 指定客户端：O(1) 查找，避免遍历用户所有设备
+		// 指定客户端：O(1) 查找，msgNamespace 非空时才做 namespace 匹配（防止跨 ns 串扰）
+		// ⚠️ 不做 GroupIDs 系统组 vs 业务群匹配：ReceiverClient 已由发送方精准指定
 		if client, ok := h.shardedRegistry.GetClient(msg.ReceiverClient); ok {
-			h.sendToClientSerialized(ctx, client, msg, data)
-			sent = 1
+			if client != nil && (msg.Namespace == "" || client.Namespace == msg.Namespace) {
+				h.sendToClientSerialized(ctx, client, msg, data)
+				sent = 1
+			}
 		}
 	} else {
-		// 未指定客户端：零拷贝遍历用户所有设备直接发送
-		h.shardedRegistry.ForEachUserClient(msg.Receiver, func(_ string, client *Client) bool {
+		// 未指定客户端：遍历用户所有设备（ForEachUserClientFiltered 内部已按 msg.Namespace 规则过滤）
+		h.shardedRegistry.ForEachUserClientFiltered(msg.Receiver, msg.Namespace, msg.GroupIDs, func(_ string, client *Client) bool {
 			h.sendToClientSerialized(ctx, client, msg, data)
 			sent++
 			return true
@@ -382,8 +453,11 @@ func (h *Hub) handleDirectMessage(ctx context.Context, msg *HubMessage) {
 		h.logger.DebugContextKV(ctx, "消息已通过SSE发送", "message_id", msg.MessageID)
 	}
 
-	// 🔥 多端同步：如果发送者有多个设备在线，同步给发送者的其他设备（排除当前发送设备）
-	if msg.Sender != "" && msg.SenderClient != "" {
+	// 🔥 多端同步：P2P 消息同步给发送者的其他设备（排除当前发送设备）
+	// ⚠️ 群组消息（msg.GroupIDs 非空）跳过：SendToGroup 对每个成员投递都走 handleDirectMessage，
+	//    每次都同步会导致发送者其他设备收到 N 条重复（N=群组成员数）；
+	//    且群组场景 excludeSender 语义已决定发送者是否收自己的消息，多端同步会与之冲突
+	if msg.Sender != "" && msg.SenderClient != "" && len(msg.GroupIDs) == 0 {
 		h.syncToSenderDevices(ctx, msg)
 	}
 }
@@ -404,11 +478,12 @@ func (h *Hub) handleBroadcastMessage(ctx context.Context, msg *HubMessage) {
 	msgID := mathx.IfNotEmpty(msg.MessageID, msg.ID)
 	dataLen := len(data)
 
-	// 遍历所有客户端，避免拷贝整个 clients 列表
+	// 遍历所有客户端，仅投递路由匹配（namespace+group）的设备
+	// ns1 的广播不会投递给 ns2 的用户，避免跨租户串扰
 	successCount := 0
 	failCount := 0
 
-	h.shardedRegistry.ForEachClient(func(_ string, client *Client) bool {
+	h.shardedRegistry.ForEachClientFiltered(msg.Namespace, msg.GroupIDs, func(_ string, client *Client) bool {
 		if client.IsClosed() || client.ConnectionType == ConnectionTypeSSE {
 			return true
 		}

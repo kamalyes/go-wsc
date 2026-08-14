@@ -28,7 +28,7 @@ func (h *Hub) GetAllOnlineUserIDs() ([]string, error) {
 		return h.shardedRegistry.GetOnlineUserIDs(), nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(h.ctx, 3*time.Second)
 	defer cancel()
 	return h.onlineStatusRepo.GetAllOnlineUsers(ctx)
 }
@@ -50,7 +50,7 @@ func (h *Hub) GetOnlineUsersByNode(nodeID string) ([]string, error) {
 		return nil, ErrOnlineStatusRepositoryNotSet
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(h.ctx, 3*time.Second)
 	defer cancel()
 	return h.onlineStatusRepo.GetNodeUsers(ctx, nodeID)
 }
@@ -66,7 +66,7 @@ func (h *Hub) GetOnlineUserCount() (int64, error) {
 		return int64(len(userIDs)), nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(h.ctx, 2*time.Second)
 	defer cancel()
 	return h.onlineStatusRepo.GetOnlineCount(ctx)
 }
@@ -81,8 +81,8 @@ func (h *Hub) SyncOnlineStatusToRedis() error {
 	// shardedRegistry 批量获取所有客户端（分片读锁，粒度细）
 	clientsArray := h.shardedRegistry.GetAllClients()
 
-	// 使用批量接口
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// 使用批量接口，从 hub ctx 派生以透传 trace_id 等元数据
+	ctx, cancel := context.WithTimeout(h.ctx, 10*time.Second)
 	defer cancel()
 
 	if err := h.onlineStatusRepo.BatchSetClientsOnline(ctx, clientsArray); err != nil {

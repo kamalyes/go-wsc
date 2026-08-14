@@ -297,7 +297,8 @@ const (
 	OperationTypeKickUser        OperationType = "kick_user"        // 跨节点踢人
 	OperationTypeNodeRegister    OperationType = "node_register"    // 节点注册
 	OperationTypeObserverNotify  OperationType = "observer_notify"  // 跨节点观察者通知
-	OperationTypeGroupsBroadcast OperationType = "groups_broadcast" // 跨节点群组广播（单群组或批量统一走 Pipeline 批量路径）
+	OperationTypeGroupBroadcast  OperationType = "group_broadcast"  // 跨节点单群组广播
+	OperationTypeGroupsBroadcast OperationType = "groups_broadcast" // 跨节点批量群组广播
 )
 
 // String 实现Stringer接口

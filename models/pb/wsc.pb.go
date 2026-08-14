@@ -7,14 +7,13 @@
 package wscpb
 
 import (
-	reflect "reflect"
-	sync "sync"
-	unsafe "unsafe"
-
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	structpb "google.golang.org/protobuf/types/known/structpb"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
+	reflect "reflect"
+	sync "sync"
+	unsafe "unsafe"
 )
 
 const (
@@ -54,6 +53,8 @@ type HubMessageProto struct {
 	BroadcastType       string                 `protobuf:"bytes,23,opt,name=broadcast_type,json=broadcastType,proto3" json:"broadcast_type,omitempty"`                      // 广播类型 | [EN] Broadcast Type
 	SkipDatabaseStorage bool                   `protobuf:"varint,24,opt,name=skip_database_storage,json=skipDatabaseStorage,proto3" json:"skip_database_storage,omitempty"` // 是否跳过数据库存储 | [EN] Skip Database Storage
 	SkipSendToClient    bool                   `protobuf:"varint,25,opt,name=skip_send_to_client,json=skipSendToClient,proto3" json:"skip_send_to_client,omitempty"`        // 是否跳过发送到客户端 | [EN] Skip Send To Client
+	Namespace           string                 `protobuf:"bytes,27,opt,name=namespace,proto3" json:"namespace,omitempty"`                                                   // 命名空间ID（路由信封，投递精确隔离用） | [EN] Namespace (routing envelope)
+	GroupIds            []string               `protobuf:"bytes,28,rep,name=group_ids,json=groupIds,proto3" json:"group_ids,omitempty"`                                     // 群组ID列表（路由信封，P2P为空） | [EN] Group IDs (routing envelope)
 	unknownFields       protoimpl.UnknownFields
 	sizeCache           protoimpl.SizeCache
 }
@@ -270,20 +271,37 @@ func (x *HubMessageProto) GetSkipSendToClient() bool {
 	return false
 }
 
+func (x *HubMessageProto) GetNamespace() string {
+	if x != nil {
+		return x.Namespace
+	}
+	return ""
+}
+
+func (x *HubMessageProto) GetGroupIds() []string {
+	if x != nil {
+		return x.GroupIds
+	}
+	return nil
+}
+
 // DistributedMessageProto 分布式消息（跨节点传输包装）
-// 路由信封：携带路由元数据（namespace/group_ids），业务消息体（HubMessage）不承担路由职责
+// 路由信封：跨节点 PubSub 链路在 DistributedMessage 层携带 namespace/group_ids；
+// HubMessage 自身也携带路由信封（field 27/28），用于本地异步队列消费时恢复路由
 // [EN] DistributedMessageProto is the protobuf representation of a Distributed message.
 type DistributedMessageProto struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Type          string                 `protobuf:"bytes,1,opt,name=type,proto3" json:"type,omitempty"`                         // 操作类型 | [EN] Operation Type
-	NodeId        string                 `protobuf:"bytes,2,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`       // 源节点ID | [EN] Source Node ID
-	TargetId      string                 `protobuf:"bytes,3,opt,name=target_id,json=targetId,proto3" json:"target_id,omitempty"` // 目标ID（用户ID、节点ID等） | [EN] Target ID
-	TraceId       string                 `protobuf:"bytes,9,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`    // 全链路追踪ID | [EN] Trace ID
-	Message       *HubMessageProto       `protobuf:"bytes,4,opt,name=message,proto3" json:"message,omitempty"`                   // 消息数据 | [EN] Message Data
-	Reason        string                 `protobuf:"bytes,5,opt,name=reason,proto3" json:"reason,omitempty"`                     // 原因 | [EN] Reason
-	Timestamp     *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=timestamp,proto3" json:"timestamp,omitempty"`               // 时间戳 | [EN] Timestamp
-	Namespace     string                 `protobuf:"bytes,7,opt,name=namespace,proto3" json:"namespace,omitempty"`               // 命名空间ID（路由信封携带，空=全命名空间广播） | [EN] Namespace ID
-	GroupIds      []string               `protobuf:"bytes,8,rep,name=group_ids,json=groupIds,proto3" json:"group_ids,omitempty"` // 批量群组ID列表 | [EN] Group IDs
+	Type          string                 `protobuf:"bytes,1,opt,name=type,proto3" json:"type,omitempty"`                                          // 操作类型 | [EN] Operation Type
+	NodeId        string                 `protobuf:"bytes,2,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`                        // 源节点ID | [EN] Source Node ID
+	TargetId      string                 `protobuf:"bytes,3,opt,name=target_id,json=targetId,proto3" json:"target_id,omitempty"`                  // 目标ID（用户ID、节点ID等） | [EN] Target ID
+	TraceId       string                 `protobuf:"bytes,9,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`                     // 全链路追踪ID | [EN] Trace ID
+	Message       *HubMessageProto       `protobuf:"bytes,4,opt,name=message,proto3" json:"message,omitempty"`                                    // 消息数据 | [EN] Message Data
+	Reason        string                 `protobuf:"bytes,5,opt,name=reason,proto3" json:"reason,omitempty"`                                      // 原因 | [EN] Reason
+	Timestamp     *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=timestamp,proto3" json:"timestamp,omitempty"`                                // 时间戳 | [EN] Timestamp
+	Namespace     string                 `protobuf:"bytes,7,opt,name=namespace,proto3" json:"namespace,omitempty"`                                // 命名空间ID（路由信封携带，空=全命名空间广播） | [EN] Namespace ID
+	GroupIds      []string               `protobuf:"bytes,8,rep,name=group_ids,json=groupIds,proto3" json:"group_ids,omitempty"`                  // 群组ID列表（支持多群组，观察者可订阅多个组） | [EN] Group IDs
+	ExcludeSender bool                   `protobuf:"varint,10,opt,name=exclude_sender,json=excludeSender,proto3" json:"exclude_sender,omitempty"` // 是否排除发送者（跨节点群组广播 PubSub 兜底携带，与 gRPC BroadcastGroupRequest 对齐） | [EN] Exclude Sender
+	SenderId      string                 `protobuf:"bytes,11,opt,name=sender_id,json=senderId,proto3" json:"sender_id,omitempty"`                 // 发送者ID（排除发送者时用，跨节点 PubSub 兜底场景） | [EN] Sender ID
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -379,6 +397,20 @@ func (x *DistributedMessageProto) GetGroupIds() []string {
 		return x.GroupIds
 	}
 	return nil
+}
+
+func (x *DistributedMessageProto) GetExcludeSender() bool {
+	if x != nil {
+		return x.ExcludeSender
+	}
+	return false
+}
+
+func (x *DistributedMessageProto) GetSenderId() string {
+	if x != nil {
+		return x.SenderId
+	}
+	return ""
 }
 
 // NodeInfoProto 节点信息（用于 Redis 存储和跨节点发现）
@@ -479,7 +511,7 @@ var File_wsc_proto protoreflect.FileDescriptor
 
 const file_wsc_proto_rawDesc = "" +
 	"\n" +
-	"\twsc.proto\x12\x03wsc\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x8a\a\n" +
+	"\twsc.proto\x12\x03wsc\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xc5\a\n" +
 	"\x0fHubMessageProto\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x19\n" +
 	"\btrace_id\x18\x1a \x01(\tR\atraceId\x12!\n" +
@@ -512,7 +544,9 @@ const file_wsc_proto_rawDesc = "" +
 	"\tpush_type\x18\x16 \x01(\tR\bpushType\x12%\n" +
 	"\x0ebroadcast_type\x18\x17 \x01(\tR\rbroadcastType\x122\n" +
 	"\x15skip_database_storage\x18\x18 \x01(\bR\x13skipDatabaseStorage\x12-\n" +
-	"\x13skip_send_to_client\x18\x19 \x01(\bR\x10skipSendToClient\"\xbb\x02\n" +
+	"\x13skip_send_to_client\x18\x19 \x01(\bR\x10skipSendToClient\x12\x1c\n" +
+	"\tnamespace\x18\x1b \x01(\tR\tnamespace\x12\x1b\n" +
+	"\tgroup_ids\x18\x1c \x03(\tR\bgroupIds\"\xff\x02\n" +
 	"\x17DistributedMessageProto\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12\x17\n" +
 	"\anode_id\x18\x02 \x01(\tR\x06nodeId\x12\x1b\n" +
@@ -522,7 +556,10 @@ const file_wsc_proto_rawDesc = "" +
 	"\x06reason\x18\x05 \x01(\tR\x06reason\x128\n" +
 	"\ttimestamp\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x12\x1c\n" +
 	"\tnamespace\x18\a \x01(\tR\tnamespace\x12\x1b\n" +
-	"\tgroup_ids\x18\b \x03(\tR\bgroupIds\"\xe4\x01\n" +
+	"\tgroup_ids\x18\b \x03(\tR\bgroupIds\x12%\n" +
+	"\x0eexclude_sender\x18\n" +
+	" \x01(\bR\rexcludeSender\x12\x1b\n" +
+	"\tsender_id\x18\v \x01(\tR\bsenderId\"\xe4\x01\n" +
 	"\rNodeInfoProto\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1d\n" +
 	"\n" +

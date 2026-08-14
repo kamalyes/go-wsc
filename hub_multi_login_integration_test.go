@@ -19,6 +19,8 @@ import (
 	"time"
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-wsc/models"
+	"github.com/kamalyes/go-wsc/routing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -160,19 +162,19 @@ func TestMultiLoginWithWorkloadSync(t *testing.T) {
 	assert.True(t, hub.HasClient(agent.ID), "客服应该已注册")
 
 	// 设置客服负载
-	err := hub.ForceSetAgentWorkload(agent.UserID, 5)
+	err := hub.ForceSetAgentWorkload(ctx, agent.UserID, 5)
 	require.NoError(t, err)
 
 	// 验证负载已设置
-	workload, err := hub.GetAgentWorkload(agent.UserID)
+	workload, err := hub.GetAgentWorkload(ctx, agent.UserID)
 	require.NoError(t, err)
 	assert.Equal(t, int64(5), workload)
 
 	// 增加负载
-	err = hub.IncrementAgentWorkload(agent.UserID)
+	err = hub.IncrementAgentWorkload(ctx, agent.UserID)
 	require.NoError(t, err)
 
-	workload, err = hub.GetAgentWorkload(agent.UserID)
+	workload, err = hub.GetAgentWorkload(ctx, agent.UserID)
 	require.NoError(t, err)
 	assert.Equal(t, int64(6), workload)
 
@@ -182,14 +184,16 @@ func TestMultiLoginWithWorkloadSync(t *testing.T) {
 	assert.False(t, hub.HasClient(agent.ID), "客服应该已注销")
 
 	// 验证负载仍然保留（设计上保留 string key 以便重新上线时恢复）
-	workload, err = workloadRepo.GetAgentWorkload(ctx, agent.UserID)
+	// namespace 由 repository 内部从 ctx 提取，ctx 需注入 namespace
+	workloadCtx := routing.WithNamespaceGroupIDs(ctx, models.DefaultNamespace, nil)
+	workload, err = workloadRepo.GetAgentWorkload(workloadCtx, agent.UserID)
 	require.NoError(t, err)
 	assert.Equal(t, int64(6), workload, "客服离线后负载应该保留以便重新上线时恢复")
 
 	// 验证从 ZSet 中已移除（不在在线客服列表中）
 	// 注意：GetLeastLoadedAgent 需要传入在线客服列表，离线客服不应该被查询
 	// 这里测试的是：即使传入离线客服ID，也会因为 ZSet 中不存在而降级查询 string key
-	leastAgent, leastWorkload, err := workloadRepo.GetLeastLoadedAgent(ctx, []string{agent.UserID}, WorkloadDimensionRealtime)
+	leastAgent, leastWorkload, err := workloadRepo.GetLeastLoadedAgent(workloadCtx, []string{agent.UserID}, WorkloadDimensionRealtime)
 	if err != nil {
 		// 预期行为：离线客服不在 ZSet 中，降级查询也应该只返回在线客服
 		// 但由于我们传入的列表包含离线客服，Lua 脚本会尝试查询 string key

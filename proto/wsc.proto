@@ -36,10 +36,13 @@ message HubMessageProto {
   string broadcast_type = 23; // 广播类型 | [EN] Broadcast Type
   bool skip_database_storage = 24; // 是否跳过数据库存储 | [EN] Skip Database Storage
   bool skip_send_to_client = 25; // 是否跳过发送到客户端 | [EN] Skip Send To Client
+  string namespace = 27; // 命名空间ID（路由信封，投递精确隔离用） | [EN] Namespace (routing envelope)
+  repeated string group_ids = 28; // 群组ID列表（路由信封，P2P为空） | [EN] Group IDs (routing envelope)
 }
 
 // DistributedMessageProto 分布式消息（跨节点传输包装）
-// 路由信封：携带路由元数据（namespace/group_ids），业务消息体（HubMessage）不承担路由职责
+// 路由信封：跨节点 PubSub 链路在 DistributedMessage 层携带 namespace/group_ids；
+// HubMessage 自身也携带路由信封（field 27/28），用于本地异步队列消费时恢复路由
 // [EN] DistributedMessageProto is the protobuf representation of a Distributed message.
 message DistributedMessageProto {
   string type = 1;            // 操作类型 | [EN] Operation Type
@@ -50,7 +53,9 @@ message DistributedMessageProto {
   string reason = 5;          // 原因 | [EN] Reason
   google.protobuf.Timestamp timestamp = 6; // 时间戳 | [EN] Timestamp
   string namespace = 7;      // 命名空间ID（路由信封携带，空=全命名空间广播） | [EN] Namespace ID
-  repeated string group_ids = 8; // 批量群组ID列表 | [EN] Group IDs
+  repeated string group_ids = 8; // 群组ID列表（支持多群组，观察者可订阅多个组） | [EN] Group IDs
+  bool exclude_sender = 10; // 是否排除发送者（跨节点群组广播 PubSub 兜底携带，与 gRPC BroadcastGroupRequest 对齐） | [EN] Exclude Sender
+  string sender_id = 11; // 发送者ID（排除发送者时用，跨节点 PubSub 兜底场景） | [EN] Sender ID
 }
 
 // NodeInfoProto 节点信息（用于 Redis 存储和跨节点发现）

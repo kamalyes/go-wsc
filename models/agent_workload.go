@@ -12,14 +12,16 @@ package models
 
 import "time"
 
-// AgentWorkloadModel 客服负载模型（DB 持久化，支持多维度）
+// AgentWorkloadModel 客服负载模型（DB 持久化，支持多维度+多命名空间隔离）
 // 用于存储客服的工作负载信息，支持负载均衡和故障恢复
 // 通过 dimension 和 time_key 字段支持多时间维度统计
+// namespace 字段实现多租户隔离，不同命名空间下同名 agent_id 互不干扰
 type AgentWorkloadModel struct {
 	ID                uint              `gorm:"primaryKey;autoIncrement;comment:自增主键" json:"id"`
-	AgentID           string            `gorm:"column:agent_id;size:255;not null;index:idx_agent_dimension_time;comment:客服ID" json:"agent_id"`
-	WorkloadDimension WorkloadDimension `gorm:"column:dimension;size:20;not null;default:'realtime';index:idx_agent_dimension_time;comment:统计维度" json:"dimension"`
-	TimeKey           string            `gorm:"column:time_key;size:20;not null;default:'';index:idx_agent_dimension_time;comment:时间键(realtime为空,hourly如2026022513)" json:"time_key"`
+	Namespace         string            `gorm:"column:namespace;size:128;not null;default:'';index:idx_ns_agent_dimension_time;comment:命名空间ID（空=全局，已归一化时非空）" json:"namespace"`
+	AgentID           string            `gorm:"column:agent_id;size:255;not null;index:idx_ns_agent_dimension_time;comment:客服ID" json:"agent_id"`
+	WorkloadDimension WorkloadDimension `gorm:"column:dimension;size:20;not null;default:'realtime';index:idx_ns_agent_dimension_time;comment:统计维度" json:"dimension"`
+	TimeKey           string            `gorm:"column:time_key;size:20;not null;default:'';index:idx_ns_agent_dimension_time;comment:时间键(realtime为空,hourly如2026022513)" json:"time_key"`
 	Workload          int64             `gorm:"column:workload;not null;default:0;index;comment:当前负载" json:"workload"`
 	CreatedAt         time.Time         `gorm:"column:created_at;not null;comment:创建时间" json:"created_at"`
 	UpdatedAt         time.Time         `gorm:"column:updated_at;not null;comment:更新时间" json:"updated_at"`

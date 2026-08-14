@@ -17,6 +17,8 @@ import (
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-toolbox/pkg/idgen"
+	"github.com/kamalyes/go-wsc/models"
+	"github.com/kamalyes/go-wsc/routing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -46,10 +48,14 @@ func newTestOfflineHandlerContext(t *testing.T) *testOfflineHandlerContext {
 
 	handler := NewHybridOfflineMessageHandler(redisClient, db, config, NewDefaultWSCLogger())
 
+	// 源头注入路由元数据：测试作为调用方需注入 namespace（与 hub handleTextMessage 源头注入一致）
+	// namespace 恒非空，避免 GORM 零值回退数据库 default 导致存储/查询维度不一致
+	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+
 	return &testOfflineHandlerContext{
 		t:              t,
 		handler:        handler,
-		ctx:            context.Background(),
+		ctx:            ctx,
 		idGen:          idgen.NewIDGenerator(idgen.GeneratorTypeNanoID),
 		cleanupUserIDs: make([]string, 0),
 	}
@@ -58,7 +64,7 @@ func newTestOfflineHandlerContext(t *testing.T) *testOfflineHandlerContext {
 // cleanup 清理测试数据
 func (c *testOfflineHandlerContext) cleanup() {
 	for _, userID := range c.cleanupUserIDs {
-		_ = c.handler.ClearOfflineMessages(c.ctx, userID)
+		_ = c.handler.ClearOfflineMessages(c.ctx, userID, nil)
 	}
 }
 
@@ -345,7 +351,7 @@ func TestOfflineMessageHandler_ClearOfflineMessages(t *testing.T) {
 		assert.Greater(t, before, int64(0))
 
 		// 清空
-		err = tc.handler.ClearOfflineMessages(tc.ctx, userID)
+		err = tc.handler.ClearOfflineMessages(tc.ctx, userID, nil)
 		assert.NoError(t, err)
 
 		// 验证已清空
@@ -355,7 +361,7 @@ func TestOfflineMessageHandler_ClearOfflineMessages(t *testing.T) {
 	})
 
 	t.Run("清空不存在的用户", func(t *testing.T) {
-		err := tc.handler.ClearOfflineMessages(tc.ctx, "non-existent-user")
+		err := tc.handler.ClearOfflineMessages(tc.ctx, "non-existent-user", nil)
 		assert.NoError(t, err)
 	})
 }

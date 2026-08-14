@@ -383,12 +383,31 @@ func startTestWSServer(t *testing.T, hub *Hub) *httptest.Server {
 			return
 		}
 
+		// 优先从 URL query 参数读取 user_id（支持重连场景使用相同 user_id）
+		// 未提供时自动生成新 ID
+		userID := r.URL.Query().Get("user_id")
+		if userID == "" {
+			userID = idGen.GenerateCorrelationID()
+		}
+
+		// 从 URL query 参数读取 user_type（默认 customer）
+		userType := UserTypeCustomer
+		if ut := r.URL.Query().Get("user_type"); ut != "" {
+			userType = UserType(ut)
+		}
+
+		// 从 URL query 参数读取 client_ip（默认 192.168.1.100）
+		clientIP := r.URL.Query().Get("client_ip")
+		if clientIP == "" {
+			clientIP = "192.168.1.100"
+		}
+
 		// 创建客户端
 		client := &Client{
 			ID:            idGen.GenerateSpanID(),
-			UserID:        idGen.GenerateCorrelationID(),
-			UserType:      UserTypeCustomer,
-			ClientIP:      "192.168.1.100",
+			UserID:        userID,
+			UserType:      userType,
+			ClientIP:      clientIP,
 			Status:        UserStatusOnline,
 			ClientType:    ClientTypeWeb,
 			SendChan:      make(chan []byte, 100),
@@ -452,6 +471,7 @@ func TestMessageSendFieldsUpdate(t *testing.T) {
 	wsURL := "ws" + srv.URL[len("http"):]
 	wsClient := New(wsURL)
 	wsClient.Config.WithAutoReconnect(false)
+	wsClient.Config.MaxMessageSize = 10 * 1024 * 1024 // 10MB，避免离线消息触发 close 1009
 	defer wsClient.Close()
 
 	var connected atomic.Bool
@@ -541,7 +561,11 @@ waitLoop:
 
 	// 8. 测试用户离线场景 - 验证离线消息表字段
 	wsClient.Close()
-	time.Sleep(1000 * time.Millisecond) // 增加等待时间确保清理完成
+	// 等待客户端关闭后清理完成（用户变为离线状态），使用 Eventually 轮询避免固定 Sleep 的时序问题
+	require.Eventually(t, func() bool {
+		online, _ := hub.IsUserOnline(testUserID)
+		return !online
+	}, 5*time.Second, 50*time.Millisecond, "用户应该在超时前变为离线状态")
 
 	msgID2 := idGen.GenerateRequestID()
 	msg2 := &HubMessage{
@@ -559,7 +583,25 @@ waitLoop:
 	// 配置了 offlineMessageHandler 时，离线消息存储成功返回 Success=true
 	assert.True(t, result2.Success, "离线消息应成功存储")
 	assert.NoError(t, result2.FinalError, "离线消息存储不应返回错误")
-	time.Sleep(500 * time.Millisecond)
+	// 等待离线消息异步存储完成，使用 Eventually 轮询避免固定 Sleep 的时序问题
+	require.Eventually(t, func() bool {
+		msgs, qErr := offlineMessageDBRepo.QueryMessages(ctx, &OfflineMessageFilter{
+			UserID:    testUserID,
+			Role:      MessageRoleReceiver,
+			Namespace: DefaultNamespace,
+			Limit:     10,
+			Cursor:    "",
+		})
+		if qErr != nil {
+			return false
+		}
+		for _, msg := range msgs {
+			if msg.MessageID == msgID2 {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 50*time.Millisecond, "离线消息应该在超时前完成异步存储")
 
 	// 验证离线消息表字段
 	offlineMsgs, err := offlineMessageDBRepo.QueryMessages(ctx, &OfflineMessageFilter{
@@ -588,9 +630,11 @@ waitLoop:
 	}
 
 	// 9. 测试离线消息推送 - 验证pushed_at字段更新
-	// 重新连接客户端
-	wsClient2 := New(wsURL)
+	// 重新连接客户端（使用相同的 user_id 以便接收之前存储的离线消息）
+	wsURL2WithUserID := wsURL + "/?user_id=" + testUserID + "&user_type=customer&client_ip=192.168.1.100"
+	wsClient2 := New(wsURL2WithUserID)
 	wsClient2.Config.WithAutoReconnect(false)
+	wsClient2.Config.MaxMessageSize = 10 * 1024 * 1024 // 10MB，避免离线消息触发 close 1009
 	defer wsClient2.Close()
 
 	var connected2 atomic.Bool
@@ -616,7 +660,29 @@ waitLoop2:
 		}
 	}
 
-	time.Sleep(1 * time.Second) // 等待离线消息推送
+	// 等待离线消息推送完成并删除，使用 Eventually 轮询避免固定 Sleep 的时序问题
+	// 推送成功后消息会被自动删除，所以查询不到即表示推送成功
+	require.Eventually(t, func() bool {
+		msgs, qErr := offlineMessageDBRepo.QueryMessages(ctx, &OfflineMessageFilter{
+			UserID:    testUserID,
+			Role:      MessageRoleReceiver,
+			Namespace: DefaultNamespace,
+			Limit:     10,
+			Cursor:    "",
+		})
+		if qErr != nil {
+			return false
+		}
+		for _, msg := range msgs {
+			if msg.MessageID == msgID2 {
+				// 还能查到，说明推送失败了或者还未删除
+				t.Logf("⚠️ 离线消息仍存在: MessageID=%s, Status=%s, RetryCount=%d",
+					msg.MessageID, msg.Status, msg.RetryCount)
+				return false
+			}
+		}
+		return true
+	}, 10*time.Second, 100*time.Millisecond, "离线消息应该在超时前被成功推送并删除")
 
 	// 验证离线消息已被成功推送并删除
 	// 注意：推送成功后消息会被自动删除，所以查询不到是正常的

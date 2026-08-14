@@ -75,6 +75,13 @@ func (h *Hub) startNodeGRPC() {
 		return
 	}
 
+	// 更新 nodeRegistry 的实际监听地址
+	// 配置端口为 0（随机端口）时，listener 绑定后才知实际端口；
+	// Register 写入 Redis 和 GetNodeAddr 返回本节点地址都需用实际地址
+	if h.nodeRegistry != nil && h.grpcServer.listener != nil {
+		h.nodeRegistry.grpcAddr = h.grpcServer.listener.Addr().String()
+	}
+
 	// 2. 注册本节点到 Redis 节点发现表
 	syncx.Go(h.ctx).
 		WithTimeout(5 * time.Second).

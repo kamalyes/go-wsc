@@ -78,6 +78,7 @@ func TestBroadcastToGroup(t *testing.T) {
 
 	// 注册不同类型的客户端
 	customer := createTestClientWithIDGen(UserTypeCustomer)
+	customer.Namespace = "default" // 与群组 namespace 和 BroadcastToGroup 参数对齐
 	agent := createTestClientWithIDGen(UserTypeAgent)
 
 	hub.Register(customer)

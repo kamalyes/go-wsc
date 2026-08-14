@@ -21,6 +21,8 @@ import (
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/zipx"
+	"github.com/kamalyes/go-wsc/models"
+	"github.com/kamalyes/go-wsc/routing"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 )
@@ -30,29 +32,37 @@ import (
 // ============================================================================
 
 // OfflineMessageHandler 离线消息处理器接口（业务逻辑层）
+//
+// 存储维度：按 (namespace, groupID, userID) 三元组隔离。
+//   - Redis 队列 key = "{prefix}{ns}:{groupID}:{userID}"（P2P 消息 groupID 为空）
+//   - MySQL 记录带 namespace + group_id + receiver 列
+//
+// namespace + groupID 一律从 ctx 路由元数据提取（hub 层 WithNamespaceGroupIDs 注入）
 type OfflineMessageHandler interface {
-	// StoreOfflineMessage 存储离线消息
+	// StoreOfflineMessage 存储离线消息（双写 Redis + MySQL）
+	// 落入 ctx 的 (ns, group) 对应的分区：Redis key = ns:group:userID
 	StoreOfflineMessage(ctx context.Context, userID string, msg *HubMessage) error
 
-	// GetOfflineMessages 获取用户的离线消息
-	// limit: 限制返回数量
-	//   - > 0: 最多返回指定数量
-	//   - <= 0: Redis全部读取，MySQL最多1万条
-	// cursor: 游标，用于分页和保证时序
-	//   - Redis: 传空字符串表示从头开始
-	//   - MySQL: 传上次返回的最后一条消息ID
-	// 返回: messages, nextCursor, error
-	//   - nextCursor为空表示没有更多数据
+	// DrainOfflineQueue 排空 Redis 队列（单组 FIFO，仅 Redis，不触及 MySQL）
+	// 按 ctx 的单个 (ns, group) 出队，limit<=0 表示一次取尽
+	// 调用方按组循环调用（hub replay 枚举用户所有 group + P2P）
+	DrainOfflineQueue(ctx context.Context, userID string, limit int) ([]*HubMessage, error)
+
+	// GetOfflineMessages 查询 MySQL 离线消息（跨组，命名空间内该用户全部 group）
+	// limit: >0 最多返回指定数量；<=0 最多 1 万条
+	// cursor: 上次返回的最后一条 message_id，空串表示从头
+	// 返回 nextCursor 为空表示无更多数据
 	GetOfflineMessages(ctx context.Context, userID string, limit int, cursor string) ([]*HubMessage, string, error)
 
-	// DeleteOfflineMessages 删除已推送的离线消息
+	// DeleteOfflineMessages 按消息ID删除已推送的离线消息（MySQL，跨组按 message_id 删）
 	DeleteOfflineMessages(ctx context.Context, userID string, messageIDs []string) error
 
-	// GetOfflineMessageCount 获取离线消息数量
+	// GetOfflineMessageCount 获取离线消息数量（MySQL 跨组计数，MySQL 为双写超集故计数准确）
 	GetOfflineMessageCount(ctx context.Context, userID string) (int64, error)
 
-	// ClearOfflineMessages 清空用户的所有离线消息
-	ClearOfflineMessages(ctx context.Context, userID string) error
+	// ClearOfflineMessages 清空用户的离线消息
+	// groupIDs: 用户在该命名空间下的全部 group + "" (P2P)，逐组清 Redis + 一次清 MySQL
+	ClearOfflineMessages(ctx context.Context, userID string, groupIDs []string) error
 
 	// UpdatePushStatus 更新离线消息推送状态
 	// pushErr: 推送结果错误,nil表示成功,非nil表示失败
@@ -191,13 +201,49 @@ func (h *HybridOfflineMessageHandler) shouldSkipOfflineStorage(userID string, ms
 	return false
 }
 
-// storeToRedis 存储到 Redis 队列
+// normalizeGroupID 归一化存储维度的 groupID：P2P（空）补 DefaultGroupID
+// 保证 Redis 队列 key 与 MySQL group_id 维度一致，三段非空格式统一
+// 与 client.GetGroupID() 归一化对齐（注册时空 group 已归一化为 DefaultGroupID）
+func normalizeGroupID(groupID string) string {
+	return mathx.IfEmpty(groupID, models.DefaultGroupID)
+}
+
+// queueKey 构造命名空间+群组隔离的 Redis 队列名：ns:group:userID
+// 纯参数构造（不依赖 ctx），避免异步队列消费时 ctx 路由元数据丢失导致串扰
+// groupID 为空（P2P）补 DefaultGroupID，三段非空；namespace 传真实值（不补默认）
+//   - 完整群组消息：ns:group:userID
+//   - 点对点消息：ns:__default_gp__:userID（groupID 补默认组）
+func queueKey(ns, groupID, userID string) string {
+	return ns + ":" + groupID + ":" + userID
+}
+
+// resolveOfflineRoute 从 msg 信封提取存储路由（写入路径专用，优先 msg 信封，ctx 仅作极端兜底）
+// 异步队列消费时 ctx 会丢失路由，因此 ns 和 firstGroupID 优先从 msg 自带信封读取：
+//   - ns:          msg.Namespace（空串保持空，不补 default）
+//   - firstGroupID: msg.FirstGroupID()，P2P（GroupIDs=nil/空）返回 ""，调用方后续 normalizeGroupID 补默认
+func resolveOfflineRoute(ctx context.Context, msg *HubMessage) (ns string, firstGroupID string) {
+	ns = msg.Namespace
+	firstGroupID = msg.FirstGroupID()
+	// 兜底：如果 msg 信封完全为空（理论上入口已注入，仅作最后防护），从 ctx 恢复
+	if ns == "" && firstGroupID == "" {
+		ns = routing.NamespaceFromContext(ctx)
+		firstGroupID = routing.FirstGroupIDFromContext(ctx)
+	}
+	return
+}
+
+// storeToRedis 存储到 Redis 队列（按 ns:group:userID 分区）
+// ⚠️ 路由必须从 msg 信封读取（不依赖 ctx）：异步队列消费时 ctx 路由会丢失
 func (h *HybridOfflineMessageHandler) storeToRedis(ctx context.Context, userID string, msg *HubMessage) error {
-	if err := h.queueRepo.Enqueue(ctx, userID, msg); err != nil {
+	ns, firstGID := resolveOfflineRoute(ctx, msg)
+	key := queueKey(ns, normalizeGroupID(firstGID), userID)
+	if err := h.queueRepo.Enqueue(ctx, key, msg); err != nil {
 		h.logger.ErrorKV("存储离线消息到 Redis 失败",
 			"user_id", userID,
 			"id", msg.ID,
 			"message_id", msg.MessageID,
+			"namespace", ns,
+			"group_id", firstGID,
 			"error", err,
 		)
 		return errorx.WrapError("redis queue", err)
@@ -207,11 +253,52 @@ func (h *HybridOfflineMessageHandler) storeToRedis(ctx context.Context, userID s
 		"user_id", userID,
 		"id", msg.ID,
 		"message_id", msg.MessageID,
+		"namespace", ns,
+		"group_id", firstGID,
 	)
 	return nil
 }
 
+// DrainOfflineQueue 排空 Redis 队列（单组 FIFO，仅 Redis）
+// 按 ctx 的单个 (ns, group) 出队；limit<=0 表示一次取尽该队列
+func (h *HybridOfflineMessageHandler) DrainOfflineQueue(ctx context.Context, userID string, limit int) ([]*HubMessage, error) {
+	// 同步流程（用户上线回放）：ctx 含有完整路由（客户端注册时注入）
+	ns := routing.NamespaceFromContext(ctx)
+	firstGID := routing.FirstGroupIDFromContext(ctx)
+	key := queueKey(ns, normalizeGroupID(firstGID), userID)
+
+	count := limit
+	if count <= 0 {
+		length, err := h.queueRepo.GetLength(ctx, key)
+		if err != nil {
+			h.logger.ErrorKV("获取离线队列长度失败",
+				"user_id", userID,
+				"queue", key,
+				"error", err,
+			)
+			return nil, err
+		}
+		count = int(length)
+	}
+	if count <= 0 {
+		return nil, nil
+	}
+
+	msgs, err := h.queueRepo.DequeueBatch(ctx, key, count)
+	if err != nil {
+		h.logger.ErrorKV("排空离线队列失败",
+			"user_id", userID,
+			"queue", key,
+			"count", count,
+			"error", err,
+		)
+		return nil, err
+	}
+	return msgs, nil
+}
+
 // storeToDatabase 持久化到 MySQL 数据库
+// ⚠️ 路由必须从 msg 信封读取（不依赖 ctx）：异步队列消费时 ctx 路由会丢失
 func (h *HybridOfflineMessageHandler) storeToDatabase(ctx context.Context, msg *HubMessage) error {
 	compressedData, dataSize, err := zipx.ZlibCompressObjectWithSize(msg)
 	if err != nil {
@@ -227,12 +314,19 @@ func (h *HybridOfflineMessageHandler) storeToDatabase(ctx context.Context, msg *
 	compressedSize := len(compressedData)
 	compressionRatio := float64(compressedSize) / float64(dataSize) * 100
 
+	// 从 msg 信封提取路由元数据（异步队列 ctx 丢路由，以 msg 信封为准）
+	// namespace 直接取真实值（不做默认值归一化，没有就是空串）
+	// groupID 取首个并归一化（P2P 补 DefaultGroupID，与 Redis key 维度一致）
+	ns, firstGID := resolveOfflineRoute(ctx, msg)
+	namespace := ns
+	groupID := normalizeGroupID(firstGID)
+
 	record := &OfflineMessageRecord{
 		MessageID:      msg.MessageID, // 业务消息ID
 		Sender:         msg.Sender,
 		Receiver:       msg.Receiver,
-		Namespace:      DefaultNamespace, // 默认命名空间
-		GroupID:        "",               // 点对点消息（空表示非群组消息）
+		Namespace:      namespace, // 真实命名空间（ctx 路由元数据，没有就是空串）
+		GroupID:        groupID,   // 群组ID（P2P 补 DefaultGroupID，与 Redis key 维度一致）
 		SessionID:      msg.SessionID,
 		CompressedData: compressedData,
 		ScheduledAt:    msg.CreateAt,
@@ -261,83 +355,34 @@ func (h *HybridOfflineMessageHandler) storeToDatabase(ctx context.Context, msg *
 	return nil
 }
 
-// GetOfflineMessages 获取用户的离线消息
+// GetOfflineMessages 查询 MySQL 离线消息（跨组：命名空间内该用户全部 group）
+// Redis 队列由 DrainOfflineQueue 单独排空；本方法只负责 MySQL 持久层的分页查询
+//
 // 参数:
 //   - userID: 用户ID
-//   - limit: 限制返回数量
-//   - > 0: 最多返回指定数量的消息
-//   - <= 0: Redis 全部读取, MySQL 最多返回 1 万条
-//   - cursor: 游标，用于分页
-//   - Redis: 忽略（Redis是FIFO队列，始终从头取）
-//   - MySQL: 传上次返回的最后一条消息ID，继续向后读取
+//   - limit: >0 最多返回指定数量；<=0 最多 1 万条
+//   - cursor: 上次返回的最后一条 message_id，空串从头开始
 //
-// 返回:
-//   - messages: 消息列表
-//   - nextCursor: 下一页游标，空字符串表示没有更多数据
-//   - error: 错误信息
+// 返回 nextCursor 为空表示无更多数据
 func (h *HybridOfflineMessageHandler) GetOfflineMessages(ctx context.Context, userID string, limit int, cursor string) ([]*HubMessage, string, error) {
 	messages := make([]*HubMessage, 0)
 	nextCursor := ""
 
-	// 1. 优先从 Redis 队列读取（性能更好）
-	// Redis 是 FIFO 队列，不支持游标，始终从头取
-	length, err := h.queueRepo.GetLength(ctx, userID)
-	if err != nil {
-		h.logger.ErrorKV("获取离线消息队列长度失败",
-			"user_id", userID,
-			"error", err,
-		)
-		return messages, nextCursor, err
-	}
-
-	// 如果 Redis 有消息，忽略 cursor，直接从队列头部读取
-	if length > 0 {
-		count := mathx.IF(limit > 0, min(int(length), limit), int(length))
-
-		// 批量出队：单次 Redis 往返替代 N 次 BLPOP
-		batchMessages, err := h.queueRepo.DequeueBatch(ctx, userID, count)
-		if err != nil {
-			h.logger.ErrorKV("批量读取离线消息失败",
-				"user_id", userID,
-				"count", count,
-				"error", err,
-			)
-			return messages, nextCursor, err
-		}
-		messages = append(messages, batchMessages...)
-
-		// Redis 队列还有剩余，返回特殊游标 "redis:continue"
-		remaining := length - int64(len(messages))
-		if remaining > 0 {
-			nextCursor = "redis:continue"
-		}
-
-		h.logger.InfoKV("从 Redis 读取离线消息",
-			"user_id", userID,
-			"count", len(messages),
-			"remaining", remaining,
-			"next_cursor", nextCursor,
-		)
-
-		return messages, nextCursor, nil
-	}
-
-	// 2. Redis 无消息，从 MySQL offline_messages 表读取
-	h.logger.DebugKV("Redis 无离线消息，尝试从 MySQL offline_messages 表读取",
-		"user_id", userID,
-		"cursor", cursor,
-	)
+	// namespace 从 ctx 路由元数据提取（用户上线回放时由 hub 注入 client.Namespace）
+	// 直接取真实值，不做默认值归一化；GroupID 留空 → 跨组查询该命名空间内全部 group 的离线消息
+	namespace := routing.NamespaceFromContext(ctx)
 
 	records, err := h.dbRepo.QueryMessages(ctx, &OfflineMessageFilter{
 		UserID:    userID,
 		Role:      MessageRoleReceiver,
-		Namespace: DefaultNamespace,
+		Namespace: namespace,
 		Limit:     limit,
 		Cursor:    cursor,
 	})
 	if err != nil {
 		h.logger.ErrorKV("从 MySQL 读取离线消息失败",
 			"user_id", userID,
+			"namespace", namespace,
 			"cursor", cursor,
 			"error", err,
 		)
@@ -358,14 +403,14 @@ func (h *HybridOfflineMessageHandler) GetOfflineMessages(ctx context.Context, us
 		messages = append(messages, msg)
 	}
 
-	// 如果返回数量等于 limit，说明可能还有更多数据
-	if len(records) >= limit && len(messages) > 0 {
-		// 使用最后一条消息的 message_id 作为下一页游标
+	// 返回数量达到 limit，可能还有更多数据，用最后一条 message_id 作下一页游标
+	if limit > 0 && len(records) >= limit && len(records) > 0 {
 		nextCursor = records[len(records)-1].MessageID
 	}
 
 	h.logger.InfoKV("从 MySQL 读取离线消息",
 		"user_id", userID,
+		"namespace", namespace,
 		"count", len(messages),
 		"limit", limit,
 		"cursor", cursor,
@@ -375,18 +420,20 @@ func (h *HybridOfflineMessageHandler) GetOfflineMessages(ctx context.Context, us
 	return messages, nextCursor, nil
 }
 
-// DeleteOfflineMessages 删除已推送的离线消息
+// DeleteOfflineMessages 删除已推送的离线消息（namespace 从 ctx 提取）
 func (h *HybridOfflineMessageHandler) DeleteOfflineMessages(ctx context.Context, userID string, messageIDs []string) error {
 	if len(messageIDs) == 0 {
 		return nil
 	}
 
 	// Redis 队列是先进先出，已经 Dequeue 的消息自动删除
-	// 这里主要处理 MySQL 的消息删除
+	// 这里主要处理 MySQL 的消息删除（按命名空间隔离，跨组按 message_id 删）
+	namespace := routing.NamespaceFromContext(ctx)
 
-	if err := h.dbRepo.DeleteByMessageIDs(ctx, DefaultNamespace, userID, messageIDs); err != nil {
+	if err := h.dbRepo.DeleteByMessageIDs(ctx, namespace, userID, messageIDs); err != nil {
 		h.logger.ErrorKV("从 MySQL offline_messages 表删除离线消息失败",
 			"user_id", userID,
+			"namespace", namespace,
 			"count", len(messageIDs),
 			"error", err,
 		)
@@ -395,56 +442,63 @@ func (h *HybridOfflineMessageHandler) DeleteOfflineMessages(ctx context.Context,
 
 	h.logger.DebugKV("从 MySQL offline_messages 表删除离线消息成功",
 		"user_id", userID,
+		"namespace", namespace,
 		"count", len(messageIDs),
 	)
 
 	return nil
 }
 
-// GetOfflineMessageCount 获取离线消息数量
+// GetOfflineMessageCount 获取离线消息数量（MySQL 跨组计数）
+// MySQL 为双写超集（含 Redis 内 + Redis 已过期的全部待推送消息），故直接以 MySQL 计数为准
 func (h *HybridOfflineMessageHandler) GetOfflineMessageCount(ctx context.Context, userID string) (int64, error) {
-	// 优先从 Redis 获取（速度快）
-	redisCount, err := h.queueRepo.GetLength(ctx, userID)
-	if err == nil && redisCount > 0 {
-		return redisCount, nil
-	}
+	namespace := routing.NamespaceFromContext(ctx)
 
-	// Redis 无数据时从 MySQL 获取
-	mysqlCount, err := h.dbRepo.GetCountByReceiver(ctx, DefaultNamespace, userID)
+	count, err := h.dbRepo.GetCountByReceiver(ctx, namespace, userID)
 	if err != nil {
 		h.logger.ErrorKV("从 MySQL 获取离线消息数量失败",
 			"user_id", userID,
+			"namespace", namespace,
 			"error", err,
 		)
 		return 0, err
 	}
 
-	return mysqlCount, nil
+	return count, nil
 }
 
-// ClearOfflineMessages 清空用户的所有离线消息
-func (h *HybridOfflineMessageHandler) ClearOfflineMessages(ctx context.Context, userID string) error {
+// ClearOfflineMessages 清空用户的离线消息
+// groupIDs: 用户在该命名空间下的全部 group（含 "" 表示 P2P 队列），逐组清 Redis + 一次清 MySQL
+func (h *HybridOfflineMessageHandler) ClearOfflineMessages(ctx context.Context, userID string, groupIDs []string) error {
+	namespace := routing.NamespaceFromContext(ctx)
+
 	var errs []error
 
-	// 1. 清空 Redis 队列
-	if err := h.queueRepo.Clear(ctx, userID); err != nil {
-		errs = append(errs, errorx.WrapError("redis", err))
-		h.logger.ErrorKV("清空 Redis 离线消息队列失败",
-			"user_id", userID,
-			"error", err,
-		)
+	// 1. 逐组清空 Redis 队列（Redis 按 ns:group:userID 分区，P2P 的空 group 补 DefaultGroupID）
+	for _, groupID := range groupIDs {
+		key := namespace + ":" + normalizeGroupID(groupID) + ":" + userID
+		if err := h.queueRepo.Clear(ctx, key); err != nil {
+			errs = append(errs, errorx.WrapError("redis", err))
+			h.logger.ErrorKV("清空 Redis 离线消息队列失败",
+				"user_id", userID,
+				"queue", key,
+				"error", err,
+			)
+		}
 	}
 
-	// 2. 清空 MySQL offline_messages 表
-	if err := h.dbRepo.ClearByReceiver(ctx, DefaultNamespace, userID); err != nil {
+	// 2. 清空 MySQL offline_messages 表（按命名空间隔离，跨组一次清完）
+	if err := h.dbRepo.ClearByReceiver(ctx, namespace, userID); err != nil {
 		errs = append(errs, errorx.WrapError("mysql", err))
 		h.logger.ErrorKV("清空 MySQL offline_messages 表失败",
 			"user_id", userID,
+			"namespace", namespace,
 			"error", err,
 		)
 	} else {
 		h.logger.DebugKV("清空 MySQL offline_messages 表成功",
 			"user_id", userID,
+			"namespace", namespace,
 		)
 	}
 

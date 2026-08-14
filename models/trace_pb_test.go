@@ -103,7 +103,7 @@ func TestE2E_Protobuf_TraceChain(t *testing.T) {
 	assert.Equal(t, traceID, decoded.Message.TraceID, "HubMessage trace_id should survive protobuf")
 
 	// 6. 恢复到接收端 ctx
-	receiverCtx := decoded.ContextFromMessage(context.Background())
+	receiverCtx := decoded.ContextFrom(context.Background())
 	extracted := receiverCtx.Value(logger.ContextKeyTraceID)
 	assert.Equal(t, traceID, extracted, "trace_id should be restored on receiver side")
 
@@ -152,7 +152,7 @@ func TestE2E_Protobuf_GRPCCrossNode(t *testing.T) {
 	restoredCtx := logger.RestoreTraceFromIncoming(incomingCtx)
 	assert.Equal(t, traceID, restoredCtx.Value(logger.ContextKeyTraceID), "trace_id from gRPC metadata")
 
-	restoredCtx = decodedDM.Message.ContextFromMessage(restoredCtx)
+	restoredCtx = decodedDM.Message.ContextFrom(restoredCtx)
 	assert.Equal(t, traceID, restoredCtx.Value(logger.ContextKeyTraceID), "trace_id from message body (double guarantee)")
 
 	// 5. 验证 DistributedMessage 的 trace_id 也保留了

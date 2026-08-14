@@ -21,6 +21,7 @@ import (
 
 	"github.com/kamalyes/go-logger"
 	wscpb "github.com/kamalyes/go-wsc/models/pb"
+	"github.com/kamalyes/go-wsc/routing"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -115,16 +116,16 @@ func (p *GRPCClientPool) CheckUsersOnline(ctx context.Context, addr string, user
 }
 
 // BroadcastGroup 向指定节点的群组成员广播消息
-func (p *GRPCClientPool) BroadcastGroup(ctx context.Context, addr, namespace, groupID string, msgData []byte, excludeSender bool, senderID string) (int32, error) {
+// namespace/groupID 从 ctx 提取并注入 gRPC metadata 跨节点传播
+func (p *GRPCClientPool) BroadcastGroup(ctx context.Context, addr string, msgData []byte, excludeSender bool, senderID string) (int32, error) {
 	client, err := p.GetClient(addr)
 	if err != nil {
 		return 0, err
 	}
-	// 注入 trace_id 到 gRPC metadata（跨节点传播）
+	// 注入 trace_id + 路由元数据 到 gRPC metadata（跨节点传播）
 	ctx = logger.InjectTraceToOutgoing(ctx, logger.ExtractTraceID(ctx))
+	ctx = routing.InjectToOutgoingMetadata(ctx)
 	resp, err := client.BroadcastGroup(ctx, &wscpb.BroadcastGroupRequest{
-		Namespace:     namespace,
-		GroupId:       groupID,
 		MessageData:   msgData,
 		ExcludeSender: excludeSender,
 		SenderId:      senderID,
@@ -136,17 +137,16 @@ func (p *GRPCClientPool) BroadcastGroup(ctx context.Context, addr, namespace, gr
 }
 
 // NotifyObservers 通知指定节点的观察者
-// groupID 非空时仅通知订阅该群组的观察者，为空时通知命名空间级观察者
-func (p *GRPCClientPool) NotifyObservers(ctx context.Context, addr, namespace, groupID string, msgData []byte) (int32, error) {
+// namespace/groupID 从 ctx 提取并注入 gRPC metadata 跨节点传播
+func (p *GRPCClientPool) NotifyObservers(ctx context.Context, addr string, msgData []byte) (int32, error) {
 	client, err := p.GetClient(addr)
 	if err != nil {
 		return 0, err
 	}
-	// 注入 trace_id 到 gRPC metadata（跨节点传播）
+	// 注入 trace_id + 路由元数据 到 gRPC metadata（跨节点传播）
 	ctx = logger.InjectTraceToOutgoing(ctx, logger.ExtractTraceID(ctx))
+	ctx = routing.InjectToOutgoingMetadata(ctx)
 	resp, err := client.NotifyObservers(ctx, &wscpb.NotifyObserversRequest{
-		Namespace:   namespace,
-		GroupId:     groupID,
 		MessageData: msgData,
 	})
 	if err != nil {

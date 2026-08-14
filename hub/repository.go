@@ -45,7 +45,7 @@ func (h *Hub) InitializeRepositories(redisClient redis.UniversalClient, db *gorm
 	}
 
 	// 验证 Redis 连接
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(h.ctx, 3*time.Second)
 	defer cancel()
 
 	if err := redisClient.Ping(ctx).Err(); err != nil {
@@ -244,7 +244,7 @@ func (h *Hub) SetHubStatsRepository(repo HubStatsRepository) {
 	h.logger.InfoKV("Hub统计仓库已设置", "repository_type", "redis")
 
 	// 设置启动时间到 Redis
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(h.ctx, 3*time.Second)
 	defer cancel()
 	_ = repo.RegisterNode(ctx, h.nodeID, time.Now().Unix())
 }

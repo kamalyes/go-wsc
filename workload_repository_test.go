@@ -4,7 +4,7 @@
  * @LastEditors: kamalyes 501893067@qq.com
  * @LastEditTime: 2026-01-02 15:23:08
  * @FilePath: \go-wsc\workload_repository_test.go
- * @Description: 客服负载管理测试 - 多维度架构
+ * @Description: 客服负载管理测试 - 多维度架构（带 Namespace 隔离）
  *
  * Copyright (c) 2025 by kamalyes, All Rights Reserved.
  */
@@ -18,7 +18,9 @@ import (
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-toolbox/pkg/idgen"
+	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/repository"
+	"github.com/kamalyes/go-wsc/routing"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -31,14 +33,15 @@ var (
 
 // testWorkloadRepo 测试辅助结构
 type testWorkloadRepo struct {
-	repo        repository.WorkloadRepository       // 使用接口类型
-	repoImpl    *repository.RedisWorkloadRepository // 保存具体实现，用于访问内部方法
-	client      *redis.Client                       // Redis 客户端
-	db          *gorm.DB                            // 数据库连接
-	ctx         context.Context
-	t           *testing.T
-	testPrefix  string // 测试前缀，用于隔离不同测试的数据
-	idGenerator *idgen.ShortFlakeGenerator
+	repo          repository.WorkloadRepository       // 使用接口类型
+	repoImpl      *repository.RedisWorkloadRepository // 保存具体实现，用于访问内部方法
+	client        *redis.Client                       // Redis 客户端
+	db            *gorm.DB                            // 数据库连接
+	ctx           context.Context
+	t             *testing.T
+	testPrefix    string // 测试前缀，用于隔离不同测试的数据
+	testNamespace string // 测试使用的命名空间（统一用 DefaultNamespace）
+	idGenerator   *idgen.ShortFlakeGenerator
 }
 
 // newTestWorkloadRepo 创建测试仓库实例
@@ -58,20 +61,21 @@ func newTestWorkloadRepo(t *testing.T) *testWorkloadRepo {
 	}
 
 	return &testWorkloadRepo{
-		repo:        repoInterface,
-		repoImpl:    repoImpl,
-		client:      client,
-		db:          db,
-		ctx:         context.Background(),
-		t:           t,
-		testPrefix:  testPrefix,
-		idGenerator: idgen.NewShortFlakeGenerator(1),
+		repo:          repoInterface,
+		repoImpl:      repoImpl,
+		client:        client,
+		db:            db,
+		ctx:           routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil),
+		t:             t,
+		testPrefix:    testPrefix,
+		testNamespace: models.DefaultNamespace,
+		idGenerator:   idgen.NewShortFlakeGenerator(1),
 	}
 }
 
 // checkRedisHealth 检查Redis连接健康状态，如果不健康则跳过测试
 func (tr *testWorkloadRepo) checkRedisHealth() {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(routing.WithNamespaceGroupIDs(context.Background(), tr.testNamespace, nil), 3*time.Second)
 	defer cancel()
 
 	// 尝试一个简单的操作
@@ -92,7 +96,7 @@ func (tr *testWorkloadRepo) agentID(name string) string {
 // getWorkloadFromDimension 从指定维度获取客服负载
 func (tr *testWorkloadRepo) getWorkloadFromDimension(agentID string, dimension repository.WorkloadDimension) int64 {
 	now := time.Now()
-	key := tr.repoImpl.GetDimensionKey(dimension, agentID, now)
+	key := tr.repoImpl.GetDimensionKey(tr.testNamespace, dimension, agentID, now)
 	workloadStr, err := tr.client.Get(tr.ctx, key).Result()
 	if err != nil {
 		return 0
@@ -110,11 +114,11 @@ func (tr *testWorkloadRepo) cleanup(agentID string) {
 	// 清理所有维度的 Redis 数据
 	for _, dimension := range repository.AllWorkloadDimensions {
 		// 清理 string key
-		key := tr.repoImpl.GetDimensionKey(dimension, agentID, now)
+		key := tr.repoImpl.GetDimensionKey(tr.testNamespace, dimension, agentID, now)
 		_ = tr.client.Del(tr.ctx, key).Err()
 
 		// 清理 ZSet
-		zsetKey := tr.repoImpl.GetDimensionZSetKey(dimension, now)
+		zsetKey := tr.repoImpl.GetDimensionZSetKey(tr.testNamespace, dimension, now)
 		_ = tr.client.ZRem(tr.ctx, zsetKey, agentID).Err()
 	}
 
@@ -270,7 +274,7 @@ func TestRemoveAgentWorkloadAllDimensions(t *testing.T) {
 	// 验证各维度 ZSet 状态：realtime 移除，统计维度保留；string key 全部保留
 	now := time.Now()
 	for _, dimension := range repository.AllWorkloadDimensions {
-		zsetKey := tr.repoImpl.GetDimensionZSetKey(dimension, now)
+		zsetKey := tr.repoImpl.GetDimensionZSetKey(tr.testNamespace, dimension, now)
 		score := tr.client.ZScore(tr.ctx, zsetKey, agentID).Val()
 
 		if dimension == repository.WorkloadDimensionRealtime {
@@ -315,7 +319,7 @@ func TestReloadAgentWorkload(t *testing.T) {
 	// 验证所有维度的 ZSet 都已恢复
 	now := time.Now()
 	for _, dimension := range repository.AllWorkloadDimensions {
-		zsetKey := tr.repoImpl.GetDimensionZSetKey(dimension, now)
+		zsetKey := tr.repoImpl.GetDimensionZSetKey(tr.testNamespace, dimension, now)
 		score := tr.client.ZScore(tr.ctx, zsetKey, agentID).Val()
 		assert.Equal(t, float64(15), score, "维度 %s 的 ZSet 应该已恢复", dimension)
 	}
@@ -568,7 +572,7 @@ func TestAcquireLeastLoadedAgent_FallbackToStringKey(t *testing.T) {
 	require.NoError(t, tr.repo.ForceSetAgentWorkload(tr.ctx, agentB, 3))
 
 	// 从 realtime ZSet 中移除 B，模拟 B 曾被 RemoveAgentWorkload 移出 ZSet 的情况
-	zsetKey := tr.repoImpl.GetDimensionZSetKey(repository.WorkloadDimensionRealtime, time.Now())
+	zsetKey := tr.repoImpl.GetDimensionZSetKey(tr.testNamespace, repository.WorkloadDimensionRealtime, time.Now())
 	require.NoError(t, tr.client.ZRem(tr.ctx, zsetKey, agentB).Err())
 
 	// Acquire 应仍能从 string key 读到 B 的真实负载 3 并选中 B

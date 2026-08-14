@@ -2143,20 +2143,22 @@ func TestHubBroadcastToGroup(t *testing.T) {
 
 	// 注册在线客户端
 	client1 := &Client{
-		ID:       "sales-client-1",
-		UserID:   "sales-user-1",
-		UserType: UserTypeCustomer,
-		Status:   UserStatusOnline,
-		SendChan: make(chan []byte, 16),
-		Context:  context.WithValue(context.Background(), ContextKeyUserID, "sales-user-1"),
+		ID:        "sales-client-1",
+		UserID:    "sales-user-1",
+		UserType:  UserTypeCustomer,
+		Status:    UserStatusOnline,
+		Namespace: "default", // 与群组 namespace 和 BroadcastToGroup 参数对齐
+		SendChan:  make(chan []byte, 16),
+		Context:   context.WithValue(context.Background(), ContextKeyUserID, "sales-user-1"),
 	}
 	client2 := &Client{
-		ID:       "sales-client-2",
-		UserID:   "sales-user-2",
-		UserType: UserTypeCustomer,
-		Status:   UserStatusOnline,
-		SendChan: make(chan []byte, 16),
-		Context:  context.WithValue(context.Background(), ContextKeyUserID, "sales-user-2"),
+		ID:        "sales-client-2",
+		UserID:    "sales-user-2",
+		UserType:  UserTypeCustomer,
+		Status:    UserStatusOnline,
+		Namespace: "default", // 与群组 namespace 和 BroadcastToGroup 参数对齐
+		SendChan:  make(chan []byte, 16),
+		Context:   context.WithValue(context.Background(), ContextKeyUserID, "sales-user-2"),
 	}
 	hub.Register(client1)
 	hub.Register(client2)

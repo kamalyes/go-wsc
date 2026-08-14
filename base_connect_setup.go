@@ -204,10 +204,11 @@ func GetTestDBWithMigration(t *testing.T, models ...interface{}) *gorm.DB {
 		t.Logf("✅ 迁移完成，耗时: %v", time.Since(start))
 
 		// 创建唯一索引（不使用 GORM uniqueIndex tag，改用 Migrator 跨方言创建）
+		// 唯一键: (namespace, agent_id, dimension, time_key) — 实现多命名空间下同名 agent 负载独立
 		if db.Migrator().HasTable("wsc_agent_workload") {
 			idxMigrator := dbMigrator.NewMigrator(db, &dbMigrator.MigratorConfig{
 				Indexes: []dbMigrator.IndexDefinition{
-					dbMigrator.NewUniqueIndex("wsc_agent_workload", "agent_id", "dimension", "time_key"),
+					dbMigrator.NewUniqueIndex("wsc_agent_workload", "namespace", "agent_id", "dimension", "time_key"),
 				},
 				SkipIndexOnError: true,
 			})

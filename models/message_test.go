@@ -15,10 +15,15 @@
 package models
 
 import (
+	"context"
 	"encoding/json"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 	"unsafe"
 
+	"github.com/kamalyes/go-logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -30,9 +35,9 @@ import (
 func TestHubMessage_SizeAndAlignment(t *testing.T) {
 	size := unsafe.Sizeof(HubMessage{})
 
-	// 368 是新增 TraceID 后的预期大小
-	// 由于 Go 版本/平台差异，允许 ±8 字节浮动，但必须 < 376
-	assert.Less(t, size, uintptr(376), "HubMessage size should be optimized (< 376 bytes), got %d", size)
+	// 416 是新增 Namespace/GroupID（各16字节）+ mu 指针（8字节）后的预期大小
+	// 由于 Go 版本/平台差异，允许浮动，但必须 <= 416
+	assert.LessOrEqual(t, size, uintptr(416), "HubMessage size should be optimized (<= 416 bytes), got %d", size)
 
 	// 验证 3 个 bool 字段位于结构体末尾（地址偏移接近 size）
 	msg := HubMessage{}
@@ -271,4 +276,333 @@ func TestHubMessage_Metadata(t *testing.T) {
 	jsonStr := msg.GetMetadataJSON()
 	assert.Contains(t, jsonStr, "key1")
 	assert.Contains(t, jsonStr, "val1")
+}
+
+// ============================================================================
+// 并发安全测试
+//
+// 以下测试验证 HubMessage 的 Set*/Get*/With*/Clone/MarshalJSON 在高并发
+// 场景下不会触发 "concurrent map iteration and map write" fatal，且取值正确。
+// 必须以 `go test -race` 运行才能检测到数据竞争。
+// ============================================================================
+
+// concurrencyIters 并发测试的迭代次数（足够大以触发竞争，又不至于拖慢 CI）
+const concurrencyIters = 2000
+
+// TestHubMessage_ConcurrentSetGet 验证 Set* 写与 Get* 读并发时的安全性
+// 场景：多 goroutine 同时 SetID/SetContent/SetSeqNo/GetMessageID，不应 panic/race
+func TestHubMessage_ConcurrentSetGet(t *testing.T) {
+	msg := NewHubMessage()
+	var wg sync.WaitGroup
+	wg.Add(4)
+
+	// writer 1：交替写 ID 与 Content
+	go func() {
+		defer wg.Done()
+		for i := 0; i < concurrencyIters; i++ {
+			msg.SetID("id-" + time.Now().Format("150405.000000"))
+			msg.SetContent("content")
+		}
+	}()
+
+	// writer 2：交替写 SeqNo 与 Priority
+	go func() {
+		defer wg.Done()
+		for i := 0; i < concurrencyIters; i++ {
+			msg.SetSeqNo(int64(i))
+			msg.SetPriority(PriorityHigh)
+		}
+	}()
+
+	// reader 1：读 MessageID（与 SetID 并发）
+	go func() {
+		defer wg.Done()
+		for i := 0; i < concurrencyIters; i++ {
+			_ = msg.GetMessageID()
+			_ = msg.GetTraceID()
+		}
+	}()
+
+	// reader 2：读 Data 相关字段（与 With* 并发）
+	go func() {
+		defer wg.Done()
+		for i := 0; i < concurrencyIters; i++ {
+			_, _ = msg.GetMetadata("any")
+			_ = msg.GetMetadataJSON()
+			_ = msg.GetContentExtraJSON()
+		}
+	}()
+
+	wg.Wait()
+}
+
+// TestHubMessage_ConcurrentDataMap 验证 Data map 并发写与读/序列化不触发 fatal
+// 这是最初导致 "concurrent map iteration and map write" 崩溃的根因场景
+func TestHubMessage_ConcurrentDataMap(t *testing.T) {
+	msg := NewHubMessage()
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	// writer：并发写 metadata / content_extra / media_info
+	go func() {
+		defer wg.Done()
+		for i := 0; i < concurrencyIters; i++ {
+			msg.WithMetadata("k", "v")
+			msg.WithContentExtra("k", "v")
+			msg.WithOption("opt", i)
+		}
+	}()
+
+	// reader：并发读 Data map（GetMetadata/GetOption 遍历子 map）
+	go func() {
+		defer wg.Done()
+		for i := 0; i < concurrencyIters; i++ {
+			_, _ = msg.GetMetadata("k")
+			_, _ = msg.GetOption("opt")
+			_ = msg.GetAllMetadata()
+		}
+	}()
+
+	// marshaler：并发序列化（json.Marshal 遍历 Data map，与 writer 并发）
+	go func() {
+		defer wg.Done()
+		for i := 0; i < concurrencyIters; i++ {
+			_, err := json.Marshal(msg)
+			assert.NoError(t, err)
+		}
+	}()
+
+	wg.Wait()
+}
+
+// TestHubMessage_ConcurrentClone 验证 Clone 与 Set*/With* 并发安全
+// 场景：Clone 持 RLock 深拷贝 Data，与 With* 的 Lock 互斥，不应触发 map 并发 fatal
+func TestHubMessage_ConcurrentClone(t *testing.T) {
+	msg := NewHubMessage().
+		SetID("orig").
+		WithMetadata("trace", "abc").
+		WithContentExtra("color", "red")
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// writer：持续修改 Data map
+	go func() {
+		defer wg.Done()
+		for i := 0; i < concurrencyIters; i++ {
+			msg.WithMetadata("k", "v")
+			msg.WithContentExtra("k", "v")
+			msg.SetID("orig")
+		}
+	}()
+
+	// cloner：持续 Clone 并验证深拷贝独立性
+	go func() {
+		defer wg.Done()
+		for i := 0; i < concurrencyIters; i++ {
+			c := msg.Clone()
+			// 副本修改不应影响原对象（Data map 独立）
+			c.WithOption("clone-only", "x")
+			_, ok := msg.GetOption("clone-only")
+			assert.False(t, ok, "clone modification should not affect original")
+		}
+	}()
+
+	wg.Wait()
+}
+
+// TestHubMessage_ConcurrentMarshal 验证 MarshalJSON 与 Set*/With* 全字段并发安全
+func TestHubMessage_ConcurrentMarshal(t *testing.T) {
+	msg := NewHubMessage()
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	// writer 1：写字符串字段
+	go func() {
+		defer wg.Done()
+		for i := 0; i < concurrencyIters; i++ {
+			msg.SetID("id").SetSender("s").SetReceiver("r").SetContent("c").SetSessionID("sid")
+		}
+	}()
+
+	// writer 2：写 Data map 与数值字段
+	go func() {
+		defer wg.Done()
+		for i := 0; i < concurrencyIters; i++ {
+			msg.WithMetadata("k", "v").WithContentExtra("k", "v")
+			msg.SetSeqNo(int64(i)).SetRequireAck(true)
+		}
+	}()
+
+	// marshaler：并发序列化全字段
+	go func() {
+		defer wg.Done()
+		for i := 0; i < concurrencyIters; i++ {
+			data, err := json.Marshal(msg)
+			if assert.NoError(t, err) {
+				var decoded HubMessage
+				_ = json.Unmarshal(data, &decoded) // 仅验证可反序列化
+			}
+		}
+	}()
+
+	wg.Wait()
+}
+
+// TestHubMessage_ConcurrentGetAllAndMarshal 验证 GetAll*（返回内部 map 引用）与 Marshal 并发
+// GetAllMetadata/GetAllContentExtra 返回的是 Data 内部子 map 的引用，
+// 与 MarshalJSON 遍历可能并发。测试验证持 RLock 下不会 fatal。
+func TestHubMessage_ConcurrentGetAllAndMarshal(t *testing.T) {
+	msg := NewHubMessage().
+		WithMetadata("a", "1").WithMetadata("b", "2").
+		WithContentExtra("x", "y")
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < concurrencyIters; i++ {
+			_ = msg.GetAllMetadata()
+			_ = msg.GetAllContentExtra()
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < concurrencyIters; i++ {
+			_, err := json.Marshal(msg)
+			assert.NoError(t, err)
+		}
+	}()
+
+	wg.Wait()
+}
+
+// TestHubMessage_NilMuIsLockFree 验证直接构造（mu=nil）时不死锁、不 panic
+// 兼容 &HubMessage{} 零值构造场景
+func TestHubMessage_NilMuIsLockFree(t *testing.T) {
+	// 直接构造，mu 为 nil
+	msg := &HubMessage{
+		ID:      "zero",
+		Content: "raw",
+		Data:    map[string]interface{}{"k": "v"},
+	}
+
+	// Set/Get 在 nil mu 下应退化为无锁，正常执行
+	msg.SetID("updated").SetContent("new")
+	assert.Equal(t, "updated", msg.ID)
+
+	_, ok := msg.GetOption("k")
+	assert.True(t, ok)
+
+	// Clone 在 nil mu 下应正常工作（无锁深拷贝）
+	c := msg.Clone()
+	assert.Equal(t, msg.ID, c.ID)
+	assert.Equal(t, "v", c.Data["k"])
+
+	// MarshalJSON 在 nil mu 下应正常工作
+	data, err := json.Marshal(msg)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "updated")
+}
+
+// TestHubMessage_CloneIndependentLock 验证 Clone 副本拥有独立锁
+// 场景：原对象持锁写，副本写不阻塞（反之亦然）
+func TestHubMessage_CloneIndependentLock(t *testing.T) {
+	original := NewHubMessage().SetID("orig")
+	clone := original.Clone()
+
+	// 副本修改不应阻塞原对象
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < concurrencyIters; i++ {
+			clone.SetID("clone-value")
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < concurrencyIters; i++ {
+			original.SetID("orig-value")
+			_, _ = json.Marshal(original)
+		}
+	}()
+
+	wg.Wait()
+	// 副本与原对象的 ID 不互相影响
+	assert.Equal(t, "clone-value", clone.ID)
+	assert.Equal(t, "orig-value", original.ID)
+}
+
+// TestHubMessage_InjectContextConcurrent 验证 InjectContext 与 GetTraceID 并发安全
+func TestHubMessage_InjectContextConcurrent(t *testing.T) {
+	msg := NewHubMessage()
+	ctx := logger.ContextWithTraceID(context.Background(), "test-trace")
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < concurrencyIters; i++ {
+			msg.InjectContext(ctx)
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < concurrencyIters; i++ {
+			_ = msg.GetTraceID()
+		}
+	}()
+
+	wg.Wait()
+	// 注入后 trace_id 应稳定可见
+	assert.Equal(t, "test-trace", msg.GetTraceID())
+}
+
+// TestHubMessage_CloneDeepAlias 验证 CloneDeep 接口返回独立深拷贝
+func TestHubMessage_CloneDeepAlias(t *testing.T) {
+	orig := NewHubMessage().
+		SetID("o").
+		WithMetadata("k", "v")
+
+	c := orig.CloneDeep()
+	cloned, ok := c.(*HubMessage)
+	require.True(t, ok)
+
+	cloned.WithMetadata("clone-only", "x")
+	_, exists := orig.GetMetadata("clone-only")
+	assert.False(t, exists, "CloneDeep should produce independent copy")
+}
+
+// TestHubMessage_AtomicCounterUnderConcurrency 辅助验证并发测试确实产生了竞争压力
+// 确保 race detector 能捕获未加锁路径（本测试中所有路径都已加锁，应无 race）
+func TestHubMessage_AtomicCounterUnderConcurrency(t *testing.T) {
+	msg := NewHubMessage()
+	var counter int64
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < concurrencyIters; i++ {
+			msg.SetSeqNo(int64(i))
+			atomic.AddInt64(&counter, 1)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < concurrencyIters; i++ {
+			_ = msg.GetMessageID()
+			atomic.AddInt64(&counter, 1)
+		}
+	}()
+
+	wg.Wait()
+	assert.Equal(t, int64(concurrencyIters*2), counter)
 }

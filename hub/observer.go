@@ -27,6 +27,8 @@ import (
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
+	"github.com/kamalyes/go-wsc/models"
+	"github.com/kamalyes/go-wsc/routing"
 )
 
 // ============================================================================
@@ -54,9 +56,9 @@ func (h *Hub) GetObserverClientsByNamespace(namespace string) []*Client {
 }
 
 // GetObserversForMessage 获取应接收指定命名空间+群组消息的观察者
-// 合并三级：全局 + 命名空间 + 命名空间+群组，O(k) k=匹配的观察者数
-func (h *Hub) GetObserversForMessage(namespace, groupID string) []*Client {
-	return h.shardedRegistry.GetObserversForMessage(namespace, groupID)
+// 合并三级：全局 + 命名空间 + 各群组，按 clientID 去重，O(k) k=匹配的观察者数
+func (h *Hub) GetObserversForMessage(namespace string, groupIDs ...string) []*Client {
+	return h.shardedRegistry.GetObserversForMessage(namespace, groupIDs...)
 }
 
 // GetObserverCount 获取观察者数量（用户数，非设备数）- O(1)
@@ -79,27 +81,31 @@ func (h *Hub) IsObserver(userID string) bool {
 // ============================================================================
 
 // notifyObservers 通知观察者（内部方法）
-// namespace+groupID 定位观察范围，通过三级索引 O(k) 查找匹配的观察者
+// 从 ctx 提取 namespace+groupID 定位观察范围，通过三级索引 O(k) 查找匹配的观察者
 // 提交到 observerBatcher 批量处理，消除 per-message goroutine
-func (h *Hub) notifyObservers(ctx context.Context, msg *HubMessage, namespace, groupID string) {
+// 调用方需先用 WithNamespaceGroupIDs 注入 context
+func (h *Hub) notifyObservers(ctx context.Context, msg *HubMessage) {
 	// 观察者模块未启用时直接返回
 	if !h.shardedRegistry.ObserverEnabled() {
 		return
 	}
+	namespace := routing.NamespaceFromContext(ctx)
+	groupIDs := routing.GroupIDsFromContext(ctx)
 	// 提交到批量处理器（msg 会在 Submit 内 Clone，避免调用方修改影响异步 flush）
-	if !h.observerBatcher.Submit(msg, namespace, groupID) {
+	if !h.observerBatcher.Submit(msg, namespace, groupIDs) {
 		h.logger.DebugContextKV(ctx, "观察者通知队列已满，丢弃",
 			"message_id", msg.MessageID,
 			"namespace", namespace,
-			"group_id", groupID,
+			"group_ids", groupIDs,
 		)
 	}
 }
 
 // notifyObserversDirect 同步执行观察者通知（由 observerBatcher.flush 调用）
 // 本地观察者投递 + 跨节点广播，无 per-message goroutine
-func (h *Hub) notifyObserversDirect(msg *HubMessage, namespace, groupID string) {
-	ctx := h.ctx
+// namespace/groupIDs 由 batcher item 携带（异步场景原 ctx 已过期），flush 时注入新 ctx
+func (h *Hub) notifyObserversDirect(msg *HubMessage, namespace string, groupIDs []string) {
+	ctx := routing.WithNamespaceGroupIDs(h.ctx, namespace, groupIDs)
 
 	// 快速检查：无观察者时仅跨节点广播 - O(1)
 	observerCount := h.shardedRegistry.GetObserverUserCount()
@@ -107,7 +113,7 @@ func (h *Hub) notifyObserversDirect(msg *HubMessage, namespace, groupID string) 
 	h.logger.DebugContextKV(ctx, "开始通知观察者",
 		"message_id", msg.MessageID,
 		"namespace", namespace,
-		"group_id", groupID,
+		"group_ids", groupIDs,
 		"sender", msg.Sender,
 		"receiver", msg.Receiver,
 		"message_type", msg.MessageType,
@@ -118,16 +124,16 @@ func (h *Hub) notifyObserversDirect(msg *HubMessage, namespace, groupID string) 
 		h.logger.DebugContextKV(ctx, "本节点无观察者，仅广播到其他节点",
 			"message_id", msg.MessageID,
 		)
-		h.broadcastObserverNotification(ctx, msg, namespace, groupID)
+		h.broadcastObserverNotification(ctx, msg)
 		return
 	}
 
-	// 三级索引查找：O(k) k=匹配的观察者设备数
-	observers := h.shardedRegistry.GetObserversForMessage(namespace, groupID)
+	// 三级索引查找：合并所有 groupIDs 的观察者并去重
+	observers := h.shardedRegistry.GetObserversForMessage(namespace, groupIDs...)
 	h.logger.DebugContextKV(ctx, "准备通知本地观察者",
 		"message_id", msg.MessageID,
 		"namespace", namespace,
-		"group_id", groupID,
+		"group_ids", groupIDs,
 		"observer_devices", len(observers),
 	)
 
@@ -183,30 +189,36 @@ func (h *Hub) notifyObserversDirect(msg *HubMessage, namespace, groupID string) 
 	)
 
 	// 跨节点广播观察者通知
-	h.broadcastObserverNotification(ctx, msg, namespace, groupID)
+	h.broadcastObserverNotification(ctx, msg)
 }
 
 // broadcastObserverNotification 广播观察者通知到其他节点
 //
 // 统一走 routeToCluster 入口，由其集中决策 gRPC 直连与 PubSub 兜底
-// groupID 通过 GroupIDs 字段传递，接收端从 distMsg.GroupIDs 提取
+// namespace/groupID 从 ctx 提取，通过 opts.GroupID 单值字段传递
 // 同步执行（由 observerBatcher.flush 调用，无需额外 goroutine）
-func (h *Hub) broadcastObserverNotification(ctx context.Context, msg *HubMessage, namespace, groupID string) {
+func (h *Hub) broadcastObserverNotification(ctx context.Context, msg *HubMessage) {
 	// 单机模式：无 PubSub 且无 gRPC，不跨节点
 	if h.pubsub == nil && !h.IsGRPCEnabled() {
 		return
 	}
 
-	dispatchCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	namespace := routing.NamespaceFromContext(ctx)
+	groupIDs := routing.GroupIDsFromContext(ctx)
+
+	// 从传入 ctx 派生超时 ctx，保留 trace_id 等元数据
+	// 如果传入 ctx 已取消（如 Hub 关闭场景），fallback 到 Background 确保 dispatch 能完成
+	parentCtx := ctx
+	if ctx == nil || ctx.Err() != nil {
+		parentCtx = context.Background()
+	}
+	dispatchCtx, cancel := context.WithTimeout(parentCtx, 3*time.Second)
 	defer cancel()
 
 	opts := ClusterDispatchOptions{
-		Operation: OperationTypeObserverNotify,
+		Operation: models.OperationTypeObserverNotify,
 		Namespace: namespace,
-	}
-	// 通过 GroupIDs 携带 groupID，接收端从 distMsg.GroupIDs[0] 提取
-	if groupID != "" {
-		opts.GroupIDs = []string{groupID}
+		GroupIDs:  groupIDs,
 	}
 
 	if err := h.routeToCluster(dispatchCtx, msg, opts); err != nil {
@@ -272,6 +284,8 @@ func (h *Hub) GetObserverStats() []*ObserverStats {
 		stats = append(stats, &ObserverStats{
 			ObserverID:  observer.UserID,
 			ClientID:    observer.ID,
+			Namespace:   observer.Namespace,
+			GroupID:     observer.GetGroupID(),
 			ConnectedAt: observer.ConnectedAt,
 			BufferSize:  cap(observer.SendChan),
 			BufferUsage: len(observer.SendChan),
@@ -284,13 +298,45 @@ func (h *Hub) GetObserverStats() []*ObserverStats {
 	return stats
 }
 
-// GetObserverManagerStats 获取观察者管理器统计信息 - O(n) n=观察者设备数
+// GetObserverManagerStats 获取观察者管理器统计信息（按 namespace/groupID 分组）- O(n) n=观察者设备数
 func (h *Hub) GetObserverManagerStats() *ObserverManagerStats {
 	observerStats := h.GetObserverStats()
 
-	statsAny := make([]any, len(observerStats))
-	for i, stat := range observerStats {
-		statsAny[i] = stat
+	// 按 namespace → groupID 分组
+	nsStatsMap := make(map[string]*NamespaceObserverStats)
+	for _, stat := range observerStats {
+		ns := stat.Namespace
+		if nsStatsMap[ns] == nil {
+			nsStatsMap[ns] = &NamespaceObserverStats{
+				Namespace: ns,
+			}
+		}
+		nsStat := nsStatsMap[ns]
+		nsStat.TotalDevices++
+
+		if stat.GroupID == "" {
+			// 命名空间级观察者（非群组级）
+			nsStat.ObserverStats = append(nsStat.ObserverStats, stat)
+			nsStat.TotalUsers++
+		} else {
+			// 群组级观察者：找到或创建对应的 GroupObserverStats
+			var groupStat *GroupObserverStats
+			for i := range nsStat.GroupStats {
+				if nsStat.GroupStats[i].GroupID == stat.GroupID {
+					groupStat = &nsStat.GroupStats[i]
+					break
+				}
+			}
+			if groupStat == nil {
+				nsStat.GroupStats = append(nsStat.GroupStats, GroupObserverStats{
+					GroupID: stat.GroupID,
+				})
+				groupStat = &nsStat.GroupStats[len(nsStat.GroupStats)-1]
+			}
+			groupStat.ObserverStats = append(groupStat.ObserverStats, stat)
+			groupStat.TotalDevices++
+			groupStat.TotalUsers++
+		}
 	}
 
 	return &ObserverManagerStats{
@@ -299,6 +345,6 @@ func (h *Hub) GetObserverManagerStats() *ObserverManagerStats {
 		TotalNotifications:  0,
 		FailedNotifications: 0,
 		DroppedMessages:     0,
-		ObserverStats:       statsAny,
+		NamespaceStats:      nsStatsMap,
 	}
 }

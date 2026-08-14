@@ -5,8 +5,8 @@
  * @LastEditTime: 2026-08-13 19:02:35
  * @FilePath: \go-wsc\models\trace_test.go
  * @Description: trace_id 链路串联测试（models 内部）
- *   - HubMessage.InjectContext / ContextFromMessage
- *   - DistributedMessage.InjectContext / ContextFromMessage
+ *   - HubMessage.InjectContext / ContextFrom
+ *   - DistributedMessage.InjectContext / ContextFrom
  *   - JSON 序列化后 trace_id 保留
  *   - 同一 trace_id 不重复注入
  *
@@ -68,27 +68,27 @@ func TestHubMessage_InjectContext_EmptyCtx(t *testing.T) {
 	assert.Equal(t, "", msg.TraceID, "TraceID should be empty with background ctx")
 }
 
-// TestHubMessage_ContextFromMessage 从消息恢复 trace_id 到 ctx
-func TestHubMessage_ContextFromMessage(t *testing.T) {
+// TestHubMessage_ContextFrom 从消息恢复 trace_id 到 ctx
+func TestHubMessage_ContextFrom(t *testing.T) {
 	traceID := "trace-from-message-xyz"
 	msg := NewHubMessage()
 	msg.TraceID = traceID
 
 	parent := context.Background()
-	ctx := msg.ContextFromMessage(parent)
+	ctx := msg.ContextFrom(parent)
 
 	// 验证 ctx 中有 trace_id
 	extracted := ctx.Value(logger.ContextKeyTraceID)
 	assert.Equal(t, traceID, extracted, "trace_id should be restored to ctx")
 }
 
-// TestHubMessage_ContextFromMessage_EmptyTraceID 空 trace_id 不修改 ctx
-func TestHubMessage_ContextFromMessage_EmptyTraceID(t *testing.T) {
+// TestHubMessage_ContextFrom_EmptyTraceID 空 trace_id 不修改 ctx
+func TestHubMessage_ContextFrom_EmptyTraceID(t *testing.T) {
 	msg := NewHubMessage()
 	assert.Equal(t, "", msg.TraceID)
 
 	parent := context.Background()
-	ctx := msg.ContextFromMessage(parent)
+	ctx := msg.ContextFrom(parent)
 
 	// 空 TraceID 时 ctx 中不应有 trace_id
 	assert.Nil(t, ctx.Value(logger.ContextKeyTraceID), "should not have trace_id in ctx when TraceID is empty")
@@ -187,8 +187,8 @@ func TestDistributedMessage_InjectContext_NoOverwrite(t *testing.T) {
 	assert.Equal(t, originalTrace, dm.TraceID, "existing TraceID should not be overwritten")
 }
 
-// TestDistributedMessage_ContextFromMessage 从分布式消息恢复 trace_id 到 ctx
-func TestDistributedMessage_ContextFromMessage(t *testing.T) {
+// TestDistributedMessage_ContextFrom 从分布式消息恢复 trace_id 到 ctx
+func TestDistributedMessage_ContextFrom(t *testing.T) {
 	traceID := "dist-restore-trace"
 	dm := &DistributedMessage{
 		Type:     OperationTypeSendMessage,
@@ -199,21 +199,21 @@ func TestDistributedMessage_ContextFromMessage(t *testing.T) {
 	}
 
 	parent := context.Background()
-	ctx := dm.ContextFromMessage(parent)
+	ctx := dm.ContextFrom(parent)
 
 	extracted := ctx.Value(logger.ContextKeyTraceID)
 	assert.Equal(t, traceID, extracted, "trace_id should be restored from DistributedMessage")
 }
 
-// TestDistributedMessage_ContextFromMessage_EmptyTraceID 空 trace_id 返回原 ctx
-func TestDistributedMessage_ContextFromMessage_EmptyTraceID(t *testing.T) {
+// TestDistributedMessage_ContextFrom_EmptyTraceID 空 trace_id 返回原 ctx
+func TestDistributedMessage_ContextFrom_EmptyTraceID(t *testing.T) {
 	dm := &DistributedMessage{
 		Type:   OperationTypeSendMessage,
 		NodeID: "node-1",
 	}
 
 	parent := context.Background()
-	ctx := dm.ContextFromMessage(parent)
+	ctx := dm.ContextFrom(parent)
 
 	// 空 TraceID 时 ctx 中不应有 trace_id
 	assert.Nil(t, ctx.Value(logger.ContextKeyTraceID), "should not have trace_id in ctx when TraceID is empty")
@@ -316,7 +316,7 @@ func TestE2E_TraceChain_HubMessage(t *testing.T) {
 	assert.Equal(t, traceID, decoded.TraceID, "trace_id should survive serialization")
 
 	// 5. 恢复到新 ctx（模拟接收端）
-	receiverCtx := decoded.ContextFromMessage(context.Background())
+	receiverCtx := decoded.ContextFrom(context.Background())
 	extracted := receiverCtx.Value(logger.ContextKeyTraceID)
 	assert.Equal(t, traceID, extracted, "trace_id should be restored on receiver side")
 }
@@ -358,7 +358,7 @@ func TestE2E_TraceChain_GRPCCrossNode(t *testing.T) {
 	assert.Equal(t, traceID, extractedFromMD, "trace_id should be restored from gRPC metadata")
 
 	// 7. 消息体也恢复 trace_id（双重保障）
-	restoredCtx = msg.ContextFromMessage(restoredCtx)
+	restoredCtx = msg.ContextFrom(restoredCtx)
 	assert.Equal(t, traceID, restoredCtx.Value(logger.ContextKeyTraceID), "trace_id should also be in ctx from message body")
 }
 
@@ -384,7 +384,7 @@ func TestE2E_TraceChain_LoggerContext(t *testing.T) {
 	// 1. 通过 HubMessage 恢复 ctx
 	msg := NewHubMessage()
 	msg.TraceID = traceID
-	ctx := msg.ContextFromMessage(context.Background())
+	ctx := msg.ContextFrom(context.Background())
 
 	// 2. 验证 logger.ExtractTraceID 可以从恢复后的 ctx 提取
 	extracted := logger.ExtractTraceID(ctx)
@@ -395,7 +395,7 @@ func TestE2E_TraceChain_LoggerContext(t *testing.T) {
 		Type:    OperationTypeSendMessage,
 		TraceID: traceID,
 	}
-	ctx2 := dm.ContextFromMessage(context.Background())
+	ctx2 := dm.ContextFrom(context.Background())
 	extracted2 := logger.ExtractTraceID(ctx2)
 	assert.Equal(t, traceID, extracted2, "logger.ExtractTraceID should extract from DistributedMessage restored ctx")
 }

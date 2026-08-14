@@ -40,15 +40,19 @@ import (
 type observerNotifyItem struct {
 	msg       *HubMessage
 	namespace string
-	groupID   string
+	groupIDs  []string
 }
 
-// cloneObserverNotifyItem 深拷贝观察者通知条目（Clone msg 防止数据竞争）
+// cloneObserverNotifyItem 深拷贝观察者通知条目（Clone msg 防止数据竞争，复制 groupIDs 切片）
 func cloneObserverNotifyItem(item *observerNotifyItem) *observerNotifyItem {
+	groupIDs := item.groupIDs
+	if len(groupIDs) > 0 {
+		groupIDs = append([]string(nil), groupIDs...)
+	}
 	return &observerNotifyItem{
 		msg:       item.msg.Clone(),
 		namespace: item.namespace,
-		groupID:   item.groupID,
+		groupIDs:  groupIDs,
 	}
 }
 
@@ -72,14 +76,14 @@ func NewObserverNotificationBatcher(hub *Hub, queueSize, batchSize int, flushInt
 // Submit 非阻塞提交观察者通知
 // msg 由 BatchProcessor.WithClone 自动深拷贝，调用方无需关心数据隔离
 // 队列满时返回 false（观察者通知可丢失，非核心路径）
-func (b *ObserverNotificationBatcher) Submit(msg *HubMessage, namespace, groupID string) bool {
+func (b *ObserverNotificationBatcher) Submit(msg *HubMessage, namespace string, groupIDs []string) bool {
 	if b == nil || msg == nil {
 		return false
 	}
 	return b.processor.Submit(&observerNotifyItem{
 		msg:       msg,
 		namespace: namespace,
-		groupID:   groupID,
+		groupIDs:  groupIDs,
 	})
 }
 
@@ -106,6 +110,6 @@ func (b *ObserverNotificationBatcher) flush(items []*observerNotifyItem) {
 		return
 	}
 	for _, item := range items {
-		b.hub.notifyObserversDirect(item.msg, item.namespace, item.groupID)
+		b.hub.notifyObserversDirect(item.msg, item.namespace, item.groupIDs)
 	}
 }

@@ -27,6 +27,7 @@ import (
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/models"
+	"github.com/kamalyes/go-wsc/routing"
 )
 
 // ============================================================================
@@ -135,7 +136,9 @@ func (h *Hub) triggerGroupMemberJoinCallback(namespace, groupID string, userIDs 
 	ns, gid := namespace, groupID
 	uids := append([]string(nil), userIDs...)
 	h.workerPool.TrySubmitCallback(func() {
-		h.groupMemberJoinCallback(context.Background(), ns, gid, uids)
+		cbCtx, cbCancel := context.WithTimeout(h.ctx, 5*time.Second)
+		defer cbCancel()
+		h.groupMemberJoinCallback(cbCtx, ns, gid, uids)
 	})
 }
 
@@ -161,7 +164,9 @@ func (h *Hub) RemoveGroupMembers(ctx context.Context, namespace, groupID string,
 		ns, gid := namespace, groupID
 		uids := append([]string(nil), userIDs...)
 		h.workerPool.TrySubmitCallback(func() {
-			h.groupMemberLeaveCallback(context.Background(), ns, gid, uids)
+			cbCtx, cbCancel := context.WithTimeout(h.ctx, 5*time.Second)
+			defer cbCancel()
+			h.groupMemberLeaveCallback(cbCtx, ns, gid, uids)
 		})
 	}
 	return nil
@@ -213,7 +218,9 @@ func (h *Hub) GetNamespaceGroups(ctx context.Context, namespace string) ([]strin
 
 // SendToGroup 向群组发送消息（可靠投递）
 //
-// namespace 与 groupID 共同定位群组（空值默认 "default"）
+// ✅ 路由元数据统一从 ctx 取（调用方使用 routing.WithNamespaceGroupIDs 注入）：
+//   - namespace: 从 routing.NamespaceFromContext(ctx) 取，空时兜底注入 models.DefaultNamespace（老系统兼容）
+//   - groupID:   从 routing.FirstGroupIDFromContext(ctx) 取（单群组语义，必须传至少 1 个 groupID）
 //
 // 投递策略：
 //   - 在线成员：通过 SendToUserWithRetry 投递（自动支持跨节点路由与重试）
@@ -221,7 +228,17 @@ func (h *Hub) GetNamespaceGroups(ctx context.Context, namespace string) ([]strin
 //   - excludeSender 为 true 时跳过消息发送者本人
 //
 // 返回 GroupSendResult 包含详细的投递统计
-func (h *Hub) SendToGroup(ctx context.Context, namespace, groupID string, msg *HubMessage, excludeSender bool) *GroupSendResult {
+func (h *Hub) SendToGroup(ctx context.Context, msg *HubMessage, excludeSender bool) *GroupSendResult {
+	// 🔑 路由来源：统一从 ctx 取（不再通过参数单独传 namespace/groupID，与 SendToUserWithRetry 风格一致）
+	namespace := routing.NamespaceFromContext(ctx)
+	groupID := routing.FirstGroupIDFromContext(ctx)
+
+	// 老系统兼容：ctx 未传 namespace 时，兜底注入 DefaultNamespace
+	if namespace == "" {
+		namespace = models.DefaultNamespace
+		ctx = routing.WithNamespaceGroupIDs(ctx, namespace, routing.GroupIDsFromContext(ctx))
+	}
+
 	result := &GroupSendResult{
 		GroupID: groupID,
 		Errors:  make([]error, 0),
@@ -231,6 +248,17 @@ func (h *Hub) SendToGroup(ctx context.Context, namespace, groupID string, msg *H
 		result.Errors = append(result.Errors, ErrGroupRepoNotSet)
 		return result
 	}
+
+	// SendToGroup 是单群组语义，ctx 必须至少有 1 个 groupID
+	if groupID == "" {
+		result.Errors = append(result.Errors, fmt.Errorf("SendToGroup: ctx 缺少 groupID，请用 routing.WithNamespaceGroupIDs(ctx, ns, []string{gid}) 注入路由"))
+		return result
+	}
+
+	// 先 Clone 消息：并发给 N 个成员调用 SendToUserWithRetry 会各自再 Clone 一次，
+	// 此处 Clone 保证写入信封/trace_id/CreateAt 不污染调用方原对象
+	msg = msg.Clone()
+	msg.InjectContext(ctx)
 
 	// 1. 获取群组成员列表
 	members, err := h.groupRepo.GetMembers(ctx, namespace, groupID)
@@ -264,6 +292,11 @@ func (h *Hub) SendToGroup(ctx context.Context, namespace, groupID string, msg *H
 	if len(filteredMembers) == 0 {
 		return result
 	}
+
+	// 🔏 群组消息：同时写入 ctx + msg 信封（namespace, [groupID]）
+	// - 离线存储：从 ctx 取路由，存 ns:groupID:userID 维度
+	// - 本地/跨节点投递过滤：从 msg 信封取路由，保证同 ns 且同 group
+	ctx = msg.ContextWithRoute(ctx, namespace, []string{groupID})
 
 	// 3. 并发投递消息 + 原子计数（消除序列化预检查 N 次 Redis 在线探测）
 	// SendToUserWithRetry 内部已处理在线/离线逻辑，并通过 StoredOffline 标志返回分类信息
@@ -313,8 +346,8 @@ func (h *Hub) SendToGroup(ctx context.Context, namespace, groupID string, msg *H
 	result.StoredOffline = int(atomic.LoadInt64(&storedOffline))
 	result.Failed = int(atomic.LoadInt64(&failed))
 
-	// 🔔 通知观察者（异步，三级索引 O(k) 查找命名空间+群组级观察者）
-	h.notifyObservers(ctx, msg, namespace, groupID)
+	// 🔔 通知观察者（ctx 已在上方 ContextWithRoute 注入路由，直接使用即可）
+	h.notifyObservers(ctx, msg)
 
 	h.logger.InfoContextKV(ctx, "✅ 群组消息投递完成",
 		"namespace", namespace,
@@ -351,14 +384,21 @@ func (h *Hub) SendToGroup(ctx context.Context, namespace, groupID string, msg *H
 //
 // 返回本地成功投递数（跨节点投递为异步，不计入返回值）
 func (h *Hub) BroadcastToGroupMembers(ctx context.Context, namespace, groupID string, msg *HubMessage, excludeSender bool) int {
+	// 命名空间归一化：空值兜底为 DefaultNamespace
+	// ⚠️ 未归一化时 msg.Namespace="" → broadcastToUserIDs 的 ForEachUserClientFiltered 跳过 ns 过滤，
+	//    成员跨 ns 多端登录的设备都会收到（跨租户串扰）；且 groupRepo.GetMembers(ctx,"",gid) 查询的是空 ns 的群组
+	namespace = mathx.IfEmpty(namespace, models.DefaultNamespace)
 	if h.groupRepo == nil {
 		h.logger.WarnContextKV(ctx, "群组仓库未设置，无法广播",
 			"namespace", namespace, "group_id", groupID)
 		return 0
 	}
 
-	// 克隆消息避免并发修改
+	// 克隆消息避免并发修改 + 写入路由信封（broadcastToUserIDs 内部从 msg 信封取过滤条件）
 	msg = msg.Clone()
+	msg.InjectContext(ctx)
+	// 🔏 写入 ctx+msg 信封（namespace, [groupID]）
+	ctx = msg.ContextWithRoute(ctx, namespace, []string{groupID})
 	if msg.CreateAt.IsZero() {
 		msg.CreateAt = time.Now()
 	}
@@ -390,11 +430,11 @@ func (h *Hub) BroadcastToGroupMembers(ctx context.Context, namespace, groupID st
 	// 3. 按成员ID查找本地连接并投递（O(m)，m=成员数，不遍历全部连接）
 	localCount := h.broadcastToUserIDs(ctx, targetMembers, msg)
 
-	// 🔔 通知观察者（异步，三级索引 O(k) 查找命名空间+群组级观察者）
-	h.notifyObservers(ctx, msg, namespace, groupID)
+	// 🔔 通知观察者（ctx 已注入路由，直接使用）
+	h.notifyObservers(ctx, msg)
 
 	// 4. 跨节点广播：优先 gRPC 直连，降级 PubSub
-	h.crossNodeGroupBroadcast(ctx, namespace, groupID, msg, excludeSender)
+	h.crossNodeGroupBroadcast(routing.WithNamespaceGroupIDs(ctx, namespace, []string{groupID}), msg, excludeSender)
 
 	h.logger.InfoContextKV(ctx, "📢 群组广播已发起",
 		"namespace", namespace,
@@ -413,10 +453,14 @@ func (h *Hub) BroadcastToGroupMembers(ctx context.Context, namespace, groupID st
 //
 // 统一走 OperationTypeGroupsBroadcast 批量路径，单群组作为 GroupIDs=[groupID] 的特例
 // 提交到 clusterBatcher 批量处理，消除 per-message goroutine
-func (h *Hub) crossNodeGroupBroadcast(ctx context.Context, namespace, groupID string, msg *HubMessage, excludeSender bool) {
+// namespace/groupID 从 ctx 提取
+func (h *Hub) crossNodeGroupBroadcast(ctx context.Context, msg *HubMessage, excludeSender bool) {
 	if h.pubsub == nil && !h.IsGRPCEnabled() {
 		return // 单机模式，无需跨节点
 	}
+
+	namespace := routing.NamespaceFromContext(ctx)
+	groupIDs := routing.GroupIDsFromContext(ctx)
 
 	senderID := ""
 	if excludeSender {
@@ -424,16 +468,16 @@ func (h *Hub) crossNodeGroupBroadcast(ctx context.Context, namespace, groupID st
 	}
 
 	opts := ClusterDispatchOptions{
-		Operation:     OperationTypeGroupsBroadcast,
+		Operation:     models.OperationTypeGroupBroadcast,
 		Namespace:     namespace,
-		GroupIDs:      []string{groupID}, // 单群组是批量的特例，统一走批量路径
+		GroupIDs:      groupIDs,
 		ExcludeSender: excludeSender,
 		SenderID:      senderID,
 	}
 
 	if !h.clusterBatcher.Submit(msg, opts) {
 		h.logger.WarnContextKV(ctx, "集群分发队列已满，丢弃跨节点群组广播",
-			"namespace", namespace, "group_id", groupID,
+			"namespace", namespace, "group_ids", groupIDs,
 			"message_id", msg.MessageID)
 	}
 }
@@ -481,8 +525,10 @@ func (h *Hub) batchGetGroupMembers(ctx context.Context, namespace string, groupI
 //   - 一次本地过滤：N 次 broadcastToFiltered 降为 1 次
 //   - 一次跨节点路由：N 次 routeToCluster 降为 1 次（携带所有 groupIDs）
 //
-// namespace 为空时自动填充 "default"
+// namespace 为空时自动填充 DefaultNamespace
 func (h *Hub) BroadcastToAllGroups(ctx context.Context, namespace string, msg *HubMessage) int {
+	// 命名空间归一化：空值兜底为 DefaultNamespace（与 BroadcastToGroupMembers 一致，避免跨 ns 串扰）
+	namespace = mathx.IfEmpty(namespace, models.DefaultNamespace)
 	if h.groupRepo == nil {
 		h.logger.WarnContextKV(ctx, "群组仓库未设置，无法广播", "namespace", namespace)
 		return 0
@@ -504,8 +550,10 @@ func (h *Hub) BroadcastToAllGroups(ctx context.Context, namespace string, msg *H
 		return 0
 	}
 
-	// 3. 准备消息
+	// 3. 准备消息 + 🔏 写入路由信封（namespace + 所有 groupIDs，投递过滤时 client.groupID 命中任意一个即可）
 	msg = msg.Clone()
+	msg.InjectContext(ctx)
+	ctx = msg.ContextWithRoute(ctx, namespace, groupIDs)
 	if msg.CreateAt.IsZero() {
 		msg.CreateAt = time.Now()
 	}
@@ -519,6 +567,11 @@ func (h *Hub) BroadcastToAllGroups(ctx context.Context, namespace string, msg *H
 
 	// 5. 一次跨节点路由（携带所有 groupIDs，接收端批量处理）
 	h.crossNodeGroupsBroadcast(ctx, namespace, groupIDs, msg)
+
+	// 🔔 通知观察者（命名空间+群组维度，与 BroadcastToGroupMembers/BroadcastToGroups 对齐）
+	// ctx 已在 step 3 注入 namespace+groupIDs，观察者按此三级索引匹配
+	// 历史遗漏：本方法曾缺失观察者通知，导致订阅全群组广播的观察者收不到消息
+	h.notifyObservers(ctx, msg)
 
 	h.logger.DebugContextKV(ctx, "命名空间全群组广播完成",
 		"namespace", namespace,
@@ -539,12 +592,27 @@ func (h *Hub) crossNodeGroupsBroadcast(ctx context.Context, namespace string, gr
 		return // 单机模式，无需跨节点
 	}
 
+	// 单群组：走 OperationTypeGroupBroadcast
+	if len(groupIDs) == 1 {
+		opts := ClusterDispatchOptions{
+			Operation: models.OperationTypeGroupBroadcast,
+			Namespace: namespace,
+			GroupIDs:  groupIDs,
+		}
+		if !h.clusterBatcher.Submit(msg, opts) {
+			h.logger.WarnContextKV(ctx, "集群分发队列已满，丢弃跨节点群组广播",
+				"namespace", namespace, "group_id", groupIDs[0],
+				"message_id", msg.MessageID)
+		}
+		return
+	}
+
+	// 批量群组：走 OperationTypeGroupsBroadcast
 	opts := ClusterDispatchOptions{
-		Operation: OperationTypeGroupsBroadcast,
+		Operation: models.OperationTypeGroupsBroadcast,
 		Namespace: namespace,
 		GroupIDs:  groupIDs,
 	}
-
 	if !h.clusterBatcher.Submit(msg, opts) {
 		h.logger.WarnContextKV(ctx, "集群分发队列已满，丢弃跨节点批量群组广播",
 			"namespace", namespace, "group_count", len(groupIDs),
@@ -622,6 +690,16 @@ func (h *Hub) BroadcastToGroups(ctx context.Context, namespaces, groupIDs []stri
 		return 0
 	}
 
+	// 命名空间归一化：切片中空值兜底为 DefaultNamespace（与单 ns 广播方法一致，避免 "" ns 群组查询与跨 ns 串扰）
+	// 复制切片避免修改调用方底层数组
+	if len(namespaces) > 0 {
+		normalized := make([]string, len(namespaces))
+		for i, ns := range namespaces {
+			normalized[i] = mathx.IfEmpty(ns, models.DefaultNamespace)
+		}
+		namespaces = normalized
+	}
+
 	// 1. 解析目标 (namespace → []groupID) 映射
 	namespaceGroups, err := h.resolveTargetGroups(ctx, namespaces, groupIDs)
 	if err != nil {
@@ -632,34 +710,57 @@ func (h *Hub) BroadcastToGroups(ctx context.Context, namespaces, groupIDs []stri
 		return 0
 	}
 
-	// 2. 按命名空间 Pipeline 批量获取成员，合并去重（用户跨群组只收一条）
-	memberSet := make(map[string]struct{})
+	// 2. 按命名空间分组投递（路由隔离）：
+	//    - 每个 namespace 独立 Clone msg 并写入专属路由信封（ns + 对应 groupIDs）
+	//    - 避免"多 namespace 成员混合 + 单一 msg 信封"导致除一个 ns 外全部投不出去的串扰问题
+	//    - 跨 namespace 去重不做（同一 userID 跨不同 namespace 登录视为不同身份，各自接收）
+	var localCount int
+	baseMsg := msg.Clone()
+	baseMsg.InjectContext(ctx)
+
 	for namespace, gids := range namespaceGroups {
+		// 获取该 namespace 指定群组的成员（按 ns 批量 Pipeline）
 		members, mErr := h.groupRepo.GetMultiGroupMembers(ctx, namespace, gids)
 		if mErr != nil {
 			h.logger.DebugContextKV(ctx, "批量获取群组成员失败，跳过该命名空间",
 				"namespace", namespace, "error", mErr)
 			continue
 		}
-		for _, members := range members {
-			for _, uid := range members {
-				memberSet[uid] = struct{}{}
+		// 合并去重（该 ns 内跨群组用户只收一条）
+		nsMemberSet := make(map[string]struct{})
+		for _, mList := range members {
+			for _, uid := range mList {
+				nsMemberSet[uid] = struct{}{}
 			}
 		}
-	}
-	if len(memberSet) == 0 {
-		return 0
+		if len(nsMemberSet) == 0 {
+			continue
+		}
+		nsMemberList := make([]string, 0, len(nsMemberSet))
+		for uid := range nsMemberSet {
+			nsMemberList = append(nsMemberList, uid)
+		}
+		// 🔏 每个 ns 独立信封：保证 client.Namespace==msg.Namespace 且 client.groupID 在列表内
+		nsMsg := baseMsg.Clone()
+		nsCtx := nsMsg.ContextWithRoute(ctx, namespace, gids)
+		if nsMsg.CreateAt.IsZero() {
+			nsMsg.CreateAt = time.Now()
+		}
+		localCount += h.broadcastToUserIDs(nsCtx, nsMemberList, nsMsg)
 	}
 
-	// 3. 按成员ID查找本地连接并投递（O(m) 替代 O(n) 全连接扫描）
-	memberList := make([]string, 0, len(memberSet))
-	for uid := range memberSet {
-		memberList = append(memberList, uid)
-	}
-	localCount := h.broadcastToUserIDs(ctx, memberList, msg)
+	// 3. 按命名空间分组跨节点路由（每命名空间 Clone msg + 专属信封，携带该命名空间的 GroupIDs）
+	h.crossNodeMultiNamespaceGroupsBroadcast(ctx, namespaceGroups, baseMsg)
 
-	// 4. 按命名空间分组跨节点路由（每命名空间一条消息，携带该命名空间的 GroupIDs）
-	h.crossNodeMultiNamespaceGroupsBroadcast(ctx, namespaceGroups, msg)
+	// 🔔 通知观察者（按命名空间+群组维度通知，与 BroadcastToGroupMembers 对齐）
+	// 每个 ns 独立 Clone + 写入专属信封：baseMsg 仅 InjectContext（trace_id），其信封路由为调用方 ctx 原值
+	// （多 ns 场景下可能是空或陈旧值）。观察者消息内容需携带正确 ns，避免下游拿到错误 Namespace 字段
+	for namespace, gids := range namespaceGroups {
+		observerCtx := routing.WithNamespaceGroupIDs(ctx, namespace, gids)
+		observerMsg := baseMsg.Clone()
+		observerMsg.ContextWithRoute(observerCtx, namespace, gids)
+		h.notifyObservers(observerCtx, observerMsg)
+	}
 
 	h.logger.DebugContextKV(ctx, "BroadcastToGroups 完成",
 		"namespace_count", len(namespaceGroups),
@@ -734,20 +835,33 @@ func (h *Hub) resolveTargetGroups(ctx context.Context, namespaces, groupIDs []st
 }
 
 // crossNodeMultiNamespaceGroupsBroadcast 按命名空间分组跨节点路由
-// 每个命名空间提交一条到 clusterBatcher，携带该命名空间的 GroupIDs（接收端批量处理）
+// 每个命名空间独立 Clone msg + 写入专属路由信封后提交到 clusterBatcher
+//
+// ⚠️ 必须按 ns 独立信封：routeToCluster 优先取 msg.Namespace（信封为路由真相源），
+//
+//	若直接复用同一 msg（多 ns 场景信封为空或陈旧值），dispatch.Namespace 会与 opts.Namespace 不一致，
+//	非该信封 ns 的目标命名空间全部投递到错误的命名空间（跨租户串扰）
 func (h *Hub) crossNodeMultiNamespaceGroupsBroadcast(ctx context.Context, namespaceGroups map[string][]string, msg *HubMessage) {
 	if h.pubsub == nil && !h.IsGRPCEnabled() {
 		return // 单机模式，无需跨节点
 	}
 	for namespace, groupIDs := range namespaceGroups {
+		// 根据群组数量选择单群组或批量操作类型
+		op := models.OperationTypeGroupBroadcast
+		if len(groupIDs) > 1 {
+			op = models.OperationTypeGroupsBroadcast
+		}
+		// 按 ns 独立 Clone + 写入专属信封，确保 routeToCluster 取到的 msg.Namespace 与 opts.Namespace 一致
+		nsMsg := msg.Clone()
+		nsMsg.ContextWithRoute(ctx, namespace, groupIDs)
 		opts := ClusterDispatchOptions{
-			Operation: OperationTypeGroupsBroadcast,
+			Operation: op,
 			Namespace: namespace,
 			GroupIDs:  groupIDs,
 		}
-		if !h.clusterBatcher.Submit(msg, opts) {
+		if !h.clusterBatcher.Submit(nsMsg, opts) {
 			h.logger.WarnContextKV(ctx, "集群分发队列已满，丢弃跨节点多命名空间群组广播",
-				"namespace", namespace, "message_id", msg.MessageID)
+				"namespace", namespace, "group_count", len(groupIDs), "message_id", msg.MessageID)
 		}
 	}
 }
@@ -867,14 +981,24 @@ func (h *Hub) ensureAndJoinSystemGroup(ctx context.Context, namespace, groupID, 
 }
 
 // BroadcastToNamespace 向指定命名空间的所有连接广播消息（不限群组）
-// namespace 为空时自动填充 "default"
+// namespace 为空时自动填充 DefaultNamespace
 // 本地按命名空间过滤广播 + 跨节点命名空间广播（提交到 clusterBatcher）
 func (h *Hub) BroadcastToNamespace(ctx context.Context, namespace string, msg *HubMessage) int {
+	// 命名空间归一化：空值兜底为 DefaultNamespace（与 SendToGroup/BroadcastToGroupMembers 一致）
+	// ⚠️ 未归一化时本地与跨节点语义割裂导致消息"乱掉"：
+	//   - 本地：broadcastToFiltered 的 c.Namespace=="" 仅匹配全局观察者，default 客户端收不到
+	//   - 跨节点：handleDistributedBroadcast 把空 namespace 视为"全命名空间广播"投递给所有客户端（跨租户泄露）
+	namespace = mathx.IfEmpty(namespace, models.DefaultNamespace)
+	// 🔏 写入路由信封：命名空间广播（不限群组，groupIDs=nil → 投递过滤只检查 namespace）
 	msg = msg.Clone()
-	// 本地按命名空间过滤广播
+	msg.InjectContext(ctx)
+	ctx = msg.ContextWithRoute(ctx, namespace, nil)
+	// 本地按命名空间过滤广播（broadcastToFiltered 内部 combinedCondition 会叠加路由信封匹配，此处 condition 仅作业务兜底）
 	count := h.broadcastToFiltered(ctx, func(c *Client) bool {
 		return c.Namespace == namespace
 	}, msg)
+	// 🔔 通知观察者（命名空间级广播事件，与 Broadcast/BroadcastToGroupMembers 对齐）
+	h.notifyObservers(ctx, msg)
 	// 跨节点命名空间广播（提交到 clusterBatcher 批量处理）
 	opts := ClusterDispatchOptions{
 		Operation: OperationTypeBroadcast,

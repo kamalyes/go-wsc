@@ -35,6 +35,13 @@ func (h *Hub) Broadcast(ctx context.Context, msg *HubMessage) {
 	// 创建消息副本，避免并发修改
 	msg = msg.Clone()
 
+	// 🔏 路由信封同步：从 ctx 恢复路由到 msg 信封（幂等，已有不覆盖）
+	// 下游 handleBroadcastMessage 通过 ForEachClientFiltered(msg.Namespace, msg.GroupIDs, ...) 严格匹配投递
+	// 注：Broadcast 语义为"跟随调用方 ctx 路由"——如果 ctx 无 ns/gid，则信封为空（仅匹配 ns="" 客户端）
+	//     如需指定 ns 广播，请使用 BroadcastToNamespace；如需多群组，请使用 BroadcastToGroups
+	// InjectRoute 同时回写 ctx，保证下游 ctx 与信封一致
+	ctx = msg.InjectRoute(ctx)
+
 	// 自动设置为全局广播类型
 	msg.BroadcastType = mathx.IfEmpty(msg.BroadcastType, BroadcastTypeGlobal)
 
@@ -93,6 +100,12 @@ func (h *Hub) Broadcast(ctx context.Context, msg *HubMessage) {
 //   - 不走 SendToUserWithRetry（原方案每客户端 Clone×2 + 在线检查 + 入队 + DB 记录）
 //   - 零拷贝遍历（原方案 GetClientsCopy + FilterSlice 双重拷贝）
 func (h *Hub) broadcastToFiltered(ctx context.Context, condition func(*Client) bool, msg *HubMessage) int {
+	// 🔏 路由信封同步：从 ctx 恢复路由到 msg 信封（幂等，已有不覆盖）
+	// 覆盖所有上层入口：SendConditional / BroadcastByUserType / BroadcastToRole / BroadcastToClientType / SendToGroup 等
+	// 确保业务 condition + 路由信封匹配 combinedCondition 能正确读 msg 自带路由
+	// InjectRoute 同时回写 ctx，保证下游 ctx 与信封一致
+	ctx = msg.InjectRoute(ctx)
+
 	// 预序列化 WebSocket 消息（仅一次）
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -104,12 +117,19 @@ func (h *Hub) broadcastToFiltered(ctx context.Context, condition func(*Client) b
 	dataLen := len(data)
 	var successCount int32
 
+	// 组合过滤条件：业务 condition + namespace 隔离（ClientMatchesEnvelope 仅做 namespace 严格匹配，
+	// 不做 msg.GroupIDs vs client.GroupID 系统组匹配——两者维度不同，详见 ClientMatchesEnvelope 注释）
+	// 所有 BroadcastByUserType / BroadcastToRole / BroadcastToClientType 等上层调用自动获得 namespace 隔离
+	combinedCondition := func(c *Client) bool {
+		return ClientMatchesEnvelope(c, msg.Namespace, msg.GroupIDs) && condition(c)
+	}
+
 	// WebSocket 客户端：直接 TrySend 预序列化数据
 	h.shardedRegistry.ForEachClient(func(_ string, client *Client) bool {
 		if client.IsClosed() || client.ConnectionType == ConnectionTypeSSE {
 			return true
 		}
-		if !condition(client) {
+		if !combinedCondition(client) {
 			return true
 		}
 		if client.TrySend(data) {
@@ -121,7 +141,7 @@ func (h *Hub) broadcastToFiltered(ctx context.Context, condition func(*Client) b
 
 	// SSE 客户端：通过专用通道发送 msg 对象（无需序列化）
 	h.shardedRegistry.ForEachSSEClient(func(_, _ string, client *Client) bool {
-		if client.IsClosed() || !condition(client) {
+		if client.IsClosed() || !combinedCondition(client) {
 			return true
 		}
 		if client.TrySendSSE(msg) {
@@ -147,6 +167,10 @@ func (h *Hub) broadcastToUserIDs(ctx context.Context, userIDs []string, msg *Hub
 	if len(userIDs) == 0 {
 		return 0
 	}
+	// 🔏 路由信封同步：从 ctx 恢复路由到 msg 信封（幂等）
+	// 上游 SendToGroup/BroadcastToGroupMembers 已注入，此处作为二次兜底
+	// InjectRoute 同时回写 ctx，保证下游 ctx 与信封一致
+	ctx = msg.InjectRoute(ctx)
 
 	// 预序列化 WebSocket 消息（仅一次）
 	data, err := json.Marshal(msg)
@@ -160,8 +184,11 @@ func (h *Hub) broadcastToUserIDs(ctx context.Context, userIDs []string, msg *Hub
 	var successCount int32
 
 	// 按用户ID查找客户端（O(m)，仅锁定相关 shard，不遍历全部连接）
+	// 使用 ForEachUserClientFiltered 叠加路由信封匹配：
+	//   - 群组消息：client 必须同 ns 且 client.groupID 在 msg.GroupIDs 中
+	//   - 避免新加入群的成员通过"旧 userIDs 列表"收到不匹配其 group 的历史消息（与项目约束一致）
 	for _, userID := range userIDs {
-		h.shardedRegistry.ForEachUserClient(userID, func(_ string, client *Client) bool {
+		h.shardedRegistry.ForEachUserClientFiltered(userID, msg.Namespace, msg.GroupIDs, func(_ string, client *Client) bool {
 			if client.IsClosed() {
 				return true
 			}

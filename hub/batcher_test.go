@@ -44,7 +44,7 @@ func TestObserverBatcher_SubmitAndFlush(t *testing.T) {
 	// 提交消息到观察者 batcher
 	msg := makeGroupMessage("sender-001")
 	msg.Receiver = "group-001"
-	ok := hub.observerBatcher.Submit(msg, "tenantA", "group-001")
+	ok := hub.observerBatcher.Submit(msg, "tenantA", []string{"group-001"})
 	require.True(t, ok, "Submit 应成功")
 
 	// 等待 flush（50ms 间隔）
@@ -72,14 +72,14 @@ func TestObserverBatcher_Submit_NilMsg(t *testing.T) {
 	hub, _, _, cleanup := setupGroupTestHub(t)
 	defer cleanup()
 
-	assert.False(t, hub.observerBatcher.Submit(nil, "ns", "gid"), "nil msg 应返回 false")
+	assert.False(t, hub.observerBatcher.Submit(nil, "ns", []string{"gid"}), "nil msg 应返回 false")
 }
 
 // TestObserverBatcher_NilSafe 验证 nil batcher 的所有方法安全
 func TestObserverBatcher_NilSafe(t *testing.T) {
 	var b *ObserverNotificationBatcher
 
-	assert.False(t, b.Submit(nil, "ns", "gid"), "nil batcher Submit 应返回 false")
+	assert.False(t, b.Submit(nil, "ns", []string{"gid"}), "nil batcher Submit 应返回 false")
 	assert.NotPanics(t, func() { b.Stop() }, "nil batcher Stop 应安全")
 	assert.Equal(t, int64(0), b.DroppedCount(), "nil batcher DroppedCount 应返回 0")
 }
@@ -109,7 +109,7 @@ func TestObserverBatcher_CloneIsolation(t *testing.T) {
 	// 提交消息
 	msg := makeGroupMessage("sender-clone")
 	msg.Content = "original"
-	ok := hub.observerBatcher.Submit(msg, "tenantClone", "")
+	ok := hub.observerBatcher.Submit(msg, "tenantClone", nil)
 	require.True(t, ok)
 
 	// Submit 后修改原 msg（WithClone 应保护队列中的副本）
@@ -139,7 +139,7 @@ func TestObserverBatcher_Stop(t *testing.T) {
 
 	msg := makeGroupMessage("sender-stop")
 	for i := 0; i < 10; i++ {
-		batcher.Submit(msg, "ns", "gid")
+		batcher.Submit(msg, "ns", []string{"gid"})
 	}
 
 	// Stop 应在合理时间内返回（flush 剩余后退出）
@@ -275,7 +275,7 @@ func BenchmarkObserverBatcher_Submit(b *testing.B) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			hub.observerBatcher.Submit(msg, "bench-ns", "bench-gid")
+			hub.observerBatcher.Submit(msg, "bench-ns", []string{"bench-gid"})
 		}
 	})
 }

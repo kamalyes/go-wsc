@@ -84,8 +84,10 @@ func (h *Hub) UnregisterSSE(clientID string) {
 // SSE 消息发送方法
 // ============================================================================
 
-// SendToUserViaSSE 通过SSE发送消息给指定用户（支持多设备）
+// SendToUserViaSSE 通过SSE发送消息给指定用户（支持多设备，按 namespace 隔离）
 // 使用 ForEachSSEUserClient 持读锁零拷贝遍历，替代 GetSSEUserClients 锁外遍历的数据竞争
+// 🔏 namespace 隔离：与 ForEachUserClientFiltered 保持一致，
+// msg.Namespace 非空时仅投递给同 ns 的 SSE 设备，避免同一 userID 跨 ns 串扰
 func (h *Hub) SendToUserViaSSE(userID string, msg *HubMessage) bool {
 	// 快速检查用户是否有 SSE 连接（O(1)）
 	if !h.shardedRegistry.HasSSEUser(userID) {
@@ -101,6 +103,10 @@ func (h *Hub) SendToUserViaSSE(userID string, msg *HubMessage) bool {
 	successCount := 0
 	totalDevices := 0
 	h.shardedRegistry.ForEachSSEUserClient(userID, func(clientID string, client *Client) bool {
+		// 🔏 namespace 隔离：msg.Namespace 非空时仅投递给同 ns 的设备
+		if msg.Namespace != "" && client.Namespace != msg.Namespace {
+			return true
+		}
 		totalDevices++
 		select {
 		case client.SSEMessageCh <- msg:
@@ -139,10 +145,15 @@ func (h *Hub) SendToUserViaSSE(userID string, msg *HubMessage) bool {
 	return false
 }
 
-// broadcastToSSEClients 广播消息到所有SSE客户端
+// broadcastToSSEClients 广播消息到所有SSE客户端（按 namespace 隔离）
 // 通过 shardedRegistry.ForEachSSEClient 分片读锁遍历，无外置锁
+// 🔏 namespace 隔离：与 WebSocket 路径 ForEachClientFiltered 保持一致，
+// msg.Namespace 非空时仅投递给同 ns 的 SSE 客户端，避免跨租户串扰
 func (h *Hub) broadcastToSSEClients(msg *HubMessage) {
 	h.shardedRegistry.ForEachSSEClient(func(userID, clientID string, client *Client) bool {
+		if !ClientMatchesEnvelope(client, msg.Namespace, msg.GroupIDs) {
+			return true
+		}
 		select {
 		case client.SSEMessageCh <- msg:
 			client.SetLastSeen(time.Now())

@@ -35,12 +35,14 @@ import (
 func init() {
 	// HubMessage ↔ HubMessageProto
 	// 字段名差异通过 WithFieldMapping 显式映射
+	// Namespace 字段名一致，自动匹配
 	pbmo.RegisterWith[models.HubMessage, HubMessageProto]().
 		WithFieldMapping("ID", "Id").
 		WithFieldMapping("TraceID", "TraceId").
 		WithFieldMapping("MessageID", "MessageId").
 		WithFieldMapping("SessionID", "SessionId").
-		WithFieldMapping("ReplyToMsgID", "ReplyToMsgId")
+		WithFieldMapping("ReplyToMsgID", "ReplyToMsgId").
+		WithFieldMapping("GroupIDs", "GroupIds")
 
 	// DistributedMessage ↔ DistributedMessageProto
 	// 嵌套的 Message 字段会自动递归转换（已注册 HubMessage 转换器）
@@ -49,7 +51,8 @@ func init() {
 	pbmo.RegisterWith[models.DistributedMessage, DistributedMessageProto]().
 		WithFieldMapping("NodeID", "NodeId").
 		WithFieldMapping("TraceID", "TraceId").
-		WithFieldMapping("GroupIDs", "GroupIds")
+		WithFieldMapping("GroupIDs", "GroupIds").
+		WithFieldMapping("SenderID", "SenderId") // ExcludeSender 字段名一致，自动匹配
 }
 
 // ============================================================================

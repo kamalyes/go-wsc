@@ -1,4 +1,4 @@
-/*
+﻿/*
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-07-29 00:00:15
  * @LastEditors: kamalyes 501893067@qq.com
@@ -31,6 +31,7 @@ import (
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/repository"
+	"github.com/kamalyes/go-wsc/routing"
 )
 
 // benchScale 基准测试的连接规模档位
@@ -316,7 +317,7 @@ func BenchmarkGroupBroadcast(b *testing.B) {
 			b.ResetTimer()
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				hub.SendToGroup(ctx, ns, gid, msg, false)
+				hub.SendToGroup(routing.WithNamespaceGroupIDs(ctx, ns, []string{gid}), msg, false)
 			}
 		})
 	}
@@ -551,7 +552,7 @@ func BenchmarkSendToGroupDefaultGroup(b *testing.B) {
 			b.ResetTimer()
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				hub.SendToGroup(ctx, ns, models.DefaultGroupID, msg, false)
+				hub.SendToGroup(routing.WithNamespaceGroupIDs(ctx, ns, []string{models.DefaultGroupID}), msg, false)
 			}
 		})
 	}
@@ -583,3 +584,5 @@ func BenchmarkBroadcastToAllGroupsWithDefaultGroup(b *testing.B) {
 		})
 	}
 }
+
+

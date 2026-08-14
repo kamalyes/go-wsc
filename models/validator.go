@@ -185,6 +185,7 @@ var (
 		OperationTypeKickUser,
 		OperationTypeNodeRegister,
 		OperationTypeObserverNotify,
+		OperationTypeGroupBroadcast,
 		OperationTypeGroupsBroadcast,
 	)
 

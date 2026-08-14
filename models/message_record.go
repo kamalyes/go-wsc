@@ -78,6 +78,8 @@ type MessageSendRecord struct {
 	SessionID     string                         `gorm:"column:session_id;size:255;not null;index;comment:会话ID" json:"session_id"`           // 会话ID
 	MessageID     string                         `gorm:"index;size:255;not null;comment:业务消息ID,用于关联业务系统" json:"message_id"`                  // 业务消息ID(可重复,支持多次发送记录)
 	HubID         string                         `gorm:"index;size:255;not null;comment:Hub内部消息ID,用于ACK确认和日志追踪" json:"hub_id"`               // Hub内部消息ID(可重复)
+	Namespace     string                         `gorm:"index;size:128;not null;default:'';comment:命名空间,用于多租户/业务隔离" json:"namespace"`         // 命名空间
+	GroupID       string                         `gorm:"index;size:255;not null;default:'';comment:业务群组ID,P2P消息为空" json:"group_id"`            // 业务群组ID
 	MessageData   string                         `gorm:"type:text;comment:原始消息数据,类型为文本" json:"message_data"`                                 // 原始消息数据
 	Sender        string                         `gorm:"index;size:255;comment:发送者ID" json:"sender"`                                         // 发送者ID
 	Receiver      string                         `gorm:"index;size:255;comment:接收者ID" json:"receiver"`                                       // 接收者ID
@@ -156,6 +158,14 @@ func (m *MessageSendRecord) SetMessage(msg *HubMessage) error {
 	m.Sender = msg.Sender
 	m.Receiver = msg.Receiver
 	m.MessageType = msg.MessageType
+
+	// 🔏 从路由信封提取 namespace + group_id（业务维度）
+	// 消息信封由入口（SendToUserWithRetry/SendToGroup/BroadcastToGroupMembers 等）注入
+	m.Namespace = msg.Namespace
+	if len(msg.GroupIDs) > 0 {
+		// 记录维度：一条消息归属一个 group；跨组广播通过多条记录表达
+		m.GroupID = msg.GroupIDs[0]
+	}
 
 	return nil
 }

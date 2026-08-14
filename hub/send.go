@@ -14,6 +14,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"runtime/debug"
 	"time"
 
@@ -21,19 +22,13 @@ import (
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/retry"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
+	"github.com/kamalyes/go-wsc/models"
+	"github.com/kamalyes/go-wsc/routing"
 )
 
 // ============================================================================
 // 基础发送方法
 // ============================================================================
-
-// ContextKey 上下文键类型
-type ContextKey string
-
-const (
-	ContextKeyUserID   ContextKey = "user_id"
-	ContextKeySenderID ContextKey = "sender_id"
-)
 
 // routeToClusterForOfflineUser 当用户在本地和 Redis 索引中都判定为离线时，
 // 仍通过 routeToCluster pubsub 广播到其他节点
@@ -73,13 +68,19 @@ func (h *Hub) routeToClusterForOfflineUser(ctx context.Context, userID string, m
 // sendToUser 发送消息给指定用户（内部方法）
 // 自动支持分布式：如果用户在其他节点，会自动路由过去
 func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) error {
-	// 浅拷贝消息，避免修改原 msg 字段引发数据竞争
+	// 深拷贝消息（Clone 持 RLock 与 Set*/With* 互斥；Data map 独立，避免与原 msg 并发写 fatal）
 	// （ack 重试 goroutine 写 CreateAt 与 EventLoop 序列化读 CreateAt 并发）
-	// 仅改 ReceiverNode/CreateAt 两个值类型字段，浅拷贝足够；下游只读不改其他字段
-	cp := *msg
-	cp.ReceiverNode = mathx.IfEmpty(cp.ReceiverNode, h.nodeID)
-	cp.CreateAt = mathx.IfNotZero(cp.CreateAt, time.Now())
-	msgCopy := &cp
+	msgCopy := msg.Clone()
+	msgCopy.ReceiverNode = mathx.IfEmpty(msgCopy.ReceiverNode, h.nodeID)
+	msgCopy.Receiver = mathx.IfEmpty(msgCopy.Receiver, toUserID) // 确保 Receiver 非空（离线消息反序列化后可能丢失）
+	msgCopy.CreateAt = mathx.IfNotZero(msgCopy.CreateAt, time.Now())
+
+	// 🔗 从 msg 恢复 trace_id 到 ctx
+	// 离线消息推送路径（pushAndDeleteOffline → sendToUser）：ctx 来自 h.ctx 无原始 trace_id，
+	// msg 信封携带原始 trace_id（存储时注入）。此处恢复保证下游 checkAndRouteToNode → routeToCluster
+	// → dispatch.InjectContext(ctx) 注入正确的 trace_id，跨节点投递不断链。
+	// SendToUserWithRetry 路径：ctx 已有 trace_id，ContextFrom 幂等（已有则不覆盖）。
+	ctx = msgCopy.ContextFrom(ctx)
 
 	// 🌐 分布式路由：检查用户是否在其他节点
 	routed, err := h.checkAndRouteToNode(ctx, toUserID, msgCopy)
@@ -137,6 +138,13 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 
 // SendToUserWithRetry 带重试机制的发送消息给指定用户
 func (h *Hub) SendToUserWithRetry(ctx context.Context, toUserID string, msg *HubMessage) *SendResult {
+	// 源头注入 routing namespace：老系统不传 namespace 时补 DefaultNamespace
+	// 本方法为 P2P 发送，group 不参与（nil），不与群组发送逻辑捆绑
+	// 保证离线消息存储维度（ns::userID）的 namespace 非空，与 client 注册归一化一致
+	if routing.NamespaceFromContext(ctx) == "" {
+		ctx = routing.WithNamespaceGroupIDs(ctx, models.DefaultNamespace, nil)
+	}
+
 	result := &SendResult{
 		Attempts: make([]SendAttempt, 0, h.config.RetryPolicy.MaxRetries+1),
 	}
@@ -148,6 +156,11 @@ func (h *Hub) SendToUserWithRetry(ctx context.Context, toUserID string, msg *Hub
 
 	// 从 ctx 注入 trace_id（OTel span > ctx.Value fallback，已有则不覆盖）
 	msg.InjectContext(ctx)
+
+	// 🔏 入口注入路由信封：将 ctx 中的 (namespace, groupIDs) 同步写入 msg 信封
+	// 下游跨节点 gRPC / PubSub / 离线存储回放统一从 msg 取路由，避免 ctx 丢失导致串扰
+	// P2P 场景下 groupIDs=nil（与入口归一化一致），群组发送由 SendToGroup 显式设置
+	ctx = msg.InjectRoute(ctx)
 
 	// 修改副本对象
 	if msg.Sender == "" {
@@ -195,6 +208,9 @@ func (h *Hub) SendToUserWithRetry(ctx context.Context, toUserID string, msg *Hub
 					"message_id", msg.MessageID,
 					"error", err,
 				)
+				// 🔥 离线存储失败 → 更新 message_record 状态为 Failed
+				// 离线存储失败通常因 Redis 队列满或 MySQL 写入异常，消息无法投递也无法暂存
+				h.updateMessageStatusAsync(msg.MessageID, MessageSendStatusFailed, FailureReasonQueueFull, err.Error())
 				result.FinalError = err
 				result.TotalDuration = time.Since(startTime)
 				h.invokeMessageSendCallback(msg, result)
@@ -459,6 +475,10 @@ func (h *Hub) SendToGroupMembers(ctx context.Context, memberIDs []string, msg *H
 		"failed", result.Failed,
 	)
 
+	// 🔔 通知观察者（群组级别统一通知，与 SendToGroup 对齐）
+	// handleBroadcast 对 GroupIDs 非空的消息跳过观察者通知，此处补齐
+	h.notifyObservers(ctx, msg)
+
 	return result
 }
 
@@ -505,7 +525,7 @@ func (h *Hub) recordMessageToDatabase(msg *HubMessage, sendErr error) {
 		ctx, cancel := context.WithTimeout(h.ctx, 3*time.Second)
 		defer cancel()
 		// 从消息体恢复 trace_id（SendToUserWithRetry 已注入）
-		ctx = msg.ContextFromMessage(ctx)
+		ctx = msg.ContextFrom(ctx)
 
 		now := time.Now()
 
@@ -530,9 +550,10 @@ func (h *Hub) recordMessageToDatabase(msg *HubMessage, sendErr error) {
 			ExpiresAt:    &expiresAt,
 		}
 
-		// 序列化消息数据
-		if msgData, err := json.Marshal(msg); err == nil {
-			record.MessageData = string(msgData)
+		// SetMessage 序列化消息体并同步 Namespace/GroupID 等路由信封字段到 record
+		if err := record.SetMessage(msg); err != nil {
+			h.logger.WarnContextKV(ctx, "序列化消息数据失败",
+				"message_id", msg.MessageID, "error", err)
 		}
 
 		if sendErr != nil {
@@ -568,6 +589,55 @@ func (h *Hub) updateMessageStatusAsync(msgID string, status MessageSendStatus, r
 			"status", status,
 		)
 	}
+}
+
+// tryStoreOfflineOnDeliveryFailure 在在线投递失败时异步转存离线消息
+//
+// 触发条件（全部满足才转存）：
+//   - offlineMessageHandler 可用
+//   - msg.Receiver 非空（P2P 消息，广播场景不转存）
+//   - msg.Source != offline（离线推送本身失败不重新存，避免无限循环）
+//
+// 状态流转：
+//   - 转存成功 → message_record 状态从 Failed 覆盖为 UserOffline（消息已安全暂存，等用户上线推送）
+//   - 转存失败 → 保持调用方已标记的 Failed 状态（消息确实丢了）
+//
+// 注意：多设备场景下若部分设备投递成功部分失败，失败设备仍会触发转存。
+// 这不会导致重复推送：用户上线 drain 时 pushAndDeleteOffline 成功后按 message_id 删 MySQL，
+// 客户端也可按 message_id 去重。
+func (h *Hub) tryStoreOfflineOnDeliveryFailure(msg *HubMessage, deliveryErr error) {
+	if h.offlineMessageHandler == nil || msg.Receiver == "" {
+		return
+	}
+	// 离线消息推送失败不重新存（避免无限循环），只标记 Failed
+	if msg.Source == MessageSourceOffline {
+		return
+	}
+
+	syncx.Go().
+		OnError(func(storeErr error) {
+			h.logger.WarnContextKV(msg.ContextFrom(h.ctx), "在线投递失败后转存离线也失败",
+				"message_id", msg.MessageID,
+				"user_id", msg.Receiver,
+				"delivery_error", deliveryErr.Error(),
+				"store_error", storeErr.Error(),
+			)
+			// 转存失败，保持已有的 Failed 状态，不覆盖
+		}).
+		ExecWithContext(func(storeCtx context.Context) error {
+			storeCtx = msg.ContextFrom(storeCtx)
+			if err := h.offlineMessageHandler.StoreOfflineMessage(storeCtx, msg.Receiver, msg); err != nil {
+				return err
+			}
+			// 转存成功 → 覆盖状态为 UserOffline（消息已暂存，等用户上线推送）
+			h.updateMessageStatusAsync(msg.MessageID, MessageSendStatusUserOffline, FailureReasonUserOffline, "")
+			h.logger.InfoContextKV(storeCtx, "在线投递失败，消息已转存离线队列",
+				"message_id", msg.MessageID,
+				"user_id", msg.Receiver,
+				"delivery_error", deliveryErr.Error(),
+			)
+			return nil
+		})
 }
 
 // notifyQueueFull 通知队列满处理器
@@ -682,9 +752,12 @@ func (h *Hub) sendToClientSerialized(ctx context.Context, client *Client, msg *H
 			// SSE消息成功发送，更新为成功状态
 			h.updateMessageStatusAsync(msgID, MessageSendStatusSuccess, "", "")
 		} else {
+			sseErr := fmt.Errorf("SSE channel full or closed")
 			h.logger.WarnContextKV(ctx, "SSE客户端消息通道已满或已关闭", "client_id", client.ID, "user_id", client.UserID)
 			// SSE通道已满或已关闭，更新为失败状态
-			h.updateMessageStatusAsync(msgID, MessageSendStatusFailed, FailureReasonQueueFull, "SSE channel full or closed")
+			h.updateMessageStatusAsync(msgID, MessageSendStatusFailed, FailureReasonQueueFull, sseErr.Error())
+			// 🔥 在线投递失败 → 异步转存离线（P2P 场景，避免循环）
+			h.tryStoreOfflineOnDeliveryFailure(msg, sseErr)
 		}
 		return
 	}
@@ -700,6 +773,7 @@ func (h *Hub) sendToClientSerialized(ctx context.Context, client *Client, msg *H
 			h.logger.ErrorContextKV(ctx, "消息序列化失败", "error", err)
 			// 更新为失败状态
 			h.updateMessageStatusAsync(msgID, MessageSendStatusFailed, FailureReasonUnknown, err.Error())
+			// 序列化失败无法转存离线（msg 无法被存储），只标记 Failed
 			return
 		}
 	}
@@ -711,9 +785,12 @@ func (h *Hub) sendToClientSerialized(ctx context.Context, client *Client, msg *H
 		// 更新接收者的消息统计和字节统计
 		h.trackReceiverMessageStats(client.ID, client.UserType, len(data))
 	} else {
+		queueErr := fmt.Errorf("client send channel full or closed")
 		h.logger.WarnContextKV(ctx, "客户端发送通道已满或已关闭", "client_id", client.ID)
 		// 发送通道已满或已关闭，更新为失败状态
-		h.updateMessageStatusAsync(msgID, MessageSendStatusFailed, FailureReasonQueueFull, "client send channel full or closed")
+		h.updateMessageStatusAsync(msgID, MessageSendStatusFailed, FailureReasonQueueFull, queueErr.Error())
+		// 🔥 在线投递失败 → 异步转存离线（P2P 场景，避免循环）
+		h.tryStoreOfflineOnDeliveryFailure(msg, queueErr)
 	}
 }
 
@@ -728,9 +805,11 @@ func (h *Hub) syncToSenderDevices(ctx context.Context, msg *HubMessage) {
 	}
 
 	// 零拷贝遍历：一次遍历完成计数+收集其他设备，避免中间切片拷贝
+	// 过滤：只收集路由匹配（namespace）的设备，且排除当前发送端
+	// （发送者多端同步不检查 group，同一 user 在不同 group 的设备都应该同步到）
 	var otherDevices []*Client
 	deviceCount := 0
-	h.shardedRegistry.ForEachUserClient(msg.Sender, func(_ string, client *Client) bool {
+	h.shardedRegistry.ForEachUserClientFiltered(msg.Sender, msg.Namespace, nil, func(_ string, client *Client) bool {
 		deviceCount++
 		if client.ID != msg.SenderClient {
 			otherDevices = append(otherDevices, client)

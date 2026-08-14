@@ -4,7 +4,7 @@
  * @LastEditors: kamalyes 501893067@qq.com
  * @LastEditTime: 2025-12-30 00:00:00
  * @FilePath: \go-wsc\hub\workload.go
- * @Description: 客服工作负载管理相关方法
+ * @Description: 客服工作负载管理相关方法（支持多命名空间隔离）
  *
  * Copyright (c) 2025 by kamalyes, All Rights Reserved.
  */
@@ -12,6 +12,7 @@
 package hub
 
 import (
+	"context"
 	"fmt"
 )
 
@@ -29,47 +30,47 @@ func (h *Hub) checkWorkloadRepo(operation string) error {
 }
 
 // ForceSetAgentWorkload 强制设置客服工作负载（慎用）
-func (h *Hub) ForceSetAgentWorkload(agentID string, workload int64) error {
+func (h *Hub) ForceSetAgentWorkload(ctx context.Context, agentID string, workload int64) error {
 	if err := h.checkWorkloadRepo("强制设置工作负载"); err != nil {
 		return err
 	}
-	return h.workloadRepo.ForceSetAgentWorkload(h.ctx, agentID, workload)
+	return h.workloadRepo.ForceSetAgentWorkload(ctx, agentID, workload)
 }
 
 // GetAgentWorkload 获取客服工作负载
-func (h *Hub) GetAgentWorkload(agentID string) (int64, error) {
+func (h *Hub) GetAgentWorkload(ctx context.Context, agentID string) (int64, error) {
 	if err := h.checkWorkloadRepo("获取工作负载"); err != nil {
 		return 0, err
 	}
-	return h.workloadRepo.GetAgentWorkload(h.ctx, agentID)
+	return h.workloadRepo.GetAgentWorkload(ctx, agentID)
 }
 
 // RemoveAgentWorkload 移除客服工作负载
-func (h *Hub) RemoveAgentWorkload(agentID string) error {
+func (h *Hub) RemoveAgentWorkload(ctx context.Context, agentID string) error {
 	if err := h.checkWorkloadRepo("移除工作负载"); err != nil {
 		return err
 	}
-	return h.workloadRepo.RemoveAgentWorkload(h.ctx, agentID)
+	return h.workloadRepo.RemoveAgentWorkload(ctx, agentID)
 }
 
 // IncrementAgentWorkload 增加客服工作负载
-func (h *Hub) IncrementAgentWorkload(agentID string) error {
+func (h *Hub) IncrementAgentWorkload(ctx context.Context, agentID string) error {
 	if err := h.checkWorkloadRepo("增加工作负载"); err != nil {
 		return err
 	}
-	return h.workloadRepo.IncrementAgentWorkload(h.ctx, agentID)
+	return h.workloadRepo.IncrementAgentWorkload(ctx, agentID)
 }
 
 // DecrementAgentWorkload 减少客服工作负载
-func (h *Hub) DecrementAgentWorkload(agentID string) error {
+func (h *Hub) DecrementAgentWorkload(ctx context.Context, agentID string) error {
 	if err := h.checkWorkloadRepo("减少工作负载"); err != nil {
 		return err
 	}
-	return h.workloadRepo.DecrementAgentWorkload(h.ctx, agentID)
+	return h.workloadRepo.DecrementAgentWorkload(ctx, agentID)
 }
 
 // GetLeastLoadedAgent 获取负载最小的在线客服
-func (h *Hub) GetLeastLoadedAgent(dimension WorkloadDimension) (string, int64, error) {
+func (h *Hub) GetLeastLoadedAgent(ctx context.Context, dimension WorkloadDimension) (string, int64, error) {
 	if err := h.checkWorkloadRepo("获取负载最小的客服"); err != nil {
 		return "", 0, err
 	}
@@ -84,7 +85,7 @@ func (h *Hub) GetLeastLoadedAgent(dimension WorkloadDimension) (string, int64, e
 		return "", 0, nil
 	}
 
-	return h.workloadRepo.GetLeastLoadedAgent(h.ctx, onlineAgents, dimension)
+	return h.workloadRepo.GetLeastLoadedAgent(ctx, onlineAgents, dimension)
 }
 
 // AcquireLeastLoadedAgent 原子地选择负载最小的在线客服并将其负载 +1（分布式安全）
@@ -96,7 +97,7 @@ func (h *Hub) GetLeastLoadedAgent(dimension WorkloadDimension) (string, int64, e
 // 函数会自动回退到调用 GetOnlineUsersByType(UserTypeAgent) 获取全部在线客服
 //
 // 业务失败回滚：调用方应在后续业务失败时显式调用 DecrementAgentWorkload 回滚此次预扣减
-func (h *Hub) AcquireLeastLoadedAgent(onlineAgents []string, dimension WorkloadDimension) (string, int64, error) {
+func (h *Hub) AcquireLeastLoadedAgent(ctx context.Context, onlineAgents []string, dimension WorkloadDimension) (string, int64, error) {
 	if err := h.checkWorkloadRepo("原子获取并预扣减负载最小的客服"); err != nil {
 		return "", 0, err
 	}
@@ -112,21 +113,21 @@ func (h *Hub) AcquireLeastLoadedAgent(onlineAgents []string, dimension WorkloadD
 		onlineAgents = agents
 	}
 
-	return h.workloadRepo.AcquireLeastLoadedAgent(h.ctx, onlineAgents, dimension)
+	return h.workloadRepo.AcquireLeastLoadedAgent(ctx, onlineAgents, dimension)
 }
 
 // ReloadAgentWorkload 重新加载客服工作负载（客服上线时调用）
-func (h *Hub) ReloadAgentWorkload(agentID string) (int64, error) {
+func (h *Hub) ReloadAgentWorkload(ctx context.Context, agentID string) (int64, error) {
 	if err := h.checkWorkloadRepo("重新加载工作负载"); err != nil {
 		return 0, err
 	}
-	return h.workloadRepo.ReloadAgentWorkload(h.ctx, agentID)
+	return h.workloadRepo.ReloadAgentWorkload(ctx, agentID)
 }
 
 // GetAllAgentWorkloads 获取所有客服的负载信息
-func (h *Hub) GetAllAgentWorkloads(limit int64) ([]WorkloadInfo, error) {
+func (h *Hub) GetAllAgentWorkloads(ctx context.Context, limit int64) ([]WorkloadInfo, error) {
 	if err := h.checkWorkloadRepo("获取所有客服负载"); err != nil {
 		return nil, err
 	}
-	return h.workloadRepo.GetAllAgentWorkloads(h.ctx, limit)
+	return h.workloadRepo.GetAllAgentWorkloads(ctx, limit)
 }

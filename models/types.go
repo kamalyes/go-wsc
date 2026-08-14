@@ -55,7 +55,9 @@ type DistributedMessage struct {
 	Reason    string        `json:"reason"`              // 原因
 	Timestamp time.Time     `json:"timestamp"`           // 时间戳
 	Namespace string        `json:"namespace,omitempty"` // 命名空间ID（路由信封携带，空=全命名空间广播，非空=指定命名空间）
-	GroupIDs  []string      `json:"group_ids,omitempty"` // 批量群组广播时的群组ID列表（Operation=GroupsBroadcast 时使用）
+	GroupIDs      []string      `json:"group_ids,omitempty"`      // 群组ID列表（支持多群组，观察者可订阅多个组；空表示无群组操作）
+	ExcludeSender bool          `json:"exclude_sender,omitempty"` // 是否排除发送者（跨节点群组广播 PubSub 兜底携带，与 gRPC BroadcastGroupRequest 对齐）
+	SenderID      string        `json:"sender_id,omitempty"`      // 发送者ID（排除发送者时用，跨节点 PubSub 兜底场景）
 }
 
 // InjectContext 从 ctx 注入上下文信息到分布式消息（trace_id 等）
@@ -69,9 +71,9 @@ func (dm *DistributedMessage) InjectContext(ctx context.Context) *DistributedMes
 	return dm
 }
 
-// ContextFromMessage 基于分布式消息的 trace_id 创建一个携带 trace 信息的 context
+// ContextFrom 基于分布式消息的 trace_id 创建一个携带 trace 信息的 context
 // 用于消息流转路径中恢复 ctx（如 PubSub 消费端、回调等场景）
-func (dm *DistributedMessage) ContextFromMessage(parent context.Context) context.Context {
+func (dm *DistributedMessage) ContextFrom(parent context.Context) context.Context {
 	if dm.TraceID == "" {
 		return parent
 	}

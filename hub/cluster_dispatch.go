@@ -30,6 +30,7 @@ import (
 
 	"github.com/kamalyes/go-wsc/models"
 	wscpb "github.com/kamalyes/go-wsc/models/pb"
+	"github.com/kamalyes/go-wsc/routing"
 )
 
 // ============================================================================
@@ -45,9 +46,9 @@ type ClusterOperation = models.OperationType
 type ClusterDispatchOptions struct {
 	Operation     ClusterOperation // 操作类型（SendMessage/GroupsBroadcast/Broadcast/ObserverNotify/KickUser）
 	Namespace     string           // 命名空间ID（空="default"；Broadcast 时空表示全命名空间）
-	TargetNodeIDs []string         // 目标节点ID列表（单元素=精确路由，多元素=批量，空=所有已知节点）
+	TargetNodeID  string           // 目标节点ID（精确路由，空=所有已知节点广播）
 	TargetUserID  string           // 目标用户ID（Operation=SendMessage 时使用）
-	GroupIDs      []string         // 群组ID列表（单元素=单群组，多元素=批量广播，调用方自决）
+	GroupIDs      []string         // 群组ID列表（len==1 单群组广播，len>1 批量广播，len==0 不广播）
 	ExcludeSender bool             // 是否排除发送者（群组广播时使用）
 	SenderID      string           // 发送者ID（排除发送者时使用）
 	Reason        string           // 辅助信息（踢人原因等）
@@ -81,38 +82,47 @@ func (h *Hub) routeToCluster(ctx context.Context, msg *HubMessage, opts ClusterD
 		return nil
 	}
 
-	// Broadcast 操作：空 Namespace 表示全命名空间广播，不归一化为 "default"
-	// 其他操作：空 Namespace 归一化为默认命名空间 "default"
-	namespace := opts.Namespace
+	// 🔏 路由信封解析：msg 信封优先（入口层已注入，异步/跨节点链路持久化），opts 仅作兜底
+	// - Broadcast 操作：空 Namespace 表示全命名空间广播，不归一化为 "default"
+	// - 其他操作：空 Namespace 保持空（由接收端从 msg 内层信封再兜底）
+	namespace := msg.Namespace
+	if namespace == "" {
+		namespace = opts.Namespace
+	}
+	// GroupIDs：msg 非空则 clone 一份（避免后续 append 污染原 msg），否则用 opts
+	var groupIDs []string
+	if len(msg.GroupIDs) > 0 {
+		groupIDs = append([]string(nil), msg.GroupIDs...)
+	} else {
+		groupIDs = opts.GroupIDs
+	}
 
 	h.logger.DebugContextKV(ctx, "集群路由",
 		"operation", opts.Operation,
 		"namespace", namespace,
-		"target_nodes", opts.TargetNodeIDs,
+		"target_node", opts.TargetNodeID,
 		"target_user", opts.TargetUserID,
-		"group_ids", opts.GroupIDs,
+		"group_ids", groupIDs,
 		"grpc_enabled", h.IsGRPCEnabled(),
 		"message_id", msg.GetMessageID(),
 	)
 
-	// 构建分发信封（路由信封携带命名空间，接收端按命名空间过滤）
+	// 构建分发信封（路由信封携带 namespace + group_ids，接收端按此过滤）
 	dispatch := &models.DistributedMessage{
-		Type:      opts.Operation,
-		NodeID:    h.nodeID,
-		TargetID:  resolveDispatchTargetID(opts),
-		Message:   msg,
-		Reason:    opts.Reason,
-		Timestamp: time.Now(),
-		Namespace: namespace,
+		Type:          opts.Operation,
+		NodeID:        h.nodeID,
+		TargetID:      resolveDispatchTargetID(opts),
+		Message:       msg,
+		Reason:        opts.Reason,
+		Timestamp:     time.Now(),
+		Namespace:     namespace,
+		GroupIDs:      groupIDs,
+		ExcludeSender: opts.ExcludeSender, // 跨节点群组广播 PubSub 兜底需携带，接收端据此排除发送者
+		SenderID:      opts.SenderID,
 	}
 
 	// 从 ctx 注入 trace_id（消息已有则复用，跨节点保留源 trace）
 	dispatch.InjectContext(ctx)
-
-	// 构建分发信封时携带 GroupIDs（批量群组广播）
-	if len(opts.GroupIDs) > 0 {
-		dispatch.GroupIDs = opts.GroupIDs
-	}
 
 	// ① 尝试 gRPC 直连
 	result := h.dispatchViaGRPC(ctx, msg, opts)
@@ -127,20 +137,32 @@ func (h *Hub) routeToCluster(ctx context.Context, msg *HubMessage, opts ClusterD
 		return nil
 	}
 
-	// ③ PubSub 兜底：gRPC 未覆盖的节点走广播
+	// ③ PubSub 兜底：gRPC 未覆盖的节点走 PubSub
 	if h.pubsub != nil {
-		if err := h.publishToCluster(ctx, dispatch); err != nil {
+		var pubErr error
+		if result.grpcDelivered > 0 {
+			// gRPC 部分成功（pubsubFallback 必非空，否则 step ② 已返回）：
+			// 仅向失败的节点定向发布（节点专属频道），
+			// 避免 gRPC 已成功的节点重复处理同一消息（gRPC + PubSub 双重投递）
+			pubErr = h.publishToTargetedNodes(ctx, dispatch, result.pubsubFallback)
+		} else {
+			// gRPC 全部失败或未启用（pubsubFallback 可能为空——如无 nodeRegistry，
+			// 纯 PubSub 模式仍需广播频道发布，所有节点都需要收到）
+			pubErr = h.publishToCluster(ctx, dispatch)
+		}
+		if pubErr != nil {
 			h.logger.WarnContextKV(ctx, "PubSub 兜底发布失败",
 				"operation", opts.Operation,
-				"error", err,
+				"error", pubErr,
 				"grpc_delivered", result.grpcDelivered,
+				"pubsub_fallback", len(result.pubsubFallback),
 				"message_id", msg.GetMessageID(),
 			)
 			// gRPC 有部分成功则不算完全失败
 			if result.grpcDelivered > 0 {
 				return nil
 			}
-			return err
+			return pubErr
 		}
 	}
 
@@ -216,10 +238,10 @@ func (h *Hub) dispatchViaGRPC(ctx context.Context, msg *HubMessage, opts Cluster
 }
 
 // resolveGRPCTargetNodes 根据操作类型确定 gRPC 目标节点列表
-// 调用方传单元素切片=精确路由，空切片=广播到所有已知节点
+// TargetNodeID 非空=精确路由到单个节点，空=广播到所有已知节点
 func (h *Hub) resolveGRPCTargetNodes(opts ClusterDispatchOptions) []string {
-	if len(opts.TargetNodeIDs) > 0 {
-		return opts.TargetNodeIDs
+	if opts.TargetNodeID != "" {
+		return []string{opts.TargetNodeID}
 	}
 	return h.getAllClusterNodeIDs()
 }
@@ -236,23 +258,24 @@ func (h *Hub) executeGRPCDispatch(ctx context.Context, addr string, msgData []by
 	case models.OperationTypeSendMessage, models.OperationTypeKickUser:
 		_, err = grpcClient.SendToUser(ctx, addr, opts.TargetUserID, msgData)
 
+	case models.OperationTypeGroupBroadcast:
+		// 单群组广播（GroupIDs[0]）：一次 BroadcastGroup RPC
+		return h.grpcBroadcastGroup(ctx, addr, opts, msgData)
+
 	case models.OperationTypeGroupsBroadcast:
-		// 批量群组广播：并行复用 BroadcastGroup RPC（单群组场景仅 1 次调用）
-		// 全部失败才返回 false，任一成功即视为 gRPC 覆盖（失败群组由 PubSub 兜底补齐）
+		// 批量群组广播（len(GroupIDs)>1）：并行复用 BroadcastGroup RPC
 		return h.grpcBroadcastGroups(ctx, addr, opts, msgData)
 
 	case models.OperationTypeObserverNotify:
-		// 从 GroupIDs 提取 groupID（群组级观察者通知）
-		groupID := ""
-		if len(opts.GroupIDs) > 0 {
-			groupID = opts.GroupIDs[0]
-		}
-		_, err = grpcClient.NotifyObservers(ctx, addr, opts.Namespace, groupID, msgData)
+		// 单次调用注入全部 GroupIDs，服务端合并去重观察者后一次投递
+		observerCtx := routing.WithNamespaceGroupIDs(ctx, opts.Namespace, opts.GroupIDs)
+		_, err = grpcClient.NotifyObservers(observerCtx, addr, msgData)
 
 	case models.OperationTypeBroadcast:
 		// 全局广播通过 gRPC SendToUser 的变体：向所有节点发送
 		// 复用 BroadcastGroup 的 namespace 过滤能力，groupID 留空表示全命名空间
-		_, err = grpcClient.BroadcastGroup(ctx, addr, opts.Namespace, "", msgData, false, "")
+		broadcastCtx := routing.WithNamespaceGroupIDs(ctx, opts.Namespace, nil)
+		_, err = grpcClient.BroadcastGroup(broadcastCtx, addr, msgData, false, "")
 
 	default:
 		h.logger.WarnContextKV(ctx, "未知集群操作类型，跳过 gRPC", "operation", opts.Operation)
@@ -287,6 +310,30 @@ func (h *Hub) publishToCluster(ctx context.Context, dispatch *models.Distributed
 	return h.pubsub.Publish(ctx, channel, string(data))
 }
 
+// publishToTargetedNodes 向指定节点的专属频道精准发布（避免全量广播导致 gRPC 已成功节点重复处理）
+// 用于 gRPC 部分成功的 PubSub 兜底场景：仅失败节点需要收到消息
+func (h *Hub) publishToTargetedNodes(ctx context.Context, dispatch *models.DistributedMessage, nodeIDs []string) error {
+	if h.pubsub == nil || len(nodeIDs) == 0 {
+		return nil
+	}
+	data := h.marshalDistributedMessage(dispatch, dispatch.Message.GetMessageID())
+	prefix := h.config.RedisRepository.PubSub.GetNodeChannelPrefix()
+	var lastErr error
+	for _, nodeID := range nodeIDs {
+		// 防御：跳过自身（不应出现，但避免意外循环投递）
+		if nodeID == h.nodeID {
+			continue
+		}
+		if err := h.pubsub.Publish(ctx, prefix+nodeID, string(data)); err != nil {
+			lastErr = err
+			h.logger.WarnContextKV(ctx, "PubSub 定向发布失败",
+				"target_node", nodeID, "error", err,
+				"message_id", dispatch.Message.GetMessageID())
+		}
+	}
+	return lastErr
+}
+
 // ============================================================================
 // 辅助方法
 // ============================================================================
@@ -299,9 +346,26 @@ func (h *Hub) getAllClusterNodeIDs() []string {
 	allNodes := h.nodeRegistry.GetAllNodes()
 	nodeIDs := make([]string, 0, len(allNodes))
 	for nodeID := range allNodes {
-		nodeIDs = append(nodeIDs, nodeID)
+		if nodeID != "" && nodeID != h.nodeID { // 排除自身，避免 gRPC 自调用 + PubSub 循环
+			nodeIDs = append(nodeIDs, nodeID)
+		}
 	}
 	return nodeIDs
+}
+
+// grpcBroadcastGroup 通过 gRPC 广播到单个群组（GroupIDs[0]）
+func (h *Hub) grpcBroadcastGroup(ctx context.Context, addr string, opts ClusterDispatchOptions, msgData []byte) bool {
+	if len(opts.GroupIDs) == 0 || h.grpcClientPool == nil {
+		return false
+	}
+
+	_, err := h.grpcClientPool.BroadcastGroup(routing.WithNamespaceGroupIDs(ctx, opts.Namespace, opts.GroupIDs[:1]), addr, msgData, opts.ExcludeSender, opts.SenderID)
+	if err != nil {
+		h.logger.DebugContextKV(ctx, "gRPC 群组广播投递失败",
+			"target_addr", addr, "group_id", opts.GroupIDs[0], "error", err)
+		return false
+	}
+	return true
 }
 
 // grpcBroadcastGroups 通过 gRPC 批量广播到多个群组（并行复用 BroadcastGroup RPC）
@@ -329,7 +393,7 @@ func (h *Hub) grpcBroadcastGroups(ctx context.Context, addr string, opts Cluster
 		go func(groupID string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if _, err := h.grpcClientPool.BroadcastGroup(ctx, addr, opts.Namespace, groupID, msgData, opts.ExcludeSender, opts.SenderID); err == nil {
+			if _, err := h.grpcClientPool.BroadcastGroup(routing.WithNamespaceGroupIDs(ctx, opts.Namespace, []string{groupID}), addr, msgData, opts.ExcludeSender, opts.SenderID); err == nil {
 				atomic.AddInt64(&success, 1)
 			} else {
 				h.logger.DebugContextKV(ctx, "gRPC 批量群组广播：单个群组投递失败",
@@ -340,7 +404,7 @@ func (h *Hub) grpcBroadcastGroups(ctx context.Context, addr string, opts Cluster
 	wg.Wait()
 
 	if atomic.LoadInt64(&success) == 0 {
-		return false // 全部失败，交由 PubSub 兜底
+		return false
 	}
 	return true
 }

@@ -29,6 +29,7 @@ import (
 
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/repository"
+	"github.com/kamalyes/go-wsc/routing"
 )
 
 // ============================================================================
@@ -730,13 +731,16 @@ func (f *fakeOfflineHandler) StoreOfflineMessage(_ context.Context, userID strin
 func (f *fakeOfflineHandler) GetOfflineMessages(_ context.Context, _ string, _ int, _ string) ([]*HubMessage, string, error) {
 	return nil, "", nil
 }
+func (f *fakeOfflineHandler) DrainOfflineQueue(_ context.Context, _ string, _ int) ([]*HubMessage, error) {
+	return nil, nil
+}
 func (f *fakeOfflineHandler) DeleteOfflineMessages(_ context.Context, _ string, _ []string) error {
 	return nil
 }
 func (f *fakeOfflineHandler) GetOfflineMessageCount(_ context.Context, _ string) (int64, error) {
 	return 0, nil
 }
-func (f *fakeOfflineHandler) ClearOfflineMessages(_ context.Context, _ string) error { return nil }
+func (f *fakeOfflineHandler) ClearOfflineMessages(_ context.Context, _ string, _ []string) error { return nil }
 func (f *fakeOfflineHandler) UpdatePushStatus(_ context.Context, _ []string, _ error) error {
 	return nil
 }
@@ -853,4 +857,106 @@ func TestSendScenario_NonRetryableSentinelNotRetried(t *testing.T) {
 	retryable := models.ErrMessageBufferFull
 	assert.True(t, hub.isRetryableError(retryable), "ErrMessageBufferFull 应可重试")
 	assert.True(t, IsQueueFullError(retryable), "ErrMessageBufferFull 应识别为队列满")
+}
+
+// ============================================================================
+// 测试专用 mock：捕获 ctx 路由元数据的离线 handler
+// ============================================================================
+
+// nsCapturingOfflineHandler 嵌入 fakeOfflineHandler 复用其余方法，
+// 仅覆盖 StoreOfflineMessage 捕获入口注入的 namespace/groupIDs 用于断言
+type nsCapturingOfflineHandler struct {
+	fakeOfflineHandler
+	mu         sync.Mutex
+	lastNS     string
+	lastGroups []string
+	storeCount int
+}
+
+func (n *nsCapturingOfflineHandler) StoreOfflineMessage(ctx context.Context, userID string, msg *HubMessage) error {
+	n.mu.Lock()
+	n.lastNS = routing.NamespaceFromContext(ctx)
+	n.lastGroups = routing.GroupIDsFromContext(ctx)
+	n.storeCount++
+	n.mu.Unlock()
+	return n.fakeOfflineHandler.StoreOfflineMessage(ctx, userID, msg)
+}
+
+// snapshot 返回捕获到的 namespace、groupIDs 与存储调用次数
+func (n *nsCapturingOfflineHandler) snapshot() (string, []string, int) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.lastNS, n.lastGroups, n.storeCount
+}
+
+// ============================================================================
+// SendToUserWithRetry 入口注入测试
+// ============================================================================
+
+// TestSendToUserWithRetry_InjectDefaultNamespaceForLegacy 老系统不传 namespace 时
+// 入口应注入 DefaultNamespace，且 group 保持 nil（P2P 不与群组逻辑捆绑）
+func TestSendToUserWithRetry_InjectDefaultNamespaceForLegacy(t *testing.T) {
+	hub := NewHub(smallRetryHubConfig(2))
+	h := &nsCapturingOfflineHandler{}
+	hub.SetOfflineMessageHandler(h)
+	defer hub.SafeShutdown()
+
+	// context.Background() 模拟老系统不传 namespace/group，用户离线走存储路径
+	hub.SendToUserWithRetry(context.Background(), "u-offline-legacy", makeGroupMessage("sender"))
+
+	ns, groups, count := h.snapshot()
+	require.Equal(t, 1, count, "离线用户应触发一次 StoreOfflineMessage")
+	assert.Equal(t, models.DefaultNamespace, ns, "老系统不传 namespace 应注入 DefaultNamespace")
+	assert.Empty(t, groups, "P2P 发送方法 group 不参与，应保持空")
+}
+
+// TestSendToUserWithRetry_PreservesExistingNamespace ctx 已有 namespace 时不应被覆盖
+func TestSendToUserWithRetry_PreservesExistingNamespace(t *testing.T) {
+	hub := NewHub(smallRetryHubConfig(2))
+	h := &nsCapturingOfflineHandler{}
+	hub.SetOfflineMessageHandler(h)
+	defer hub.SafeShutdown()
+
+	ctx := routing.WithNamespaceGroupIDs(context.Background(), "ns-custom", nil)
+	hub.SendToUserWithRetry(ctx, "u-offline-custom", makeGroupMessage("sender"))
+
+	ns, groups, count := h.snapshot()
+	require.Equal(t, 1, count)
+	assert.Equal(t, "ns-custom", ns, "ctx 已有 namespace 不应被覆盖")
+	assert.Empty(t, groups, "P2P 方法 group 不参与")
+}
+
+// ============================================================================
+// SendToUserWithAck 入口注入测试
+// ============================================================================
+
+// TestSendToUserWithAck_InjectDefaultNamespaceForLegacy ACK 路径同样注入 DefaultNamespace
+// 无论 EnableAck 取值，离线用户最终都会走 StoreOfflineMessage，可据此断言注入结果
+func TestSendToUserWithAck_InjectDefaultNamespaceForLegacy(t *testing.T) {
+	hub := NewHub(smallRetryHubConfig(2))
+	h := &nsCapturingOfflineHandler{}
+	hub.SetOfflineMessageHandler(h)
+	defer hub.SafeShutdown()
+
+	hub.SendToUserWithAck(context.Background(), "u-offline-ack", makeGroupMessage("sender"), time.Second, 1)
+
+	ns, groups, count := h.snapshot()
+	require.Equal(t, 1, count, "ACK 路径离线用户应触发一次 StoreOfflineMessage")
+	assert.Equal(t, models.DefaultNamespace, ns, "ACK 入口同样应注入 DefaultNamespace")
+	assert.Empty(t, groups, "P2P 发送方法 group 不参与")
+}
+
+// TestSendToUserWithAck_PreservesExistingNamespace ACK 路径不覆盖已有 namespace
+func TestSendToUserWithAck_PreservesExistingNamespace(t *testing.T) {
+	hub := NewHub(smallRetryHubConfig(2))
+	h := &nsCapturingOfflineHandler{}
+	hub.SetOfflineMessageHandler(h)
+	defer hub.SafeShutdown()
+
+	ctx := routing.WithNamespaceGroupIDs(context.Background(), "ns-ack", nil)
+	hub.SendToUserWithAck(ctx, "u-offline-ack2", makeGroupMessage("sender"), time.Second, 1)
+
+	ns, _, count := h.snapshot()
+	require.Equal(t, 1, count)
+	assert.Equal(t, "ns-ack", ns, "ACK 入口不应覆盖已有 namespace")
 }

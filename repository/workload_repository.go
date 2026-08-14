@@ -4,7 +4,7 @@
  * @LastEditors: kamalyes 501893067@qq.com
  * @LastEditTime: 2026-01-02 15:23:08
  * @FilePath: \go-wsc\repository\workload_repository.go
- * @Description: 客服负载管理 - Redis + DB 双层存储
+ * @Description: 客服负载管理 - Redis + DB 双层存储（支持多命名空间隔离）
  *
  * Copyright (c) 2025 by kamalyes, All Rights Reserved.
  */
@@ -18,10 +18,13 @@ import (
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-logger"
+	sqlbuilder "github.com/kamalyes/go-sqlbuilder/repository"
 	"github.com/kamalyes/go-toolbox/pkg/convert"
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
+	"github.com/kamalyes/go-wsc/models"
+	"github.com/kamalyes/go-wsc/routing"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -35,6 +38,7 @@ type WorkloadInfo struct {
 }
 
 // WorkloadRepository 负载管理仓库接口
+// namespace 从 ctx 中提取（routing.NamespaceFromContext），空时兜底 DefaultNamespace
 type WorkloadRepository interface {
 	// ReloadAgentWorkload 重新加载客服工作负载（客服上线时调用）
 	// 优先级：Redis > DB > 默认值 0
@@ -114,20 +118,26 @@ func NewRedisWorkloadRepository(client redis.UniversalClient, db *gorm.DB, confi
 	return repo
 }
 
+// namespaceFromCtx 从 ctx 提取 namespace，空时兜底 DefaultNamespace
+// 老系统兼容写法：调用方无需显式传 namespace，repository 内部自行从 ctx 取
+func (r *RedisWorkloadRepository) namespaceFromCtx(ctx context.Context) string {
+	return mathx.IfEmpty(routing.NamespaceFromContext(ctx), models.DefaultNamespace)
+}
+
 // GetDimensionKey 生成指定维度的 Redis key
-// 格式：{keyPrefix}{dimension}:{timeKey}:agent:{agentID}
-// realtime: workload:realtime:agent:{agentID}
-// hourly: workload:hourly:2026022513:agent:agent123
-func (r *RedisWorkloadRepository) GetDimensionKey(dimension WorkloadDimension, agentID string, t time.Time) string {
-	return r.keyPrefix + dimension.FormatKeyPart(t) + ":agent:" + agentID
+// 格式：{keyPrefix}{namespace}:{dimension}:{timeKey}:agent:{agentID}
+// realtime: workload:{ns}:realtime:agent:{agentID}
+// hourly: workload:{ns}:hourly:2026022513:agent:agent123
+func (r *RedisWorkloadRepository) GetDimensionKey(namespace string, dimension WorkloadDimension, agentID string, t time.Time) string {
+	return r.keyPrefix + namespace + ":" + dimension.FormatKeyPart(t) + ":agent:" + agentID
 }
 
 // GetDimensionZSetKey 生成指定维度的 ZSet key
-// 格式：{keyPrefix}{dimension}:{timeKey}:zset
-// realtime: workload:realtime:zset
-// hourly: workload:hourly:2026022513:zset
-func (r *RedisWorkloadRepository) GetDimensionZSetKey(dimension WorkloadDimension, t time.Time) string {
-	return r.keyPrefix + dimension.FormatKeyPart(t) + ":zset"
+// 格式：{keyPrefix}{namespace}:{dimension}:{timeKey}:zset
+// realtime: workload:{ns}:realtime:zset
+// hourly: workload:{ns}:hourly:2026022513:zset
+func (r *RedisWorkloadRepository) GetDimensionZSetKey(namespace string, dimension WorkloadDimension, t time.Time) string {
+	return r.keyPrefix + namespace + ":" + dimension.FormatKeyPart(t) + ":zset"
 }
 
 // evalLua 执行 Lua 脚本的通用方法
@@ -146,10 +156,11 @@ func (r *RedisWorkloadRepository) parseWorkloadResult(result any) int64 {
 // 用于客服上线时恢复之前的工作负载，如果不存在则初始化为 0
 // 返回 realtime 维度的负载值
 func (r *RedisWorkloadRepository) ReloadAgentWorkload(ctx context.Context, agentID string) (int64, error) {
+	namespace := r.namespaceFromCtx(ctx)
 	now := time.Now()
 
 	// 1. 先尝试从 Redis realtime 维度获取并同步所有维度到 ZSet
-	realtimeKey := r.GetDimensionKey(WorkloadDimensionRealtime, agentID, now)
+	realtimeKey := r.GetDimensionKey(namespace, WorkloadDimensionRealtime, agentID, now)
 	workloadStr, err := r.client.Get(ctx, realtimeKey).Result()
 
 	if err == nil {
@@ -158,16 +169,16 @@ func (r *RedisWorkloadRepository) ReloadAgentWorkload(ctx context.Context, agent
 		existingWorkload, parseErr := convert.MustIntT[int64](workloadStr, &roundNone)
 		if parseErr != nil {
 			// Redis 中值被污染（非数字），记录告警并按 0 处理，避免后续广播错误值
-			r.logger.Warnf("⚠️ 客服 %s Redis 负载值解析失败(%q): %v，降级为 0", agentID, workloadStr, parseErr)
+			r.logger.Warnf("⚠️ 客服 [%s]%s Redis 负载值解析失败(%q): %v，降级为 0", namespace, agentID, workloadStr, parseErr)
 			existingWorkload = 0
 		}
 
 		// 同步所有维度到 ZSet
-		if err := r.syncAllDimensionsToZSet(ctx, agentID, existingWorkload, now); err != nil {
+		if err := r.syncAllDimensionsToZSet(ctx, namespace, agentID, existingWorkload, now); err != nil {
 			return 0, errorx.WrapError("failed to sync all dimensions to zset", err)
 		}
 
-		r.logger.Debugf("🔄 客服 %s 上线，从 Redis 恢复负载: %d", agentID, existingWorkload)
+		r.logger.Debugf("🔄 客服 [%s]%s 上线，从 Redis 恢复负载: %d", namespace, agentID, existingWorkload)
 		return existingWorkload, nil
 	}
 
@@ -181,31 +192,31 @@ func (r *RedisWorkloadRepository) ReloadAgentWorkload(ctx context.Context, agent
 	if r.db != nil {
 		var dbModel AgentWorkloadModel
 		dbErr := r.db.WithContext(ctx).
-			Where("agent_id = ? AND dimension = ? AND time_key = ?", agentID, WorkloadDimensionRealtime, "").
+			Where("namespace = ? AND agent_id = ? AND dimension = ? AND time_key = ?", namespace, agentID, WorkloadDimensionRealtime, "").
 			First(&dbModel).Error
 		if dbErr == nil {
 			finalWorkload = dbModel.Workload
 
 			// 恢复所有维度到 Redis
-			if err := r.setAllDimensions(ctx, agentID, finalWorkload, now); err != nil {
+			if err := r.setAllDimensions(ctx, namespace, agentID, finalWorkload, now); err != nil {
 				return 0, errorx.WrapError("failed to restore from db to redis", err)
 			}
 
-			r.logger.Debugf("🔄 客服 %s 上线，从 DB 恢复负载: %d", agentID, finalWorkload)
+			r.logger.Debugf("🔄 客服 [%s]%s 上线，从 DB 恢复负载: %d", namespace, agentID, finalWorkload)
 			return finalWorkload, nil
 		}
-		// DB 查询出错且不是“记录不存在” —— 不能当作 0 初始化，避免覆盖真实历史负载
+		// DB 查询出错且不是"记录不存在" —— 不能当作 0 初始化，避免覆盖真实历史负载
 		if !errors.Is(dbErr, gorm.ErrRecordNotFound) {
 			return 0, errorx.WrapError("failed to load agent workload from db", dbErr)
 		}
 	}
 
 	// 3. DB 也不存在，初始化所有维度为 0
-	if err := r.setAllDimensions(ctx, agentID, finalWorkload, now); err != nil {
+	if err := r.setAllDimensions(ctx, namespace, agentID, finalWorkload, now); err != nil {
 		return 0, errorx.WrapError("failed to init agent workload", err)
 	}
 
-	r.logger.Debugf("🆕 客服 %s 上线初始化，负载: %d", agentID, finalWorkload)
+	r.logger.Debugf("🆕 客服 [%s]%s 上线初始化，负载: %d", namespace, agentID, finalWorkload)
 	return finalWorkload, nil
 }
 
@@ -216,38 +227,40 @@ func (r *RedisWorkloadRepository) ReloadAgentWorkload(ctx context.Context, agent
 // （调用方读到 string=9 → 另一路径 INCRBY 至 10 并 ZADD 10 → 本方法再 ZADD 9 覆盖回 9），
 // 这里使用 ZADD NX：仅当 ZSet 中不存在该 agent 时才写入
 // 如果 ZSet 中已经有该 agent 的 score（意味着有其他流程正在维护实时值），则保留现值不覆盖
-func (r *RedisWorkloadRepository) syncAllDimensionsToZSet(ctx context.Context, agentID string, workload int64, t time.Time) error {
+func (r *RedisWorkloadRepository) syncAllDimensionsToZSet(ctx context.Context, namespace, agentID string, workload int64, t time.Time) error {
 	luaScript := `
 		local keyPrefix = ARGV[1]
-		local agentID = ARGV[2]
-		local workload = tonumber(ARGV[3])
-		
-		-- 从 ARGV[4] 开始是维度配置：dimension, timeKey
-		local argIndex = 4
-		
+		local namespace = ARGV[2]
+		local agentID = ARGV[3]
+		local workload = tonumber(ARGV[4])
+
+		-- 从 ARGV[5] 开始是维度配置：dimension, timeKey
+		local argIndex = 5
+
 		while argIndex <= #ARGV do
 			local dimension = ARGV[argIndex]
 			local timeKey = ARGV[argIndex + 1]
-			
+
 			local zsetKey
 			if timeKey == "" then
-				zsetKey = keyPrefix .. dimension .. ":zset"
+				zsetKey = keyPrefix .. namespace .. ":" .. dimension .. ":zset"
 			else
-				zsetKey = keyPrefix .. dimension .. ":" .. timeKey .. ":zset"
+				zsetKey = keyPrefix .. namespace .. ":" .. dimension .. ":" .. timeKey .. ":zset"
 			end
-			
+
 			-- 仅在 ZSet 中不存在该 agent 时才写入，避免覆盖并发维护的真实值
 			redis.call('ZADD', zsetKey, 'NX', workload, agentID)
-			
+
 			argIndex = argIndex + 2
 		end
-		
+
 		return "OK"
 	`
 
 	// 准备参数
 	args := []any{
 		r.keyPrefix,
+		namespace,
 		agentID,
 		workload,
 	}
@@ -263,46 +276,48 @@ func (r *RedisWorkloadRepository) syncAllDimensionsToZSet(ctx context.Context, a
 }
 
 // setAllDimensions 设置所有维度的负载（原子操作）
-func (r *RedisWorkloadRepository) setAllDimensions(ctx context.Context, agentID string, workload int64, t time.Time) error {
+func (r *RedisWorkloadRepository) setAllDimensions(ctx context.Context, namespace, agentID string, workload int64, t time.Time) error {
 	luaScript := `
 		local keyPrefix = ARGV[1]
-		local agentID = ARGV[2]
-		local workload = tonumber(ARGV[3])
-		
-		-- 从 ARGV[4] 开始是维度配置：dimension, timeKey, ttl(秒)
-		local argIndex = 4
-		
+		local namespace = ARGV[2]
+		local agentID = ARGV[3]
+		local workload = tonumber(ARGV[4])
+
+		-- 从 ARGV[5] 开始是维度配置：dimension, timeKey, ttl(秒)
+		local argIndex = 5
+
 		while argIndex <= #ARGV do
 			local dimension = ARGV[argIndex]
 			local timeKey = ARGV[argIndex + 1]
 			local ttl = tonumber(ARGV[argIndex + 2])
-			
+
 			local workloadKey, zsetKey
 			if timeKey == "" then
-				workloadKey = keyPrefix .. dimension .. ":agent:" .. agentID
-				zsetKey = keyPrefix .. dimension .. ":zset"
+				workloadKey = keyPrefix .. namespace .. ":" .. dimension .. ":agent:" .. agentID
+				zsetKey = keyPrefix .. namespace .. ":" .. dimension .. ":zset"
 			else
-				workloadKey = keyPrefix .. dimension .. ":" .. timeKey .. ":agent:" .. agentID
-				zsetKey = keyPrefix .. dimension .. ":" .. timeKey .. ":zset"
+				workloadKey = keyPrefix .. namespace .. ":" .. dimension .. ":" .. timeKey .. ":agent:" .. agentID
+				zsetKey = keyPrefix .. namespace .. ":" .. dimension .. ":" .. timeKey .. ":zset"
 			end
-			
+
 			redis.call('SET', workloadKey, workload)
 			redis.call('ZADD', zsetKey, workload, agentID)
-			
+
 			if ttl > 0 then
 				redis.call('EXPIRE', workloadKey, ttl)
 				redis.call('EXPIRE', zsetKey, ttl)
 			end
-			
+
 			argIndex = argIndex + 3
 		end
-		
+
 		return "OK"
 	`
 
 	// 准备参数
 	args := []any{
 		r.keyPrefix,
+		namespace,
 		agentID,
 		workload,
 	}
@@ -320,7 +335,7 @@ func (r *RedisWorkloadRepository) setAllDimensions(ctx context.Context, agentID 
 	}
 
 	// 异步同步到 DB
-	r.asyncSyncToDB(agentID, workload)
+	r.asyncSyncToDB(namespace, agentID, workload)
 
 	return nil
 }
@@ -328,20 +343,22 @@ func (r *RedisWorkloadRepository) setAllDimensions(ctx context.Context, agentID 
 // ForceSetAgentWorkload 强制设置客服负载（慎用，会覆盖现有值）
 // 直接覆盖所有维度的 Redis 和 ZSet 中的负载值，异步同步到 DB
 func (r *RedisWorkloadRepository) ForceSetAgentWorkload(ctx context.Context, agentID string, workload int64) error {
+	namespace := r.namespaceFromCtx(ctx)
 	now := time.Now()
 
-	if err := r.setAllDimensions(ctx, agentID, workload, now); err != nil {
+	if err := r.setAllDimensions(ctx, namespace, agentID, workload, now); err != nil {
 		return errorx.WrapError("failed to force set agent workload", err)
 	}
 
-	r.logger.Debugf("✅ 已强制设置客服 %s 工作负载: %d (所有维度)", agentID, workload)
+	r.logger.Debugf("✅ 已强制设置客服 [%s]%s 工作负载: %d (所有维度)", namespace, agentID, workload)
 	return nil
 }
 
 // GetAgentWorkload 获取客服负载（从 realtime 维度读取）
 func (r *RedisWorkloadRepository) GetAgentWorkload(ctx context.Context, agentID string) (int64, error) {
+	namespace := r.namespaceFromCtx(ctx)
 	now := time.Now()
-	realtimeKey := r.GetDimensionKey(WorkloadDimensionRealtime, agentID, now)
+	realtimeKey := r.GetDimensionKey(namespace, WorkloadDimensionRealtime, agentID, now)
 
 	// 1. 先从 Redis realtime 维度获取
 	workloadStr, err := r.client.Get(ctx, realtimeKey).Result()
@@ -349,7 +366,7 @@ func (r *RedisWorkloadRepository) GetAgentWorkload(ctx context.Context, agentID 
 		roundNone := convert.RoundNone
 		workload, parseErr := convert.MustIntT[int64](workloadStr, &roundNone)
 		if parseErr != nil {
-			r.logger.Warnf("⚠️ 客服 %s Redis 负载值解析失败(%q): %v，降级为 0", agentID, workloadStr, parseErr)
+			r.logger.Warnf("⚠️ 客服 [%s]%s Redis 负载值解析失败(%q): %v，降级为 0", namespace, agentID, workloadStr, parseErr)
 			return 0, nil
 		}
 		return workload, nil
@@ -364,17 +381,17 @@ func (r *RedisWorkloadRepository) GetAgentWorkload(ctx context.Context, agentID 
 	if r.db != nil {
 		var dbModel AgentWorkloadModel
 		dbErr := r.db.WithContext(ctx).
-			Where("agent_id = ? AND dimension = ? AND time_key = ?", agentID, WorkloadDimensionRealtime, "").
+			Where("namespace = ? AND agent_id = ? AND dimension = ? AND time_key = ?", namespace, agentID, WorkloadDimensionRealtime, "").
 			First(&dbModel).Error
 		if dbErr == nil {
 			// 回写到 Redis
 			if err := r.client.Set(ctx, realtimeKey, dbModel.Workload, 0).Err(); err != nil {
 				r.logger.Warnf("⚠️ 回写 Redis 失败: %v", err)
 			}
-			r.logger.Debugf("📥 从 DB 加载客服 %s 负载: %d", agentID, dbModel.Workload)
+			r.logger.Debugf("📥 从 DB 加载客服 [%s]%s 负载: %d", namespace, agentID, dbModel.Workload)
 			return dbModel.Workload, nil
 		}
-		// DB 查询出错且不是“记录不存在” —— 上抛，避免静默吞掉故障
+		// DB 查询出错且不是"记录不存在" —— 上抛，避免静默吞掉故障
 		if !errors.Is(dbErr, gorm.ErrRecordNotFound) {
 			return 0, errorx.WrapError("failed to get agent workload from db", dbErr)
 		}
@@ -386,74 +403,77 @@ func (r *RedisWorkloadRepository) GetAgentWorkload(ctx context.Context, agentID 
 
 // IncrementAgentWorkload 增加客服负载（支持多维度）
 func (r *RedisWorkloadRepository) IncrementAgentWorkload(ctx context.Context, agentID string) error {
-	return r.incrementMultiDimension(ctx, agentID, 1)
+	namespace := r.namespaceFromCtx(ctx)
+	return r.incrementMultiDimension(ctx, namespace, agentID, 1)
 }
 
 // incrementMultiDimension 多维度增加客服负载（原子操作）
-func (r *RedisWorkloadRepository) incrementMultiDimension(ctx context.Context, agentID string, delta int64) error {
+func (r *RedisWorkloadRepository) incrementMultiDimension(ctx context.Context, namespace, agentID string, delta int64) error {
 	now := time.Now()
 
 	// 使用 Lua 脚本保证所有维度的原子性更新
 	luaScript := `
 		local keyPrefix = ARGV[1]
-		local agentID = ARGV[2]
-		local delta = tonumber(ARGV[3])
-		local currentTime = tonumber(ARGV[4])
-		
+		local namespace = ARGV[2]
+		local agentID = ARGV[3]
+		local delta = tonumber(ARGV[4])
+		local currentTime = tonumber(ARGV[5])
+
 		-- 维度配置：dimension, timeKey, ttl(秒)
 		local dimensions = {
 			{"realtime", "", 0},
-			{"hourly", ARGV[5], 604800},      -- 7天
-			{"daily", ARGV[6], 7776000},      -- 90天
-			{"monthly", ARGV[7], 63072000},   -- 2年
-			{"yearly", ARGV[8], 157680000}    -- 5年
+			{"hourly", ARGV[6], 604800},      -- 7天
+			{"daily", ARGV[7], 7776000},      -- 90天
+			{"monthly", ARGV[8], 63072000},   -- 2年
+			{"yearly", ARGV[9], 157680000}    -- 5年
 		}
-		
+
 		local results = {}
-		
+
 		for i, dim in ipairs(dimensions) do
 			local dimension = dim[1]
 			local timeKey = dim[2]
 			local ttl = dim[3]
-			
+
 			-- 构建 key
 			local workloadKey, zsetKey
 			if timeKey == "" then
-				workloadKey = keyPrefix .. dimension .. ":agent:" .. agentID
-				zsetKey = keyPrefix .. dimension .. ":zset"
+				workloadKey = keyPrefix .. namespace .. ":" .. dimension .. ":agent:" .. agentID
+				zsetKey = keyPrefix .. namespace .. ":" .. dimension .. ":zset"
 			else
-				workloadKey = keyPrefix .. dimension .. ":" .. timeKey .. ":agent:" .. agentID
-				zsetKey = keyPrefix .. dimension .. ":" .. timeKey .. ":zset"
+				workloadKey = keyPrefix .. namespace .. ":" .. dimension .. ":" .. timeKey .. ":agent:" .. agentID
+				zsetKey = keyPrefix .. namespace .. ":" .. dimension .. ":" .. timeKey .. ":zset"
 			end
-			
+
 			-- 递增负载
 			local newWorkload = redis.call('INCRBY', workloadKey, delta)
-			
+
 			-- 确保不低于0
 			if newWorkload < 0 then
 				newWorkload = 0
 				redis.call('SET', workloadKey, 0)
 			end
-			
+
 			-- 更新 ZSet
 			redis.call('ZADD', zsetKey, newWorkload, agentID)
-			
+
 			-- 设置 TTL（realtime 维度除外）
 			if ttl > 0 then
 				redis.call('EXPIRE', workloadKey, ttl)
 				redis.call('EXPIRE', zsetKey, ttl)
 			end
-			
+
 			-- 记录结果
 			table.insert(results, {dimension, timeKey, newWorkload})
 		end
-		
+
 		return results
 	`
 
 	// 准备参数
 	args := []any{
 		r.keyPrefix,
+		namespace,
 		agentID,
 		delta,
 		now.Unix(),
@@ -477,30 +497,32 @@ func (r *RedisWorkloadRepository) incrementMultiDimension(ctx context.Context, a
 				workload := r.parseWorkloadResult(dimResult[2])
 
 				// 异步同步到 DB
-				r.asyncSyncMultiDimensionToDB(agentID, WorkloadDimension(dimension), timeKey, workload)
+				r.asyncSyncMultiDimensionToDB(namespace, agentID, WorkloadDimension(dimension), timeKey, workload)
 			}
 		}
 	}
 
-	r.logger.Debugf("📈 客服 %s 工作负载增加 %d (多维度)", agentID, delta)
+	r.logger.Debugf("📈 客服 [%s]%s 工作负载增加 %d (多维度)", namespace, agentID, delta)
 	return nil
 }
 
 // DecrementAgentWorkload 减少客服负载（不低于 0，支持多维度）
 func (r *RedisWorkloadRepository) DecrementAgentWorkload(ctx context.Context, agentID string) error {
-	return r.incrementMultiDimension(ctx, agentID, -1)
+	namespace := r.namespaceFromCtx(ctx)
+	return r.incrementMultiDimension(ctx, namespace, agentID, -1)
 }
 
 // GetLeastLoadedAgent 获取负载最小的在线客服（支持多策略）
 func (r *RedisWorkloadRepository) GetLeastLoadedAgent(ctx context.Context, onlineAgents []string, dimension WorkloadDimension) (string, int64, error) {
+	namespace := r.namespaceFromCtx(ctx)
 	if len(onlineAgents) == 0 {
 		return "", 0, errorx.WrapError("no online agents available")
 	}
-	return r.getLeastLoadedAgentFromRedis(ctx, onlineAgents, dimension, time.Now())
+	return r.getLeastLoadedAgentFromRedis(ctx, namespace, onlineAgents, dimension, time.Now())
 }
 
 // getLeastLoadedAgentFromRedis 从 Redis ZSet 获取负载最小的客服（支持多维度）
-func (r *RedisWorkloadRepository) getLeastLoadedAgentFromRedis(ctx context.Context, onlineAgents []string, dimension WorkloadDimension, t time.Time) (string, int64, error) {
+func (r *RedisWorkloadRepository) getLeastLoadedAgentFromRedis(ctx context.Context, namespace string, onlineAgents []string, dimension WorkloadDimension, t time.Time) (string, int64, error) {
 	// 使用 Lua 脚本在 Redis 端完成筛选、随机选择和降级处理
 	// 算法：
 	//   1. 遍历传入的所有在线客服，通过 ZSCORE 查询各自负载
@@ -512,8 +534,9 @@ func (r *RedisWorkloadRepository) getLeastLoadedAgentFromRedis(ctx context.Conte
 	luaScript := `
 		local zsetKey = KEYS[1]
 		local keyPrefix = KEYS[2]
-		local dimension = KEYS[3]
-		local timeKey = KEYS[4]
+		local namespace = KEYS[3]
+		local dimension = KEYS[4]
+		local timeKey = KEYS[5]
 
 		-- 初始化随机数种子（使用当前时间的微秒数，避免多次调用返回相同结果）
 		local t = redis.call('TIME')
@@ -524,9 +547,9 @@ func (r *RedisWorkloadRepository) getLeastLoadedAgentFromRedis(ctx context.Conte
 		-- 构建单个客服在 realtime / 时间分片维度下的 string key
 		local function buildWorkloadKey(agentID)
 			if timeKey == "" then
-				return keyPrefix .. dimension .. ":agent:" .. agentID
+				return keyPrefix .. namespace .. ":" .. dimension .. ":agent:" .. agentID
 			else
-				return keyPrefix .. dimension .. ":" .. timeKey .. ":agent:" .. agentID
+				return keyPrefix .. namespace .. ":" .. dimension .. ":" .. timeKey .. ":agent:" .. agentID
 			end
 		end
 
@@ -569,18 +592,18 @@ func (r *RedisWorkloadRepository) getLeastLoadedAgentFromRedis(ctx context.Conte
 	`
 
 	// 获取指定维度的 ZSet key
-	zsetKey := r.GetDimensionZSetKey(dimension, t)
+	zsetKey := r.GetDimensionZSetKey(namespace, dimension, t)
 	keyPrefix := r.keyPrefix
 	timeKey := dimension.FormatTimeKey(t)
 
-	// 参数：所有在线客服列表（不再需要 maxCandidates）
+	// 参数：所有在线客服列表
 	args := make([]any, len(onlineAgents))
 	for i, agentID := range onlineAgents {
 		args[i] = agentID
 	}
 
 	// 执行 Lua 脚本
-	result, err := r.evalLua(ctx, luaScript, []string{zsetKey, keyPrefix, dimension.String(), timeKey}, args...)
+	result, err := r.evalLua(ctx, luaScript, []string{zsetKey, keyPrefix, namespace, dimension.String(), timeKey}, args...)
 	if err != nil && err != redis.Nil {
 		return "", 0, errorx.WrapError("failed to get least loaded agent", err)
 	}
@@ -590,7 +613,7 @@ func (r *RedisWorkloadRepository) getLeastLoadedAgentFromRedis(ctx context.Conte
 		if resultArray, ok := result.([]any); ok && len(resultArray) == 2 {
 			agentID := resultArray[0].(string)
 			workload := r.parseWorkloadResult(resultArray[1])
-			r.logger.Debugf("🎯 选择负载最小的客服 [%s]: %s (负载: %d)", dimension, agentID, workload)
+			r.logger.Debugf("🎯 选择负载最小的客服 [%s][%s]: %s (负载: %d)", namespace, dimension, agentID, workload)
 			return agentID, workload, nil
 		}
 	}
@@ -610,6 +633,7 @@ func (r *RedisWorkloadRepository) getLeastLoadedAgentFromRedis(ctx context.Conte
 // 为什么需要原子化：多副本部署/多 goroutine 并发时，若"选择"和"扣减"分两步执行，
 // 多个调用会读到同一份旧负载快照，选出同一客服，导致分配严重不均
 func (r *RedisWorkloadRepository) AcquireLeastLoadedAgent(ctx context.Context, onlineAgents []string, dimension WorkloadDimension) (string, int64, error) {
+	namespace := r.namespaceFromCtx(ctx)
 	if len(onlineAgents) == 0 {
 		return "", 0, errorx.WrapError("no online agents available")
 	}
@@ -624,12 +648,13 @@ func (r *RedisWorkloadRepository) AcquireLeastLoadedAgent(ctx context.Context, o
 	// Lua 脚本：选择 + 多维度原子 +1
 	luaScript := `
 		local keyPrefix = ARGV[1]
-		local realtimeTimeKey = ARGV[2]
-		local hourlyTimeKey = ARGV[3]
-		local dailyTimeKey = ARGV[4]
-		local monthlyTimeKey = ARGV[5]
-		local yearlyTimeKey = ARGV[6]
-		-- ARGV[7..] 为在线客服 ID 列表
+		local namespace = ARGV[2]
+		local realtimeTimeKey = ARGV[3]
+		local hourlyTimeKey = ARGV[4]
+		local dailyTimeKey = ARGV[5]
+		local monthlyTimeKey = ARGV[6]
+		local yearlyTimeKey = ARGV[7]
+		-- ARGV[8..] 为在线客服 ID 列表
 
 		-- 初始化随机种子
 		local t = redis.call('TIME')
@@ -638,17 +663,17 @@ func (r *RedisWorkloadRepository) AcquireLeastLoadedAgent(ctx context.Context, o
 
 		local function buildWorkloadKey(dimension, timeKey, agentID)
 			if timeKey == "" then
-				return keyPrefix .. dimension .. ":agent:" .. agentID
+				return keyPrefix .. namespace .. ":" .. dimension .. ":agent:" .. agentID
 			else
-				return keyPrefix .. dimension .. ":" .. timeKey .. ":agent:" .. agentID
+				return keyPrefix .. namespace .. ":" .. dimension .. ":" .. timeKey .. ":agent:" .. agentID
 			end
 		end
 
 		local function buildZSetKey(dimension, timeKey)
 			if timeKey == "" then
-				return keyPrefix .. dimension .. ":zset"
+				return keyPrefix .. namespace .. ":" .. dimension .. ":zset"
 			else
-				return keyPrefix .. dimension .. ":" .. timeKey .. ":zset"
+				return keyPrefix .. namespace .. ":" .. dimension .. ":" .. timeKey .. ":zset"
 			end
 		end
 
@@ -667,7 +692,7 @@ func (r *RedisWorkloadRepository) AcquireLeastLoadedAgent(ctx context.Context, o
 		local minWorkload = nil
 		local candidateAgents = {}
 
-		for i = 7, #ARGV do
+		for i = 8, #ARGV do
 			local agentID = ARGV[i]
 			local score = redis.call('ZSCORE', realtimeZSetKey, agentID)
 			local workload
@@ -729,9 +754,10 @@ func (r *RedisWorkloadRepository) AcquireLeastLoadedAgent(ctx context.Context, o
 		return {selected, minWorkload, newWorkloads[1], newWorkloads[2], newWorkloads[3], newWorkloads[4], newWorkloads[5]}
 	`
 
-	args := make([]any, 0, 6+len(onlineAgents))
+	args := make([]any, 0, 7+len(onlineAgents))
 	args = append(args,
 		r.keyPrefix,
+		namespace,
 		WorkloadDimensionRealtime.FormatTimeKey(now),
 		WorkloadDimensionHourly.FormatTimeKey(now),
 		WorkloadDimensionDaily.FormatTimeKey(now),
@@ -769,10 +795,10 @@ func (r *RedisWorkloadRepository) AcquireLeastLoadedAgent(ctx context.Context, o
 	}
 	for i, dim := range dims {
 		newWorkload := r.parseWorkloadResult(resultArray[2+i])
-		r.asyncSyncMultiDimensionToDB(selected, dim, dim.FormatTimeKey(now), newWorkload)
+		r.asyncSyncMultiDimensionToDB(namespace, selected, dim, dim.FormatTimeKey(now), newWorkload)
 	}
 
-	r.logger.Debugf("🎯 原子选择并预扣减负载 [%s]: %s (选中前负载: %d)", dimension, selected, minWorkload)
+	r.logger.Debugf("🎯 原子选择并预扣减负载 [%s][%s]: %s (选中前负载: %d)", namespace, dimension, selected, minWorkload)
 	return selected, minWorkload, nil
 }
 
@@ -781,25 +807,27 @@ func (r *RedisWorkloadRepository) AcquireLeastLoadedAgent(ctx context.Context, o
 // 只移除 realtime 维度的 ZSet：
 //  1. 参与负载均衡分配的仅是 realtime 维度（详见 GetLeastLoadedAgent）
 //  2. 时间分片维度（hourly/daily/monthly/yearly）的 ZSet key 依赖当前时间戳，
-//     客服跨小时/跨天下线时，time.Now() 只能命中“当前”时间片的 ZSet，
+//     客服跨小时/跨天下线时，time.Now() 只能命中"当前"时间片的 ZSet，
 //     前一时间片 ZSet 中残留的该客服记录无法被清理；同时这些维度本就是
 //     用于统计的累计数据，不应在下线时清除
 func (r *RedisWorkloadRepository) RemoveAgentWorkload(ctx context.Context, agentID string) error {
+	namespace := r.namespaceFromCtx(ctx)
 	now := time.Now()
 
-	zsetKey := r.GetDimensionZSetKey(WorkloadDimensionRealtime, now)
+	zsetKey := r.GetDimensionZSetKey(namespace, WorkloadDimensionRealtime, now)
 	if err := r.client.ZRem(ctx, zsetKey, agentID).Err(); err != nil {
-		r.logger.Errorf("❌ 从 ZSet [%s] 移除客服 %s 失败: %v", WorkloadDimensionRealtime, agentID, err)
+		r.logger.Errorf("❌ 从 ZSet [%s] 移除客服 [%s]%s 失败: %v", WorkloadDimensionRealtime, namespace, agentID, err)
 		return errorx.WrapError("failed to remove agent from realtime zset", err)
 	}
 
-	r.logger.Debugf("👋 客服 %s 下线，已从 realtime ZSet 移除（保留 string key 及统计维度）", agentID)
+	r.logger.Debugf("👋 客服 [%s]%s 下线，已从 realtime ZSet 移除（保留 string key 及统计维度）", namespace, agentID)
 	return nil
 }
 
 // GetAllAgentWorkloads 获取所有客服负载（从 realtime 维度查询）
 func (r *RedisWorkloadRepository) GetAllAgentWorkloads(ctx context.Context, limit int64) ([]WorkloadInfo, error) {
-	zsetKey := r.GetDimensionZSetKey(WorkloadDimensionRealtime, time.Now())
+	namespace := r.namespaceFromCtx(ctx)
+	zsetKey := r.GetDimensionZSetKey(namespace, WorkloadDimensionRealtime, time.Now())
 
 	var results []redis.Z
 	var err error
@@ -833,18 +861,18 @@ func (r *RedisWorkloadRepository) Close() error {
 }
 
 // asyncSyncToDB 异步同步负载到 DB（多维度）
-func (r *RedisWorkloadRepository) asyncSyncToDB(agentID string, workload int64) {
+func (r *RedisWorkloadRepository) asyncSyncToDB(namespace, agentID string, workload int64) {
 	now := time.Now()
 
 	// 同步所有维度到 DB
 	for _, dimension := range AllWorkloadDimensions {
 		timeKey := dimension.FormatTimeKey(now)
-		r.asyncSyncMultiDimensionToDB(agentID, dimension, timeKey, workload)
+		r.asyncSyncMultiDimensionToDB(namespace, agentID, dimension, timeKey, workload)
 	}
 }
 
 // asyncSyncMultiDimensionToDB 异步同步单个维度负载到 DB
-func (r *RedisWorkloadRepository) asyncSyncMultiDimensionToDB(agentID string, dimension WorkloadDimension, timeKey string, workload int64) {
+func (r *RedisWorkloadRepository) asyncSyncMultiDimensionToDB(namespace, agentID string, dimension WorkloadDimension, timeKey string, workload int64) {
 	if r.db == nil {
 		return
 	}
@@ -853,10 +881,19 @@ func (r *RedisWorkloadRepository) asyncSyncMultiDimensionToDB(agentID string, di
 		r.logger.Warnf("⚠️ 同步负载到 DB 失败: %v", err)
 	}).ExecWithContext(func(ctx context.Context) error {
 		// 使用 Upsert 避免并发场景下的重复键错误
+		// 唯一键: (namespace, agent_id, dimension, time_key)
+		// 通过 Dialect 引擎兼容 MySQL/SQLite/PostgreSQL 的 UpsertColumnRef
+		// - MySQL:  VALUES(workload)
+		// - SQLite/PG:  excluded.workload
+		dialect := sqlbuilder.DetectDialect(r.db)
 		return r.db.WithContext(ctx).Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "agent_id"}, {Name: "dimension"}, {Name: "time_key"}},
-			DoUpdates: clause.AssignmentColumns([]string{"workload", "updated_at"}),
+			Columns: []clause.Column{{Name: "namespace"}, {Name: "agent_id"}, {Name: "dimension"}, {Name: "time_key"}},
+			DoUpdates: clause.Assignments(map[string]any{
+				"workload":   gorm.Expr(dialect.UpsertColumnRef("workload")),
+				"updated_at": gorm.Expr(dialect.UpsertColumnRef("updated_at")),
+			}),
 		}).Create(&AgentWorkloadModel{
+			Namespace:         namespace,
 			AgentID:           agentID,
 			WorkloadDimension: dimension,
 			TimeKey:           timeKey,

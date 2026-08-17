@@ -35,7 +35,7 @@ func TestObserverBatcher_SubmitAndFlush(t *testing.T) {
 	hub, _, _, cleanup := setupGroupTestHub(t)
 	defer cleanup()
 
-	// 注册观察者（直接写入 registry，绕过 register channel）
+	// 注册观察者（直接写入 registry，绕过异步注册）
 	observer := makeTestClient("c-obs-1", "observer-user-1")
 	observer.UserType = UserTypeObserver
 	observer.Namespace = "tenantA"

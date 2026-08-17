@@ -18,6 +18,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gorilla/websocket"
+
 	"github.com/kamalyes/go-cachex"
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
@@ -313,11 +315,11 @@ type Hub struct {
 	nodeInfo  *NodeInfo
 	startTime time.Time
 
-	register        chan *Client
-	unregister      chan *Client
-	broadcast       chan *HubMessage
-	nodeMessage     chan *DistributedMessage
-	pendingMessages chan *HubMessage
+	// upgrader 复用（避免每次连接升级时分配新对象）
+	upgrader     *websocket.Upgrader
+	upgraderOnce sync.Once
+
+	nodeMessage chan *DistributedMessage
 
 	ackManager             *AckManager
 	messageRecordRepo      MessageRecordRepository
@@ -472,11 +474,7 @@ func NewHub(config *wscconfig.WSC) *Hub {
 			Status:    NodeStatusActive,
 			LastSeen:  time.Now(),
 		},
-		register:         make(chan *Client, config.MessageBufferSize),
-		unregister:       make(chan *Client, config.MessageBufferSize),
-		broadcast:        make(chan *HubMessage, config.MessageBufferSize*4),
 		nodeMessage:      make(chan *DistributedMessage, config.MessageBufferSize*4),
-		pendingMessages:  make(chan *HubMessage, config.MaxPendingQueueSize),
 		ackManager:       NewAckManager(config.AckTimeout, config.AckMaxRetries),
 		ctx:              ctx,
 		cancel:           cancel,

@@ -11,10 +11,10 @@ require (
 	github.com/kamalyes/go-argus v0.3.1
 	github.com/kamalyes/go-cachex v0.3.5
 	github.com/kamalyes/go-config v0.21.13
-	github.com/kamalyes/go-logger v0.5.9-0.20260813103002-af4a587d95c7
+	github.com/kamalyes/go-logger v0.5.9
 	github.com/kamalyes/go-pbmo v0.1.9
 	github.com/kamalyes/go-sqlbuilder v0.6.3
-	github.com/kamalyes/go-toolbox v0.15.10-0.20260813100755-b3afa3d759b5
+	github.com/kamalyes/go-toolbox v0.16.0
 	github.com/redis/go-redis/v9 v9.21.0
 	github.com/stretchr/testify v1.11.1
 	google.golang.org/grpc v1.83.0

@@ -124,7 +124,7 @@ func TestBroadcastToSSEClients(t *testing.T) {
 	}
 }
 
-// TestRegisterSSE 验证注册 SSE 连接（需 Run 消费 register channel）
+// TestRegisterSSE 验证注册 SSE 连接（需 Run 处理异步注册）
 func TestRegisterSSE(t *testing.T) {
 	hub, _, _, cleanup := setupGroupTestHub(t)
 	defer cleanup()
@@ -208,7 +208,7 @@ func TestUnregisterSSE_NotSSE(t *testing.T) {
 	c := makeTestClient("c-ws", "u-ws")
 	hub.shardedRegistry.AddClient(c)
 
-	// 注销非 SSE 客户端不应通过 unregister channel
+	// 注销非 SSE 客户端不应触发异步注销
 	assert.NotPanics(t, func() {
 		hub.UnregisterSSE("c-ws")
 	})

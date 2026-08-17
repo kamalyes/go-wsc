@@ -604,49 +604,6 @@ func TestSyncToSenderDevices(t *testing.T) {
 }
 
 // ============================================================================
-// notifyQueueFull 测试
-// ============================================================================
-
-// TestNotifyQueueFullNilCallback 验证 callback 为 nil 时不 panic
-func TestNotifyQueueFullNilCallback(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
-	defer cleanup()
-
-	msg := makeGroupMessage("sender")
-	assert.NotPanics(t, func() {
-		hub.notifyQueueFull(msg, "u-recipient", QueueTypeAllQueues, ErrQueueAndPendingFull)
-	})
-}
-
-// TestNotifyQueueFullCallbackInvoked 验证 callback 非 nil 时被异步调用
-func TestNotifyQueueFullCallbackInvoked(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
-	defer cleanup()
-
-	var mu sync.Mutex
-	got := make(chan struct{}, 1)
-	hub.OnQueueFull(func(msg *HubMessage, recipient string, queueType QueueType, _ errorx.BaseError) {
-		mu.Lock()
-		defer mu.Unlock()
-		assert.Equal(t, "u-recipient", recipient)
-		assert.Equal(t, QueueTypeAllQueues, queueType)
-		select {
-		case got <- struct{}{}:
-		default:
-		}
-	})
-
-	msg := makeGroupMessage("sender")
-	hub.notifyQueueFull(msg, "u-recipient", QueueTypeAllQueues, ErrQueueAndPendingFull)
-
-	select {
-	case <-got:
-	case <-time.After(time.Second):
-		t.Fatal("queueFullCallback 未被调用")
-	}
-}
-
-// ============================================================================
 // invokeMessageSendCallback 测试
 // ============================================================================
 
@@ -759,46 +716,6 @@ func smallRetryHubConfig(maxRetries int) *wscconfig.WSC {
 		WithRetryPolicy(wscconfig.DefaultRetryPolicy().
 			WithMaxRetries(maxRetries).
 			WithDelay(time.Millisecond, 5*time.Millisecond))
-}
-
-// TestSendScenario_QueueFullRetriesExhausted 验证核心发送路径：用户在线但 broadcast 与
-// pending 队列均满时，sendToUser 返回 ErrQueueAndPendingFull（可重试），重试循环按
-// MaxRetries+1 次耗尽后给出 FinalError，且错误被正确分类为队列满/可重试。
-//
-// 该场景锁定 errors.go 修复后 IsRetryableError/IsQueueFullError 对 sentinel 的判定：
-// 修复前 sentinel 全为 Type=0 互相相等，IsQueueFullError(ErrQueueAndPendingFull) 经由
-// 断言失败路径退回 == 比较虽可命中，但 IsRetryableError 对其它 sentinel 误判 true；
-// 修复后基于 ClassifyError 严格按 ErrorType 判定，行为正确且不回归。
-func TestSendScenario_QueueFullRetriesExhausted(t *testing.T) {
-	hub := NewHub(smallRetryHubConfig(2))
-	// 故意不启动 Run()：EventLoop 不消费 broadcast/pending，队列可被填满且不排水。
-	defer hub.SafeShutdown()
-
-	// 直接登记一个在线用户（checkUserOnline 先查 shardedRegistry.HasUser）
-	client := makeTestClient("c-qfull", "u-qfull")
-	hub.shardedRegistry.AddClient(client)
-
-	// 填满 broadcast（cap = MessageBufferSize*4 = 4）与 pending（cap = MaxPendingQueueSize = 1）
-	fill := &HubMessage{ID: "fill"}
-	for i := 0; i < 4; i++ {
-		hub.broadcast <- fill
-	}
-	hub.pendingMessages <- fill
-
-	msg := makeGroupMessage("sender")
-	msg.ReceiverType = UserTypeCustomer
-	result := hub.SendToUserWithRetry(context.Background(), "u-qfull", msg)
-
-	require.NotNil(t, result)
-	assert.False(t, result.Success, "队列满时应失败")
-	require.NotNil(t, result.FinalError, "应有最终错误")
-	assert.Equal(t, 3, len(result.Attempts), "应重试 MaxRetries+1=3 次")
-
-	// 错误分类：队列满 + 可重试（修复后对 sentinel 与运行时错误均生效）
-	assert.Equal(t, models.ErrTypeQueueAndPendingFull, errorx.ClassifyError(result.FinalError))
-	assert.True(t, IsQueueFullError(result.FinalError), "应识别为队列满错误")
-	assert.True(t, IsRetryableError(result.FinalError), "ErrQueueAndPendingFull 应可重试")
-	assert.False(t, IsUserOfflineError(result.FinalError), "不应误判为离线错误")
 }
 
 // TestSendScenario_OfflineNoHandlerClassifiedCorrectly 验证离线用户无 handler 时：

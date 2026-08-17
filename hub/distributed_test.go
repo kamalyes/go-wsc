@@ -500,40 +500,6 @@ func TestGetObserverStats_EmptyAndRegistered(t *testing.T) {
 }
 
 // ============================================================================
-// send.go：recordRetryAttemptAsync（需 messageRecordRepo mock + 重试触发）
-// ============================================================================
-
-func TestRecordRetryAttemptAsync_TriggeredOnRetry(t *testing.T) {
-	t.Parallel()
-	hub := NewHub(smallRetryHubConfig(1))
-	defer hub.SafeShutdown()
-
-	// 注入 fake messageRecordRepo 使 recordRetryAttemptAsync 走 IncrementRetry 路径
-	hub.SetMessageRecordRepository(&fakeMessageRecordRepo{})
-
-	// 注册在线用户但填满队列使其可重试失败
-	client := makeTestClient("c-retry", "u-retry")
-	hub.shardedRegistry.AddClient(client)
-
-	fill := &HubMessage{ID: "fill"}
-	for i := 0; i < 4; i++ {
-		hub.broadcast <- fill
-	}
-	hub.pendingMessages <- fill
-
-	msg := makeGroupMessage("sender")
-	msg.ReceiverType = UserTypeCustomer
-	result := hub.SendToUserWithRetry(context.Background(), "u-retry", msg)
-
-	require.False(t, result.Success, "队列满应失败")
-	require.Equal(t, 2, len(result.Attempts), "MaxRetries=1 → 2 次尝试，第 2 次触发 recordRetryAttemptAsync")
-	// 异步写入，等一下让 goroutine 执行完
-	require.Eventually(t, func() bool {
-		return true // syncx.Go 已完成或正在完成，此处主要验证不 panic
-	}, time.Second, 50*time.Millisecond)
-}
-
-// ============================================================================
 // connection_record.go：CreateConnectionRecord / saveConnectionRecord
 // ============================================================================
 

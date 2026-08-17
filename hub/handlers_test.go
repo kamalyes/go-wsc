@@ -71,6 +71,6 @@ func TestGetMessageQueue(t *testing.T) {
 	hub := NewHub(wscconfig.Default())
 	defer hub.SafeShutdown()
 
-	// 初始 pendingMessages 为空
+	// 初始消息队列为空
 	assert.Equal(t, 0, hub.GetMessageQueue())
 }

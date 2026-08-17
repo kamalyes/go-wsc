@@ -104,32 +104,12 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 		return nil
 	}
 	// 用户在本节点或单机模式，正常发送
-	// 尝试发送到broadcast队列
-	select {
-	case h.broadcast <- msgCopy:
-		h.logger.DebugContextKV(ctx, "消息已广播", "message_id", msgCopy.MessageID, "from", msgCopy.Sender, "to", msgCopy.Receiver, "type", msgCopy.MessageType)
-		// 记录消息到数据库 - 创建时已标记为Sending状态
-		h.recordMessageToDatabase(msgCopy, nil)
-		return nil
-	default:
-		// broadcast队列满，尝试放入待发送队列
-		select {
-		case h.pendingMessages <- msgCopy:
-			h.logger.DebugContextKV(ctx, "消息已放入待发送队列", "message_id", msgCopy.MessageID, "from", msgCopy.Sender, "to", msgCopy.Receiver, "type", msgCopy.MessageType)
-			// 记录消息到数据库 - 创建时已标记为Sending状态
-			h.recordMessageToDatabase(msgCopy, nil)
-			return nil
-		default:
-			err := ErrQueueAndPendingFull
-			// 记录消息发送失败日志
-			h.logger.DebugContextKV(ctx, "消息发送失败", "message_id", msgCopy.MessageID, "from", msgCopy.Sender, "to", msgCopy.Receiver, "type", msgCopy.MessageType, "error", err)
-			// 记录失败消息到数据库
-			h.recordMessageToDatabase(msgCopy, err)
-			// 通知队列满处理器
-			h.notifyQueueFull(msgCopy, toUserID, QueueTypeAllQueues, err)
-			return err
-		}
-	}
+	// 直接异步执行 handleBroadcast，不经过 EventLoop channel 串行化
+	go h.handleBroadcast(msgCopy)
+	h.logger.DebugContextKV(ctx, "消息已广播", "message_id", msgCopy.MessageID, "from", msgCopy.Sender, "to", msgCopy.Receiver, "type", msgCopy.MessageType)
+	// 记录消息到数据库 - 创建时已标记为Sending状态
+	h.recordMessageToDatabase(msgCopy, nil)
+	return nil
 }
 
 // ============================================================================
@@ -637,25 +617,6 @@ func (h *Hub) tryStoreOfflineOnDeliveryFailure(msg *HubMessage, deliveryErr erro
 				"delivery_error", deliveryErr.Error(),
 			)
 			return nil
-		})
-}
-
-// notifyQueueFull 通知队列满处理器
-func (h *Hub) notifyQueueFull(msg *HubMessage, recipient string, queueType QueueType, err errorx.BaseError) {
-	if h.queueFullCallback == nil {
-		return
-	}
-
-	syncx.Go().
-		OnPanic(func(r interface{}) {
-			h.logger.ErrorKV("队列满回调panic",
-				"message_id", msg.MessageID,
-				"panic", r,
-				"stack", string(debug.Stack()),
-			)
-		}).
-		Exec(func() {
-			h.queueFullCallback(msg, recipient, queueType, err)
 		})
 }
 

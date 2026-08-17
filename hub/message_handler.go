@@ -24,6 +24,8 @@ import (
 	"context"
 	"encoding/json"
 	"runtime/debug"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -306,33 +308,43 @@ func (h *Hub) normalizeMessageFields(client *Client, msg *HubMessage) {
 // ============================================================================
 
 // checkHeartbeat 检查客户端心跳
-// 使用 ForEachClient 零拷贝遍历 + 原子读时间戳（替代 GetClientsCopy 全量拷贝 + Hub.mutex 误用）
+// 使用 ForEachClientParallel 并行遍历 + 原子读时间戳（百万级连接优化）
 //
-// ⚠️ 死锁防御：ForEachClient 持有 shard 读锁，若在 callback 中直接调用 Unregister，
-// 当 unregister channel 满时会走 default 同步分支 → handleUnregister → RemoveClient → WithShardLock，
+// ⚠️ 死锁防御：ForEachClientParallel 持有 shard 读锁，若在 callback 中直接调用 Unregister，
+// Unregister → go handleUnregister → RemoveClient → WithShardLock，
 // 同一 shard 持读锁等写锁 → 死锁
-// 修复：先收集超时客户端到本地 slice，遍历结束后在锁外统一调用 Unregister
+// 修复：先收集超时客户端到本地 slice（mutex 保护并发 append），遍历结束后在锁外统一调用 Unregister
 func (h *Hub) checkHeartbeat() {
-	now := time.Now()
+	start := time.Now()
+	now := start
 
-	// Phase 1：持读锁收集超时客户端（不调用任何会获取写锁的方法）
+	// 并发数快照（遍历开始时的总连接数）
+	totalClients := h.shardedRegistry.GetClientCount()
+
+	// Phase 1：并行持读锁收集超时客户端（不调用任何会获取写锁的方法）
 	type timeoutClient struct {
 		client     *Client
 		lastActive time.Time
 	}
+	var mu sync.Mutex
 	var timeouts []timeoutClient
+	var scanned int64
 
-	h.shardedRegistry.ForEachClient(func(_ string, client *Client) bool {
+	h.shardedRegistry.ForEachClientParallel(0, func(_ string, client *Client) {
+		atomic.AddInt64(&scanned, 1)
 		// 原子读时间戳（并发安全，无数据竞争）
 		lastActive := mathx.IF(client.ConnectionType == ConnectionTypeSSE, client.GetLastSeen(), client.GetLastHeartbeat())
 
 		// 检查是否超时
 		inactiveDuration := now.Sub(lastActive)
 		if inactiveDuration > h.config.ClientTimeout {
+			mu.Lock()
 			timeouts = append(timeouts, timeoutClient{client: client, lastActive: lastActive})
+			mu.Unlock()
 		}
-		return true
 	})
+
+	traversalDuration := time.Since(start)
 
 	// Phase 2：锁外批量注销（Unregister 内部走 channel 异步或 default 同步均安全）
 	for _, tc := range timeouts {
@@ -352,6 +364,16 @@ func (h *Hub) checkHeartbeat() {
 			h.heartbeatTimeoutCallback(tc.client.ID, tc.client.UserID, tc.lastActive)
 		}
 	}
+
+	totalDuration := time.Since(start)
+	h.logger.InfoKV("❤️ 心跳检查完成",
+		"total_clients", totalClients,
+		"scanned", atomic.LoadInt64(&scanned),
+		"timeouts", len(timeouts),
+		"traversal_duration_ms", traversalDuration.Milliseconds(),
+		"unregister_duration_ms", (totalDuration - traversalDuration).Milliseconds(),
+		"total_duration_ms", totalDuration.Milliseconds(),
+	)
 }
 
 // ============================================================================
@@ -464,6 +486,7 @@ func (h *Hub) handleDirectMessage(ctx context.Context, msg *HubMessage) {
 
 // handleBroadcastMessage 处理广播消息
 func (h *Hub) handleBroadcastMessage(ctx context.Context, msg *HubMessage) {
+	start := time.Now()
 	if h.statsRepo != nil {
 		h.broadcastSentCount.Add(1)
 	}
@@ -474,41 +497,69 @@ func (h *Hub) handleBroadcastMessage(ctx context.Context, msg *HubMessage) {
 		h.logger.ErrorContextKV(ctx, "广播消息序列化失败", "error", err)
 		return
 	}
+	marshalDuration := time.Since(start)
 
 	msgID := mathx.IfNotEmpty(msg.MessageID, msg.ID)
 	dataLen := len(data)
 
+	// 并发数快照
+	totalWSClients := h.shardedRegistry.GetClientCount()
+	totalSSEClients := h.shardedRegistry.GetSSEClientCount()
+
 	// 遍历所有客户端，仅投递路由匹配（namespace+group）的设备
 	// ns1 的广播不会投递给 ns2 的用户，避免跨租户串扰
-	successCount := 0
-	failCount := 0
+	// 使用并行遍历优化百万级连接广播性能（原子计数线程安全）
+	var successCount int32
+	var failCount int32
+	var scanned int64
 
-	h.shardedRegistry.ForEachClientFiltered(msg.Namespace, msg.GroupIDs, func(_ string, client *Client) bool {
+	wsStart := time.Now()
+	h.shardedRegistry.ForEachClientFilteredParallel(0, msg.Namespace, msg.GroupIDs, func(_ string, client *Client) {
+		atomic.AddInt64(&scanned, 1)
 		if client.IsClosed() || client.ConnectionType == ConnectionTypeSSE {
-			return true
+			return
 		}
 		if client.TrySend(data) {
-			successCount++
+			atomic.AddInt32(&successCount, 1)
 			h.trackReceiverMessageStats(client.ID, client.UserType, dataLen)
 		} else {
-			failCount++
+			atomic.AddInt32(&failCount, 1)
 		}
-		return true
 	})
+	wsDuration := time.Since(wsStart)
 
 	// 消息记录状态只更新一次（同一 msgID，无需每客户端都更新）
-	if successCount > 0 {
+	if atomic.LoadInt32(&successCount) > 0 {
 		h.updateMessageStatusAsync(msgID, MessageSendStatusSuccess, "", "")
 	}
 
-	if failCount > 0 {
+	if atomic.LoadInt32(&failCount) > 0 {
 		h.logger.WarnContextKV(ctx, "广播消息：部分客户端发送失败",
-			"success_count", successCount,
-			"fail_count", failCount,
+			"success_count", atomic.LoadInt32(&successCount),
+			"fail_count", atomic.LoadInt32(&failCount),
 			"message_id", msg.MessageID,
 		)
 	}
 
 	// SSE 客户端通过专用通道发送
+	sseStart := time.Now()
 	h.broadcastToSSEClients(msg)
+	sseDuration := time.Since(sseStart)
+
+	totalDuration := time.Since(start)
+	h.logger.DebugContextKV(ctx, "📢 广播消息完成",
+		"message_id", msg.MessageID,
+		"message_type", msg.MessageType,
+		"namespace", msg.Namespace,
+		"data_bytes", dataLen,
+		"total_ws_clients", totalWSClients,
+		"total_sse_clients", totalSSEClients,
+		"scanned", atomic.LoadInt64(&scanned),
+		"ws_success", atomic.LoadInt32(&successCount),
+		"ws_fail", atomic.LoadInt32(&failCount),
+		"marshal_duration_ms", marshalDuration.Milliseconds(),
+		"ws_duration_ms", wsDuration.Milliseconds(),
+		"sse_duration_ms", sseDuration.Milliseconds(),
+		"total_duration_ms", totalDuration.Milliseconds(),
+	)
 }

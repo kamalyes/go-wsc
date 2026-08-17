@@ -34,7 +34,7 @@ func (h *Hub) GetStats() *HubStats {
 		WebSocketClients: totalCount - sseCount, // WS 连接数 = 总连接数 - SSE 连接数
 		SSEClients:       sseCount,
 		AgentConnections: agentCount,
-		QueuedMessages:   len(h.pendingMessages),
+		QueuedMessages:   0,
 		OnlineUsers:      h.GetOnlineUsersCount(),
 		Uptime:           h.GetUptime(),
 	}

@@ -234,7 +234,7 @@ func TestGRPCServer_NotifyObservers_GlobalObserver(t *testing.T) {
 
 // TestGRPCServer_KickUser 验证踢人 RPC 踢掉本节点在线客户端
 //
-// 注：Unregister 经 unregister channel 异步由 EventLoop 处理，故需运行中的 Hub
+// 注：Unregister 异步注销由 EventLoop 处理，故需运行中的 Hub
 // 并用 Eventually 等待注册表移除生效
 func TestGRPCServer_KickUser(t *testing.T) {
 	hub, _, _ := newGRPCClientHub(t, false)
@@ -259,7 +259,7 @@ func TestGRPCServer_KickUser(t *testing.T) {
 	assert.True(t, resp.GetSuccess())
 	assert.GreaterOrEqual(t, resp.GetKickedConnections(), int32(1))
 
-	// 踢出后用户从注册表移除（EventLoop 异步处理 unregister channel）
+	// 踢出后用户从注册表移除（EventLoop 异步处理注销）
 	require.Eventually(t, func() bool {
 		return !hub.HasUserClient("u-kick")
 	}, 2*time.Second, 20*time.Millisecond, "踢出后用户应从注册表移除")

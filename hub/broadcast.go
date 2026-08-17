@@ -64,30 +64,8 @@ func (h *Hub) Broadcast(ctx context.Context, msg *HubMessage) {
 			"message_id", msg.MessageID)
 	}
 
-	// 本地广播
-	select {
-	case h.broadcast <- msg:
-		// 成功放入广播队列
-	default:
-		// broadcast队列满，尝试放入待发送队列
-		h.logger.WarnContextKV(ctx, "广播队列已满，尝试使用待发送队列",
-			"message_id", msg.MessageID,
-			"sender", msg.Sender,
-			"message_type", msg.MessageType,
-		)
-		select {
-		case h.pendingMessages <- msg:
-			// 成功放入待发送队列
-		default:
-			// 两个队列都满，静默丢弃（广播消息不返回错误）
-			h.logger.ErrorContextKV(ctx, "所有队列已满，丢弃广播消息",
-				"message_id", msg.MessageID,
-				"sender", msg.Sender,
-				"message_type", msg.MessageType,
-				"content_length", len(msg.Content),
-			)
-		}
-	}
+	// 本地广播（直接异步执行，不经过 EventLoop channel 串行化）
+	go h.handleBroadcast(msg)
 }
 
 // ============================================================================
@@ -100,6 +78,7 @@ func (h *Hub) Broadcast(ctx context.Context, msg *HubMessage) {
 //   - 不走 SendToUserWithRetry（原方案每客户端 Clone×2 + 在线检查 + 入队 + DB 记录）
 //   - 零拷贝遍历（原方案 GetClientsCopy + FilterSlice 双重拷贝）
 func (h *Hub) broadcastToFiltered(ctx context.Context, condition func(*Client) bool, msg *HubMessage) int {
+	start := time.Now()
 	// 🔏 路由信封同步：从 ctx 恢复路由到 msg 信封（幂等，已有不覆盖）
 	// 覆盖所有上层入口：SendConditional / BroadcastByUserType / BroadcastToRole / BroadcastToClientType / SendToGroup 等
 	// 确保业务 condition + 路由信封匹配 combinedCondition 能正确读 msg 自带路由
@@ -112,10 +91,17 @@ func (h *Hub) broadcastToFiltered(ctx context.Context, condition func(*Client) b
 		h.logger.ErrorContextKV(ctx, "分组广播消息序列化失败", "error", err)
 		return 0
 	}
+	marshalDuration := time.Since(start)
 
 	msgID := mathx.IfNotEmpty(msg.MessageID, msg.ID)
 	dataLen := len(data)
+
+	// 并发数快照
+	totalWSClients := h.shardedRegistry.GetClientCount()
+	totalSSEClients := h.shardedRegistry.GetSSEClientCount()
+
 	var successCount int32
+	var wsScanned, sseScanned int64
 
 	// 组合过滤条件：业务 condition + namespace 隔离（ClientMatchesEnvelope 仅做 namespace 严格匹配，
 	// 不做 msg.GroupIDs vs client.GroupID 系统组匹配——两者维度不同，详见 ClientMatchesEnvelope 注释）
@@ -124,37 +110,56 @@ func (h *Hub) broadcastToFiltered(ctx context.Context, condition func(*Client) b
 		return ClientMatchesEnvelope(c, msg.Namespace, msg.GroupIDs) && condition(c)
 	}
 
-	// WebSocket 客户端：直接 TrySend 预序列化数据
-	h.shardedRegistry.ForEachClient(func(_ string, client *Client) bool {
+	// WebSocket 客户端：直接 TrySend 预序列化数据（并行遍历优化百万级广播）
+	wsStart := time.Now()
+	h.shardedRegistry.ForEachClientParallel(0, func(_ string, client *Client) {
+		atomic.AddInt64(&wsScanned, 1)
 		if client.IsClosed() || client.ConnectionType == ConnectionTypeSSE {
-			return true
+			return
 		}
 		if !combinedCondition(client) {
-			return true
+			return
 		}
 		if client.TrySend(data) {
 			atomic.AddInt32(&successCount, 1)
 			h.trackReceiverMessageStats(client.ID, client.UserType, dataLen)
 		}
-		return true
 	})
+	wsDuration := time.Since(wsStart)
 
-	// SSE 客户端：通过专用通道发送 msg 对象（无需序列化）
-	h.shardedRegistry.ForEachSSEClient(func(_, _ string, client *Client) bool {
+	// SSE 客户端：通过专用通道发送 msg 对象（无需序列化，并行遍历）
+	sseStart := time.Now()
+	h.shardedRegistry.ForEachSSEClientParallel(0, func(_, _ string, client *Client) {
+		atomic.AddInt64(&sseScanned, 1)
 		if client.IsClosed() || !combinedCondition(client) {
-			return true
+			return
 		}
 		if client.TrySendSSE(msg) {
 			atomic.AddInt32(&successCount, 1)
 		}
-		return true
 	})
+	sseDuration := time.Since(sseStart)
 
 	// 消息记录状态只更新一次（同一 msgID）
 	totalSuccess := atomic.LoadInt32(&successCount)
 	if totalSuccess > 0 {
 		h.updateMessageStatusAsync(msgID, MessageSendStatusSuccess, "", "")
 	}
+
+	totalDuration := time.Since(start)
+	h.logger.DebugContextKV(ctx, "📡 分组广播完成",
+		"message_id", msg.MessageID,
+		"data_bytes", dataLen,
+		"total_ws_clients", totalWSClients,
+		"total_sse_clients", totalSSEClients,
+		"ws_scanned", atomic.LoadInt64(&wsScanned),
+		"sse_scanned", atomic.LoadInt64(&sseScanned),
+		"success", totalSuccess,
+		"marshal_duration_ms", marshalDuration.Milliseconds(),
+		"ws_duration_ms", wsDuration.Milliseconds(),
+		"sse_duration_ms", sseDuration.Milliseconds(),
+		"total_duration_ms", totalDuration.Milliseconds(),
+	)
 
 	return int(totalSuccess)
 }

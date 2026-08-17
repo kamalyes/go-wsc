@@ -651,6 +651,90 @@ func (r *ShardedRegistry) ForEachClientFiltered(msgNamespace string, msgGroupIDs
 	})
 }
 
+// ============================================================================
+// 并行遍历（百万级连接优化）
+//
+// 基于 go-toolbox ShardedMap.RangeParallel，直接在 shard 级别并行遍历：
+//   - 将 shards 分配到多个 goroutine，每个 goroutine 独立持有所分配 shard 的读锁
+//   - 不同 goroutine 处理不同 shard，读锁无竞争
+//   - 零额外分配（直接遍历 shards 数组，不需要 Keys() 中间切片）
+//
+// 适用场景：checkHeartbeat、全局广播、批量查询等需要遍历全部连接的热路径
+// 注意：回调 fn 无返回值（始终遍历全部），不支持提前终止
+// ============================================================================
+
+// parallelThreshold 并行遍历启动阈值
+// 低于此用户数时退化为串行遍历，避免 goroutine 创建开销超过并行收益
+// （轻量回调下并行可能慢于串行，阈值保证小规模场景不退化）
+const parallelThreshold = 256
+
+// ForEachClientParallel 并行遍历所有客户端（百万级连接优化）
+// 基于 userShards.RangeParallel 直接在 shard 级别并行遍历，零额外分配
+// fn 在 shard 读锁内执行（并发安全），回调应为非阻塞操作
+// workerNum <= 0 时使用 GOMAXPROCS；用户数低于 parallelThreshold 时退化为串行
+func (r *ShardedRegistry) ForEachClientParallel(workerNum int, fn func(clientID string, client *Client)) {
+	if fn == nil {
+		return
+	}
+	if r.userShards.Len() <= parallelThreshold {
+		r.ForEachClient(func(clientID string, client *Client) bool {
+			fn(clientID, client)
+			return true
+		})
+		return
+	}
+	r.userShards.RangeParallel(workerNum, func(_ string, userClients map[string]*Client) {
+		for clientID, client := range userClients {
+			fn(clientID, client)
+		}
+	})
+}
+
+// ForEachSSEClientParallel 并行遍历所有 SSE 客户端（百万级连接优化）
+// 基于 sseShards.RangeParallel 直接在 shard 级别并行遍历，零额外分配
+// workerNum <= 0 时使用 GOMAXPROCS；用户数低于 parallelThreshold 时退化为串行
+func (r *ShardedRegistry) ForEachSSEClientParallel(workerNum int, fn func(userID, clientID string, client *Client)) {
+	if fn == nil {
+		return
+	}
+	if r.sseShards.Len() <= parallelThreshold {
+		r.ForEachSSEClient(func(userID, clientID string, client *Client) bool {
+			fn(userID, clientID, client)
+			return true
+		})
+		return
+	}
+	r.sseShards.RangeParallel(workerNum, func(userID string, userClients map[string]*Client) {
+		for clientID, client := range userClients {
+			fn(userID, clientID, client)
+		}
+	})
+}
+
+// ForEachClientFilteredParallel 并行遍历所有客户端，仅对匹配路由信封的 client 调用 fn
+// 用于全局广播等场景：ns1 的广播只投递给 ns1 的所有在线设备
+// 基于 userShards.RangeParallel 直接在 shard 级别并行遍历，零额外分配
+// workerNum <= 0 时使用 GOMAXPROCS；用户数低于 parallelThreshold 时退化为串行
+func (r *ShardedRegistry) ForEachClientFilteredParallel(workerNum int, msgNamespace string, msgGroupIDs []string, fn func(clientID string, client *Client)) {
+	if fn == nil {
+		return
+	}
+	if r.userShards.Len() <= parallelThreshold {
+		r.ForEachClientFiltered(msgNamespace, msgGroupIDs, func(clientID string, client *Client) bool {
+			fn(clientID, client)
+			return true
+		})
+		return
+	}
+	r.userShards.RangeParallel(workerNum, func(_ string, userClients map[string]*Client) {
+		for clientID, client := range userClients {
+			if ClientMatchesEnvelope(client, msgNamespace, msgGroupIDs) {
+				fn(clientID, client)
+			}
+		}
+	})
+}
+
 func (r *ShardedRegistry) GetObserversForMessage(namespace string, groupIDs ...string) []*Client {
 	if r.observerShards == nil {
 		return nil

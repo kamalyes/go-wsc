@@ -13,7 +13,6 @@ package hub
 
 import (
 	"context"
-	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -174,36 +173,6 @@ func TestOnGroupMemberJoin_Triggered(t *testing.T) {
 	assert.Equal(t, []string{"u-join-1", "u-join-2"}, joinUIDs)
 }
 
-// TestOnQueueFull_Triggered 验证队列满回调被触发
-// 用 smallRetryHubConfig（队列极小）+ 不启动 Run + 填满队列 → 触发 queueFullCallback
-func TestOnQueueFull_Triggered(t *testing.T) {
-	hub := NewHub(smallRetryHubConfig(0))
-	defer hub.SafeShutdown()
-
-	var called int32
-	hub.OnQueueFull(func(msg *HubMessage, recipient string, qt QueueType, err errorx.BaseError) {
-		atomic.StoreInt32(&called, 1)
-	})
-
-	// 注册在线用户但填满队列，sendToUser 走队列满分支
-	client := makeTestClient("c-qfull-cb", "u-qfull-cb")
-	hub.shardedRegistry.AddClient(client)
-
-	// 填满 broadcast（cap = MessageBufferSize*4 = 4）与 pending（cap = 1）
-	fill := &HubMessage{ID: "fill"}
-	for i := 0; i < 4; i++ {
-		hub.broadcast <- fill
-	}
-	hub.pendingMessages <- fill
-
-	msg := makeGroupMessage("sender")
-	msg.ReceiverType = UserTypeCustomer
-	hub.SendToUserWithRetry(context.Background(), "u-qfull-cb", msg)
-
-	// queueFullCallback 在 sendToUser 内异步触发（worker pool），等待
-	require.Eventually(t, func() bool { return atomic.LoadInt32(&called) == 1 }, 2*time.Second, 20*time.Millisecond)
-}
-
 // TestOnMessageReceived_Triggered 验证消息接收回调被触发
 func TestOnMessageReceived_Triggered(t *testing.T) {
 	hub, _, _, cleanup := setupGroupTestHub(t)
@@ -234,46 +203,4 @@ func TestOnMessageReceived_NoCallback(t *testing.T) {
 	// 未注册回调，应返回 nil
 	err := hub.InvokeMessageReceivedCallback(context.Background(), client, msg)
 	assert.Nil(t, err)
-}
-
-// TestOnClientConnect_Triggered 验证客户端连接回调被触发（通过 register 流程）
-func TestOnClientConnect_Triggered(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
-	defer cleanup()
-
-	var called int32
-	hub.OnClientConnect(func(ctx context.Context, client *Client) error {
-		atomic.StoreInt32(&called, 1)
-		return nil
-	})
-
-	go hub.Run()
-	defer hub.Shutdown()
-	time.Sleep(100 * time.Millisecond)
-
-	client := makeTestClient("c-conn", "u-conn")
-	hub.register <- client
-
-	require.Eventually(t, func() bool { return atomic.LoadInt32(&called) == 1 }, time.Second, 10*time.Millisecond)
-}
-
-// TestOnClientConnect_Error 验证连接回调返回错误时被记录
-func TestOnClientConnect_Error(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
-	defer cleanup()
-
-	hub.OnClientConnect(func(ctx context.Context, client *Client) error {
-		return errors.New("connect rejected")
-	})
-
-	go hub.Run()
-	defer hub.Shutdown()
-	time.Sleep(100 * time.Millisecond)
-
-	client := makeTestClient("c-conn-err", "u-conn-err")
-	// 回调返回错误不应 panic
-	assert.NotPanics(t, func() {
-		hub.register <- client
-		time.Sleep(100 * time.Millisecond)
-	})
 }

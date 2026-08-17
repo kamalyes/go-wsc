@@ -43,7 +43,7 @@ func (h *Hub) GetRateLimiter() *RateLimiter {
 // 消息队列
 // ============================================================================
 
-// GetMessageQueue 获取消息队列长度
+// GetMessageQueue 获取消息队列长度（已废弃，保留接口兼容）
 func (h *Hub) GetMessageQueue() int {
-	return len(h.pendingMessages)
+	return 0
 }

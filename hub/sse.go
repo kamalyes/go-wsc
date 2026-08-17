@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 )
 
@@ -56,8 +57,8 @@ func (h *Hub) RegisterSSE(userID string, w http.ResponseWriter, userType UserTyp
 		SSECloseCh:   make(chan struct{}),
 	}
 
-	// 使用统一的注册通道
-	h.register <- client
+	// 异步注册（与 WS 连接一致，不经过 EventLoop channel）
+	go h.handleRegister(client)
 
 	h.logger.InfoKV("SSE连接已创建",
 		"user_id", userID,
@@ -72,7 +73,7 @@ func (h *Hub) RegisterSSE(userID string, w http.ResponseWriter, userType UserTyp
 func (h *Hub) UnregisterSSE(clientID string) {
 	client, exists := h.shardedRegistry.GetClient(clientID)
 	if exists && client.ConnectionType == ConnectionTypeSSE {
-		h.unregister <- client
+		go h.handleUnregister(client)
 		h.logger.InfoKV("SSE连接已注销",
 			"user_id", client.UserID,
 			"client_id", clientID,
@@ -146,26 +147,41 @@ func (h *Hub) SendToUserViaSSE(userID string, msg *HubMessage) bool {
 }
 
 // broadcastToSSEClients 广播消息到所有SSE客户端（按 namespace 隔离）
-// 通过 shardedRegistry.ForEachSSEClient 分片读锁遍历，无外置锁
-// 🔏 namespace 隔离：与 WebSocket 路径 ForEachClientFiltered 保持一致，
+// 通过 shardedRegistry.ForEachSSEClientParallel 并行分片读锁遍历（百万级优化）
+// 🔏 namespace 隔离：与 WebSocket 路径 ForEachClientFilteredParallel 保持一致，
 // msg.Namespace 非空时仅投递给同 ns 的 SSE 客户端，避免跨租户串扰
 func (h *Hub) broadcastToSSEClients(msg *HubMessage) {
-	h.shardedRegistry.ForEachSSEClient(func(userID, clientID string, client *Client) bool {
+	start := time.Now()
+	totalSSEClients := h.shardedRegistry.GetSSEClientCount()
+
+	var sent, skipped, scanned int64
+	h.shardedRegistry.ForEachSSEClientParallel(0, func(userID, clientID string, client *Client) {
+		atomic.AddInt64(&scanned, 1)
 		if !ClientMatchesEnvelope(client, msg.Namespace, msg.GroupIDs) {
-			return true
+			return
 		}
 		select {
 		case client.SSEMessageCh <- msg:
 			client.SetLastSeen(time.Now())
+			atomic.AddInt64(&sent, 1)
 		default:
-			// 消息通道满，跳过
+			atomic.AddInt64(&skipped, 1)
 			h.logger.WarnKV("SSE客户端消息通道已满，跳过",
 				"user_id", userID,
 				"client_id", clientID,
 			)
 		}
-		return true
 	})
+
+	h.logger.DebugKV("📡 SSE广播完成",
+		"message_id", msg.MessageID,
+		"namespace", msg.Namespace,
+		"total_sse_clients", totalSSEClients,
+		"scanned", atomic.LoadInt64(&scanned),
+		"sent", atomic.LoadInt64(&sent),
+		"skipped", atomic.LoadInt64(&skipped),
+		"duration_ms", time.Since(start).Milliseconds(),
+	)
 }
 
 // ============================================================================

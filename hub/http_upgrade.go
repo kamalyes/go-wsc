@@ -30,20 +30,21 @@ import (
 // ConfigureUpgrader 配置 WebSocket 升级器
 // 根据 Hub 配置创建升级器，支持自定义缓冲区大小和 Origin 检查
 func (h *Hub) ConfigureUpgrader() *websocket.Upgrader {
-	upgrader := &websocket.Upgrader{
-		ReadBufferSize:  h.config.MessageBufferSize,
-		WriteBufferSize: h.config.MessageBufferSize,
-		CheckOrigin: func(r *http.Request) bool {
-			return true // 默认允许所有来源
-		},
-	}
+	h.upgraderOnce.Do(func() {
+		h.upgrader = &websocket.Upgrader{
+			ReadBufferSize:  h.config.MessageBufferSize,
+			WriteBufferSize: h.config.MessageBufferSize,
+			CheckOrigin: func(r *http.Request) bool {
+				return true // 默认允许所有来源
+			},
+		}
 
-	// 自定义 Origin 检查
-	if len(h.config.WebSocketOrigins) > 0 {
-		upgrader.CheckOrigin = h.createOriginChecker()
-	}
-
-	return upgrader
+		// 自定义 Origin 检查
+		if len(h.config.WebSocketOrigins) > 0 {
+			h.upgrader.CheckOrigin = h.createOriginChecker()
+		}
+	})
+	return h.upgrader
 }
 
 // createOriginChecker 创建 Origin 检查器

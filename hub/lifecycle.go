@@ -81,13 +81,6 @@ func (h *Hub) Run() {
 	// 启动指标收集器（如果已配置）
 	close(h.startCh)
 
-	// 启动待发送消息处理goroutine
-	syncx.Go().
-		OnPanic(func(r any) {
-			h.logger.ErrorKV("待发送消息处理器 panic", "panic", r, "stack", string(debug.Stack()), "node_id", h.nodeID)
-		}).
-		Exec(h.processPendingMessages)
-
 	// 🌐 启动分布式服务（如果启用了 PubSub）
 	if h.pubsub != nil {
 		// 节点心跳已由 node_registry.go::NodeRegistry.refreshLoop 接管（gRPC 模式）
@@ -134,12 +127,6 @@ func (h *Hub) Run() {
 	// 使用 EventLoop 管理事件循环
 	// 统一处理客户端注册/注销、消息广播和定时任务
 	syncx.NewEventLoop(h.ctx).
-		// 客户端注册事件：处理新客户端连接
-		OnChannel(h.register, h.handleRegister).
-		// 客户端注销事件：处理客户端断开连接
-		OnChannel(h.unregister, h.handleUnregister).
-		// 广播消息事件：处理需要广播的消息
-		OnChannel(h.broadcast, h.handleBroadcast).
 		// 心跳检查定时器：定期检查客户端心跳，清理超时连接
 		OnTicker(h.config.HeartbeatInterval, h.checkHeartbeat).
 		// 统计计数器定时刷写：将原子计数器累积的统计批量写入 Redis
@@ -520,60 +507,6 @@ func (h *Hub) SafeShutdown() error {
 		cg.GroupEnd()
 		return ErrHubShutdownTimeout
 	}
-}
-
-// processPendingMessages 处理待发送消息队列
-func (h *Hub) processPendingMessages() {
-	h.wg.Add(1)
-	defer h.wg.Done()
-
-	h.logger.InfoKV("待发送消息处理器启动", "node_id", h.nodeID)
-
-	processedCount := 0
-	timeoutCount := 0
-
-	// 使用 EventLoop 统一管理事件循环
-	syncx.NewEventLoop(h.ctx).
-		// 处理待发送消息
-		OnChannel(h.pendingMessages, func(msg *HubMessage) {
-			// 先非阻塞尝试，绝大多数情况下 broadcast 队列不会满
-			select {
-			case h.broadcast <- msg:
-				processedCount++
-				return
-			default:
-			}
-
-			// channel 满，带超时等待（仅在此路径才创建 Timer）
-			timer := time.NewTimer(5 * time.Second)
-			defer timer.Stop()
-
-			select {
-			case h.broadcast <- msg:
-				processedCount++
-			case <-timer.C:
-				timeoutCount++
-				h.logger.WarnKV("待发送消息处理超时",
-					"message_id", msg.MessageID,
-					"sender", msg.Sender,
-					"receiver", msg.Receiver,
-					"message_type", msg.MessageType,
-					"timeout", "5s",
-				)
-			}
-		}).
-		// Panic 保护
-		OnPanic(func(r interface{}) {
-			h.logger.ErrorKV("待发送消息处理器panic", "panic", r, "stack", string(debug.Stack()), "node_id", h.nodeID)
-		}).
-		// 优雅关闭
-		OnShutdown(func() {
-			h.logger.InfoKV("待发送消息处理器关闭",
-				"processed_count", processedCount,
-				"timeout_count", timeoutCount,
-			)
-		}).
-		Run()
 }
 
 // Shutdown 关闭Hub（旧API，兼容性方法）

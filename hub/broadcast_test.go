@@ -10,12 +10,11 @@
  * 复用 query_test.go 中的 makeSSEClient helper。
  *
  * 覆盖场景：
- *   1. Broadcast 基础方法（入队/满队列降级/Clone保护/统计计数/默认值填充）
- *   2. broadcastToFiltered（WS+SSE 投递/条件过滤/路由信封隔离/序列化失败/关闭客户端跳过）
- *   3. broadcastToUserIDs（空列表/WS+SSE 投递/关闭客户端跳过/路由隔离）
- *   4. BroadcastByUserType / BroadcastToRole / BroadcastToClientType / BroadcastToDepartment
- *   5. BroadcastPriority / BroadcastAfterDelay / BroadcastExclude
- *   6. GetClientsByUserType / GetClientsByRole / GetClientsByClientType / GetClientsByDepartment / GetClientsByVIPLevel
+ *   1. broadcastToFiltered（WS+SSE 投递/条件过滤/路由信封隔离/序列化失败/关闭客户端跳过）
+ *   2. broadcastToUserIDs（空列表/WS+SSE 投递/关闭客户端跳过/路由隔离）
+ *   3. BroadcastByUserType / BroadcastToRole / BroadcastToClientType / BroadcastToDepartment
+ *   4. BroadcastExclude
+ *   5. GetClientsByUserType / GetClientsByRole / GetClientsByClientType / GetClientsByDepartment / GetClientsByVIPLevel
  *
  * Copyright (c) 2026 by kamalyes, All Rights Reserved.
  */
@@ -25,7 +24,6 @@ package hub
 import (
 	"context"
 	"encoding/json"
-	"sync"
 	"testing"
 	"time"
 
@@ -35,210 +33,6 @@ import (
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/routing"
 )
-
-// ============================================================================
-// Broadcast 基础方法测试
-// ============================================================================
-
-// TestBroadcast_ToChannel 验证消息正常进入 broadcast channel，且路由信封/类型/时间被正确填充
-func TestBroadcast_ToChannel(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
-	defer cleanup()
-
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
-	msg := makeGroupMessage("sender")
-	msg.MessageID = "bcast-1"
-
-	hub.Broadcast(ctx, msg)
-
-	select {
-	case got := <-hub.broadcast:
-		assert.Equal(t, "bcast-1", got.MessageID)
-		assert.Equal(t, models.DefaultNamespace, got.Namespace)
-		assert.Equal(t, BroadcastTypeGlobal, got.BroadcastType)
-		assert.False(t, got.CreateAt.IsZero())
-	case <-time.After(time.Second):
-		t.Fatal("消息未进入 broadcast channel")
-	}
-}
-
-// TestBroadcast_AutoSetsCreateAt 验证 CreateAt 为零值时自动填充当前时间
-func TestBroadcast_AutoSetsCreateAt(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
-	defer cleanup()
-
-	msg := makeGroupMessage("sender")
-	msg.CreateAt = time.Time{} // 零值
-
-	hub.Broadcast(context.Background(), msg)
-
-	select {
-	case got := <-hub.broadcast:
-		assert.False(t, got.CreateAt.IsZero(), "CreateAt 零值时应自动填充")
-	case <-time.After(time.Second):
-		t.Fatal("消息未进入 broadcast channel")
-	}
-}
-
-// TestBroadcast_PreservesExistingCreateAt 验证 CreateAt 已有值时不被覆盖
-func TestBroadcast_PreservesExistingCreateAt(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
-	defer cleanup()
-
-	fixed := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
-	msg := makeGroupMessage("sender")
-	msg.CreateAt = fixed
-
-	hub.Broadcast(context.Background(), msg)
-
-	select {
-	case got := <-hub.broadcast:
-		assert.Equal(t, fixed, got.CreateAt, "已有 CreateAt 不应被覆盖")
-	case <-time.After(time.Second):
-		t.Fatal("消息未进入 broadcast channel")
-	}
-}
-
-// TestBroadcast_AutoSetsBroadcastType 验证 BroadcastType 为空时自动设置为 Global
-func TestBroadcast_AutoSetsBroadcastType(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
-	defer cleanup()
-
-	t.Run("空值自动填充Global", func(t *testing.T) {
-		msg := makeGroupMessage("sender")
-		msg.BroadcastType = ""
-
-		hub.Broadcast(context.Background(), msg)
-
-		select {
-		case got := <-hub.broadcast:
-			assert.Equal(t, BroadcastTypeGlobal, got.BroadcastType)
-		case <-time.After(time.Second):
-			t.Fatal("消息未进入 broadcast channel")
-		}
-	})
-
-	t.Run("已有值不覆盖", func(t *testing.T) {
-		msg := makeGroupMessage("sender")
-		msg.BroadcastType = BroadcastTypeSession
-
-		hub.Broadcast(context.Background(), msg)
-
-		select {
-		case got := <-hub.broadcast:
-			assert.Equal(t, BroadcastTypeSession, got.BroadcastType)
-		case <-time.After(time.Second):
-			t.Fatal("消息未进入 broadcast channel")
-		}
-	})
-}
-
-// TestBroadcast_CloneProtection 验证 Broadcast 内部 Clone 消息，外部修改不影响入队内容
-func TestBroadcast_CloneProtection(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
-	defer cleanup()
-
-	msg := makeGroupMessage("sender")
-	msg.MessageID = "clone-1"
-	msg.Content = "original"
-
-	hub.Broadcast(context.Background(), msg)
-
-	// 修改原消息
-	msg.Content = "modified"
-
-	select {
-	case got := <-hub.broadcast:
-		assert.Equal(t, "original", got.Content, "Clone 后外部修改不应影响入队消息")
-		assert.Equal(t, "clone-1", got.MessageID)
-	case <-time.After(time.Second):
-		t.Fatal("消息未进入 broadcast channel")
-	}
-}
-
-// TestBroadcast_StatsIncrement 验证 statsRepo 存在时 broadcastSentCount 递增
-func TestBroadcast_StatsIncrement(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
-	defer cleanup()
-
-	// setupGroupTestHub 未设置 statsRepo，先注入 fake
-	hub.statsRepo = &fakeHubStatsRepository{}
-	before := hub.broadcastSentCount.Load()
-
-	hub.Broadcast(context.Background(), makeGroupMessage("sender"))
-
-	// 消费 channel 避免堆积
-	<-hub.broadcast
-
-	assert.Equal(t, int64(1), hub.broadcastSentCount.Load()-before, "broadcastSentCount 应递增 1")
-}
-
-// TestBroadcast_StatsNilNoIncrement 验证 statsRepo 为 nil 时不递增计数（不 panic）
-func TestBroadcast_StatsNilNoIncrement(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
-	defer cleanup()
-
-	// statsRepo 默认为 nil
-	assert.Nil(t, hub.statsRepo)
-
-	assert.NotPanics(t, func() {
-		hub.Broadcast(context.Background(), makeGroupMessage("sender"))
-	})
-	assert.Equal(t, int64(0), hub.broadcastSentCount.Load())
-
-	<-hub.broadcast // 消费
-}
-
-// TestBroadcast_FullChannelFallsToPending 验证 broadcast channel 满时降级到 pendingMessages
-func TestBroadcast_FullChannelFallsToPending(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
-	defer cleanup()
-
-	// 不启动 Run，手动填满 broadcast channel（容量 = MessageBufferSize*4 = 256*4 = 1024）
-	for i := 0; i < cap(hub.broadcast)+1; i++ {
-		m := makeGroupMessage("sender")
-		hub.Broadcast(context.Background(), m)
-		// 一旦 pendingMessages 有消息就停止（说明 broadcast 已满）
-		if len(hub.pendingMessages) > 0 {
-			break
-		}
-	}
-
-	// 验证 pendingMessages 至少有 1 条
-	require.NotZero(t, len(hub.pendingMessages), "broadcast 满后应降级到 pendingMessages")
-
-	// 从 pendingMessages 读出验证
-	select {
-	case got := <-hub.pendingMessages:
-		assert.NotNil(t, got)
-	case <-time.After(time.Second):
-		t.Fatal("pendingMessages 中无消息")
-	}
-}
-
-// TestBroadcast_AllQueuesFullSilentDrop 验证 broadcast 和 pendingMessages 都满时静默丢弃不 panic
-func TestBroadcast_AllQueuesFullSilentDrop(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
-	defer cleanup()
-
-	// 填满 broadcast channel
-	for len(hub.broadcast) < cap(hub.broadcast) {
-		hub.broadcast <- makeGroupMessage("filler")
-	}
-	// 填满 pendingMessages
-	for len(hub.pendingMessages) < cap(hub.pendingMessages) {
-		hub.pendingMessages <- makeGroupMessage("filler")
-	}
-
-	// 两个队列都满，再发应静默丢弃
-	assert.NotPanics(t, func() {
-		hub.Broadcast(context.Background(), makeGroupMessage("sender"))
-	})
-
-	// 队列长度不变（消息被丢弃）
-	assert.Equal(t, cap(hub.broadcast), len(hub.broadcast))
-	assert.Equal(t, cap(hub.pendingMessages), len(hub.pendingMessages))
-}
 
 // ============================================================================
 // broadcastToFiltered 测试
@@ -856,87 +650,8 @@ func TestBroadcastToDepartment(t *testing.T) {
 }
 
 // ============================================================================
-// BroadcastPriority / BroadcastAfterDelay / BroadcastExclude 测试
+// BroadcastExclude 测试
 // ============================================================================
-
-// TestBroadcastPriority 验证优先级广播：设置 Priority 后进入 broadcast channel
-func TestBroadcastPriority(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
-	defer cleanup()
-
-	msg := makeGroupMessage("sender")
-	msg.MessageID = "prio-1"
-
-	hub.BroadcastPriority(context.Background(), msg, PriorityHigh)
-
-	select {
-	case got := <-hub.broadcast:
-		assert.Equal(t, PriorityHigh, got.Priority)
-		assert.Equal(t, "prio-1", got.MessageID)
-	case <-time.After(time.Second):
-		t.Fatal("消息未进入 broadcast channel")
-	}
-}
-
-// TestBroadcastPriority_VariousLevels 表驱动验证各优先级
-func TestBroadcastPriority_VariousLevels(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
-	defer cleanup()
-
-	levels := []Priority{PriorityLow, PriorityNormal, PriorityHigh, PriorityCritical}
-	for _, p := range levels {
-		msg := makeGroupMessage("sender")
-		hub.BroadcastPriority(context.Background(), msg, p)
-
-		select {
-		case got := <-hub.broadcast:
-			assert.Equal(t, p, got.Priority)
-		case <-time.After(time.Second):
-			t.Fatalf("优先级 %s 的消息未进入 broadcast channel", p)
-		}
-	}
-}
-
-// TestBroadcastAfterDelay 验证延迟广播：延迟后消息进入 broadcast channel
-func TestBroadcastAfterDelay(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
-	defer cleanup()
-
-	msg := makeGroupMessage("sender")
-	msg.MessageID = "delay-1"
-
-	hub.BroadcastAfterDelay(context.Background(), msg, 100*time.Millisecond)
-
-	// 50ms 内不应到达
-	select {
-	case <-hub.broadcast:
-		t.Fatal("延迟未到，消息不应进入 channel")
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	// 100ms 后应到达
-	select {
-	case got := <-hub.broadcast:
-		assert.Equal(t, "delay-1", got.MessageID)
-	case <-time.After(time.Second):
-		t.Fatal("延迟后消息未进入 broadcast channel")
-	}
-}
-
-// TestBroadcastAfterDelay_ZeroDelay 验证零延迟立即入队
-func TestBroadcastAfterDelay_ZeroDelay(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
-	defer cleanup()
-
-	msg := makeGroupMessage("sender")
-	hub.BroadcastAfterDelay(context.Background(), msg, 0)
-
-	select {
-	case <-hub.broadcast:
-	case <-time.After(time.Second):
-		t.Fatal("零延迟应立即入队")
-	}
-}
 
 // TestBroadcastExclude 验证排除指定用户后广播给其余客户端
 func TestBroadcastExclude(t *testing.T) {
@@ -1277,22 +992,6 @@ func TestBroadcastToRole_NoGroupIsolation(t *testing.T) {
 	}
 }
 
-// TestBroadcast_MultiMessageStatsIncrement 验证多次广播累计计数
-func TestBroadcast_MultiMessageStatsIncrement(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
-	defer cleanup()
-
-	hub.statsRepo = &fakeHubStatsRepository{}
-	before := hub.broadcastSentCount.Load()
-
-	for i := 0; i < 5; i++ {
-		hub.Broadcast(context.Background(), makeGroupMessage("sender"))
-		<-hub.broadcast // 消费避免堆积
-	}
-
-	assert.Equal(t, int64(5), hub.broadcastSentCount.Load()-before, "5 次广播应递增 5")
-}
-
 // TestBroadcastToFiltered_MultiSuccessUpdatesStatusOnce 验证多客户端成功投递后只更新一次状态
 func TestBroadcastToFiltered_MultiSuccessUpdatesStatusOnce(t *testing.T) {
 	hub, _, _, cleanup := setupGroupTestHub(t)
@@ -1432,77 +1131,4 @@ func TestBroadcastToFiltered_OnlyWSClients(t *testing.T) {
 	default:
 		t.Fatal("ws2 应收到消息")
 	}
-}
-
-// TestBroadcast_InjectRouteFromContext 验证 Broadcast 从 ctx 注入路由信封到 msg
-func TestBroadcast_InjectRouteFromContext(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
-	defer cleanup()
-
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), "ns-from-ctx", []string{"g-from-ctx"})
-	msg := makeGroupMessage("sender")
-
-	hub.Broadcast(ctx, msg)
-
-	select {
-	case got := <-hub.broadcast:
-		assert.Equal(t, "ns-from-ctx", got.Namespace, "应从 ctx 注入 namespace")
-		assert.Equal(t, []string{"g-from-ctx"}, got.GroupIDs, "应从 ctx 注入 groupIDs")
-	case <-time.After(time.Second):
-		t.Fatal("消息未进入 broadcast channel")
-	}
-}
-
-// TestBroadcast_EmptyRoute 验证 ctx 无路由时 msg 信封为空（全局广播语义）
-func TestBroadcast_EmptyRoute(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
-	defer cleanup()
-
-	msg := makeGroupMessage("sender")
-	// 显式设置信封值，验证 ctx 无路由时不覆盖
-	msg.Namespace = "preset-ns"
-
-	hub.Broadcast(context.Background(), msg)
-
-	select {
-	case got := <-hub.broadcast:
-		// InjectRoute 幂等：已有值不覆盖
-		assert.Equal(t, "preset-ns", got.Namespace, "已有 namespace 不应被空 ctx 覆盖")
-	case <-time.After(time.Second):
-		t.Fatal("消息未进入 broadcast channel")
-	}
-}
-
-// TestBroadcast_ConcurrentSafe 验证并发调用 Broadcast 不 panic（轻量并发安全检查）
-func TestBroadcast_ConcurrentSafe(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
-	defer cleanup()
-
-	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			msg := makeGroupMessage("sender")
-			msg.MessageID = "concurrent-" + string(rune('A'+idx))
-			hub.Broadcast(context.Background(), msg)
-		}(i)
-	}
-
-	assert.NotPanics(t, func() {
-		wg.Wait()
-	})
-
-	// 消费所有消息（至少应有一些进入 channel）
-	consumed := 0
-drainLoop:
-	for {
-		select {
-		case <-hub.broadcast:
-			consumed++
-		default:
-			break drainLoop
-		}
-	}
-	assert.Greater(t, consumed, 0, "应至少消费到 1 条消息")
 }

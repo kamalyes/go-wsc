@@ -31,24 +31,20 @@ import (
 // ============================================================================
 
 // Register 注册客户端
+// 直接异步执行 handleRegister，不经过 EventLoop channel 串行化
+// handleRegister 内部已用 shardedRegistry 分片锁保护临界区，IO 操作通过 workerPool 异步化
+// 避免单 goroutine EventLoop 成为并发连接的 QPS 瓶颈
 func (h *Hub) Register(client *Client) {
 	h.logger.DebugKV("客户端注册请求", "client_id", client.ID, "user_id", client.UserID)
-	h.register <- client
+	go h.handleRegister(client)
 }
 
 // Unregister 注销客户端
+// 直接异步执行 handleUnregister，不经过 EventLoop channel 串行化
+// handleUnregister 内部已用 shardedRegistry 分片锁保护临界区，IO 操作通过 workerPool 异步化
 func (h *Hub) Unregister(client *Client) {
 	h.logger.DebugKV("客户端注销请求", "client_id", client.ID, "user_id", client.UserID)
-	select {
-	case h.unregister <- client:
-		// 成功放入注销队列，由 EventLoop 异步处理
-	default:
-		// 注销队列已满（大量并发断开），降级为同步处理
-		// 避免读 goroutine 的 defer 阻塞在 channel 发送上导致泄漏
-		h.logger.WarnKV("注销队列已满，同步处理客户端注销",
-			"client_id", client.ID, "user_id", client.UserID)
-		h.handleUnregister(client)
-	}
+	go h.handleUnregister(client)
 }
 
 // handleRegister 处理客户端注册（内部方法）

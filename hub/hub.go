@@ -402,6 +402,9 @@ type Hub struct {
 	// 消息统计原子计数器（替代每次消息创建 goroutine 更新 Redis）
 	msgSentCount       atomic.Int64
 	broadcastSentCount atomic.Int64
+	// 跨 Pod 广播兜底触发次数（routeToClusterForOfflineUser 触发时 +1）
+	// reportPerformanceMetrics 每 5min 上报后清零，用于监控"索引滞后"是否消除（治本后应趋近 0）
+	broadcastFallbackCount atomic.Int64
 
 	welcomeProvider WelcomeMessageProvider
 	logger          WSCLogger

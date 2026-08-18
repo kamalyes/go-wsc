@@ -44,6 +44,9 @@ func (h *Hub) routeToClusterForOfflineUser(ctx context.Context, userID string, m
 	if h.pubsub == nil && !h.IsGRPCEnabled() {
 		return // 单机模式，无需跨节点
 	}
+	// 📊 广播兜底触发计数（reportPerformanceMetrics 每 5min 上报后清零）
+	// 治本后该值应趋近 0；若持续增长说明索引写入仍有滞后（检查 syncOnlineStatus 是否同步执行、Redis 可达性）
+	h.broadcastFallbackCount.Add(1)
 	opts := ClusterDispatchOptions{
 		Operation:    OperationTypeSendMessage,
 		TargetUserID: userID,
@@ -55,6 +58,7 @@ func (h *Hub) routeToClusterForOfflineUser(ctx context.Context, userID string, m
 		"node_id", h.nodeID,
 		"grpc_enabled", h.IsGRPCEnabled(),
 		"has_pubsub", h.pubsub != nil,
+		"trigger_reason", "local_miss+redis_miss",
 	)
 	if err := h.routeToCluster(ctx, msg, opts); err != nil {
 		h.logger.WarnContextKV(ctx, "离线用户跨节点广播失败",
@@ -696,10 +700,11 @@ func (h *Hub) sendToClient(ctx context.Context, client *Client, msg *HubMessage)
 // sendToClientSerialized 发送消息到客户端（支持预序列化数据）
 // preSerialized 为预序列化的 []byte，为 nil 时内部序列化
 // SSE 客户端忽略 preSerialized，直接发送 msg 对象
-func (h *Hub) sendToClientSerialized(ctx context.Context, client *Client, msg *HubMessage, preSerialized []byte) {
+// 返回是否成功投递到客户端通道（跨节点 PubSub 路径据此统计投递成败）
+func (h *Hub) sendToClientSerialized(ctx context.Context, client *Client, msg *HubMessage, preSerialized []byte) bool {
 	// 检查客户端是否已关闭
 	if client.IsClosed() {
-		return
+		return false
 	}
 
 	// 🔥 如果 MessageID 为空，使用 HubID
@@ -712,15 +717,15 @@ func (h *Hub) sendToClientSerialized(ctx context.Context, client *Client, msg *H
 			h.logger.DebugContextKV(ctx, "SSE消息发送", "message_id", msg.MessageID, "client_id", client.ID, "user_id", client.UserID)
 			// SSE消息成功发送，更新为成功状态
 			h.updateMessageStatusAsync(msgID, MessageSendStatusSuccess, "", "")
-		} else {
-			sseErr := fmt.Errorf("SSE channel full or closed")
-			h.logger.WarnContextKV(ctx, "SSE客户端消息通道已满或已关闭", "client_id", client.ID, "user_id", client.UserID)
-			// SSE通道已满或已关闭，更新为失败状态
-			h.updateMessageStatusAsync(msgID, MessageSendStatusFailed, FailureReasonQueueFull, sseErr.Error())
-			// 🔥 在线投递失败 → 异步转存离线（P2P 场景，避免循环）
-			h.tryStoreOfflineOnDeliveryFailure(msg, sseErr)
+			return true
 		}
-		return
+		sseErr := fmt.Errorf("SSE channel full or closed")
+		h.logger.WarnContextKV(ctx, "SSE客户端消息通道已满或已关闭", "client_id", client.ID, "user_id", client.UserID)
+		// SSE通道已满或已关闭，更新为失败状态
+		h.updateMessageStatusAsync(msgID, MessageSendStatusFailed, FailureReasonQueueFull, sseErr.Error())
+		// 🔥 在线投递失败 → 异步转存离线（P2P 场景，避免循环）
+		h.tryStoreOfflineOnDeliveryFailure(msg, sseErr)
+		return false
 	}
 
 	// WebSocket 客户端：使用预序列化数据或现场序列化
@@ -735,7 +740,7 @@ func (h *Hub) sendToClientSerialized(ctx context.Context, client *Client, msg *H
 			// 更新为失败状态
 			h.updateMessageStatusAsync(msgID, MessageSendStatusFailed, FailureReasonUnknown, err.Error())
 			// 序列化失败无法转存离线（msg 无法被存储），只标记 Failed
-			return
+			return false
 		}
 	}
 
@@ -745,14 +750,16 @@ func (h *Hub) sendToClientSerialized(ctx context.Context, client *Client, msg *H
 
 		// 更新接收者的消息统计和字节统计
 		h.trackReceiverMessageStats(client.ID, client.UserType, len(data))
-	} else {
-		queueErr := fmt.Errorf("client send channel full or closed")
-		h.logger.WarnContextKV(ctx, "客户端发送通道已满或已关闭", "client_id", client.ID)
-		// 发送通道已满或已关闭，更新为失败状态
-		h.updateMessageStatusAsync(msgID, MessageSendStatusFailed, FailureReasonQueueFull, queueErr.Error())
-		// 🔥 在线投递失败 → 异步转存离线（P2P 场景，避免循环）
-		h.tryStoreOfflineOnDeliveryFailure(msg, queueErr)
+		return true
 	}
+
+	queueErr := fmt.Errorf("client send channel full or closed")
+	h.logger.WarnContextKV(ctx, "客户端发送通道已满或已关闭", "client_id", client.ID)
+	// 发送通道已满或已关闭，更新为失败状态
+	h.updateMessageStatusAsync(msgID, MessageSendStatusFailed, FailureReasonQueueFull, queueErr.Error())
+	// 🔥 在线投递失败 → 异步转存离线（P2P 场景，避免循环）
+	h.tryStoreOfflineOnDeliveryFailure(msg, queueErr)
+	return false
 }
 
 // syncToSenderDevices 同步消息给发送者的其他设备（多端同步）

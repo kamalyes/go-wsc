@@ -93,10 +93,11 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMe
 
 	// 4. 统一跨节点路由：gRPC 直连优先，PubSub 兜底（由 routeToCluster 集中决策）
 	opts := ClusterDispatchOptions{
-		Operation:    OperationTypeSendMessage,
-		Namespace:    "", // namespace 由 routeToCluster 从 msg 信封提取（msg.Namespace），此处留空不覆盖
-		TargetNodeID: "", // 点对点消息让 routeToCluster 自动发现目标节点
-		TargetUserID: userID,
+		Operation:     OperationTypeSendMessage,
+		Namespace:     "", // namespace 由 routeToCluster 从 msg 信封提取（msg.Namespace），此处留空不覆盖
+		TargetNodeID:  "", // 不再依赖单节点精确路由（老路径：nodeRegistry 自动发现，gRPC 未启用时会落空）
+		TargetNodeIDs: otherNodes, // 已知目标节点列表，传给 routeToCluster：gRPC 未启用时优先定向 PubSub 而非广播频道
+		TargetUserID:  userID,
 	}
 	if err := h.routeToCluster(ctx, msg, opts); err != nil {
 		// 路由失败，返回 false 让上层 fallback 到本地发送
@@ -284,16 +285,14 @@ func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *Distrib
 	// ⚠️ 必须按 namespace 过滤：同一 userID 可能跨 namespace 多端登录（如 ns1 客服 + ns2 用户），
 	//    不过滤会导致跨租户消息泄露。与本地 P2P 路径 handleDirectMessage 保持一致。
 	// distMsg.Namespace 来自发送端 msg 信封（routeToCluster 从 msg.Namespace 提取），为空时退化为不隔离（兼容旧节点）
+	//
+	// 复用 sendToClientSerialized（与本地/gRPC 路径对齐）：
+	// 统一状态回报（Success/Failed → wsc_message_send_records）、接收者统计、失败转存离线、SSE 客户端支持。
+	// 🔥 历史遗漏：此前裸调 client.TrySend，跨节点消息状态永远停留 sending，且 SSE 客户端收不到跨节点消息
 	successCount := 0
 	h.shardedRegistry.ForEachUserClientFiltered(distMsg.TargetID, distMsg.Namespace, nil, func(_ string, client *Client) bool {
-		if client.TrySend(msgData) {
+		if h.sendToClientSerialized(ctx, client, distMsg.Message, msgData) {
 			successCount++
-		} else {
-			h.logger.WarnContextKV(ctx, "跨节点消息发送失败：发送缓冲区满或已关闭",
-				"client_id", client.ID,
-				"user_id", distMsg.TargetID,
-				"message_id", distMsg.Message.MessageID,
-			)
 		}
 
 		// 检查上下文是否取消

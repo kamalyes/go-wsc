@@ -195,6 +195,7 @@ func (h *Hub) reportPerformanceMetrics() {
 		"已发送消息数":  stats.MessagesSent,
 		"已广播消息数":  stats.BroadcastsSent,
 		"运行时长(秒)": stats.Uptime,
+		"广播兜底触发数": h.broadcastFallbackCount.Swap(0), // 本周期 routeToClusterForOfflineUser 触发次数，治本后应趋近 0
 	}
 	cg.Table(messageStats)
 
@@ -219,7 +220,14 @@ func (h *Hub) processHeartbeatRedisUpdates() {
 
 	// 按 clientID 去重收集客户端（同一客户端多次心跳只保留最新指针）
 	batch := make(map[string]*Client, 256)
-	ticker := time.NewTicker(2 * time.Second)
+	// 心跳批量重建在线索引的 flush 间隔：从 OnlineStatus.HeartbeatRefreshInterval 读取（默认 2s）
+	// 可配置以应对不同负载场景（高并发可调小到 500ms 缩短索引重建窗口；该间隔仅影响兜底重建，
+	// 首次注册的索引写入由 handleRegister 的 syncOnlineStatus 同步完成，不依赖此 ticker）
+	heartbeatRefreshInterval := 2 * time.Second
+	if h.config != nil && h.config.RedisRepository != nil && h.config.RedisRepository.OnlineStatus != nil {
+		heartbeatRefreshInterval = mathx.IfNotZero(h.config.RedisRepository.OnlineStatus.HeartbeatRefreshInterval, 2*time.Second)
+	}
+	ticker := time.NewTicker(heartbeatRefreshInterval)
 	defer ticker.Stop()
 
 	flush := func() {

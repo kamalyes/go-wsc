@@ -1151,6 +1151,128 @@ func TestHandleDistributedSendMessage_AllClientsUnavailable(t *testing.T) {
 }
 
 // ============================================================================
+// handleDistributedSendMessage 复用 sendToClientSerialized 后的行为对齐测试
+// 修复前：裸 client.TrySend 无状态回报，跨节点消息状态永远停留 sending，且 SSE 客户端收不到消息
+// ============================================================================
+
+// hasBatchUpdate 判断 fake repo 是否已收到指定 messageID + status 的批量状态更新
+func hasBatchUpdate(repo *fakeMessageRecordRepo, msgID string, status MessageSendStatus) bool {
+	repo.batchUpdateMu.Lock()
+	defer repo.batchUpdateMu.Unlock()
+	for _, call := range repo.batchUpdateCalls {
+		if call.Status != status {
+			continue
+		}
+		for _, id := range call.IDs {
+			if id == msgID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// TestHandleDistributedSendMessage_ReportsStatusSuccess 跨节点 PubSub 投递成功应异步回报 Success 状态
+// 回归场景：源节点 routed=true 后不再更新状态，目标节点是唯一的 Status 报告者
+func TestHandleDistributedSendMessage_ReportsStatusSuccess(t *testing.T) {
+	t.Parallel()
+	hub := newMinHub()
+	defer hub.Shutdown()
+
+	repo := &fakeMessageRecordRepo{}
+	hub.SetMessageRecordRepository(repo)
+
+	client := makeTestClient("c-x-node-ok", "u-x-node-ok", "ns-x")
+	hub.shardedRegistry.AddClient(client)
+
+	msg := makeGroupMessage("sender")
+	msg.MessageID = "m-x-node-success"
+	msg.Namespace = "ns-x"
+	distMsg := makeDistributedMessage(OperationTypeSendMessage, "other-node", msg)
+	distMsg.TargetID = "u-x-node-ok"
+	distMsg.Namespace = "ns-x"
+
+	err := hub.handleDistributedSendMessage(context.Background(), distMsg)
+	require.NoError(t, err)
+
+	// 状态更新经 statusUpdater 批量异步落盘
+	require.Eventually(t, func() bool {
+		return hasBatchUpdate(repo, "m-x-node-success", MessageSendStatusSuccess)
+	}, 2*time.Second, 10*time.Millisecond, "跨节点投递成功应回报 Success 状态")
+}
+
+// TestHandleDistributedSendMessage_ChannelFullReportsFailedAndStoresOffline
+// 跨节点投递失败应回报 Failed 状态并异步转存离线（与本地路径行为对齐，消息不丢）
+func TestHandleDistributedSendMessage_ChannelFullReportsFailedAndStoresOffline(t *testing.T) {
+	t.Parallel()
+	hub := newMinHub()
+	defer hub.Shutdown()
+
+	repo := &fakeMessageRecordRepo{}
+	hub.SetMessageRecordRepository(repo)
+	offline := newAckFakeOfflineHandler()
+	hub.SetOfflineMessageHandler(offline)
+
+	client := makeTestClient("c-x-node-full", "u-x-node-full", "ns-y")
+	client.SendChan = make(chan []byte, 1)
+	client.SendChan <- []byte("filler") // 填满缓冲区
+	hub.shardedRegistry.AddClient(client)
+
+	msg := makeGroupMessage("sender")
+	msg.MessageID = "m-x-node-failed"
+	msg.Receiver = "u-x-node-full" // 转存离线触发条件：Receiver 非空
+	msg.Namespace = "ns-y"
+	distMsg := makeDistributedMessage(OperationTypeSendMessage, "other-node", msg)
+	distMsg.TargetID = "u-x-node-full"
+	distMsg.Namespace = "ns-y"
+
+	err := hub.handleDistributedSendMessage(context.Background(), distMsg)
+	assert.Error(t, err, "所有客户端投递失败应返回错误")
+
+	// Failed 状态异步落盘
+	require.Eventually(t, func() bool {
+		return hasBatchUpdate(repo, "m-x-node-failed", MessageSendStatusFailed)
+	}, 2*time.Second, 10*time.Millisecond, "跨节点投递失败应回报 Failed 状态")
+
+	// 在线投递失败 → 异步转存离线（消息不丢，用户上线时推送）
+	require.Eventually(t, func() bool {
+		return offline.getStoreCalled() > 0
+	}, 2*time.Second, 10*time.Millisecond, "投递失败应转存离线队列")
+}
+
+// TestHandleDistributedSendMessage_SSEClientReceivesMessage
+// 修复前裸 client.TrySend([]byte) 对 SSE 客户端必然失败（SSE 走 *HubMessage 专用通道），
+// 复用 sendToClientSerialized 后 SSE 客户端可收到跨节点消息
+func TestHandleDistributedSendMessage_SSEClientReceivesMessage(t *testing.T) {
+	t.Parallel()
+	hub := newMinHub()
+	defer hub.Shutdown()
+
+	client := makeTestClient("c-x-node-sse", "u-x-node-sse", "ns-sse")
+	client.ConnectionType = ConnectionTypeSSE
+	client.WithSSEChannels(make(chan *HubMessage, 1), make(chan struct{}))
+	hub.shardedRegistry.AddClient(client)
+
+	msg := makeGroupMessage("sender")
+	msg.MessageID = "m-x-node-sse"
+	msg.Namespace = "ns-sse"
+	distMsg := makeDistributedMessage(OperationTypeSendMessage, "other-node", msg)
+	distMsg.TargetID = "u-x-node-sse"
+	distMsg.Namespace = "ns-sse"
+
+	err := hub.handleDistributedSendMessage(context.Background(), distMsg)
+	require.NoError(t, err, "SSE 客户端应投递成功")
+
+	select {
+	case received := <-client.SSEMessageCh:
+		require.NotNil(t, received)
+		assert.Equal(t, "m-x-node-sse", received.MessageID, "SSE 客户端应收到跨节点消息")
+	case <-time.After(1 * time.Second):
+		t.Fatal("超时：SSE 客户端未收到跨节点消息")
+	}
+}
+
+// ============================================================================
 // handleDistributedKickUser
 // ============================================================================
 

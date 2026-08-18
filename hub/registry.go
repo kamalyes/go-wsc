@@ -158,11 +158,20 @@ func (h *Hub) handleRegister(client *Client) {
 		}
 	})
 
-	// 系统组加入 + 成员组加入 + 在线状态同步 + 离线消息推送（提交到分布式池）
+	// 🔑 同步写 Redis 在线索引：注册完成的瞬间让其他节点 checkUserOnline 直查 Redis 可见
+	// 原异步路径（TrySubmitDistributed）在 DistributedPool 队列积压时索引写入滞后，
+	// 期间其他节点 checkUserOnline 返回 false → 触发 routeToClusterForOfflineUser 广播兜底
+	// 同步调用仅阻塞本 handleRegister goroutine ~1ms（一次 Redis Pipeline 往返），
+	// handleRegister 由 go h.handleRegister(client) 异步触发（registry.go:39），不阻塞 EventLoop、不影响其他连接
+	// syncOnlineStatus 内部 onlineStatusRepo==nil 时早返回；SetClientOnline 失败仅记日志不 return，行为与原异步路径一致
+	h.syncOnlineStatus(client)
+
+	// 系统组加入 + 成员组加入 + 离线消息推送（提交到分布式池，均不依赖在线状态索引）
+	// joinSystemGroupsOnConnect/joinMemberGroupOnConnect 写 group ZSET（wsc:group:* 命名空间）
+	// pushOfflineMessagesOnConnect 操作离线消息队列（ns::userID），依赖本地 shardedRegistry（L122 已完成）
 	h.workerPool.TrySubmitDistributed(func() {
 		h.joinSystemGroupsOnConnect(ctx, client)
 		h.joinMemberGroupOnConnect(ctx, client)
-		h.syncOnlineStatus(client)
 		h.pushOfflineMessagesOnConnect(client)
 	})
 

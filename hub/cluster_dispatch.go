@@ -24,6 +24,7 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -47,6 +48,7 @@ type ClusterDispatchOptions struct {
 	Operation     ClusterOperation // 操作类型（SendMessage/GroupsBroadcast/Broadcast/ObserverNotify/KickUser）
 	Namespace     string           // 命名空间ID（空="default"；Broadcast 时空表示全命名空间）
 	TargetNodeID  string           // 目标节点ID（精确路由，空=所有已知节点广播）
+	TargetNodeIDs []string         // 已知目标节点列表（P2P 跨节点路由用，gRPC 未启用时优先定向 PubSub 而非广播频道）
 	TargetUserID  string           // 目标用户ID（Operation=SendMessage 时使用）
 	GroupIDs      []string         // 群组ID列表（len==1 单群组广播，len>1 批量广播，len==0 不广播）
 	ExcludeSender bool             // 是否排除发送者（群组广播时使用）
@@ -140,14 +142,14 @@ func (h *Hub) routeToCluster(ctx context.Context, msg *HubMessage, opts ClusterD
 	// ③ PubSub 兜底：gRPC 未覆盖的节点走 PubSub
 	if h.pubsub != nil {
 		var pubErr error
-		if result.grpcDelivered > 0 {
-			// gRPC 部分成功（pubsubFallback 必非空，否则 step ② 已返回）：
-			// 仅向失败的节点定向发布（节点专属频道），
-			// 避免 gRPC 已成功的节点重复处理同一消息（gRPC + PubSub 双重投递）
+		if result.grpcDelivered > 0 || len(result.pubsubFallback) > 0 {
+			// 已知目标节点（gRPC 部分成功的剩余节点，或 gRPC 全失败的兜底节点）
+			// 定向发布到节点专属频道，避免广播频道冗余投递到无关节点
+			// 关键修复：gRPC 未启用 + opts.TargetNodeIDs 来自 Redis 在线索引（如 otherNodes=[3iy9vey]）时，
+			// 必须走定向发布到 3iy9vey 专属频道，而不是广播频道（广播频道依赖接收端订阅，且无法定向）
 			pubErr = h.publishToTargetedNodes(ctx, dispatch, result.pubsubFallback)
 		} else {
-			// gRPC 全部失败或未启用（pubsubFallback 可能为空——如无 nodeRegistry，
-			// 纯 PubSub 模式仍需广播频道发布，所有节点都需要收到）
+			// 无目标节点列表（全局广播、群组广播场景），走广播频道
 			pubErr = h.publishToCluster(ctx, dispatch)
 		}
 		if pubErr != nil {
@@ -164,6 +166,22 @@ func (h *Hub) routeToCluster(ctx context.Context, msg *HubMessage, opts ClusterD
 			}
 			return pubErr
 		}
+
+		h.logger.DebugContextKV(ctx, "集群路由完成",
+			"operation", opts.Operation,
+			"grpc_delivered", result.grpcDelivered,
+			"pubsub_fallback", len(result.pubsubFallback),
+			"message_id", msg.GetMessageID(),
+		)
+		return nil
+	}
+
+	// ④ gRPC 投递 0 节点 + PubSub 未启用 → 路由失败，让上层 fallback 到本地发送 + 离线存储
+	// 走到这里说明 IsGRPCEnabled() == true 但 h.pubsub == nil，且 dispatchViaGRPC 没有任何节点投递成功
+	// （nodeRegistry 不含其他节点，且 opts.TargetNodeIDs 也为空，无任何可用投递路径）
+	// 不返回 error 会让上层误判"已路由成功"→ sendToUser L97 routed=true → 直接 return，消息丢失
+	if result.grpcDelivered == 0 {
+		return fmt.Errorf("跨节点路由失败：gRPC 投递 0 节点（nodeRegistry 无其他节点），PubSub 未启用，无任何投递路径")
 	}
 
 	h.logger.DebugContextKV(ctx, "集群路由完成",
@@ -198,8 +216,14 @@ func (h *Hub) dispatchViaGRPC(ctx context.Context, msg *HubMessage, opts Cluster
 	result := clusterRouteResult{}
 
 	if !h.IsGRPCEnabled() {
-		// gRPC 未启用，所有节点都需 PubSub 兜底
-		result.pubsubFallback = h.getAllClusterNodeIDs()
+		// gRPC 未启用：优先用调用方已知的目标节点列表（P2P 场景已从 Redis 在线索引查到 otherNodes），
+		// 否则 fallback 到 nodeRegistry 中的所有其他节点（群组/全局广播场景，nodeRegistry 由 gRPC 互连注册维护）
+		// 关键：gRPC 未启用时 nodeRegistry 通常为空或不含其他节点，必须依赖 opts.TargetNodeIDs 才能定向 PubSub
+		if len(opts.TargetNodeIDs) > 0 {
+			result.pubsubFallback = opts.TargetNodeIDs
+		} else {
+			result.pubsubFallback = h.getAllClusterNodeIDs()
+		}
 		return result
 	}
 
@@ -238,10 +262,14 @@ func (h *Hub) dispatchViaGRPC(ctx context.Context, msg *HubMessage, opts Cluster
 }
 
 // resolveGRPCTargetNodes 根据操作类型确定 gRPC 目标节点列表
-// TargetNodeID 非空=精确路由到单个节点，空=广播到所有已知节点
+// 优先级：TargetNodeID（单节点精确）> TargetNodeIDs（多节点定向）> nodeRegistry 所有其他节点（广播）
 func (h *Hub) resolveGRPCTargetNodes(opts ClusterDispatchOptions) []string {
 	if opts.TargetNodeID != "" {
 		return []string{opts.TargetNodeID}
+	}
+	// P2P 场景已知目标节点列表时优先用，避免广播到无关节点（gRPC 启用时定向投递更高效）
+	if len(opts.TargetNodeIDs) > 0 {
+		return opts.TargetNodeIDs
 	}
 	return h.getAllClusterNodeIDs()
 }
@@ -307,17 +335,39 @@ func (h *Hub) publishToCluster(ctx context.Context, dispatch *models.Distributed
 
 	channel := h.config.RedisRepository.PubSub.GetBroadcastChannel()
 	data := h.marshalDistributedMessage(dispatch, dispatch.Message.GetMessageID())
-	return h.pubsub.Publish(ctx, channel, string(data))
+	h.logger.InfoContextKV(ctx, "📡 PubSub 广播频道发布",
+		"channel", channel,
+		"payload_size", len(data),
+		"message_id", dispatch.Message.GetMessageID(),
+	)
+	err := h.pubsub.Publish(ctx, channel, string(data))
+	if err != nil {
+		h.logger.WarnContextKV(ctx, "📡 PubSub 广播频道发布失败",
+			"channel", channel,
+			"payload_size", len(data),
+			"error", err,
+			"message_id", dispatch.Message.GetMessageID(),
+		)
+	}
+	return err
 }
 
 // publishToTargetedNodes 向指定节点的专属频道精准发布（避免全量广播导致 gRPC 已成功节点重复处理）
 // 用于 gRPC 部分成功的 PubSub 兜底场景：仅失败节点需要收到消息
+// 也是 gRPC 未启用 + opts.TargetNodeIDs 已知目标节点场景的定向发布主路径
 func (h *Hub) publishToTargetedNodes(ctx context.Context, dispatch *models.DistributedMessage, nodeIDs []string) error {
 	if h.pubsub == nil || len(nodeIDs) == 0 {
 		return nil
 	}
 	data := h.marshalDistributedMessage(dispatch, dispatch.Message.GetMessageID())
 	prefix := h.config.RedisRepository.PubSub.GetNodeChannelPrefix()
+	h.logger.InfoContextKV(ctx, "📡 PubSub 定向发布",
+		"channel_prefix", prefix,
+		"target_nodes", nodeIDs,
+		"target_count", len(nodeIDs),
+		"payload_size", len(data),
+		"message_id", dispatch.Message.GetMessageID(),
+	)
 	var lastErr error
 	for _, nodeID := range nodeIDs {
 		// 防御：跳过自身（不应出现，但避免意外循环投递）
@@ -326,8 +376,11 @@ func (h *Hub) publishToTargetedNodes(ctx context.Context, dispatch *models.Distr
 		}
 		if err := h.pubsub.Publish(ctx, prefix+nodeID, string(data)); err != nil {
 			lastErr = err
-			h.logger.WarnContextKV(ctx, "PubSub 定向发布失败",
-				"target_node", nodeID, "error", err,
+			h.logger.WarnContextKV(ctx, "📡 PubSub 定向发布失败",
+				"target_node", nodeID,
+				"channel", prefix+nodeID,
+				"payload_size", len(data),
+				"error", err,
 				"message_id", dispatch.Message.GetMessageID())
 		}
 	}

@@ -10,7 +10,7 @@ require (
 	github.com/jpillora/backoff v1.0.0
 	github.com/kamalyes/go-argus v0.3.1
 	github.com/kamalyes/go-cachex v0.3.5
-	github.com/kamalyes/go-config v0.21.13
+	github.com/kamalyes/go-config v0.21.14-0.20260818152618-04f9ca92bb20
 	github.com/kamalyes/go-logger v0.5.9
 	github.com/kamalyes/go-pbmo v0.1.9
 	github.com/kamalyes/go-sqlbuilder v0.6.3
@@ -52,10 +52,10 @@ require (
 	go.opentelemetry.io/otel/trace v1.45.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/arch v0.24.0 // indirect
-	golang.org/x/crypto v0.54.0 // indirect
-	golang.org/x/net v0.56.0 // indirect
+	golang.org/x/crypto v0.55.0 // indirect
+	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	modernc.org/libc v1.22.5 // indirect

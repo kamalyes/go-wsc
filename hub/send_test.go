@@ -877,3 +877,99 @@ func TestSendToUserWithAck_PreservesExistingNamespace(t *testing.T) {
 	require.Equal(t, 1, count)
 	assert.Equal(t, "ns-ack", ns, "ACK 入口不应覆盖已有 namespace")
 }
+
+// ============================================================================
+// sendToClientSerialized 返回值测试（跨节点 PubSub 路径依赖返回值统计投递成败）
+// ============================================================================
+
+// TestSendToClientSerialized_ReturnsTrueOnSuccess WebSocket 正常投递应返回 true 且数据入通道
+func TestSendToClientSerialized_ReturnsTrueOnSuccess(t *testing.T) {
+	t.Parallel()
+	hub := newMinHub()
+	defer hub.Shutdown()
+
+	client := makeTestClient("c-ser-ok", "u-ser-ok")
+	msg := makeGroupMessage("sender")
+
+	ok := hub.sendToClientSerialized(context.Background(), client, msg, nil)
+
+	assert.True(t, ok, "投递成功应返回 true")
+	select {
+	case data := <-client.SendChan:
+		assert.NotEmpty(t, data, "客户端通道应收到序列化数据")
+	default:
+		t.Fatal("客户端通道应收到数据")
+	}
+}
+
+// TestSendToClientSerialized_ReturnsFalseWhenClosed 客户端已关闭应返回 false 且不投递
+func TestSendToClientSerialized_ReturnsFalseWhenClosed(t *testing.T) {
+	t.Parallel()
+	hub := newMinHub()
+	defer hub.Shutdown()
+
+	client := makeTestClient("c-ser-closed", "u-ser-closed")
+	client.MarkClosed()
+
+	ok := hub.sendToClientSerialized(context.Background(), client, makeGroupMessage("sender"), nil)
+
+	assert.False(t, ok, "客户端已关闭应返回 false")
+	assert.Empty(t, len(client.SendChan), "已关闭客户端不应收到数据")
+}
+
+// TestSendToClientSerialized_ReturnsFalseWhenChannelFull WebSocket 通道满应返回 false
+func TestSendToClientSerialized_ReturnsFalseWhenChannelFull(t *testing.T) {
+	t.Parallel()
+	hub := newMinHub()
+	defer hub.Shutdown()
+
+	client := makeTestClient("c-ser-full", "u-ser-full")
+	client.SendChan = make(chan []byte, 1)
+	client.SendChan <- []byte("filler") // 填满缓冲区
+
+	ok := hub.sendToClientSerialized(context.Background(), client, makeGroupMessage("sender"), nil)
+
+	assert.False(t, ok, "通道满应返回 false")
+}
+
+// TestSendToClientSerialized_SSEReturnsTrueAndDelivers SSE 客户端应走 SSE 通道投递 *HubMessage 并返回 true
+func TestSendToClientSerialized_SSEReturnsTrueAndDelivers(t *testing.T) {
+	t.Parallel()
+	hub := newMinHub()
+	defer hub.Shutdown()
+
+	client := makeTestClient("c-ser-sse", "u-ser-sse")
+	client.ConnectionType = ConnectionTypeSSE
+	client.WithSSEChannels(make(chan *HubMessage, 1), make(chan struct{}))
+
+	msg := makeGroupMessage("sender")
+	msg.MessageID = "m-sse-ser"
+
+	ok := hub.sendToClientSerialized(context.Background(), client, msg, nil)
+
+	assert.True(t, ok, "SSE 投递成功应返回 true")
+	select {
+	case received := <-client.SSEMessageCh:
+		require.NotNil(t, received)
+		assert.Equal(t, "m-sse-ser", received.MessageID, "SSE 通道应收到原始消息对象")
+	case <-time.After(1 * time.Second):
+		t.Fatal("超时：SSE 通道未收到消息")
+	}
+}
+
+// TestSendToClientSerialized_SSEChannelFullReturnsFalse SSE 通道满应返回 false
+func TestSendToClientSerialized_SSEChannelFullReturnsFalse(t *testing.T) {
+	t.Parallel()
+	hub := newMinHub()
+	defer hub.Shutdown()
+
+	client := makeTestClient("c-ser-sse-full", "u-ser-sse-full")
+	client.ConnectionType = ConnectionTypeSSE
+	sseCh := make(chan *HubMessage, 1)
+	sseCh <- makeGroupMessage("filler") // 填满 SSE 缓冲区
+	client.WithSSEChannels(sseCh, make(chan struct{}))
+
+	ok := hub.sendToClientSerialized(context.Background(), client, makeGroupMessage("sender"), nil)
+
+	assert.False(t, ok, "SSE 通道满应返回 false")
+}

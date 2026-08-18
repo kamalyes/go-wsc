@@ -435,11 +435,11 @@ func (r *RedisOnlineStatusRepository) GetUserClients(ctx context.Context, userID
 			continue
 		}
 
-		var client Client
-		if err := json.Unmarshal([]byte(data), &client); err != nil {
+		client, err := zipx.ZlibSmartDecompressObject[*Client]([]byte(data))
+		if err != nil {
 			continue
 		}
-		clients = append(clients, &client)
+		clients = append(clients, client)
 	}
 
 	return clients, nil
@@ -606,8 +606,8 @@ func (r *RedisOnlineStatusRepository) BatchGetUserNodes(ctx context.Context, use
 		if err != nil {
 			continue // key 不存在或已过期，跳过
 		}
-		var client Client
-		if err := json.Unmarshal([]byte(data), &client); err != nil {
+		client, err := zipx.ZlibSmartDecompressObject[*Client]([]byte(data))
+		if err != nil {
 			continue
 		}
 		if client.NodeID == "" {
@@ -664,11 +664,11 @@ func (r *RedisOnlineStatusRepository) GetNodeClients(ctx context.Context, nodeID
 			continue
 		}
 
-		var client Client
-		if err := json.Unmarshal([]byte(data), &client); err != nil {
+		client, err := zipx.ZlibSmartDecompressObject[*Client]([]byte(data))
+		if err != nil {
 			continue
 		}
-		clients = append(clients, &client)
+		clients = append(clients, client)
 	}
 
 	return clients, nil
@@ -802,8 +802,8 @@ func (r *RedisOnlineStatusRepository) BatchSetClientsOffline(ctx context.Context
 			continue
 		}
 
-		var client Client
-		if err := json.Unmarshal([]byte(data), &client); err != nil {
+		client, err := zipx.ZlibSmartDecompressObject[*Client]([]byte(data))
+		if err != nil {
 			continue
 		}
 

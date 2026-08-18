@@ -324,3 +324,60 @@ func TestRedisOnlineStatusRepositoryGetOnlineInfoNotFound(t *testing.T) {
 	assert.Error(t, err, "不存在的用户应返回错误")
 	assert.Nil(t, info, "不存在的用户应返回nil")
 }
+
+// TestRedisOnlineStatusRepositoryCompression 回归测试：开启压缩时所有读取路径必须正确解压。
+// 修复前：写入路径对 ≥512 字节的客户端记录做 zlib 压缩 + ZLIB: 前缀，
+// 但 GetUserClients/BatchGetUserNodes/GetNodeClients/BatchSetClientsOffline 用裸 json.Unmarshal，
+// 解压失败后 continue 静默吞错 → 返回空 → 跨节点误判离线（生产客户端记录约 542–571 字节普遍触发）
+func TestRedisOnlineStatusRepositoryCompression(t *testing.T) {
+	redisClient := GetTestRedisClientWithFlush(t)
+	prefix := getTestIDGenerator().GenerateRequestID()
+	repo := NewRedisOnlineStatusRepository(redisClient, &wscconfig.OnlineStatus{
+		KeyPrefix:          fmt.Sprintf("%s:", prefix),
+		TTL:                5 * time.Minute,
+		EnableCompression:  true,
+		CompressionMinSize: 512,
+	})
+	ctx := context.Background()
+
+	client := createTestClientWithIDGen(UserTypeCustomer)
+	client.NodeID = random.FRandAlphaString(20)
+	// 用 Metadata 把记录撑到 ≥512 字节，触发写入压缩（compressionThreshold 常量=512）
+	client.Metadata = map[string]interface{}{"pad": random.FRandAlphaString(600)}
+	defer func() { _ = repo.SetOffline(ctx, client.UserID) }()
+
+	// 写入（走压缩路径）
+	require.NoError(t, repo.SetClientOnline(ctx, client))
+
+	// 单条读取：GetClient 一直用 ZlibSmartDecompressObject，未受 bug 影响
+	gotClient, err := repo.GetClient(ctx, client.ID)
+	require.NoError(t, err)
+	require.NotNil(t, gotClient)
+	assert.Equal(t, client.UserID, gotClient.UserID)
+
+	// 批量读取：修复前这些路径裸 json.Unmarshal，压缩数据解码失败返回空
+	got, err := repo.GetUserClients(ctx, client.UserID)
+	require.NoError(t, err)
+	require.NotEmpty(t, got, "GetUserClients 开启压缩时应能解压返回客户端")
+	assert.Equal(t, client.ID, got[0].ID)
+
+	nodes, err := repo.GetUserNodes(ctx, client.UserID)
+	require.NoError(t, err)
+	require.NotEmpty(t, nodes, "GetUserNodes 开启压缩时应能解压返回节点")
+	assert.Contains(t, nodes, client.NodeID)
+
+	batchNodes, err := repo.BatchGetUserNodes(ctx, []string{client.UserID})
+	require.NoError(t, err)
+	require.Contains(t, batchNodes, client.UserID)
+	assert.Contains(t, batchNodes[client.UserID], client.NodeID)
+
+	nodeClients, err := repo.GetNodeClients(ctx, client.NodeID)
+	require.NoError(t, err)
+	require.NotEmpty(t, nodeClients, "GetNodeClients 开启压缩时应能解压返回客户端")
+
+	// BatchSetClientsOffline 依赖解压取 UserID/NodeID/UserType，修复前下线静默失效
+	require.NoError(t, repo.BatchSetClientsOffline(ctx, []string{client.ID}))
+	isOnline, err := repo.IsUserOnline(ctx, client.UserID)
+	require.NoError(t, err)
+	assert.False(t, isOnline, "BatchSetClientsOffline 开启压缩时应能正确下线")
+}

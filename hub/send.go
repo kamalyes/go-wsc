@@ -96,6 +96,8 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 	h.recordMessageToDatabase(msgCopy, nil)
 
 	// 🌐 分布式路由：检查用户是否在其他节点
+	// 先快照本地在线状态：路由决策与本地投递共用，避免两次查询间的连接抖动造成判定漂移
+	localOnline := h.shardedRegistry.HasUser(toUserID)
 	routed, err := h.checkAndRouteToNode(ctx, toUserID, msgCopy)
 	if err != nil {
 		// 路由失败，记录错误但继续尝试本地发送
@@ -106,9 +108,15 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 			"message_id", msgCopy.MessageID,
 			"error", err,
 		)
+		// 🔥 本地无连接且跨节点路由失败：本地投递必然扑空，返回错误让上层
+		// 重试机制（瞬时故障如 Redis 抖动可重试成功）或最终失败离线兜底接管，
+		// 避免 fire-and-forget 谎报成功导致消息静默丢失
+		if !localOnline {
+			return errorx.NewError(models.ErrTypeTemporaryFailure, "跨节点路由失败(用户不在本节点): %v", err)
+		}
 	}
-	if routed {
-		// 消息已路由到其他节点，本地不需要处理
+	if routed && !localOnline {
+		// 用户仅在其他节点（本地无连接），消息已路由到其他节点，本地无需处理
 		h.logger.DebugContextKV(ctx, "消息已路由到其他节点",
 			"message_id", msgCopy.MessageID,
 			"user_id", toUserID,
@@ -116,6 +124,9 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 		return nil
 	}
 	// 用户在本节点或单机模式，正常发送
+	// 🔥 多端跨节点：routed=true 仅代表"已投递到其他节点"，用户可能同时在本地和
+	// 其他节点有设备（如手机连 Pod A、电脑连 Pod B），本地投递不能被跳过，
+	// 否则本地设备永远收不到跨节点发送方的消息（修复前 routed=true 直接 return）
 	// 直接异步执行 handleBroadcast，不经过 EventLoop channel 串行化
 	go h.handleBroadcast(msgCopy)
 	h.logger.DebugContextKV(ctx, "消息已广播", "message_id", msgCopy.MessageID, "from", msgCopy.Sender, "to", msgCopy.Receiver, "type", msgCopy.MessageType)
@@ -243,6 +254,15 @@ func (h *Hub) SendToUserWithRetry(ctx context.Context, toUserID string, msg *Hub
 
 	// 设置最终结果
 	h.finalizeSendResult(result, finalErr, startTime)
+
+	// 🔥 在线判定成功但重试耗尽仍失败 → 标记 Failed + 异步转存离线（消息不丢，用户上线时推送）
+	// 此前该路径仅依赖 30s 后的 ACK 超时扫描兜底：延迟窗口大、依赖扫描器存活，
+	// 且 sendToUser fire-and-forget 谎报成功时连扫描器都捞不到（状态被误报 success 的路径除外）
+	// tryStoreOfflineOnDeliveryFailure 内部：转存成功覆盖状态为 UserOffline，失败保持 Failed
+	if finalErr != nil && !result.StoredOffline {
+		h.updateMessageStatusAsync(msg.MessageID, MessageSendStatusFailed, models.FailureReasonMaxRetry, finalErr.Error())
+		h.tryStoreOfflineOnDeliveryFailure(msg, finalErr)
+	}
 
 	// 调用消息发送完成回调
 	h.invokeMessageSendCallback(msg, result)

@@ -150,6 +150,9 @@ func (f *fakeMessageRecordRepository) UpdateStatus(_ context.Context, _ string, 
 func (f *fakeMessageRecordRepository) BatchUpdateStatus(_ context.Context, _ []string, _ models.MessageSendStatus, _ models.FailureReason, _ string) error {
 	return nil
 }
+func (f *fakeMessageRecordRepository) ClaimStaleSending(_ context.Context, _ []string, _ models.MessageSendStatus, _ models.FailureReason, _ string) ([]string, error) {
+	return nil, nil
+}
 func (f *fakeMessageRecordRepository) IncrementRetry(_ context.Context, _ string, _ models.RetryAttempt) error {
 	return nil
 }

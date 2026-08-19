@@ -55,8 +55,22 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMe
 	var err error
 	if h.routerCache != nil {
 		nodeIDs, err = h.routerCache.GetUserNodes(ctx, userID)
-	} else {
+		if err != nil {
+			// 缓存查询失败不直接短路：降级直查 source of truth
+			nodeIDs = nil
+		}
+	}
+	// 🔥 空结果兜底直查 onlineStatus_repo（source of truth）：
+	// routerCache 负缓存（空切片按 TTL 缓存，默认 5min）叠加失效广播丢失（PubSub 至多一次投递）
+	// 会让缓存持续返回过期空列表 → 本应跨节点投递的消息只走本地（必然扑空），
+	// 实时投递丢失直到缓存 TTL 自然过期。checkUserOnline 直查 Redis 判定在线、
+	// 此处缓存判空的"双源不一致"正是跨节点漏发的根源，直查消除不一致
+	if len(nodeIDs) == 0 {
 		nodeIDs, err = h.onlineStatusRepo.GetUserNodes(ctx, userID)
+		// 回写缓存自愈过期条目：非空 Set（后续消息命中非空缓存即跳过直查），空则 Delete（下轮回源重载）
+		if err == nil && h.routerCache != nil {
+			_ = h.routerCache.SetUserNodes(ctx, userID, nodeIDs)
+		}
 	}
 	if err != nil {
 		// 查询失败，假设用户在本节点或离线，继续本地发送流程

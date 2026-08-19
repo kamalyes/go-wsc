@@ -80,6 +80,12 @@ type MessageRecordRepository interface {
 	// 用于广播场景下大量消息同时成功/失败的状态更新，大幅减少 DB 压力
 	BatchUpdateStatus(ctx context.Context, messageIDs []string, status MessageSendStatus, reason FailureReason, errorMsg string) error
 
+	// ClaimStaleSending 原子认领超时的 sending 记录：仅当记录当前状态仍为 sending 时更新为 newStatus
+	// 返回实际认领成功的 messageID 列表（状态已被并发方更新则不认领）
+	// 多节点并发扫描共享记录表时，状态守卫（WHERE status='sending'）保证每条记录
+	// 只被一个节点认领成功，认领者负责后续兜底动作（如转存离线），消除 N Pod 重复处理
+	ClaimStaleSending(ctx context.Context, messageIDs []string, newStatus MessageSendStatus, reason FailureReason, errorMsg string) ([]string, error)
+
 	// IncrementRetry 增加重试次数
 	IncrementRetry(ctx context.Context, messageID string, attempt RetryAttempt) error
 
@@ -305,6 +311,47 @@ func (r *MessageRecordGormRepository) BatchUpdateStatus(ctx context.Context, mes
 		Updates(updates)
 
 	return result.Error
+}
+
+// ClaimStaleSending 原子认领超时的 sending 记录（接口说明见 MessageRecordRepository）
+//
+// 实现说明：逐条带状态守卫的 UPDATE（WHERE message_id = ? AND status = 'sending'），
+// RowsAffected==1 即认领成功。虽是逐条更新（单轮扫描上限 200 条，30s 一次的后台任务），
+// 但这是唯一能在多节点并发下精确判定"哪条记录被哪个节点认领"的方式——
+// 单条批量 UPDATE 只能返回总命中行数，无法区分每条的认领归属
+func (r *MessageRecordGormRepository) ClaimStaleSending(ctx context.Context, messageIDs []string, newStatus MessageSendStatus, reason FailureReason, errorMsg string) ([]string, error) {
+	if len(messageIDs) == 0 {
+		return nil, nil
+	}
+
+	now := time.Now()
+	claimed := make([]string, 0, len(messageIDs))
+
+	for _, messageID := range messageIDs {
+		updates := map[string]interface{}{
+			"status":          newStatus,
+			"last_send_time":  &now,
+			"first_send_time": gorm.Expr("CASE WHEN first_send_time IS NULL THEN ? ELSE first_send_time END", now),
+		}
+		if reason != "" {
+			updates["failure_reason"] = reason
+		}
+		if errorMsg != "" {
+			updates["error_message"] = errorMsg
+		}
+
+		result := r.db.WithContext(ctx).Model(&MessageSendRecord{}).
+			Where(QueryMessageIDWhere+" AND status = ?", messageID, MessageSendStatusSending).
+			Updates(updates)
+		if result.Error != nil {
+			return claimed, result.Error
+		}
+		if result.RowsAffected > 0 {
+			claimed = append(claimed, messageID)
+		}
+	}
+
+	return claimed, nil
 }
 
 // IncrementRetry 增加重试次数

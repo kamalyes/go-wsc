@@ -397,26 +397,26 @@ func TestResolveGRPCTargetNodes(t *testing.T) {
 	assert.ElementsMatch(t, []string{hubB.GetNodeID()}, hubA.resolveGRPCTargetNodes(ClusterDispatchOptions{}))
 }
 
-// TestExecuteGRPCDispatch_UnknownOperation 验证未知操作类型返回 false
+// TestExecuteGRPCDispatch_UnknownOperation 验证未知操作类型返回 fallback
 func TestExecuteGRPCDispatch_UnknownOperation(t *testing.T) {
 	hubA, hubB, cleanup := newClusterPair(t)
 	defer cleanup()
 
 	msgData := mustMarshalHubMessagePB(t, makeGroupMessage("s"))
 	// 使用未定义的操作类型
-	assert.False(t, hubA.executeGRPCDispatch(context.Background(), clusterHubAddr(hubB), msgData, ClusterDispatchOptions{
+	assert.Equal(t, grpcOutcomeFallback, hubA.executeGRPCDispatch(context.Background(), clusterHubAddr(hubB), msgData, ClusterDispatchOptions{
 		Operation:    models.OperationType("unknown_op_999"),
 		TargetNodeID: hubB.GetNodeID(),
 	}))
 }
 
-// TestExecuteGRPCDispatch_NilPool 验证 grpcClientPool 为 nil 时返回 false
+// TestExecuteGRPCDispatch_NilPool 验证 grpcClientPool 为 nil 时返回 fallback
 func TestExecuteGRPCDispatch_NilPool(t *testing.T) {
 	hub, _, _, cleanup := setupGroupTestHub(t)
 	defer cleanup()
 	// setupGroupTestHub 的 grpcClientPool 为 nil
 	msgData := mustMarshalHubMessagePB(t, makeGroupMessage("s"))
-	assert.False(t, hub.executeGRPCDispatch(context.Background(), "127.0.0.1:1", msgData, ClusterDispatchOptions{
+	assert.Equal(t, grpcOutcomeFallback, hub.executeGRPCDispatch(context.Background(), "127.0.0.1:1", msgData, ClusterDispatchOptions{
 		Operation: models.OperationTypeSendMessage,
 	}))
 }

@@ -29,6 +29,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-wsc/models"
 	wscpb "github.com/kamalyes/go-wsc/models/pb"
 	"github.com/kamalyes/go-wsc/routing"
@@ -59,8 +60,18 @@ type ClusterDispatchOptions struct {
 // clusterRouteResult 路由结果（内部使用）
 type clusterRouteResult struct {
 	grpcDelivered  int      // gRPC 成功投递节点数
-	pubsubFallback []string // 需 PubSub 兜底的节点列表
+	pubsubFallback []string // 需 PubSub 兜底的节点列表（地址未知/调用失败）
+	userMissNodes  []string // gRPC 目标节点明确返回"用户不在"的节点列表（索引过期/用户已迁移）
 }
+
+// grpcDispatchOutcome 单节点 gRPC 投递结果
+type grpcDispatchOutcome int
+
+const (
+	grpcOutcomeDelivered grpcDispatchOutcome = iota // 投递成功
+	grpcOutcomeFallback                             // 调用失败或结果未知 → PubSub 定向兜底重试
+	grpcOutcomeUserMiss                             // 目标节点明确用户不在 → 不对该节点兜底（PubSub 定向发布同样会扑空）
+)
 
 // ============================================================================
 // 统一路由入口
@@ -147,9 +158,13 @@ func (h *Hub) routeToCluster(ctx context.Context, msg *HubMessage, opts ClusterD
 			// 定向发布到节点专属频道，避免广播频道冗余投递到无关节点
 			// 关键修复：gRPC 未启用 + opts.TargetNodeIDs 来自 Redis 在线索引（如 otherNodes=[3iy9vey]）时，
 			// 必须走定向发布到 3iy9vey 专属频道，而不是广播频道（广播频道依赖接收端订阅，且无法定向）
+			// userMissNodes 不参与定向兜底：目标节点已明确返回用户不在，定向发布必然扑空
 			pubErr = h.publishToTargetedNodes(ctx, dispatch, result.pubsubFallback)
 		} else {
-			// 无目标节点列表（全局广播、群组广播场景），走广播频道
+			// 无目标节点列表（全局广播、群组广播场景）走广播频道；
+			// 也覆盖"gRPC 目标全部明确用户不在"（userMissNodes 非空）的场景：
+			// Redis 在线索引过期时用户可能已迁移到索引未知的节点，
+			// 广播让实际持有该用户连接的节点投递（其余节点 HasUser 扑空自动跳过）
 			pubErr = h.publishToCluster(ctx, dispatch)
 		}
 		if pubErr != nil {
@@ -158,6 +173,7 @@ func (h *Hub) routeToCluster(ctx context.Context, msg *HubMessage, opts ClusterD
 				"error", pubErr,
 				"grpc_delivered", result.grpcDelivered,
 				"pubsub_fallback", len(result.pubsubFallback),
+				"user_miss", len(result.userMissNodes),
 				"message_id", msg.GetMessageID(),
 			)
 			// gRPC 有部分成功则不算完全失败
@@ -171,6 +187,7 @@ func (h *Hub) routeToCluster(ctx context.Context, msg *HubMessage, opts ClusterD
 			"operation", opts.Operation,
 			"grpc_delivered", result.grpcDelivered,
 			"pubsub_fallback", len(result.pubsubFallback),
+			"user_miss", len(result.userMissNodes),
 			"message_id", msg.GetMessageID(),
 		)
 		return nil
@@ -178,10 +195,11 @@ func (h *Hub) routeToCluster(ctx context.Context, msg *HubMessage, opts ClusterD
 
 	// ④ gRPC 投递 0 节点 + PubSub 未启用 → 路由失败，让上层 fallback 到本地发送 + 离线存储
 	// 走到这里说明 IsGRPCEnabled() == true 但 h.pubsub == nil，且 dispatchViaGRPC 没有任何节点投递成功
-	// （nodeRegistry 不含其他节点，且 opts.TargetNodeIDs 也为空，无任何可用投递路径）
-	// 不返回 error 会让上层误判"已路由成功"→ sendToUser L97 routed=true → 直接 return，消息丢失
+	// （nodeRegistry 不含其他节点 / opts.TargetNodeIDs 为空 / 目标节点全部返回用户不在）
+	// 不返回 error 会让上层误判"已路由成功"→ sendToUser routed=true → 直接 return，消息丢失
 	if result.grpcDelivered == 0 {
-		return fmt.Errorf("跨节点路由失败：gRPC 投递 0 节点（nodeRegistry 无其他节点），PubSub 未启用，无任何投递路径")
+		return fmt.Errorf("跨节点路由失败：gRPC 投递 0 节点（投递 %d 个、用户不在 %d 个、兜底 %d 个），PubSub 未启用，无可用投递路径",
+			result.grpcDelivered, len(result.userMissNodes), len(result.pubsubFallback))
 	}
 
 	h.logger.DebugContextKV(ctx, "集群路由完成",
@@ -251,9 +269,12 @@ func (h *Hub) dispatchViaGRPC(ctx context.Context, msg *HubMessage, opts Cluster
 			continue
 		}
 
-		if h.executeGRPCDispatch(grpcCtx, addr, msgData, opts) {
+		switch h.executeGRPCDispatch(grpcCtx, addr, msgData, opts) {
+		case grpcOutcomeDelivered:
 			result.grpcDelivered++
-		} else {
+		case grpcOutcomeUserMiss:
+			result.userMissNodes = append(result.userMissNodes, nodeID)
+		default:
 			result.pubsubFallback = append(result.pubsubFallback, nodeID)
 		}
 	}
@@ -275,24 +296,38 @@ func (h *Hub) resolveGRPCTargetNodes(opts ClusterDispatchOptions) []string {
 }
 
 // executeGRPCDispatch 执行单次 gRPC 投递（按操作类型分发）
-func (h *Hub) executeGRPCDispatch(ctx context.Context, addr string, msgData []byte, opts ClusterDispatchOptions) bool {
+func (h *Hub) executeGRPCDispatch(ctx context.Context, addr string, msgData []byte, opts ClusterDispatchOptions) grpcDispatchOutcome {
 	grpcClient := h.grpcClientPool
 	if grpcClient == nil {
-		return false
+		return grpcOutcomeFallback
 	}
 
 	var err error
 	switch opts.Operation {
 	case models.OperationTypeSendMessage, models.OperationTypeKickUser:
-		_, err = grpcClient.SendToUser(ctx, addr, opts.TargetUserID, msgData)
+		resp, derr := grpcClient.SendToUser(ctx, addr, opts.TargetUserID, msgData)
+		// 🔥 必须检查响应体的 Success 字段：目标节点用户不在时返回 (Success=false, UserOnline=false, err=nil)，
+		// 此前只检查 err 会把"目标节点明确投递失败"误判为投递成功 → 上层 routed=true 直接返回 →
+		// 消息静默丢失（Redis 在线索引过期/用户已断线迁移的典型场景）
+		if derr == nil && resp != nil && !resp.GetSuccess() {
+			h.logger.InfoContextKV(ctx, "gRPC 目标节点明确用户不在，跳过该节点",
+				"operation", opts.Operation,
+				"target_addr", addr,
+				"target_user", opts.TargetUserID,
+				"user_online", resp.GetUserOnline(),
+				"resp_error", resp.GetError(),
+			)
+			return grpcOutcomeUserMiss
+		}
+		err = derr
 
 	case models.OperationTypeGroupBroadcast:
 		// 单群组广播（GroupIDs[0]）：一次 BroadcastGroup RPC
-		return h.grpcBroadcastGroup(ctx, addr, opts, msgData)
+		return mathx.IF(h.grpcBroadcastGroup(ctx, addr, opts, msgData), grpcOutcomeDelivered, grpcOutcomeFallback)
 
 	case models.OperationTypeGroupsBroadcast:
 		// 批量群组广播（len(GroupIDs)>1）：并行复用 BroadcastGroup RPC
-		return h.grpcBroadcastGroups(ctx, addr, opts, msgData)
+		return mathx.IF(h.grpcBroadcastGroups(ctx, addr, opts, msgData), grpcOutcomeDelivered, grpcOutcomeFallback)
 
 	case models.OperationTypeObserverNotify:
 		// 单次调用注入全部 GroupIDs，服务端合并去重观察者后一次投递
@@ -307,7 +342,7 @@ func (h *Hub) executeGRPCDispatch(ctx context.Context, addr string, msgData []by
 
 	default:
 		h.logger.WarnContextKV(ctx, "未知集群操作类型，跳过 gRPC", "operation", opts.Operation)
-		return false
+		return grpcOutcomeFallback
 	}
 
 	if err != nil {
@@ -316,10 +351,10 @@ func (h *Hub) executeGRPCDispatch(ctx context.Context, addr string, msgData []by
 			"target_addr", addr,
 			"error", err,
 		)
-		return false
+		return grpcOutcomeFallback
 	}
 
-	return true
+	return grpcOutcomeDelivered
 }
 
 // ============================================================================

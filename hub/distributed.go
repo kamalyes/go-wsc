@@ -208,6 +208,20 @@ func (h *Hub) handleDistributedMessage(ctx context.Context, distMsg *Distributed
 	// 确保 logger.DebugContextKV 等日志自动输出 trace_id
 	ctx = distMsg.ContextFrom(ctx)
 
+	// 📥 原始 PubSub 消息观测点：证明消息已到达本节点订阅回调（区分"Redis 传输丢失"与"消费链路丢失"）
+	// 此日志缺失时无法定位消息丢在 Publish→订阅回调 之间还是回调→本地投递 之间
+	var inboundMsgID string
+	if distMsg.Message != nil {
+		inboundMsgID = distMsg.Message.MessageID
+	}
+	h.logger.InfoContextKV(ctx, "📥 收到跨节点消息",
+		"type", distMsg.Type,
+		"from_node", distMsg.NodeID,
+		"message_id", inboundMsgID,
+		"namespace", distMsg.Namespace,
+		"target_id", distMsg.TargetID,
+	)
+
 	// 🔏 路由信封同步：将 DistributedMessage 外层路由信封同步写入内层 HubMessage
 	// 兼容两类发送路径：
 	//   1. 新节点：HubMessage 自身信封已带路由（pb 序列化），此调用为幂等（已有不覆盖）

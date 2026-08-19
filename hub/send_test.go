@@ -697,7 +697,9 @@ func (f *fakeOfflineHandler) DeleteOfflineMessages(_ context.Context, _ string, 
 func (f *fakeOfflineHandler) GetOfflineMessageCount(_ context.Context, _ string) (int64, error) {
 	return 0, nil
 }
-func (f *fakeOfflineHandler) ClearOfflineMessages(_ context.Context, _ string, _ []string) error { return nil }
+func (f *fakeOfflineHandler) ClearOfflineMessages(_ context.Context, _ string, _ []string) error {
+	return nil
+}
 func (f *fakeOfflineHandler) UpdatePushStatus(_ context.Context, _ []string, _ error) error {
 	return nil
 }
@@ -972,4 +974,85 @@ func TestSendToClientSerialized_SSEChannelFullReturnsFalse(t *testing.T) {
 	ok := hub.sendToClientSerialized(context.Background(), client, makeGroupMessage("sender"), nil)
 
 	assert.False(t, ok, "SSE 通道满应返回 false")
+}
+
+// ============================================================================
+// sendToUser write-ahead（outbox）行为测试
+// 修复前：Publish/本地投递之后才异步创建 sending 记录，投递侧的状态回报
+// UPDATE 可能扑空（记录未落库）→ 永久停留 sending → 被 ACK 兜底误标 + 重复转离线
+// 修复后：先提交记录创建任务，再执行投递，状态回报可正常覆盖
+// ============================================================================
+
+// TestSendToUser_WriteAheadRecordCreatedBeforeDelivery
+// sendToUser 本地投递路径：sending 记录被异步创建，投递成功后状态被回报覆盖为 success
+func TestSendToUser_WriteAheadRecordCreatedBeforeDelivery(t *testing.T) {
+	t.Parallel()
+	hub := newMinHub()
+	defer hub.Shutdown()
+
+	repo := &fakeMessageRecordRepo{}
+	hub.SetMessageRecordRepository(repo)
+
+	client := makeTestClient("c-wa-local", "u-wa-local")
+	hub.shardedRegistry.AddClient(client)
+
+	msg := makeGroupMessage("sender")
+	msg.MessageID = "m-wa-local"
+	msg.Receiver = "u-wa-local"
+
+	err := hub.sendToUser(context.Background(), "u-wa-local", msg)
+	require.NoError(t, err)
+
+	// 记录被异步创建，初始状态 sending
+	require.Eventually(t, func() bool {
+		repo.batchUpdateMu.Lock()
+		defer repo.batchUpdateMu.Unlock()
+		return len(repo.createdRecords) == 1
+	}, 2*time.Second, 10*time.Millisecond, "write-ahead 记录应被异步创建")
+
+	repo.batchUpdateMu.Lock()
+	created := repo.createdRecords[0]
+	repo.batchUpdateMu.Unlock()
+	assert.Equal(t, "m-wa-local", created.MessageID)
+	assert.Equal(t, models.MessageSendStatusSending, created.Status, "初始记录状态应为 sending")
+
+	// 本地投递成功后状态回报覆盖为 success（UPDATE 命中已落库的记录）
+	require.Eventually(t, func() bool {
+		return hasBatchUpdate(repo, "m-wa-local", models.MessageSendStatusSuccess)
+	}, 2*time.Second, 10*time.Millisecond, "本地投递成功应回报 success 状态")
+}
+
+// TestSendToUser_WriteAheadRecordCreatedForRoutedMessage
+// write-ahead 记录的创建不依赖路由结果：无论消息最终路由到其他节点还是本地投递，
+// 记录创建都在投递决策之前提交（恰好一条，不重复）
+func TestSendToUser_WriteAheadRecordCreatedForRoutedMessage(t *testing.T) {
+	t.Parallel()
+	hub := newMinHub()
+	defer hub.Shutdown()
+
+	repo := &fakeMessageRecordRepo{}
+	hub.SetMessageRecordRepository(repo)
+
+	client := makeTestClient("c-wa-route", "u-wa-route")
+	client.NodeID = "other-node"
+	hub.shardedRegistry.AddClient(client)
+
+	msg := makeGroupMessage("sender")
+	msg.MessageID = "m-wa-route"
+	msg.Receiver = "u-wa-route"
+
+	// 单机无 pubsub：checkAndRouteToNode 不跨节点路由，走本地投递
+	err := hub.sendToUser(context.Background(), "u-wa-route", msg)
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		repo.batchUpdateMu.Lock()
+		defer repo.batchUpdateMu.Unlock()
+		return len(repo.createdRecords) == 1
+	}, 2*time.Second, 10*time.Millisecond, "write-ahead 记录应在投递决策前提交创建")
+
+	repo.batchUpdateMu.Lock()
+	created := repo.createdRecords[0]
+	repo.batchUpdateMu.Unlock()
+	assert.Equal(t, "m-wa-route", created.MessageID, "任意投递路径都应恰好创建一条记录")
 }

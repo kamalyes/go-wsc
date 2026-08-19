@@ -50,6 +50,7 @@ type fakeMessageRecordRepo struct {
 	lastDeletedMessage string
 	lastRetryableLimit int
 	batchUpdateCalls   []batchUpdateCall
+	createdRecords     []*models.MessageSendRecord
 	batchUpdateMu      sync.Mutex
 }
 
@@ -61,7 +62,10 @@ type batchUpdateCall struct {
 	ErrMsg string
 }
 
-func (f *fakeMessageRecordRepo) Create(_ context.Context, _ *models.MessageSendRecord) error {
+func (f *fakeMessageRecordRepo) Create(_ context.Context, record *models.MessageSendRecord) error {
+	f.batchUpdateMu.Lock()
+	defer f.batchUpdateMu.Unlock()
+	f.createdRecords = append(f.createdRecords, record)
 	return nil
 }
 func (f *fakeMessageRecordRepo) Update(_ context.Context, record *models.MessageSendRecord) error {

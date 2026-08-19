@@ -9,13 +9,13 @@ require (
 	github.com/gorilla/websocket v1.4.2
 	github.com/jpillora/backoff v1.0.0
 	github.com/kamalyes/go-argus v0.3.1
-	github.com/kamalyes/go-cachex v0.3.5
+	github.com/kamalyes/go-cachex v0.3.6-0.20260819025023-d5c746879eb2
 	github.com/kamalyes/go-config v0.21.14-0.20260818152618-04f9ca92bb20
 	github.com/kamalyes/go-logger v0.5.9
 	github.com/kamalyes/go-pbmo v0.1.9
 	github.com/kamalyes/go-sqlbuilder v0.6.3
 	github.com/kamalyes/go-toolbox v0.16.0
-	github.com/redis/go-redis/v9 v9.21.0
+	github.com/redis/go-redis/v9 v9.22.0
 	github.com/stretchr/testify v1.11.1
 	google.golang.org/grpc v1.83.0
 	google.golang.org/protobuf v1.36.12
@@ -30,7 +30,7 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
-	github.com/dgraph-io/ristretto/v2 v2.4.1 // indirect
+	github.com/dgraph-io/ristretto/v2 v2.4.2 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/glebarez/go-sqlite v1.21.2 // indirect
 	github.com/go-sql-driver/mysql v1.8.1 // indirect

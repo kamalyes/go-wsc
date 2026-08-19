@@ -86,6 +86,15 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 	// SendToUserWithRetry 路径：ctx 已有 trace_id，ContextFrom 幂等（已有则不覆盖）。
 	ctx = msgCopy.ContextFrom(ctx)
 
+	// 📝 write-ahead：先落 sending 记录再投递（outbox 模式）
+	// 必须先于 checkAndRouteToNode（跨节点 Publish）和 handleBroadcast（本地投递）提交：
+	// 投递侧的状态回报走 statusUpdater 批量 UPDATE（扑空静默忽略，见
+	// MessageRecordGormRepository.BatchUpdateStatus），若记录后建，UPDATE 命中 0 行
+	// → 状态永久停留 sending → 被 ACK 超时兜底误标 ack_timeout 并重复转存离线
+	// （用户实际已收到，上线后重复推送）先提交 INSERT 任务使其在投递链路上花费的
+	// Publish RTT + 目标节点处理 + statusUpdater flush 间隔内完成落库
+	h.recordMessageToDatabase(msgCopy, nil)
+
 	// 🌐 分布式路由：检查用户是否在其他节点
 	routed, err := h.checkAndRouteToNode(ctx, toUserID, msgCopy)
 	if err != nil {
@@ -104,15 +113,12 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 			"message_id", msgCopy.MessageID,
 			"user_id", toUserID,
 		)
-		h.recordMessageToDatabase(msgCopy, nil)
 		return nil
 	}
 	// 用户在本节点或单机模式，正常发送
 	// 直接异步执行 handleBroadcast，不经过 EventLoop channel 串行化
 	go h.handleBroadcast(msgCopy)
 	h.logger.DebugContextKV(ctx, "消息已广播", "message_id", msgCopy.MessageID, "from", msgCopy.Sender, "to", msgCopy.Receiver, "type", msgCopy.MessageType)
-	// 记录消息到数据库 - 创建时已标记为Sending状态
-	h.recordMessageToDatabase(msgCopy, nil)
 	return nil
 }
 

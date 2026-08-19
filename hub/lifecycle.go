@@ -146,6 +146,12 @@ func (h *Hub) Run() {
 		IfTicker(h.messageRecordRepo != nil,
 			mathx.IfNotZero(h.config.RecordCleanupInterval, 30*time.Minute),
 			h.cleanupExpiredMessageRecords).
+		// ⏰ 跨节点投递 ACK 超时兜底：超时仍 sending 的记录标记 AckTimeout + 转存离线
+		// （PubSub 至多一次投递：目标节点订阅失活/消息丢失时状态会永远停留 sending，
+		//   见 node_ack_timeout.go）
+		IfTicker(h.messageRecordRepo != nil && h.pubsub != nil,
+			nodeAckScanInterval,
+			h.timeoutStaleSendingRecords).
 		// Panic处理：捕获事件处理过程中的panic，防止整个Hub崩溃
 		OnPanic(func(r interface{}) {
 			h.logger.ErrorKV("Hub事件循环panic", "panic", r, "stack", string(debug.Stack()), "node_id", h.nodeID)

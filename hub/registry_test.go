@@ -307,7 +307,8 @@ func TestMultiLoginDisallowKicksOld(t *testing.T) {
 	sConnA, cConnA := newWSConnPair(t)
 	clientA := newTestClient("client-A", "user-U", sConnA)
 	hub.Register(clientA)
-	require.Eventually(t, func() bool { return hub.HasClient(clientA.ID) }, 2*time.Second, 10*time.Millisecond)
+	// -race 全量套件下 EventLoop 可能被拖慢，放宽到 5s
+	require.Eventually(t, func() bool { return hub.HasClient(clientA.ID) }, 5*time.Second, 10*time.Millisecond)
 
 	sConnB, _ := newWSConnPair(t)
 	clientB := newTestClient("client-B", "user-U", sConnB)
@@ -316,10 +317,10 @@ func TestMultiLoginDisallowKicksOld(t *testing.T) {
 	// 旧连接被踢出，新连接入表，计数不膨胀
 	require.Eventually(t, func() bool {
 		return hub.HasClient(clientB.ID) && !hub.HasClient(clientA.ID) && hub.GetClientCount() == 1
-	}, 2*time.Second, 10*time.Millisecond)
+	}, 5*time.Second, 10*time.Millisecond)
 
 	// 旧连接应被关闭
-	waitForConnClosed(t, cConnA, 2*time.Second)
+	waitForConnClosed(t, cConnA, 5*time.Second)
 }
 
 // TestMultiLoginMaxConnectionsPerUserKicksOldest 验证 MaxConnectionsPerUser 限制下超出时踢掉最旧连接

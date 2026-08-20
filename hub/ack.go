@@ -98,6 +98,9 @@ func (h *Hub) HandleAck(ackMsg *AckMessage) {
 
 	// 收到ACK确认，更新消息记录状态
 	if ackMsg.Status == AckStatusConfirmed && h.messageRecordRepo != nil {
+		// ⏰ O(1) 取消跨节点 ACK 超时任务（状态由 sending→success，避免冗余超时检查）
+		// 与 updateMessageStatusAsync 的取消语义对齐，详见 ack_timer.go
+		h.cancelAckTimeout(ackMsg.MessageID)
 		go contextx.WithTimeoutOrBackground(h.ctx, 2*time.Second, func(ctx context.Context) error {
 			return h.messageRecordRepo.UpdateStatus(ctx, ackMsg.MessageID, models.MessageSendStatusSuccess, "", "")
 		})

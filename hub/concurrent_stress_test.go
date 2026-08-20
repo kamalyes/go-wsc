@@ -54,7 +54,15 @@ func setupStressHub(t *testing.T, withGroup bool) (*Hub, repository.GroupReposit
 	t.Helper()
 	mr, err := miniredis.Run()
 	require.NoError(t, err)
-	redisClient := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	// miniredis 为进程内实现，-race 下并发压力会放大 5~10 倍延迟，
+	// 使用宽松超时避免 Redis 客户端默认 3s ReadTimeout 误判 i/o timeout
+	redisClient := redis.NewClient(&redis.Options{
+		Addr:         mr.Addr(),
+		DialTimeout:  10 * time.Second,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		PoolSize:     64,
+	})
 
 	config := wscconfig.Default().
 		WithNodeInfo("127.0.0.1", 18080).
@@ -176,8 +184,10 @@ func makeStressMessage(sender, body string) *HubMessage {
 
 // TestConcurrentP2PSendStress 多 goroutine 并发向在线用户发送 P2P
 // -race 下无竞争，无 panic，消息投递失败率低于阈值
+//
+// 注意：不加 t.Parallel()——每个压力测试内部已启动数十个 goroutine 做并发验证，
+// 外部并行只会让 5 个 Hub × 200 客户端 × miniredis 在 -race 下相互饿死导致 i/o timeout。
 func TestConcurrentP2PSendStress(t *testing.T) {
-	t.Parallel()
 	hub, _, _, cleanup := setupStressHub(t, false)
 	defer cleanup()
 	ctx := context.Background()
@@ -223,7 +233,6 @@ func TestConcurrentP2PSendStress(t *testing.T) {
 // TestConcurrentBroadcastStress 三类广播并发：Broadcast 全局、BroadcastToNamespace 命名空间、
 // SendToGroup 群组；-race 下无数据竞争，无 panic
 func TestConcurrentBroadcastStress(t *testing.T) {
-	t.Parallel()
 	hub, _, _, cleanup := setupStressHub(t, true)
 	defer cleanup()
 	ctx := context.Background()
@@ -283,8 +292,6 @@ func TestConcurrentBroadcastStress(t *testing.T) {
 // TestConcurrentHubMessageModifyStress 同一 HubMessage Clone 后的多副本并发写入，
 // 原始消息只读，验证 RWMutex + Clone 无数据竞争
 func TestConcurrentHubMessageModifyStress(t *testing.T) {
-	t.Parallel()
-
 	const workers = 40
 	const perWorker = 500
 	var totalOps int64
@@ -350,7 +357,6 @@ func TestConcurrentHubMessageModifyStress(t *testing.T) {
 // TestConcurrentClientLifecycleStress 同时注册新客户端、注销现有客户端、
 // 并对存活客户端修改 namespace/groupID，-race 下 shardedRegistry 无竞争
 func TestConcurrentClientLifecycleStress(t *testing.T) {
-	t.Parallel()
 	hub, _, clients, cleanup := setupStressHub(t, false)
 	defer cleanup()
 
@@ -450,7 +456,6 @@ func TestConcurrentClientLifecycleStress(t *testing.T) {
 // TestConcurrentMixedAllStress 所有并发场景同时启动，
 // 模拟生产中多租户、广播与连接变更混合、消息读写交错场景
 func TestConcurrentMixedAllStress(t *testing.T) {
-	t.Parallel()
 	hub, _, _, cleanup := setupStressHub(t, true)
 	defer cleanup()
 	ctx := context.Background()
@@ -583,7 +588,7 @@ func TestConcurrentMixedAllStress(t *testing.T) {
 	select {
 	case <-done:
 		t.Logf("混合并发压力测试完成: total_ops=%d", atomic.LoadInt64(&totalOps))
-	case <-time.After(90 * time.Second):
-		t.Fatalf("混合并发压力测试 90s 超时，total_ops=%d", atomic.LoadInt64(&totalOps))
+	case <-time.After(180 * time.Second):
+		t.Fatalf("混合并发压力测试 180s 超时，total_ops=%d", atomic.LoadInt64(&totalOps))
 	}
 }

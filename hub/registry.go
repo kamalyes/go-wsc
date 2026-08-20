@@ -121,6 +121,10 @@ func (h *Hub) handleRegister(client *Client) {
 	// ============================================================
 	h.handleMultiLoginPolicy(client) // 内部通过 shardedRegistry 加分片锁
 
+	// ⏰ 在时间轮上调度心跳超时任务（WebSocket 客户端）
+	// 收到 PING 时 Refresh 刷新，超时未刷新则触发注销
+	h.scheduleHeartbeatTimeout(client)
+
 	// ================================================================
 	// Phase 3: 非临界区 - IO 操作异步执行（WorkerPool 控制并发）
 	// 不再持有任何锁，避免阻塞其他客户端的注册/注销/发送
@@ -409,6 +413,9 @@ func (h *Hub) removeClientUnsafe(client *Client) {
 	if removed == nil {
 		return
 	}
+
+	// ⏰ 取消时间轮上的心跳超时任务（客户端已注销，不再需要超时检测）
+	h.cancelHeartbeatTimeout(client.ID)
 
 	// 关键修复：验证客户端指针是否一致
 	// TemporalHasher 在时间窗口内为相同用户+设备生成相同 ClientID，

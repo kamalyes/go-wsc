@@ -307,8 +307,9 @@ func (h *Hub) normalizeMessageFields(client *Client, msg *HubMessage) {
 // 心跳检查
 // ============================================================================
 
-// checkHeartbeat 检查客户端心跳
-// 使用 ForEachClientParallel 并行遍历 + 原子读时间戳（百万级连接优化）
+// checkHeartbeat 检查 SSE 客户端心跳超时（兜底机制）
+// WebSocket 客户端由 heartbeatTimer O(1) 管理，此处仅扫描 SSE 客户端
+// SSE 客户端不发送 PING，无法通过时间轮 Refresh，需定期扫描 LastSeen 判断活跃度
 //
 // ⚠️ 死锁防御：ForEachClientParallel 持有 shard 读锁，若在 callback 中直接调用 Unregister，
 // Unregister → go handleUnregister → RemoveClient → WithShardLock，
@@ -321,7 +322,7 @@ func (h *Hub) checkHeartbeat() {
 	// 并发数快照（遍历开始时的总连接数）
 	totalClients := h.shardedRegistry.GetClientCount()
 
-	// Phase 1：并行持读锁收集超时客户端（不调用任何会获取写锁的方法）
+	// Phase 1：并行持读锁收集 SSE 超时客户端（WebSocket 由时间轮管理，跳过）
 	type timeoutClient struct {
 		client     *Client
 		lastActive time.Time
@@ -331,9 +332,13 @@ func (h *Hub) checkHeartbeat() {
 	var scanned int64
 
 	h.shardedRegistry.ForEachClientParallel(0, func(_ string, client *Client) {
+		// WebSocket 客户端由 heartbeatTimer O(1) 管理，跳过
+		if client.ConnectionType != ConnectionTypeSSE {
+			return
+		}
 		atomic.AddInt64(&scanned, 1)
 		// 原子读时间戳（并发安全，无数据竞争）
-		lastActive := mathx.IF(client.ConnectionType == ConnectionTypeSSE, client.GetLastSeen(), client.GetLastHeartbeat())
+		lastActive := client.GetLastSeen()
 
 		// 检查是否超时
 		inactiveDuration := now.Sub(lastActive)

@@ -81,9 +81,13 @@ func TestHubWorkerPool_TrySubmitMessage_Rejected(t *testing.T) {
 	defer wp.Stop()
 
 	release := make(chan struct{})
-	// 占用唯一 worker
-	wp.SubmitMessage(context.Background(), func() { <-release })
-	time.Sleep(50 * time.Millisecond) // 等 worker 取走任务
+	started := make(chan struct{})
+	// 占用唯一 worker（用 started channel 确定性等待 worker 取走任务，不依赖 sleep）
+	wp.SubmitMessage(context.Background(), func() {
+		close(started) // 信号：worker 已开始执行
+		<-release      // 阻塞占用 worker
+	})
+	<-started // 确定性等待 worker 确认已取走任务
 
 	// 填满 queue（queueSize=1）
 	assert.True(t, wp.TrySubmitMessage(func() {}))
@@ -109,8 +113,12 @@ func TestHubWorkerPool_TrySubmitCallback_Rejected(t *testing.T) {
 	defer wp.Stop()
 
 	release := make(chan struct{})
-	wp.SubmitCallback(context.Background(), func() { <-release })
-	time.Sleep(50 * time.Millisecond)
+	started := make(chan struct{})
+	wp.SubmitCallback(context.Background(), func() {
+		close(started) // 信号：worker 已开始执行
+		<-release      // 阻塞占用 worker
+	})
+	<-started // 确定性等待 worker 确认已取走任务
 
 	assert.True(t, wp.TrySubmitCallback(func() {}))
 	assert.False(t, wp.TrySubmitCallback(func() {}))

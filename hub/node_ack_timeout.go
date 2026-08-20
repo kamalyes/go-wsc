@@ -34,14 +34,19 @@ import (
 )
 
 const (
-	// nodeAckScanInterval 超时扫描间隔（由 Hub EventLoop IfTicker 触发）
-	nodeAckScanInterval = 30 * time.Second
-	// nodeAckTimeout 跨节点投递 ACK 超时窗口
+	// nodeAckFallbackScanInterval 兜底扫描间隔（由 Hub EventLoop IfTicker 触发）
+	// 主路径已由 ack_timer.go 的 per-message 时间轮接管（每条消息 +nodeAckTimeout 单条 ClaimStaleSending），
+	// 此低频扫描仅作为节点崩溃/重启导致内存 timer 丢失的安全网：恢复那些发送节点宕机、
+	// 其 in-memory ACK 超时任务随之消失而永久停留 sending 的记录
+	nodeAckFallbackScanInterval = 5 * time.Minute
+	// nodeTimeoutStaleScanTimeout 单轮兜底扫描的 DB 查询超时（扫描量小，但防 DB 抖动卡死 EventLoop）
+	nodeTimeoutStaleScanTimeout = 10 * time.Second
+	// nodeAckTimeout 跨节点投递 ACK 超时窗口（时间轮 per-message 调度延迟）
 	// 注意：不复用 config.AckTimeout（客户端消息确认超时，默认 500ms，毫秒级语义）——
 	// 跨节点回报链路含目标节点投递 + statusUpdater 批量落盘刷写，亚秒到秒级完成，
 	// 500ms 会大量误判；30s 足够宽容，只捕获真正的订阅失活/消息丢失
 	nodeAckTimeout = 30 * time.Second
-	// nodeAckScanLimit 单轮扫描上限（防历史大堆积时打爆 DB/离线队列）
+	// nodeAckScanLimit 单轮兜底扫描上限（防历史大堆积时打爆 DB/离线队列）
 	nodeAckScanLimit = 200
 )
 
@@ -49,13 +54,16 @@ const (
 var errNodeAckTimeout = errors.New("跨节点投递未在超时内收到目标节点确认（订阅失活或消息丢失）")
 
 // timeoutStaleSendingRecords 扫描超时未确认的 sending 记录并兜底
-// 由 Hub EventLoop 定时触发（messageRecordRepo 与 pubsub 均启用时注册，见 lifecycle.go）
+// 崩溃安全网（见 nodeAckFallbackScanInterval 注释）：主路径 ack_timer.go 的 per-message 时间轮
+// 正常场景下不会走到此分支（每条消息 +nodeAckTimeout 已被单条 ClaimStaleSending 处理），
+// 仅当发送节点宕机导致其 in-memory timer 丢失、记录永久停留 sending 时由此低频扫描接管
+// 由 Hub EventLoop IfTicker 触发（messageRecordRepo 与 pubsub 均启用时注册，见 lifecycle.go）
 func (h *Hub) timeoutStaleSendingRecords() {
 	if h.messageRecordRepo == nil {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), nodeTimeoutStaleScanTimeout)
 	defer cancel()
 
 	sending := models.MessageSendStatusSending

@@ -579,6 +579,10 @@ func (h *Hub) recordMessageToDatabase(msg *HubMessage, sendErr error) {
 				"message_id", msg.MessageID,
 				"error", err,
 			)
+		} else if record.Status == MessageSendStatusSending {
+			// ⏰ 在时间轮上调度跨节点 ACK 超时任务（per-message，+nodeAckTimeout 触发兜底）
+			// 状态由 sending 变更时由 updateMessageStatusAsync O(1) 取消；详见 ack_timer.go
+			h.scheduleAckTimeout(record.MessageID)
 		}
 	})
 }
@@ -588,6 +592,10 @@ func (h *Hub) updateMessageStatusAsync(msgID string, status MessageSendStatus, r
 	if h.messageRecordRepo == nil || h.statusUpdater == nil {
 		return
 	}
+
+	// ⏰ 状态由 sending 变更时 O(1) 取消跨节点 ACK 超时任务（本地投递即时取消，跨节点目标取消为 no-op）
+	// 本节点持有的 timer 被取消后不再触发冗余 ClaimStaleSending 检查；详见 ack_timer.go
+	h.cancelAckTimeout(msgID)
 	if !h.statusUpdater.Submit(&statusUpdateItem{
 		msgID:  msgID,
 		status: status,

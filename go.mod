@@ -14,7 +14,7 @@ require (
 	github.com/kamalyes/go-logger v0.5.9
 	github.com/kamalyes/go-pbmo v0.1.9
 	github.com/kamalyes/go-sqlbuilder v0.6.3
-	github.com/kamalyes/go-toolbox v0.16.0
+	github.com/kamalyes/go-toolbox v0.16.1-0.20260820021824-908858705d6f
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/stretchr/testify v1.11.1
 	google.golang.org/grpc v1.83.0

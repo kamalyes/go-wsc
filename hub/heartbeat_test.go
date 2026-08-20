@@ -239,14 +239,17 @@ func TestCheckHeartbeatTimeout(t *testing.T) {
 	go hub.Run()
 	require.NoError(t, hub.WaitForStartWithTimeout(5*time.Second))
 
-	// 创建一个 lastHeartbeat 为过去时间的客户端（超时）
+	// 创建一个 LastSeen 为过去时间的 SSE 客户端（超时）
+	// SSE 客户端由 checkHeartbeat 扫描兜底（WebSocket 由 heartbeatTimer 时间轮 O(1) 管理）
 	timeoutClient := makeTestClient("chk-timeout", "chk-timeout-user")
-	timeoutClient.SetLastHeartbeat(time.Now().Add(-10 * time.Second))
+	timeoutClient.ConnectionType = ConnectionTypeSSE
+	timeoutClient.SetLastSeen(time.Now().Add(-10 * time.Second))
 	hub.shardedRegistry.AddClient(timeoutClient)
 
-	// 创建一个 lastHeartbeat 为当前时间的客户端（未超时）
+	// 创建一个 LastSeen 为当前时间的 SSE 客户端（未超时）
 	activeClient := makeTestClient("chk-active", "chk-active-user")
-	activeClient.SetLastHeartbeat(time.Now())
+	activeClient.ConnectionType = ConnectionTypeSSE
+	activeClient.SetLastSeen(time.Now())
 	hub.shardedRegistry.AddClient(activeClient)
 
 	require.True(t, hub.HasClient("chk-timeout"), "超时客户端应已注册")

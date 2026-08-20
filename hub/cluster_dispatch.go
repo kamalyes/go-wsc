@@ -47,6 +47,7 @@ type ClusterOperation = models.OperationType
 // 设计原则：调用方爱传什么传什么，单/多元素统一走切片，不做单值字段冗余
 type ClusterDispatchOptions struct {
 	Operation     ClusterOperation // 操作类型（SendMessage/GroupsBroadcast/Broadcast/ObserverNotify/KickUser）
+	AppID         string           // 应用ID（最上层隔离维度，空=全局共享）
 	Namespace     string           // 命名空间ID（空="default"；Broadcast 时空表示全命名空间）
 	TargetNodeID  string           // 目标节点ID（精确路由，空=所有已知节点广播）
 	TargetNodeIDs []string         // 已知目标节点列表（P2P 跨节点路由用，gRPC 未启用时优先定向 PubSub 而非广播频道）
@@ -95,14 +96,13 @@ func (h *Hub) routeToCluster(ctx context.Context, msg *HubMessage, opts ClusterD
 		return nil
 	}
 
+	// AppID：msg 信封优先，opts 兜底；空值归一化为 DefaultAppID（入口层策略一致）
+	appID, _ := routing.NormalizeRoute(mathx.IfEmpty(msg.AppID, opts.AppID), "")
+
 	// 🔏 路由信封解析：msg 信封优先（入口层已注入，异步/跨节点链路持久化），opts 仅作兜底
 	// - Broadcast 操作：空 Namespace 表示全命名空间广播，不归一化为 "default"
 	// - 其他操作：空 Namespace 保持空（由接收端从 msg 内层信封再兜底）
-	namespace := msg.Namespace
-	if namespace == "" {
-		namespace = opts.Namespace
-	}
-	// GroupIDs：msg 非空则 clone 一份（避免后续 append 污染原 msg），否则用 opts
+	namespace := mathx.IfEmpty(msg.Namespace, opts.Namespace) // GroupIDs：msg 非空则 clone 一份（避免后续 append 污染原 msg），否则用 opts
 	var groupIDs []string
 	if len(msg.GroupIDs) > 0 {
 		groupIDs = append([]string(nil), msg.GroupIDs...)
@@ -112,6 +112,7 @@ func (h *Hub) routeToCluster(ctx context.Context, msg *HubMessage, opts ClusterD
 
 	h.logger.DebugContextKV(ctx, "集群路由",
 		"operation", opts.Operation,
+		"app_id", appID,
 		"namespace", namespace,
 		"target_node", opts.TargetNodeID,
 		"target_user", opts.TargetUserID,
@@ -120,7 +121,7 @@ func (h *Hub) routeToCluster(ctx context.Context, msg *HubMessage, opts ClusterD
 		"message_id", msg.GetMessageID(),
 	)
 
-	// 构建分发信封（路由信封携带 namespace + group_ids，接收端按此过滤）
+	// 构建分发信封（路由信封携带 app_id + namespace + group_ids，接收端按此过滤）
 	dispatch := &models.DistributedMessage{
 		Type:          opts.Operation,
 		NodeID:        h.nodeID,
@@ -128,6 +129,7 @@ func (h *Hub) routeToCluster(ctx context.Context, msg *HubMessage, opts ClusterD
 		Message:       msg,
 		Reason:        opts.Reason,
 		Timestamp:     time.Now(),
+		AppID:         appID,
 		Namespace:     namespace,
 		GroupIDs:      groupIDs,
 		ExcludeSender: opts.ExcludeSender, // 跨节点群组广播 PubSub 兜底需携带，接收端据此排除发送者
@@ -331,13 +333,13 @@ func (h *Hub) executeGRPCDispatch(ctx context.Context, addr string, msgData []by
 
 	case models.OperationTypeObserverNotify:
 		// 单次调用注入全部 GroupIDs，服务端合并去重观察者后一次投递
-		observerCtx := routing.WithNamespaceGroupIDs(ctx, opts.Namespace, opts.GroupIDs)
+		observerCtx := routing.NewRoute().WithAppID(opts.AppID).WithNamespace(opts.Namespace).WithGroupIDs(opts.GroupIDs).Inject(ctx)
 		_, err = grpcClient.NotifyObservers(observerCtx, addr, msgData)
 
 	case models.OperationTypeBroadcast:
 		// 全局广播通过 gRPC SendToUser 的变体：向所有节点发送
 		// 复用 BroadcastGroup 的 namespace 过滤能力，groupID 留空表示全命名空间
-		broadcastCtx := routing.WithNamespaceGroupIDs(ctx, opts.Namespace, nil)
+		broadcastCtx := routing.NewRoute().WithAppID(opts.AppID).WithNamespace(opts.Namespace).Inject(ctx)
 		_, err = grpcClient.BroadcastGroup(broadcastCtx, addr, msgData, false, "")
 
 	default:
@@ -447,7 +449,7 @@ func (h *Hub) grpcBroadcastGroup(ctx context.Context, addr string, opts ClusterD
 		return false
 	}
 
-	_, err := h.grpcClientPool.BroadcastGroup(routing.WithNamespaceGroupIDs(ctx, opts.Namespace, opts.GroupIDs[:1]), addr, msgData, opts.ExcludeSender, opts.SenderID)
+	_, err := h.grpcClientPool.BroadcastGroup(routing.NewRoute().WithAppID(opts.AppID).WithNamespace(opts.Namespace).WithGroupIDs(opts.GroupIDs[:1]).Inject(ctx), addr, msgData, opts.ExcludeSender, opts.SenderID)
 	if err != nil {
 		h.logger.DebugContextKV(ctx, "gRPC 群组广播投递失败",
 			"target_addr", addr, "group_id", opts.GroupIDs[0], "error", err)
@@ -481,7 +483,7 @@ func (h *Hub) grpcBroadcastGroups(ctx context.Context, addr string, opts Cluster
 		go func(groupID string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if _, err := h.grpcClientPool.BroadcastGroup(routing.WithNamespaceGroupIDs(ctx, opts.Namespace, []string{groupID}), addr, msgData, opts.ExcludeSender, opts.SenderID); err == nil {
+			if _, err := h.grpcClientPool.BroadcastGroup(routing.NewRoute().WithAppID(opts.AppID).WithNamespace(opts.Namespace).WithGroup(groupID).Inject(ctx), addr, msgData, opts.ExcludeSender, opts.SenderID); err == nil {
 				atomic.AddInt64(&success, 1)
 			} else {
 				h.logger.DebugContextKV(ctx, "gRPC 批量群组广播：单个群组投递失败",

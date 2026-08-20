@@ -176,7 +176,7 @@ func TestBroadcastToSSEClients(t *testing.T) {
 	}
 
 	// 广播消息
-	hub.Broadcast(context.Background(), msg)
+	_ = hub.Deliver(context.Background(), msg, false)
 	time.Sleep(100 * time.Millisecond)
 
 	// 清理

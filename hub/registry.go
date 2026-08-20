@@ -34,23 +34,33 @@ import (
 // 直接异步执行 handleRegister，不经过 EventLoop channel 串行化
 // handleRegister 内部已用 shardedRegistry 分片锁保护临界区，IO 操作通过 workerPool 异步化
 // 避免单 goroutine EventLoop 成为并发连接的 QPS 瓶颈
+// client.Context 在 http_upgrade 升级时已注入 trace_id，内部直接用 client.Context 实现全链路追踪
 func (h *Hub) Register(client *Client) {
-	h.logger.DebugKV("客户端注册请求", "client_id", client.ID, "user_id", client.UserID)
+	h.logger.DebugContextKV(client.Context, "客户端注册请求", "client_id", client.ID, "user_id", client.UserID)
 	go h.handleRegister(client)
 }
 
 // Unregister 注销客户端
 // 直接异步执行 handleUnregister，不经过 EventLoop channel 串行化
 // handleUnregister 内部已用 shardedRegistry 分片锁保护临界区，IO 操作通过 workerPool 异步化
+// client.Context 在升级时已注入 trace_id，内部直接用 client.Context 实现全链路追踪
 func (h *Hub) Unregister(client *Client) {
-	h.logger.DebugKV("客户端注销请求", "client_id", client.ID, "user_id", client.UserID)
+	h.logger.DebugContextKV(client.Context, "客户端注销请求", "client_id", client.ID, "user_id", client.UserID)
 	go h.handleUnregister(client)
 }
 
 // handleRegister 处理客户端注册（内部方法）
+// client.Context 在升级时已注入 trace_id，全程沿用同一 trace_id 串联长连接生命周期
 func (h *Hub) handleRegister(client *Client) {
+	// ctx 兜底：生产中 http upgrade 时已注入 client.Context；直接构造 Client 调用 Register 的场景（如测试、集成）
+	// 传 nil 时降级为 h.ctx，保证 workerPool/handleMultiLoginPolicy 等下游不因 nil ctx panic
+	ctx := client.Context
+	if ctx == nil {
+		ctx = h.ctx
+		client.Context = ctx
+	}
 	defer syncx.RecoverWithHandler(func(r interface{}) {
-		h.logger.ErrorKV("handleRegister panic",
+		h.logger.ErrorContextKV(ctx, "handleRegister panic",
 			"client_id", client.ID,
 			"user_id", client.UserID,
 			"panic", r,
@@ -59,7 +69,7 @@ func (h *Hub) handleRegister(client *Client) {
 
 	// 双重检查：如果 Hub 正在关闭，拒绝注册
 	if h.shutdown.Load() {
-		h.logger.WarnKV("Hub 正在关闭，拒绝注册",
+		h.logger.WarnContextKV(ctx, "Hub 正在关闭，拒绝注册",
 			"client_id", client.ID,
 			"user_id", client.UserID)
 		if client.Conn != nil {
@@ -68,7 +78,7 @@ func (h *Hub) handleRegister(client *Client) {
 		return
 	}
 
-	h.logger.InfoKV("handleRegister开始",
+	h.logger.InfoContextKV(ctx, "handleRegister开始",
 		"client_id", client.ID,
 		"user_id", client.UserID)
 
@@ -79,6 +89,11 @@ func (h *Hub) handleRegister(client *Client) {
 	client.NodeIP = h.config.NodeIP
 	client.NodePort = h.config.NodePort
 
+	// appID 归一化：空→DefaultAppID（入口层统一归一化，ClientMatchesEnvelope 严格匹配要求）
+	// 与 namespace 归一化策略一致：appID 无广播语义，必填，空值统一补默认值
+	if client.AppID == "" {
+		client.AppID = models.DefaultAppID
+	}
 	// 命名空间归一化：空→"default"（观察者保留空，表示全局观察所有命名空间）
 	if client.UserType != models.UserTypeObserver && client.Namespace == "" {
 		client.Namespace = models.DefaultNamespace
@@ -100,7 +115,7 @@ func (h *Hub) handleRegister(client *Client) {
 	// ============================================================
 	if maxConns := h.GetMaxConnectionsPerNode(); maxConns > 0 && h.shardedRegistry.GetClientCount() >= int64(maxConns) {
 		current := h.shardedRegistry.GetClientCount()
-		h.logger.WarnKV("节点连接数已达上限，拒绝注册",
+		h.logger.WarnContextKV(ctx, "节点连接数已达上限，拒绝注册",
 			"client_id", client.ID,
 			"user_id", client.UserID,
 			"current_connections", current,
@@ -129,9 +144,10 @@ func (h *Hub) handleRegister(client *Client) {
 	// Phase 3: 非临界区 - IO 操作异步执行（WorkerPool 控制并发）
 	// 不再持有任何锁，避免阻塞其他客户端的注册/注销/发送
 	// ============================================================
-	ctx := client.Context
+	// ctx 为业务调用方透传的 ctx（携带 trace_id），异步任务沿用实现全链路追踪
 
 	// 统计同步 + 日志（提交到记录池，可丢弃）
+	// syncClientStats/syncActiveConnectionsToRedis 聚合统计用 h.ctx；logClientConnection 用 client.Context
 	h.workerPool.TrySubmitRecord(func() {
 		h.syncClientStats()
 		h.syncActiveConnectionsToRedis()
@@ -139,10 +155,11 @@ func (h *Hub) handleRegister(client *Client) {
 	})
 
 	// 保存连接记录到数据库（提交到记录池）
+	// 传入 client.Context 保留 client 维度 trace_id，异步保存仍可全链路追踪
 	if h.connectionRecordRepo != nil {
 		record := h.CreateConnectionRecord(client)
 		h.workerPool.TrySubmitRecord(func() {
-			h.saveConnectionRecord(record)
+			h.saveConnectionRecord(ctx, record)
 		})
 	}
 
@@ -150,7 +167,7 @@ func (h *Hub) handleRegister(client *Client) {
 	h.workerPool.SubmitCallback(ctx, func() {
 		if h.clientConnectCallback != nil {
 			if err := h.clientConnectCallback(ctx, client); err != nil {
-				h.logger.ErrorKV("客户端连接回调执行失败",
+				h.logger.ErrorContextKV(ctx, "客户端连接回调执行失败",
 					"client_id", client.ID,
 					"user_id", client.UserID,
 					"error", err,
@@ -168,11 +185,12 @@ func (h *Hub) handleRegister(client *Client) {
 	// 同步调用仅阻塞本 handleRegister goroutine ~1ms（一次 Redis Pipeline 往返），
 	// handleRegister 由 go h.handleRegister(client) 异步触发（registry.go:39），不阻塞 EventLoop、不影响其他连接
 	// syncOnlineStatus 内部 onlineStatusRepo==nil 时早返回；SetClientOnline 失败仅记日志不 return，行为与原异步路径一致
-	h.syncOnlineStatus(client)
+	h.syncOnlineStatus(client) // 内部用 client.Context 保留连接级 trace_id
 
 	// 系统组加入 + 成员组加入 + 离线消息推送（提交到分布式池，均不依赖在线状态索引）
 	// joinSystemGroupsOnConnect/joinMemberGroupOnConnect 写 group ZSET（wsc:group:* 命名空间）
 	// pushOfflineMessagesOnConnect 操作离线消息队列（ns::userID），依赖本地 shardedRegistry（L122 已完成）
+	// 内部方法已有 client 参数，直接用 client.Context 保留连接级 trace_id
 	h.workerPool.TrySubmitDistributed(func() {
 		h.joinSystemGroupsOnConnect(ctx, client)
 		h.joinMemberGroupOnConnect(ctx, client)
@@ -211,14 +229,14 @@ func (h *Hub) GetMaxConnectionsPerNode() int {
 }
 
 // handleUnregister 处理客户端注销（内部方法）
+// client.Context 在升级时已注入 trace_id，内部用 client.Context 串联长连接生命周期
 func (h *Hub) handleUnregister(client *Client) {
-	// 从客户端连接级上下文获取 ctx（携带 trace_id）
 	ctx := client.Context
-
 	// 📡 发布用户下线事件（在锁外发布，避免阻塞）
 	go events.PublishUserOffline(ctx, h, client.UserID, client.UserType, client.ID)
 
 	// Phase 1: 临界区 - 仅从注册表移除（shardedRegistry 分片锁）
+	// removeClientUnsafe 内部用 client.Context 保留连接级 trace_id
 	h.removeClientUnsafe(client)
 
 	// 系统组离开（提交到分布式池，与在线状态清理并行）
@@ -230,7 +248,7 @@ func (h *Hub) handleUnregister(client *Client) {
 	if h.clientDisconnectCallback != nil {
 		h.workerPool.SubmitCallback(ctx, func() {
 			if err := h.clientDisconnectCallback(ctx, client, DisconnectReasonClientRequest); err != nil {
-				h.logger.ErrorKV("客户端断开回调执行失败",
+				h.logger.ErrorContextKV(ctx, "客户端断开回调执行失败",
 					"client_id", client.ID,
 					"user_id", client.UserID,
 					"error", err,
@@ -255,7 +273,9 @@ func (h *Hub) handleUnregister(client *Client) {
 // handleMultiLoginPolicy 统一处理多端登录策略（内部方法）
 // 根据配置决定是否允许多端登录、是否限制连接数
 // 全程使用原子/O(1) 查询 + ForEachUserClient 持锁遍历，消除 GetUserClients 锁外遍历的数据竞争
+// newClient.Context 在升级时已注入 trace_id，内部用 newClient.Context 串联长连接生命周期
 func (h *Hub) handleMultiLoginPolicy(newClient *Client) {
+	ctx := newClient.Context
 	userID := newClient.UserID
 
 	// O(1) 快速检查用户是否有现有客户端（原子计数器，无锁）
@@ -264,7 +284,7 @@ func (h *Hub) handleMultiLoginPolicy(newClient *Client) {
 		return
 	}
 
-	h.logger.DebugKV("处理多端登录策略",
+	h.logger.DebugContextKV(ctx, "处理多端登录策略",
 		"user_id", userID,
 		"new_client_id", newClient.ID,
 		"allow_multi_login", h.config.AllowMultiLogin,
@@ -272,7 +292,7 @@ func (h *Hub) handleMultiLoginPolicy(newClient *Client) {
 
 	// 检测断线重连：O(1) 查找相同 ClientID 的旧客户端（GetClient 持读锁）
 	if oldClient, exists := h.shardedRegistry.GetClient(newClient.ID); exists && oldClient.UserID == userID {
-		h.logger.InfoKV("检测到相同ClientID的旧连接，执行断线重连替换",
+		h.logger.InfoContextKV(ctx, "检测到相同ClientID的旧连接，执行断线重连替换",
 			"user_id", userID,
 			"client_id", newClient.ID,
 		)
@@ -291,7 +311,7 @@ func (h *Hub) handleMultiLoginPolicy(newClient *Client) {
 			return true
 		})
 
-		h.logger.InfoKV("不允许多端登录，踢掉所有旧连接",
+		h.logger.InfoContextKV(ctx, "不允许多端登录，踢掉所有旧连接",
 			"user_id", userID,
 			"old_connections", len(clients))
 
@@ -312,7 +332,7 @@ func (h *Hub) handleMultiLoginPolicy(newClient *Client) {
 		}
 
 		// 达到上限：踢掉最早的连接
-		h.logger.InfoKV("达到连接数上限，踢掉最早的连接",
+		h.logger.InfoContextKV(ctx, "达到连接数上限，踢掉最早的连接",
 			"user_id", userID,
 			"current_count", currentCount,
 			"max_allowed", maxAllowed)
@@ -331,14 +351,13 @@ func (h *Hub) handleMultiLoginPolicy(newClient *Client) {
 // ============================================================================
 
 // KickUser 踢出用户的所有连接
-func (h *Hub) KickUser(userID string, reason string, sendNotification bool, notificationMsg string) *KickUserResult {
+// ctx 由调用方传入（通常为请求级 ctx 或 client.Context），用于全链路追踪踢人操作
+func (h *Hub) KickUser(ctx context.Context, userID string, reason string, sendNotification bool, notificationMsg string) *KickUserResult {
 	result := &KickUserResult{
 		UserID:   userID,
 		Reason:   reason,
 		KickedAt: time.Now(),
 	}
-
-	ctx := context.Background()
 
 	// 1. 获取用户的所有连接
 	clients := h.GetConnectionsByUserID(userID)
@@ -346,7 +365,7 @@ func (h *Hub) KickUser(userID string, reason string, sendNotification bool, noti
 		result.Error = errorx.NewError(ErrTypeUserNotFound, "user not online or not found: %s", userID)
 		result.Success = false
 		result.Reason = reason + " (用户不在线)"
-		h.logger.WarnKV("踢出用户失败：用户不在线",
+		h.logger.WarnContextKV(ctx, "踢出用户失败：用户不在线",
 			"user_id", userID,
 			"reason", reason,
 		)
@@ -356,6 +375,7 @@ func (h *Hub) KickUser(userID string, reason string, sendNotification bool, noti
 	result.KickedConnections = len(clients)
 
 	// 2. 发送踢出通知消息（在断开连接之前）
+	// 批量操作：内部每个 client 用各自 client.Context 保留连接级 trace_id
 	if sendNotification {
 		notification := h.createKickNotification(userID, reason, notificationMsg, result.KickedAt)
 		result.NotificationSent = h.sendKickNotificationToClients(clients, notification)
@@ -364,7 +384,7 @@ func (h *Hub) KickUser(userID string, reason string, sendNotification bool, noti
 	}
 
 	// 3. 记录踢出操作
-	h.logger.InfoKV("开始踢出用户",
+	h.logger.InfoContextKV(ctx, "开始踢出用户",
 		"user_id", userID,
 		"reason", reason,
 		"connection_count", len(clients),
@@ -372,13 +392,14 @@ func (h *Hub) KickUser(userID string, reason string, sendNotification bool, noti
 	)
 
 	// 4. 并发断开所有连接
+	// 每个 client 用自己的 client.Context，使断开回调日志携带各自 trace_id
 	syncx.ParallelForEachSlice(clients, func(i int, client *Client) {
-		h.disconnectKickedClient(ctx, client, reason)
+		h.disconnectKickedClient(client.Context, client, reason)
 	})
 
 	// 5. 设置成功标志并记录完成
 	result.Success = true
-	h.logger.InfoKV("用户踢出完成",
+	h.logger.InfoContextKV(ctx, "用户踢出完成",
 		"user_id", userID,
 		"reason", reason,
 		"kicked_connections", result.KickedConnections,
@@ -389,14 +410,16 @@ func (h *Hub) KickUser(userID string, reason string, sendNotification bool, noti
 }
 
 // KickUserWithMessage 踢出用户并发送自定义消息
-func (h *Hub) KickUserWithMessage(userID string, reason string, message string) error {
-	result := h.KickUser(userID, reason, true, message)
+// ctx 由调用方传入（grpc/distributed 路径已恢复 trace_id），透传给 KickUser 实现全链路追踪
+func (h *Hub) KickUserWithMessage(ctx context.Context, userID string, reason string, message string) error {
+	result := h.KickUser(ctx, userID, reason, true, message)
 	return result.Error
 }
 
 // KickUserSimple 简单踢出用户（不发送通知）
-func (h *Hub) KickUserSimple(userID string, reason string) int {
-	result := h.KickUser(userID, reason, false, "")
+// ctx 由调用方传入（grpc/distributed 路径已恢复 trace_id），透传给 KickUser 实现全链路追踪
+func (h *Hub) KickUserSimple(ctx context.Context, userID string, reason string) int {
+	result := h.KickUser(ctx, userID, reason, false, "")
 	return result.KickedConnections
 }
 
@@ -404,8 +427,9 @@ func (h *Hub) KickUserSimple(userID string, reason string) int {
 // 内部辅助方法
 // ============================================================================
 
-// removeClientUnsafe 移除客户端（数据清理，不含回调）
+// removeClientUnsafe 从注册表移除客户端（含指针一致性校验、时间轮取消、清理流程）
 // 主存储 + 分类索引（SSE/Observer/Agent）全部由 shardedRegistry.RemoveClient 内部原子完成
+// 已有 client 参数，内部用 client.Context 保留连接级 trace_id
 // 回调由调用方（handleUnregister）通过 workerPool 处理，避免重复
 func (h *Hub) removeClientUnsafe(client *Client) {
 	// 1. 从 shardedRegistry 移除主存储 + 分类索引（若不存在则直接返回）
@@ -424,7 +448,7 @@ func (h *Hub) removeClientUnsafe(client *Client) {
 	if removed != client {
 		// 旧客户端已被新连接替换，重新添加新客户端并跳过旧客户端的注销
 		h.shardedRegistry.AddClient(removed)
-		h.logger.InfoKV("客户端已被新连接替换，跳过旧客户端的注销",
+		h.logger.InfoContextKV(client.Context, "客户端已被新连接替换，跳过旧客户端的注销",
 			"client_id", client.ID,
 			"user_id", client.UserID,
 		)
@@ -456,8 +480,9 @@ func (h *Hub) removeClientUnsafe(client *Client) {
 }
 
 // logClientDisconnection 记录客户端断开日志
+// 已有 client 参数，内部用 client.Context 保留连接级 trace_id
 func (h *Hub) logClientDisconnection(client *Client) {
-	h.logger.InfoKV("客户端断开连接",
+	h.logger.InfoContextKV(client.Context, "客户端断开连接",
 		"client_id", client.ID,
 		"user_id", client.UserID,
 		"user_type", client.UserType,
@@ -466,6 +491,7 @@ func (h *Hub) logClientDisconnection(client *Client) {
 }
 
 // syncClientRemovalToRedis 同步客户端移除到Redis
+// 已有 client 参数，内部用 client.Context 保留连接级 trace_id
 func (h *Hub) syncClientRemovalToRedis(client *Client) {
 	h.syncActiveConnectionsToRedis()
 	h.removeOnlineStatusFromRedis(client)
@@ -473,6 +499,7 @@ func (h *Hub) syncClientRemovalToRedis(client *Client) {
 
 // syncActiveConnectionsToRedis 同步活跃连接数到Redis（使用防抖机制避免竞态条件）
 // 当多个客户端快速注册时，使用防抖延迟50ms执行，避免多个goroutine读取不同的连接数并乱序写入Redis
+// 聚合统计无具体 client 维度，用 h.ctx
 func (h *Hub) syncActiveConnectionsToRedis() {
 	if h.statsRepo == nil {
 		return
@@ -504,10 +531,10 @@ func (h *Hub) syncActiveConnectionsToRedis() {
 		}
 		defer h.syncActiveConnPending.Store(false)
 
-		syncx.Go().
+		syncx.Go(h.ctx).
 			WithTimeout(2 * time.Second).
 			OnPanic(func(r any) {
-				h.logger.ErrorKV("同步活跃连接数到Redis崩溃", "panic", r, "stack", string(debug.Stack()))
+				h.logger.ErrorContextKV(h.ctx, "同步活跃连接数到Redis崩溃", "panic", r, "stack", string(debug.Stack()))
 			}).
 			ExecWithContext(func(ctx context.Context) error {
 				// 再次检查shutdown
@@ -521,16 +548,18 @@ func (h *Hub) syncActiveConnectionsToRedis() {
 }
 
 // removeOnlineStatusFromRedis 从Redis移除在线状态
+// 已有 client 参数，内部用 client.Context 保留连接级 trace_id
+// context.WithoutCancel 确保 Hub 关闭（h.ctx 取消）后仍能完成 Redis 清理
 func (h *Hub) removeOnlineStatusFromRedis(client *Client) {
 	if h.onlineStatusRepo == nil {
 		return
 	}
-	// 使用独立的 context，不依赖 Hub 的生命周期
-	// 确保在 Hub 关闭时仍能完成清理操作
-	syncx.Go(context.Background()).
+	// 用 client.Context 派生（保留连接级 trace_id，全链路追踪下线清理）；
+	// context.WithoutCancel 确保 Hub 关闭（h.ctx 取消）后仍能完成 Redis 清理
+	syncx.Go(context.WithoutCancel(client.Context)).
 		WithTimeout(3 * time.Second).
 		OnError(func(err error) {
-			h.logger.ErrorKV("从Redis移除在线状态失败",
+			h.logger.ErrorContextKV(client.Context, "从Redis移除在线状态失败",
 				"user_id", client.UserID,
 				"client_id", client.ID,
 				"error", err,
@@ -598,11 +627,12 @@ func (h *Hub) addNewClient(client *Client) {
 }
 
 // kickExistingClients 踢掉现有客户端（接收切片，调用方负责通过 ForEachUserClient 持锁收集）
+// 已有 client 参数，内部循环每个 client 用各自 client.Context 保留连接级 trace_id
 func (h *Hub) kickExistingClients(clients []*Client, reason DisconnectReason) {
 	for _, client := range clients {
 		h.kickClientWithNotification(client, reason, "您的账号在其他设备登录，当前连接将被断开")
 
-		h.logger.InfoKV("踢出旧连接",
+		h.logger.InfoContextKV(client.Context, "踢出旧连接",
 			"user_id", client.UserID,
 			"client_id", client.ID,
 			"reason", reason,
@@ -612,6 +642,7 @@ func (h *Hub) kickExistingClients(clients []*Client, reason DisconnectReason) {
 
 // kickOldestConnection 踢掉最不活跃的连接（基于最后心跳时间）
 // 使用 ForEachUserClient 持读锁遍历，消除锁外遍历 map 的数据竞争
+// 找到 oldestClient 后用其 client.Context 保留连接级 trace_id
 func (h *Hub) kickOldestConnection(userID string) {
 	var oldestClient *Client
 	var oldestTime time.Time
@@ -630,7 +661,7 @@ func (h *Hub) kickOldestConnection(userID string) {
 		return
 	}
 
-	h.logger.InfoKV("踢掉最不活跃的连接",
+	h.logger.InfoContextKV(oldestClient.Context, "踢掉最不活跃的连接",
 		"client_id", oldestClient.ID,
 		"user_id", oldestClient.UserID,
 		"last_heartbeat", oldestClient.GetLastHeartbeat(),
@@ -641,6 +672,7 @@ func (h *Hub) kickOldestConnection(userID string) {
 }
 
 // kickClientWithNotification 踢掉客户端并发送通知（公共方法）
+// 已有 client 参数，内部用 client.Context 保留连接级 trace_id
 func (h *Hub) kickClientWithNotification(client *Client, reason DisconnectReason, message string) {
 	// 发送强制下线通知
 	if client.Conn != nil {
@@ -653,7 +685,8 @@ func (h *Hub) kickClientWithNotification(client *Client, reason DisconnectReason
 			SetContent(message).
 			WithContentExtra("reason", reason)
 
-		h.sendToClient(h.ctx, client, forceOfflineMsg)
+		// 用 client.Context 保留连接级 trace_id，强制下线消息日志可全链路追踪
+		h.sendToClient(client.Context, client, forceOfflineMsg)
 		// 不再使用 time.Sleep 阻塞等待，sendToClient 已将消息写入 SendChan，
 		// handleClientWrite 会异步发送 Unregister 后通道关闭前消息仍会被消费
 	}
@@ -679,6 +712,7 @@ func (h *Hub) createKickNotification(userID, reason, customMsg string, kickedAt 
 
 // sendKickNotificationToClients 发送踢人通知到客户端
 // 预序列化一次消息，所有客户端复用，消除逐客户端 json.Marshal 开销
+// 批量操作：循环内每个 client 用各自 client.Context 保留连接级 trace_id
 func (h *Hub) sendKickNotificationToClients(clients []*Client, msg *HubMessage) bool {
 	if len(clients) == 0 {
 		return false
@@ -687,8 +721,9 @@ func (h *Hub) sendKickNotificationToClients(clients []*Client, msg *HubMessage) 
 	// 预序列化一次（所有客户端复用）
 	preSerialized, _ := json.Marshal(msg)
 
+	// 每个 client 用自己的 client.Context，使踢人通知投递日志携带各自 trace_id
 	for _, client := range clients {
-		h.sendToClientSerialized(h.ctx, client, msg, preSerialized)
+		h.sendToClientSerialized(client.Context, client, msg, preSerialized)
 	}
 	return true
 }

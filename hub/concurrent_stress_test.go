@@ -103,7 +103,7 @@ func setupStressHub(t *testing.T, withGroup bool) (*Hub, repository.GroupReposit
 		for i := 0; i < stressClientBase && i < stressClientBase/2; i += 2 {
 			members = append(members, fmt.Sprintf("s-u-%d", i))
 		}
-		require.NoError(t, hub.AddGroupMembers(ctx, stressNamespace, stressGroupID, members))
+		require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(models.DefaultAppID).WithNamespace(stressNamespace).WithGroupIDs([]string{stressGroupID}).Inject(ctx), members))
 	}
 
 	cleanup := func() {
@@ -127,6 +127,7 @@ func makeStressClient(clientID, userID, namespace string) *Client {
 		Context:        context.WithValue(context.Background(), ContextKeyUserID, userID),
 		ConnectedAt:    time.Now(),
 		LastSeen:       time.Now(),
+		AppID:          models.DefaultAppID, // 与入口层归一化策略一致（msg 经 InjectRoute 归一化为 DefaultAppID）
 	}
 	c.WithNamespace(namespace)
 	c.SetGroupID("") // 默认空 group，群组维度不参与系统组匹配
@@ -152,6 +153,7 @@ func makeStressClientWithGroup(clientID, userID, namespace, groupID string) *Cli
 		Context:        context.WithValue(context.Background(), ContextKeyUserID, userID),
 		ConnectedAt:    time.Now(),
 		LastSeen:       time.Now(),
+		AppID:          models.DefaultAppID, // 与入口层归一化策略一致（msg 经 InjectRoute 归一化为 DefaultAppID）
 	}
 	c.WithNamespace(namespace)
 	c.SetGroupID(groupID)
@@ -207,7 +209,7 @@ func TestConcurrentP2PSendStress(t *testing.T) {
 				to := fmt.Sprintf("s-u-%d", (w*perWorker+i)%stressClientBase)
 				from := fmt.Sprintf("sender-%d-%d", w, i)
 				msg := makeStressMessage(from, fmt.Sprintf("hello from w%d-i%d", w, i))
-				ctx := routing.WithNamespaceGroupIDs(ctx, stressNamespace, nil)
+				ctx := routing.NewRoute().WithAppID("").WithNamespace(stressNamespace).WithGroupIDs(nil).Inject(ctx)
 				res := hub.SendToUserWithRetry(ctx, to, msg)
 				if res.FinalError != nil {
 					atomic.AddInt64(&errCount, 1)
@@ -248,7 +250,7 @@ func TestConcurrentBroadcastStress(t *testing.T) {
 		for i := 0; i < eachCount; i++ {
 			msg := makeStressMessage("gb-sender", fmt.Sprintf("global-broadcast-%d", i))
 			msg.SetBroadcastType(models.BroadcastTypeGlobal)
-			hub.Broadcast(ctx, msg)
+			_ = hub.Deliver(ctx, msg, false)
 			atomic.AddInt64(&deliveredGlobal, int64(hub.GetClientsCount())) // 仅记录逻辑计数
 		}
 	}()
@@ -259,7 +261,8 @@ func TestConcurrentBroadcastStress(t *testing.T) {
 		for i := 0; i < eachCount; i++ {
 			msg := makeStressMessage("ns-sender", fmt.Sprintf("ns-broadcast-%d", i))
 			msg.SetBroadcastType(models.BroadcastTypeGlobal)
-			delivered := hub.BroadcastToNamespace(ctx, stressNamespace, msg)
+			nsCtx := routing.NewRoute().WithAppID(models.DefaultAppID).WithNamespace(stressNamespace).WithGroupIDs(nil).Inject(ctx)
+			delivered := hub.Deliver(nsCtx, msg, false).LocalDelivered
 			atomic.AddInt64(&deliveredNs, int64(delivered))
 		}
 	}()
@@ -269,8 +272,9 @@ func TestConcurrentBroadcastStress(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < eachCount; i++ {
 			msg := makeStressMessage("gp-sender", fmt.Sprintf("group-broadcast-%d", i))
-			gctx := routing.WithNamespaceGroupIDs(ctx, stressNamespace, []string{stressGroupID})
-			res := hub.SendToGroup(gctx, msg, false)
+			msg.RequireAck = true
+			gctx := routing.NewRoute().WithAppID(models.DefaultAppID).WithNamespace(stressNamespace).WithGroupIDs([]string{stressGroupID}).Inject(ctx)
+			res := hub.Deliver(gctx, msg, false)
 			if len(res.Errors) == 0 {
 				atomic.AddInt64(&successGroup, 1)
 			}
@@ -471,7 +475,7 @@ func TestConcurrentMixedAllStress(t *testing.T) {
 			for i := 0; i < 80; i++ {
 				to := fmt.Sprintf("s-u-%d", (w*80+i)%stressClientBase)
 				msg := makeStressMessage(fmt.Sprintf("m-a-%d", w), fmt.Sprintf("b%d", i))
-				ctx := routing.WithNamespaceGroupIDs(ctx, stressNamespace, nil)
+				ctx := routing.NewRoute().WithAppID("").WithNamespace(stressNamespace).WithGroupIDs(nil).Inject(ctx)
 				_ = hub.SendToUserWithRetry(ctx, to, msg)
 				atomic.AddInt64(&totalOps, 1)
 			}
@@ -485,7 +489,7 @@ func TestConcurrentMixedAllStress(t *testing.T) {
 		for i := 0; i < 40; i++ {
 			msg := makeStressMessage("mixed-gb", fmt.Sprintf("m-gb-%d", i))
 			msg.SetBroadcastType(models.BroadcastTypeGlobal)
-			hub.Broadcast(ctx, msg)
+			_ = hub.Deliver(ctx, msg, false)
 			atomic.AddInt64(&totalOps, 1)
 		}
 	}()
@@ -494,7 +498,8 @@ func TestConcurrentMixedAllStress(t *testing.T) {
 		for i := 0; i < 40; i++ {
 			msg := makeStressMessage("mixed-ns", fmt.Sprintf("m-ns-%d", i))
 			msg.SetBroadcastType(models.BroadcastTypeGlobal)
-			hub.BroadcastToNamespace(ctx, stressNamespace, msg)
+			nsCtx := routing.NewRoute().WithAppID(models.DefaultAppID).WithNamespace(stressNamespace).WithGroupIDs(nil).Inject(ctx)
+			_ = hub.Deliver(nsCtx, msg, false)
 			atomic.AddInt64(&totalOps, 1)
 		}
 	}()
@@ -502,8 +507,9 @@ func TestConcurrentMixedAllStress(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < 40; i++ {
 			msg := makeStressMessage("mixed-gp", fmt.Sprintf("m-gp-%d", i))
-			gctx := routing.WithNamespaceGroupIDs(ctx, stressNamespace, []string{stressGroupID})
-			_ = hub.SendToGroup(gctx, msg, true)
+			msg.RequireAck = true
+			gctx := routing.NewRoute().WithAppID(models.DefaultAppID).WithNamespace(stressNamespace).WithGroupIDs([]string{stressGroupID}).Inject(ctx)
+			_ = hub.Deliver(gctx, msg, true)
 			atomic.AddInt64(&totalOps, 1)
 		}
 	}()

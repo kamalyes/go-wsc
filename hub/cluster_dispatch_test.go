@@ -32,6 +32,7 @@ import (
 	"github.com/kamalyes/go-wsc/models"
 	wscpb "github.com/kamalyes/go-wsc/models/pb"
 	"github.com/kamalyes/go-wsc/repository"
+	"github.com/kamalyes/go-wsc/routing"
 )
 
 // clusterHubPortSeq 为每个 newClusterHub 分配唯一的 WS 端口，确保 generateNodeID 产出不同 nodeID
@@ -176,7 +177,7 @@ func TestRouteToCluster_GRPCDirect_GroupBroadcast(t *testing.T) {
 
 	ctx := context.Background()
 	require.NoError(t, hubB.groupRepo.CreateGroup(ctx, &Group{GroupID: "g-bc", Namespace: "ns-bc", OwnerID: "owner"}))
-	require.NoError(t, hubB.AddGroupMembers(ctx, "ns-bc", "g-bc", []string{"u-m1", "u-m2"}))
+	require.NoError(t, hubB.AddGroupMembers(routing.NewRoute().WithAppID(models.DefaultAppID).WithNamespace("ns-bc").WithGroupIDs([]string{"g-bc"}).Inject(ctx), []string{"u-m1", "u-m2"}))
 
 	m1 := makeTestClient("c-m1", "u-m1", "ns-bc")
 	m2 := makeTestClient("c-m2", "u-m2", "ns-bc")
@@ -202,8 +203,8 @@ func TestRouteToCluster_GRPCDirect_GroupsBroadcast(t *testing.T) {
 	ctx := context.Background()
 	require.NoError(t, hubB.groupRepo.CreateGroup(ctx, &Group{GroupID: "g1", Namespace: "ns-gb", OwnerID: "owner"}))
 	require.NoError(t, hubB.groupRepo.CreateGroup(ctx, &Group{GroupID: "g2", Namespace: "ns-gb", OwnerID: "owner"}))
-	require.NoError(t, hubB.AddGroupMembers(ctx, "ns-gb", "g1", []string{"u-a"}))
-	require.NoError(t, hubB.AddGroupMembers(ctx, "ns-gb", "g2", []string{"u-b"}))
+	require.NoError(t, hubB.AddGroupMembers(routing.NewRoute().WithAppID(models.DefaultAppID).WithNamespace("ns-gb").WithGroupIDs([]string{"g1"}).Inject(ctx), []string{"u-a"}))
+	require.NoError(t, hubB.AddGroupMembers(routing.NewRoute().WithAppID(models.DefaultAppID).WithNamespace("ns-gb").WithGroupIDs([]string{"g2"}).Inject(ctx), []string{"u-b"}))
 
 	ca := makeTestClient("c-a", "u-a", "ns-gb")
 	cb := makeTestClient("c-b", "u-b", "ns-gb")

@@ -18,7 +18,9 @@ import (
 	"time"
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/repository"
+	"github.com/kamalyes/go-wsc/routing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -93,7 +95,7 @@ func TestBroadcastToGroup(t *testing.T) {
 		Namespace: "default",
 		OwnerID:   "system",
 	}))
-	require.NoError(t, groupRepo.AddMembers(ctx, "default", "customer-group", []string{customer.UserID}))
+	require.NoError(t, groupRepo.AddMembers(ctx, models.DefaultAppID, "default", "customer-group", []string{customer.UserID}))
 
 	msg := &HubMessage{
 		ID:           "broadcast-group-1",
@@ -103,7 +105,9 @@ func TestBroadcastToGroup(t *testing.T) {
 	}
 
 	// 广播到customer组
-	count := hub.BroadcastToGroup(ctx, "default", "customer-group", msg, false)
+	groupCtx := routing.NewRoute().WithAppID(models.DefaultAppID).WithNamespace("default").WithGroupIDs([]string{"customer-group"}).Inject(ctx)
+	dr := hub.Deliver(groupCtx, msg, false)
+	count := dr.LocalDelivered
 	assert.Equal(t, 1, count, "应该发送给1个customer")
 
 	hub.Unregister(customer)
@@ -135,7 +139,7 @@ func TestBroadcast(t *testing.T) {
 	}
 
 	// 全局广播
-	hub.Broadcast(context.Background(), msg)
+	_ = hub.Deliver(context.Background(), msg, false)
 	time.Sleep(100 * time.Millisecond)
 
 	// 清理

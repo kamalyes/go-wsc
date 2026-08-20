@@ -158,7 +158,7 @@ func TestWorkload_NamespacePassthrough(t *testing.T) {
 	hub.SetWorkloadRepository(repo)
 	// 注入自定义 namespace 到 ctx，验证透传
 	customNS := "custom-ns"
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), customNS, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(customNS).WithGroupIDs(nil).Inject(context.Background())
 
 	t.Run("GetAgentWorkload→CustomNamespace", func(t *testing.T) {
 		_, _ = hub.GetAgentWorkload(ctx, "a1")
@@ -200,7 +200,7 @@ func TestForceSetAgentWorkload_WithRepo(t *testing.T) {
 
 	repo := &fakeWorkloadRepo{}
 	hub.SetWorkloadRepository(repo)
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(models.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 
 	require.NoError(t, hub.ForceSetAgentWorkload(ctx, "a1", 42))
 	assert.Equal(t, "a1", repo.lastForceSetAgent)

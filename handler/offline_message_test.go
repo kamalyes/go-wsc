@@ -22,12 +22,17 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// queueKeyFromCtx 从 ctx 提取 (ns, firstGroupID) 并构造 Redis 队列 key
-// 与生产代码 storeToRedis/drainFromRedis 的调用路径一致：queueKey(ns, normalizeGroupID(gid), userID)
+// queueKeyFromCtx 从 ctx 提取 (appID, ns, firstGroupID) 并构造 Redis 队列 key
+// 与生产代码 storeToRedis/drainFromRedis 的调用路径一致：queueKey(appID, ns, normalizeGroupID(gid), userID)
+// appID 归一化（空→DefaultAppID，最上层隔离维度必填），namespace 保持原值不归一化（与 resolveOfflineRoute 一致）
 func queueKeyFromCtx(ctx context.Context, userID string) string {
+	appID := routing.AppIDFromContext(ctx)
+	if appID == "" {
+		appID = models.DefaultAppID
+	}
 	ns := routing.NamespaceFromContext(ctx)
 	gid := routing.FirstGroupIDFromContext(ctx)
-	return queueKey(ns, normalizeGroupID(gid), userID)
+	return queueKey(appID, ns, normalizeGroupID(gid), userID)
 }
 
 // ============================================================================
@@ -55,48 +60,48 @@ func TestNormalizeGroupID(t *testing.T) {
 // queueKey 是包级纯函数，不依赖 HybridOfflineMessageHandler 实例
 func TestQueueKey(t *testing.T) {
 	t.Run("P2P消息补默认组", func(t *testing.T) {
-		ctx := routing.WithNamespaceGroupIDs(context.Background(), "ns1", nil)
-		assert.Equal(t, "ns1:"+models.DefaultGroupID+":u1", queueKeyFromCtx(ctx, "u1"))
+		ctx := routing.NewRoute().WithAppID("").WithNamespace("ns1").WithGroupIDs(nil).Inject(context.Background())
+		assert.Equal(t, models.DefaultAppID+":ns1:"+models.DefaultGroupID+":u1", queueKeyFromCtx(ctx, "u1"))
 	})
 
 	t.Run("群组消息保留group", func(t *testing.T) {
-		ctx := routing.WithNamespaceGroupIDs(context.Background(), "ns1", []string{"g-100"})
-		assert.Equal(t, "ns1:g-100:u1", queueKeyFromCtx(ctx, "u1"))
+		ctx := routing.NewRoute().WithAppID("").WithNamespace("ns1").WithGroupIDs([]string{"g-100"}).Inject(context.Background())
+		assert.Equal(t, models.DefaultAppID+":ns1:g-100:u1", queueKeyFromCtx(ctx, "u1"))
 	})
 
 	t.Run("namespace空P2P补默认组", func(t *testing.T) {
-		// namespace 为空时 key 以冒号开头，三段结构仍保持（:__default_gp__:u1）
-		ctx := routing.WithNamespaceGroupIDs(context.Background(), "", nil)
-		assert.Equal(t, ":"+models.DefaultGroupID+":u1", queueKeyFromCtx(ctx, "u1"))
+		// namespace 为空时 key 中间段为空，appID:__default_gp__:u1（namespace 不归一化，保持空串）
+		ctx := routing.NewRoute().WithAppID("").WithNamespace("").WithGroupIDs(nil).Inject(context.Background())
+		assert.Equal(t, models.DefaultAppID+"::"+models.DefaultGroupID+":u1", queueKeyFromCtx(ctx, "u1"))
 	})
 
 	t.Run("显式传DefaultGroupID不二次归一化", func(t *testing.T) {
-		ctx := routing.WithNamespaceGroupIDs(context.Background(), "ns1", []string{models.DefaultGroupID})
-		assert.Equal(t, "ns1:"+models.DefaultGroupID+":u1", queueKeyFromCtx(ctx, "u1"))
+		ctx := routing.NewRoute().WithAppID("").WithNamespace("ns1").WithGroupIDs([]string{models.DefaultGroupID}).Inject(context.Background())
+		assert.Equal(t, models.DefaultAppID+":ns1:"+models.DefaultGroupID+":u1", queueKeyFromCtx(ctx, "u1"))
 	})
 
 	t.Run("多group取首个", func(t *testing.T) {
-		ctx := routing.WithNamespaceGroupIDs(context.Background(), "ns1", []string{"g-1", "g-2"})
-		assert.Equal(t, "ns1:g-1:u1", queueKeyFromCtx(ctx, "u1"))
+		ctx := routing.NewRoute().WithAppID("").WithNamespace("ns1").WithGroupIDs([]string{"g-1", "g-2"}).Inject(context.Background())
+		assert.Equal(t, models.DefaultAppID+":ns1:g-1:u1", queueKeyFromCtx(ctx, "u1"))
 	})
 
 	t.Run("store与drain同ctx产出同key", func(t *testing.T) {
 		// 保证 store 落点与 drain 取点一致，不会因 key 不一致丢消息
-		ctx := routing.WithNamespaceGroupIDs(context.Background(), "ns1", nil)
+		ctx := routing.NewRoute().WithAppID("").WithNamespace("ns1").WithGroupIDs(nil).Inject(context.Background())
 		storeKey := queueKeyFromCtx(ctx, "u1")
 		drainKey := queueKeyFromCtx(ctx, "u1")
 		assert.Equal(t, storeKey, drainKey)
 	})
 
 	t.Run("不同namespace隔离", func(t *testing.T) {
-		ctxA := routing.WithNamespaceGroupIDs(context.Background(), "nsA", nil)
-		ctxB := routing.WithNamespaceGroupIDs(context.Background(), "nsB", nil)
+		ctxA := routing.NewRoute().WithAppID("").WithNamespace("nsA").WithGroupIDs(nil).Inject(context.Background())
+		ctxB := routing.NewRoute().WithAppID("").WithNamespace("nsB").WithGroupIDs(nil).Inject(context.Background())
 		assert.NotEqual(t, queueKeyFromCtx(ctxA, "u1"), queueKeyFromCtx(ctxB, "u1"))
 	})
 
 	t.Run("不同group隔离", func(t *testing.T) {
-		ctxP2P := routing.WithNamespaceGroupIDs(context.Background(), "ns1", nil)
-		ctxGroup := routing.WithNamespaceGroupIDs(context.Background(), "ns1", []string{"g-100"})
+		ctxP2P := routing.NewRoute().WithAppID("").WithNamespace("ns1").WithGroupIDs(nil).Inject(context.Background())
+		ctxGroup := routing.NewRoute().WithAppID("").WithNamespace("ns1").WithGroupIDs([]string{"g-100"}).Inject(context.Background())
 		assert.NotEqual(t, queueKeyFromCtx(ctxP2P, "u1"), queueKeyFromCtx(ctxGroup, "u1"))
 	})
 }
@@ -104,8 +109,8 @@ func TestQueueKey(t *testing.T) {
 // TestQueueKey_P2PAndGroupDimensionConsistency 验证 P2P 与群组消息的 key 维度互不冲突
 // P2P 补 DefaultGroupID 后，与真实群组（名为 DefaultGroupID 的除外）的 key 不会碰撞
 func TestQueueKey_P2PAndGroupDimensionConsistency(t *testing.T) {
-	ctxP2P := routing.WithNamespaceGroupIDs(context.Background(), "ns1", nil)
-	ctxGroup := routing.WithNamespaceGroupIDs(context.Background(), "ns1", []string{"g-real"})
+	ctxP2P := routing.NewRoute().WithAppID("").WithNamespace("ns1").WithGroupIDs(nil).Inject(context.Background())
+	ctxGroup := routing.NewRoute().WithAppID("").WithNamespace("ns1").WithGroupIDs([]string{"g-real"}).Inject(context.Background())
 
 	p2pKey := queueKeyFromCtx(ctxP2P, "u1")
 	groupKey := queueKeyFromCtx(ctxGroup, "u1")

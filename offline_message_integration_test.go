@@ -31,7 +31,7 @@ import (
 // TestOfflineMessageRealWorldScenario 真实场景：用户离线 → 发送消息 → 用户上线 → 接收离线消息
 func TestOfflineMessageRealWorldScenario(t *testing.T) {
 	// 源头注入 routing namespace（与 hub handleTextMessage 源头注入一致），避免 namespace 空串触发 GORM default 回退
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(models.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 
 	// ========== 阶段0: 准备环境 ==========
 	t.Log("========== 阶段0: 初始化 Hub 和存储 ==========")
@@ -403,7 +403,7 @@ func startTestWSServerWithParams(t *testing.T, hub *Hub) *httptest.Server {
 // TestOfflineMessage30MessagesStressTest 压力测试：用户有30条离线消息，上线后能否正常接收
 func TestOfflineMessage30MessagesStressTest(t *testing.T) {
 	// 源头注入 routing namespace（与 hub handleTextMessage 源头注入一致），避免 namespace 空串触发 GORM default 回退
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(models.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 
 	// ========== 阶段0: 准备环境 ==========
 	t.Log("========== 阶段0: 初始化 Hub 和存储 ==========")

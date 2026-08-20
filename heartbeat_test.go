@@ -275,6 +275,8 @@ func TestHeartbeatNoTimeout(t *testing.T) {
 				now := time.Now()
 				client.SetLastHeartbeat(now)
 				client.SetLastSeen(now)
+				// 刷新时间轮超时任务（WebSocket 客户端超时由时间轮管理，仅改字段不刷新会超时）
+				hub.RefreshHeartbeatTimeout(client)
 			case <-done:
 				close(stopped)
 				return
@@ -350,8 +352,10 @@ func TestMultipleClientsHeartbeat(t *testing.T) {
 			now := time.Now()
 			clients[0].SetLastHeartbeat(now)
 			clients[0].SetLastSeen(now)
+			hub.RefreshHeartbeatTimeout(clients[0])
 			clients[2].SetLastHeartbeat(now)
 			clients[2].SetLastSeen(now)
+			hub.RefreshHeartbeatTimeout(clients[2])
 		}
 	}()
 
@@ -438,10 +442,11 @@ func TestHeartbeatConfigDefaults(t *testing.T) {
 		"Should use config value when not explicitly set")
 
 	client := &Client{
-		ID:       "client-009",
-		UserID:   "user-009",
-		UserType: UserTypeCustomer,
-		SendChan: make(chan []byte, 10),
+		ID:             "client-009",
+		UserID:         "user-009",
+		UserType:       UserTypeCustomer,
+		ConnectionType: ConnectionTypeSSE, // SSE 客户端由 checkHeartbeat 扫描 LastSeen 字段判断超时（WebSocket 由时间轮管理，不走字段扫描）
+		SendChan:       make(chan []byte, 10),
 	}
 	hub.Register(client)
 	time.Sleep(100 * time.Millisecond) // 等待注册完成

@@ -87,6 +87,8 @@ type (
 	KickUserResult             = models.KickUserResult
 	SendAttempt                = models.SendAttempt
 	BroadcastResult            = models.BroadcastResult
+	DeliverResult              = models.DeliverResult
+	DeliveryMode               = models.DeliveryMode
 	HubHealthInfo              = models.HubHealthInfo
 	ConnectionType             = models.ConnectionType
 	ObserverManagerStats       = models.ObserverManagerStats
@@ -97,6 +99,15 @@ type (
 	OfflineMessageFilter       = repository.OfflineMessageFilter
 	MessageRole                = repository.MessageRole
 	WorkloadDimension          = models.WorkloadDimension
+)
+
+// DeliveryMode 投递模式常量（Deliver 决策树分派用，由 models 包统一收敛）
+const (
+	DeliveryModeP2P            = models.DeliveryModeP2P            // 点对点（msg.Receiver 非空）
+	DeliveryModeGroupReliable  = models.DeliveryModeGroupReliable  // 群组可靠投递（RequireAck=true）
+	DeliveryModeGroupBroadcast = models.DeliveryModeGroupBroadcast // 群组广播（RequireAck=false，fire-and-forget）
+	DeliveryModeNamespace      = models.DeliveryModeNamespace      // 命名空间广播
+	DeliveryModeGlobal         = models.DeliveryModeGlobal         // 全局广播
 )
 
 // 函数导入

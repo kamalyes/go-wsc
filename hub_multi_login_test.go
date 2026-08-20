@@ -333,7 +333,7 @@ func TestMultiLoginKickUser(t *testing.T) {
 	assert.Equal(t, 3, len(clientMap), "应该有3个客户端")
 
 	// 踢出用户
-	result := hub.KickUser(userID, "管理员踢出", false, "")
+	result := hub.KickUser(context.Background(), userID, "管理员踢出", false, "")
 	assert.True(t, result.Success, "踢出应该成功")
 	assert.Equal(t, 3, result.KickedConnections, "应该断开3个连接")
 

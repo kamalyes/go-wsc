@@ -4,9 +4,25 @@
  * @LastEditors: kamalyes 501893067@qq.com
  * @LastEditTime: 2025-12-28 00:00:00
  * @FilePath: \go-wsc\hub\broadcast.go
- * @Description: Hub 广播功能
+ * @Description: Hub 统一投递入口与广播功能
  *
- * Copyright (c) 2025 by kamalyes, All Rights Reserved.
+ * 本文件是消息投递的唯一公开入口（Deliver），以及广播类内部辅助的集中地：
+ *   - Deliver：统一投递入口，路由全由 ctx + msg 决定，替代历史 SendToGroup/BroadcastToGroupMembers/
+ *     BroadcastToGroup/BroadcastToAllGroups/BroadcastToAllNamespacesAllGroups/BroadcastToGroups/
+ *     BroadcastToNamespace/Broadcast 八个割裂方法
+ *   - 私有分派器：deliverP2P / deliverToGroupReliable / deliverToGroupFireForget /
+ *     deliverToNamespace / deliverGlobally（由 Deliver 按决策树调用）
+ *   - 跨节点辅助（仅保留有真实调用者的 2 个）：
+ *     · crossNodeGroupBroadcast — deliverToGroupFireForget 调用，单群组跨节点
+ *     · batchGetGroupMembers — distributed.go 跨节点接收侧调用，Pipeline 批量取成员
+ *     （历史 crossNodeGroupsBroadcast / crossNodeMultiNamespaceGroupsBroadcast / resolveTargetGroups
+ *      仅服务于已删除的 BroadcastToAllGroups/BroadcastToGroups，一并清理）
+ *   - 内部广播：broadcastToFiltered / broadcastToUserIDs（预序列化 + 直接 TrySend）
+ *   - 过滤类广播：BroadcastByUserType / BroadcastToRole / BroadcastToClientType / BroadcastToDepartment
+ *     （按客户端属性过滤，与路由正交，保留）
+ *   - 高级包装：BroadcastPriority / BroadcastAfterDelay / BroadcastExclude（基于 Deliver）
+ *
+ * Copyright (c) 2026 by kamalyes, All Rights Reserved.
  */
 
 package hub
@@ -14,37 +30,370 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
+	"github.com/kamalyes/go-wsc/models"
+	"github.com/kamalyes/go-wsc/routing"
 )
 
 // ============================================================================
-// 基础广播方法
+// 统一投递入口
 // ============================================================================
 
-// Broadcast 广播消息给所有客户端
-// 自动支持分布式：统一走 routeToCluster（gRPC 直连优先，PubSub 兜底）
-// 全命名空间广播（不按命名空间过滤）
-func (h *Hub) Broadcast(ctx context.Context, msg *HubMessage) {
-	// 从 ctx 注入 trace_id（OTel span > ctx.Value fallback，已有则不覆盖）
-	msg.InjectContext(ctx)
-
-	// 创建消息副本，避免并发修改
+// Deliver 统一消息投递入口 — 路由全由 ctx + msg 决定，一套逻辑打通所有场景
+//
+// 路由元数据来源：ctx（appID/namespace/groupIDs）+ msg（Receiver/RequireAck）
+// 调用方通过 routing.NewRoute().WithAppID(appID).WithNamespace(ns).WithGroupIDs(gids).Inject(ctx) 注入路由后调一次 Deliver。
+//
+// 决策树（按优先级）：
+//  1. msg.Receiver != ""                          → P2P（SendToUserWithRetry，在线投递 + 离线存储 + 重试）
+//  2. len(groupIDs) > 0:
+//     - msg.RequireAck == true                   → 群组可靠投递（per-member SendToUserWithRetry + 离线存储）
+//     - msg.RequireAck == false                  → 群组广播（fire-and-forget，broadcastToUserIDs + 跨节点）
+//  3. namespace != ""                             → 命名空间广播（broadcastToFiltered + 跨节点 ns 广播）
+//  4. namespace == ""                             → 全局广播（handleBroadcast + clusterBatcher）
+//
+// excludeSender 仅群组场景生效（P2P/广播场景 msg.Sender 不参与过滤）
+//
+// 返回非 nil *DeliverResult，错误收集到 result.Errors；按 result.Mode + 计数字段判断结果
+func (h *Hub) Deliver(ctx context.Context, msg *HubMessage, excludeSender bool) *DeliverResult {
+	// 统一入口：Clone + InjectRoute（注入 trace_id + 路由信封，appID 归一化，namespace 保留原值）
+	// namespace 不在此归一化：空值在广播分支表示「全局广播」语义，需保留
+	// P2P/群组分支需要 ns 严格非空，由各分支内部 EnsureRouteDefaults 兜底
 	msg = msg.Clone()
-
-	// 🔏 路由信封同步：从 ctx 恢复路由到 msg 信封（幂等，已有不覆盖）
-	// 下游 handleBroadcastMessage 通过 ForEachClientFiltered(msg.Namespace, msg.GroupIDs, ...) 严格匹配投递
-	// 注：Broadcast 语义为"跟随调用方 ctx 路由"——如果 ctx 无 ns/gid，则信封为空（仅匹配 ns="" 客户端）
-	//     如需指定 ns 广播，请使用 BroadcastToNamespace；如需多群组，请使用 BroadcastToGroups
-	// InjectRoute 同时回写 ctx，保证下游 ctx 与信封一致
 	ctx = msg.InjectRoute(ctx)
+
+	appID := routing.AppIDFromContext(ctx)
+	namespace := routing.NamespaceFromContext(ctx)
+	groupIDs := routing.GroupIDsFromContext(ctx)
+
+	switch {
+	case msg.Receiver != "":
+		return h.deliverP2P(ctx, msg, appID)
+	case len(groupIDs) > 0:
+		if msg.RequireAck {
+			return h.deliverToGroupReliable(ctx, msg, excludeSender, appID, namespace, groupIDs)
+		}
+		return h.deliverToGroupFireForget(ctx, msg, excludeSender, appID, namespace, groupIDs)
+	case namespace != "":
+		return h.deliverToNamespace(ctx, msg, appID, namespace)
+	default:
+		return h.deliverGlobally(ctx, msg, appID)
+	}
+}
+
+// ============================================================================
+// 投递私有分派器（由 Deliver 按决策树调用）
+// ============================================================================
+
+// deliverP2P 点对点投递（msg.Receiver 非空）
+// 委托 SendToUserWithRetry（内部已 EnsureRouteDefaults + InjectRoute，处理在线/离线/重试）
+func (h *Hub) deliverP2P(ctx context.Context, msg *HubMessage, appID string) *DeliverResult {
+	result := &DeliverResult{
+		Mode:   DeliveryModeP2P,
+		AppID:  appID,
+		Errors: make([]error, 0),
+	}
+
+	sr := h.SendToUserWithRetry(ctx, msg.Receiver, msg)
+	result.TotalMembers = 1
+	if sr.StoredOffline {
+		result.OfflineMembers = 1
+		if sr.Success {
+			result.StoredOffline = 1
+		} else {
+			result.Failed = 1
+		}
+	} else {
+		result.OnlineMembers = 1
+		if sr.Success {
+			result.Sent = 1
+		} else {
+			result.Failed = 1
+		}
+	}
+	if sr.FinalError != nil {
+		result.AddError(fmt.Errorf("user %s: %w", msg.Receiver, sr.FinalError))
+	}
+	return result
+}
+
+// deliverToGroupReliable 群组可靠投递（RequireAck=true）
+//
+// 复用历史 SendToGroup 逻辑：per-member SendToUserWithRetry + 离线存储 + 重试
+// 在线成员通过 SendToUserWithRetry 投递（自动支持跨节点路由与重试）
+// 离线成员通过离线消息处理器存储，上线后自动推送
+func (h *Hub) deliverToGroupReliable(ctx context.Context, msg *HubMessage, excludeSender bool, appID, namespace string, groupIDs []string) *DeliverResult {
+	// 群组严格场景：EnsureRouteDefaults 归一化 namespace（空补 DefaultNamespace）
+	ctx = routing.EnsureRouteDefaults(ctx)
+	namespace = routing.NamespaceFromContext(ctx)
+
+	result := &DeliverResult{
+		Mode:      DeliveryModeGroupReliable,
+		AppID:     appID,
+		Namespace: namespace,
+		GroupIDs:  groupIDs,
+		Errors:    make([]error, 0),
+	}
+
+	if h.groupRepo == nil {
+		result.AddError(ErrGroupRepoNotSet)
+		return result
+	}
+
+	// msg 已 Clone（Deliver 入口），同步路由信封（namespace 已归一化）
+	ctx = msg.ContextWithRoute(ctx, appID, namespace, groupIDs)
+
+	// 1. 遍历所有 groupIDs 获取成员列表，合并去重
+	seen := make(map[string]struct{}, len(groupIDs)*8)
+	members := make([]string, 0, len(groupIDs)*8)
+	for _, gid := range groupIDs {
+		gMembers, err := h.groupRepo.GetMembers(ctx, appID, namespace, gid)
+		if err != nil {
+			result.AddError(err)
+			h.logger.ErrorContextKV(ctx, "获取群组成员失败",
+				"namespace", namespace, "group_id", gid, "error", err)
+			continue
+		}
+		for _, uid := range gMembers {
+			if _, ok := seen[uid]; !ok {
+				seen[uid] = struct{}{}
+				members = append(members, uid)
+			}
+		}
+	}
+
+	result.TotalMembers = len(members)
+	if result.TotalMembers == 0 {
+		return result
+	}
+
+	// 2. 过滤发送者（如需）
+	filteredMembers := members
+	if excludeSender && msg.Sender != "" {
+		filteredMembers = mathx.FilterSlice(members, func(id string) bool {
+			return id != msg.Sender
+		})
+		h.logger.DebugContextKV(ctx, "🔄 过滤发送者后的群组成员列表",
+			"namespace", namespace,
+			"group_ids", groupIDs,
+			"original_count", len(members),
+			"filtered_count", len(filteredMembers),
+			"excluded_sender", msg.Sender,
+		)
+	}
+	if len(filteredMembers) == 0 {
+		return result
+	}
+
+	// 3. 并发投递消息 + 原子计数（消除序列化预检查 N 次 Redis 在线探测）
+	// SendToUserWithRetry 内部已处理在线/离线逻辑，并通过 StoredOffline 标志返回分类信息
+	var (
+		sent          int64
+		storedOffline int64
+		failed        int64
+		onlineCount   int64
+		offlineCount  int64
+		errMu         sync.Mutex
+	)
+
+	syncx.NewParallelSliceExecutor[string, *SendResult](filteredMembers).
+		Execute(func(idx int, uid string) (*SendResult, error) {
+			sendResult := h.SendToUserWithRetry(ctx, uid, msg)
+
+			// 原子分类，无锁开销
+			if sendResult.StoredOffline {
+				atomic.AddInt64(&offlineCount, 1)
+				if sendResult.Success {
+					atomic.AddInt64(&storedOffline, 1)
+				} else {
+					atomic.AddInt64(&failed, 1)
+				}
+			} else {
+				atomic.AddInt64(&onlineCount, 1)
+				if sendResult.Success {
+					atomic.AddInt64(&sent, 1)
+				} else {
+					atomic.AddInt64(&failed, 1)
+				}
+			}
+
+			// 仅在有错误时加锁收集错误信息（错误是少数，锁竞争极低）
+			if sendResult.FinalError != nil {
+				errMu.Lock()
+				result.AddError(fmt.Errorf("user %s: %w", uid, sendResult.FinalError))
+				errMu.Unlock()
+			}
+
+			return sendResult, nil
+		})
+
+	result.OnlineMembers = int(atomic.LoadInt64(&onlineCount))
+	result.OfflineMembers = int(atomic.LoadInt64(&offlineCount))
+	result.Sent = int(atomic.LoadInt64(&sent))
+	result.StoredOffline = int(atomic.LoadInt64(&storedOffline))
+	result.Failed = int(atomic.LoadInt64(&failed))
+
+	// � 通知观察者（ctx 已在上方 ContextWithRoute 注入路由，直接使用即可）
+	h.notifyObservers(ctx, msg)
+
+	h.logger.InfoContextKV(ctx, "✅ 群组消息投递完成",
+		"namespace", namespace,
+		"group_ids", groupIDs,
+		"message_id", msg.MessageID,
+		"total_members", result.TotalMembers,
+		"online_members", result.OnlineMembers,
+		"offline_members", result.OfflineMembers,
+		"sent", result.Sent,
+		"stored_offline", result.StoredOffline,
+		"failed", result.Failed,
+		"duration", time.Since(msg.CreateAt),
+	)
+
+	return result
+}
+
+// deliverToGroupFireForget 群组广播（RequireAck=false，fire-and-forget）
+//
+// 复用历史 BroadcastToGroupMembers 逻辑：本地 broadcastToUserIDs + 跨节点 crossNodeGroupBroadcast
+// 仅投递当前在线成员，不存储离线消息，无重试，性能最优
+func (h *Hub) deliverToGroupFireForget(ctx context.Context, msg *HubMessage, excludeSender bool, appID, namespace string, groupIDs []string) *DeliverResult {
+	// 群组严格场景：EnsureRouteDefaults 归一化 namespace（空补 DefaultNamespace）
+	ctx = routing.EnsureRouteDefaults(ctx)
+	namespace = routing.NamespaceFromContext(ctx)
+
+	result := &DeliverResult{
+		Mode:      DeliveryModeGroupBroadcast,
+		AppID:     appID,
+		Namespace: namespace,
+		GroupIDs:  groupIDs,
+		Errors:    make([]error, 0),
+	}
+
+	if h.groupRepo == nil {
+		h.logger.WarnContextKV(ctx, "群组仓库未设置，无法广播",
+			"namespace", namespace, "group_ids", groupIDs)
+		return result
+	}
+
+	// msg 已 Clone，同步路由信封（namespace 已归一化）
+	ctx = msg.ContextWithRoute(ctx, appID, namespace, groupIDs)
+	if msg.CreateAt.IsZero() {
+		msg.CreateAt = time.Now()
+	}
+
+	// 1. 遍历所有 groupIDs 获取成员列表，合并去重
+	seen := make(map[string]struct{}, len(groupIDs)*8)
+	members := make([]string, 0, len(groupIDs)*8)
+	for _, gid := range groupIDs {
+		gMembers, err := h.groupRepo.GetMembers(ctx, appID, namespace, gid)
+		if err != nil {
+			h.logger.ErrorContextKV(ctx, "群组广播：获取群组成员失败",
+				"namespace", namespace, "group_id", gid, "error", err)
+			continue
+		}
+		for _, uid := range gMembers {
+			if _, ok := seen[uid]; !ok {
+				seen[uid] = struct{}{}
+				members = append(members, uid)
+			}
+		}
+	}
+
+	result.TotalMembers = len(members)
+	if len(members) == 0 {
+		return result
+	}
+
+	// 2. 排除发送者后得到目标成员列表
+	targetMembers := members
+	if excludeSender && msg.Sender != "" {
+		targetMembers = mathx.FilterSlice(members, func(id string) bool {
+			return id != msg.Sender
+		})
+	}
+	if len(targetMembers) == 0 {
+		return result
+	}
+
+	// 3. 按成员ID查找本地连接并投递（O(m)，m=成员数，不遍历全部连接）
+	localCount := h.broadcastToUserIDs(ctx, targetMembers, msg)
+
+	// 🔔 通知观察者（ctx 已注入路由，直接使用）
+	h.notifyObservers(ctx, msg)
+
+	// 4. 跨节点广播：优先 gRPC 直连，降级 PubSub（ctx 已含完整路由）
+	h.crossNodeGroupBroadcast(ctx, msg, excludeSender)
+
+	h.logger.InfoContextKV(ctx, "📢 群组广播已发起",
+		"namespace", namespace,
+		"group_ids", groupIDs,
+		"message_id", msg.MessageID,
+		"total_members", len(members),
+		"local_delivered", localCount,
+		"grpc_enabled", h.IsGRPCEnabled(),
+		"pubsub_enabled", h.pubsub != nil,
+	)
+
+	result.LocalDelivered = localCount
+	return result
+}
+
+// deliverToNamespace 命名空间广播（namespace 非空，无 groupIDs）
+//
+// 复用历史 BroadcastToNamespace 逻辑：本地 broadcastToFiltered + 跨节点命名空间广播
+// 本地按命名空间过滤广播，跨节点提交到 clusterBatcher
+func (h *Hub) deliverToNamespace(ctx context.Context, msg *HubMessage, appID, namespace string) *DeliverResult {
+	result := &DeliverResult{
+		Mode:      DeliveryModeNamespace,
+		AppID:     appID,
+		Namespace: namespace,
+		Errors:    make([]error, 0),
+	}
+
+	// msg 已 Clone + InjectRoute，信封已含 ns（非空）；ContextWithRoute 二次同步保证 msg.Namespace 与 ctx 一致
+	ctx = msg.ContextWithRoute(ctx, appID, namespace, nil)
+
+	// 本地按命名空间过滤广播（broadcastToFiltered 内部 combinedCondition 会叠加路由信封匹配，此处 condition 仅作业务兜底）
+	count := h.broadcastToFiltered(ctx, func(c *Client) bool {
+		return c.Namespace == namespace
+	}, msg)
+
+	// 🔔 通知观察者（命名空间级广播事件）
+	h.notifyObservers(ctx, msg)
+
+	// 跨节点命名空间广播（提交到 clusterBatcher 批量处理）
+	opts := ClusterDispatchOptions{
+		Operation: OperationTypeBroadcast,
+		Namespace: namespace,
+	}
+	if !h.clusterBatcher.Submit(msg, opts) {
+		h.logger.WarnContextKV(ctx, "集群分发队列已满，丢弃跨节点命名空间广播",
+			"namespace", namespace, "message_id", msg.MessageID)
+	}
+
+	result.LocalDelivered = count
+	return result
+}
+
+// deliverGlobally 全局广播（namespace 为空，无 groupIDs）
+//
+// 复用历史 Broadcast 逻辑：设置 BroadcastTypeGlobal + 提交 clusterBatcher + 本地 handleBroadcast
+// 全命名空间广播（不按命名空间过滤），跨节点通过 clusterBatcher 批量分发
+func (h *Hub) deliverGlobally(ctx context.Context, msg *HubMessage, appID string) *DeliverResult {
+	result := &DeliverResult{
+		Mode:   DeliveryModeGlobal,
+		AppID:  appID,
+		Errors: make([]error, 0),
+	}
 
 	// 自动设置为全局广播类型
 	msg.BroadcastType = mathx.IfEmpty(msg.BroadcastType, BroadcastTypeGlobal)
-
 	if msg.CreateAt.IsZero() {
 		msg.CreateAt = time.Now()
 	}
@@ -66,10 +415,70 @@ func (h *Hub) Broadcast(ctx context.Context, msg *HubMessage) {
 
 	// 本地广播（直接异步执行，不经过 EventLoop channel 串行化）
 	go h.handleBroadcast(msg)
+
+	// 全局广播为异步，LocalDelivered 不计入（与历史 Broadcast 无返回值语义一致）
+	return result
+}
+
+// crossNodeGroupBroadcast 跨节点群组广播（单群组）
+//
+// 统一走 OperationTypeGroupsBroadcast 批量路径，单群组作为 GroupIDs=[groupID] 的特例
+// 提交到 clusterBatcher 批量处理，消除 per-message goroutine
+// namespace/groupID 从 ctx 提取
+func (h *Hub) crossNodeGroupBroadcast(ctx context.Context, msg *HubMessage, excludeSender bool) {
+	if h.pubsub == nil && !h.IsGRPCEnabled() {
+		return // 单机模式，无需跨节点
+	}
+
+	namespace := routing.NamespaceFromContext(ctx)
+	groupIDs := routing.GroupIDsFromContext(ctx)
+
+	senderID := ""
+	if excludeSender {
+		senderID = msg.Sender
+	}
+
+	opts := ClusterDispatchOptions{
+		Operation:     models.OperationTypeGroupBroadcast,
+		Namespace:     namespace,
+		GroupIDs:      groupIDs,
+		ExcludeSender: excludeSender,
+		SenderID:      senderID,
+	}
+
+	if !h.clusterBatcher.Submit(msg, opts) {
+		h.logger.WarnContextKV(ctx, "集群分发队列已满，丢弃跨节点群组广播",
+			"namespace", namespace, "group_ids", groupIDs,
+			"message_id", msg.MessageID)
+	}
+}
+
+// batchGetGroupMembers 批量获取多个群组成员并合并去重
+// 使用 Redis Pipeline 一次 RTT 获取所有群组成员，O(totalMembers) 去重
+// 相比逐群组 N 次 GetMembers（N 次 RTT），降为 1 次 RTT
+func (h *Hub) batchGetGroupMembers(ctx context.Context, appID, namespace string, groupIDs []string) map[string]struct{} {
+	memberSet := make(map[string]struct{})
+	if len(groupIDs) == 0 || h.groupRepo == nil {
+		return memberSet
+	}
+
+	groupMembers, err := h.groupRepo.GetMultiGroupMembers(ctx, appID, namespace, groupIDs)
+	if err != nil {
+		h.logger.WarnContextKV(ctx, "批量获取群组成员失败",
+			"app_id", appID, "namespace", namespace, "group_count", len(groupIDs), "error", err)
+		return memberSet
+	}
+
+	for _, members := range groupMembers {
+		for _, uid := range members {
+			memberSet[uid] = struct{}{}
+		}
+	}
+	return memberSet
 }
 
 // ============================================================================
-// 分组广播方法
+// 内部分组广播辅助（预序列化 + 直接 TrySend）
 // ============================================================================
 
 // broadcastToFiltered 预序列化消息并直接发送给符合条件的客户端
@@ -79,10 +488,8 @@ func (h *Hub) Broadcast(ctx context.Context, msg *HubMessage) {
 //   - 零拷贝遍历（原方案 GetClientsCopy + FilterSlice 双重拷贝）
 func (h *Hub) broadcastToFiltered(ctx context.Context, condition func(*Client) bool, msg *HubMessage) int {
 	start := time.Now()
-	// 🔏 路由信封同步：从 ctx 恢复路由到 msg 信封（幂等，已有不覆盖）
-	// 覆盖所有上层入口：SendConditional / BroadcastByUserType / BroadcastToRole / BroadcastToClientType / SendToGroup 等
-	// 确保业务 condition + 路由信封匹配 combinedCondition 能正确读 msg 自带路由
-	// InjectRoute 同时回写 ctx，保证下游 ctx 与信封一致
+	// 🔏 路由信封 + trace_id 同步（与所有入口共用同一套逻辑，幂等，已有不覆盖）
+	// 覆盖所有上层入口：SendConditional / BroadcastByUserType / BroadcastToRole / BroadcastToClientType / Deliver 等
 	ctx = msg.InjectRoute(ctx)
 
 	// 预序列化 WebSocket 消息（仅一次）
@@ -103,11 +510,11 @@ func (h *Hub) broadcastToFiltered(ctx context.Context, condition func(*Client) b
 	var successCount int32
 	var wsScanned, sseScanned int64
 
-	// 组合过滤条件：业务 condition + namespace 隔离（ClientMatchesEnvelope 仅做 namespace 严格匹配，
+	// 组合过滤条件：业务 condition + appId/namespace 隔离（ClientMatchesEnvelope 做 appId+namespace 严格匹配，
 	// 不做 msg.GroupIDs vs client.GroupID 系统组匹配——两者维度不同，详见 ClientMatchesEnvelope 注释）
-	// 所有 BroadcastByUserType / BroadcastToRole / BroadcastToClientType 等上层调用自动获得 namespace 隔离
+	// 所有 BroadcastByUserType / BroadcastToRole / BroadcastToClientType 等上层调用自动获得 appId+namespace 隔离
 	combinedCondition := func(c *Client) bool {
-		return ClientMatchesEnvelope(c, msg.Namespace, msg.GroupIDs) && condition(c)
+		return ClientMatchesEnvelope(c, msg.AppID, msg.Namespace, msg.GroupIDs) && condition(c)
 	}
 
 	// WebSocket 客户端：直接 TrySend 预序列化数据（并行遍历优化百万级广播）
@@ -173,7 +580,7 @@ func (h *Hub) broadcastToUserIDs(ctx context.Context, userIDs []string, msg *Hub
 		return 0
 	}
 	// 🔏 路由信封同步：从 ctx 恢复路由到 msg 信封（幂等）
-	// 上游 SendToGroup/BroadcastToGroupMembers 已注入，此处作为二次兜底
+	// 上游 deliverToGroupFireForget 已注入，此处作为二次兜底
 	// InjectRoute 同时回写 ctx，保证下游 ctx 与信封一致
 	ctx = msg.InjectRoute(ctx)
 
@@ -189,11 +596,11 @@ func (h *Hub) broadcastToUserIDs(ctx context.Context, userIDs []string, msg *Hub
 	var successCount int32
 
 	// 按用户ID查找客户端（O(m)，仅锁定相关 shard，不遍历全部连接）
-	// 使用 ForEachUserClientFiltered 叠加路由信封匹配：
-	//   - 群组消息：client 必须同 ns 且 client.groupID 在 msg.GroupIDs 中
+	// 使用 ForEachUserClientFiltered 叠加路由信封(appId+namespace)匹配：
+	//   - 群组消息：client 必须同 app/ns 且 client.groupID 在 msg.GroupIDs 中
 	//   - 避免新加入群的成员通过"旧 userIDs 列表"收到不匹配其 group 的历史消息（与项目约束一致）
 	for _, userID := range userIDs {
-		h.shardedRegistry.ForEachUserClientFiltered(userID, msg.Namespace, msg.GroupIDs, func(_ string, client *Client) bool {
+		h.shardedRegistry.ForEachUserClientFiltered(userID, msg.AppID, msg.Namespace, msg.GroupIDs, func(_ string, client *Client) bool {
 			if client.IsClosed() {
 				return true
 			}
@@ -220,6 +627,10 @@ func (h *Hub) broadcastToUserIDs(ctx context.Context, userIDs []string, msg *Hub
 
 	return int(totalSuccess)
 }
+
+// ============================================================================
+// 过滤类广播方法（按客户端属性过滤，与路由正交，保留）
+// ============================================================================
 
 // BroadcastByUserType 发送消息给特定用户类型的所有客户端
 func (h *Hub) BroadcastByUserType(ctx context.Context, userType UserType, msg *HubMessage) int {
@@ -250,21 +661,21 @@ func (h *Hub) BroadcastToDepartment(ctx context.Context, department Department, 
 }
 
 // ============================================================================
-// 高级广播方法
+// 高级广播包装（基于 Deliver）
 // ============================================================================
 
-// BroadcastPriority 根据优先级广播消息
+// BroadcastPriority 根据优先级广播消息（全局广播，走 Deliver）
 func (h *Hub) BroadcastPriority(ctx context.Context, msg *HubMessage, priority Priority) {
 	msg.Priority = priority
-	h.Broadcast(ctx, msg)
+	h.Deliver(ctx, msg, false)
 }
 
-// BroadcastAfterDelay 延迟广播消息
+// BroadcastAfterDelay 延迟广播消息（全局广播，走 Deliver）
 func (h *Hub) BroadcastAfterDelay(ctx context.Context, msg *HubMessage, delay time.Duration) {
 	syncx.Go(ctx).
 		WithDelay(delay).
 		Exec(func() {
-			h.Broadcast(ctx, msg)
+			h.Deliver(ctx, msg, false)
 		})
 }
 

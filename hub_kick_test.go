@@ -12,6 +12,7 @@
 package wsc
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -39,7 +40,7 @@ func TestKickUser(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// 踢出用户
-	result := hub.KickUser("kick-user-1", "测试踢出", true, "您已被踢出")
+	result := hub.KickUser(context.Background(), "kick-user-1", "测试踢出", true, "您已被踢出")
 
 	assert.NotNil(t, result, "KickUserResult不应为空")
 	assert.True(t, result.Success, "踢出应该成功")
@@ -72,7 +73,7 @@ func TestKickUserSimple(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// 简单踢出
-	count := hub.KickUserSimple("kick-simple-user", "simple kick")
+	count := hub.KickUserSimple(context.Background(), "kick-simple-user", "simple kick")
 	assert.Equal(t, 1, count, "应该踢出1个连接")
 
 	time.Sleep(50 * time.Millisecond)
@@ -98,7 +99,7 @@ func TestKickUserWithMessage(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// 带消息踢出
-	err := hub.KickUserWithMessage("kick-msg-user", "违规", "您因违规被踢出")
+	err := hub.KickUserWithMessage(context.Background(), "kick-msg-user", "违规", "您因违规被踢出")
 	assert.NoError(t, err, "踢出应该成功")
 
 	time.Sleep(100 * time.Millisecond)
@@ -128,7 +129,7 @@ func TestKickMultipleConnections(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// 踢出所有连接
-	result := hub.KickUser(userID, "测试踢出多连接", false, "")
+	result := hub.KickUser(context.Background(), userID, "测试踢出多连接", false, "")
 
 	assert.NotNil(t, result, "结果不应为空")
 	assert.True(t, result.Success, "应该成功")
@@ -145,7 +146,7 @@ func TestKickNonExistentUser(t *testing.T) {
 	hub.WaitForStart()
 
 	// 踢出不存在的用户
-	result := hub.KickUser("non-existent-user", "test", false, "")
+	result := hub.KickUser(context.Background(), "non-existent-user", "test", false, "")
 
 	assert.NotNil(t, result, "结果不应为空")
 	assert.False(t, result.Success, "应该失败")

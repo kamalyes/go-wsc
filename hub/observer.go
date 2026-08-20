@@ -83,7 +83,7 @@ func (h *Hub) IsObserver(userID string) bool {
 // notifyObservers 通知观察者（内部方法）
 // 从 ctx 提取 namespace+groupID 定位观察范围，通过三级索引 O(k) 查找匹配的观察者
 // 提交到 observerBatcher 批量处理，消除 per-message goroutine
-// 调用方需先用 WithNamespaceGroupIDs 注入 context
+// 调用方需先用 routing.NewRoute().WithAppID(...).WithNamespace(...).Inject(ctx) 注入 context
 func (h *Hub) notifyObservers(ctx context.Context, msg *HubMessage) {
 	// 观察者模块未启用时直接返回
 	if !h.shardedRegistry.ObserverEnabled() {
@@ -105,7 +105,7 @@ func (h *Hub) notifyObservers(ctx context.Context, msg *HubMessage) {
 // 本地观察者投递 + 跨节点广播，无 per-message goroutine
 // namespace/groupIDs 由 batcher item 携带（异步场景原 ctx 已过期），flush 时注入新 ctx
 func (h *Hub) notifyObserversDirect(msg *HubMessage, namespace string, groupIDs []string) {
-	ctx := routing.WithNamespaceGroupIDs(h.ctx, namespace, groupIDs)
+	ctx := routing.NewRoute().WithAppID(msg.AppID).WithNamespace(namespace).WithGroupIDs(groupIDs).Inject(h.ctx)
 
 	// 快速检查：无观察者时仅跨节点广播 - O(1)
 	observerCount := h.shardedRegistry.GetObserverUserCount()

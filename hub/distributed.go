@@ -24,6 +24,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	pb "github.com/kamalyes/go-wsc/models/pb"
 	"github.com/kamalyes/go-wsc/routing"
@@ -108,8 +109,8 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMe
 	// 4. 统一跨节点路由：gRPC 直连优先，PubSub 兜底（由 routeToCluster 集中决策）
 	opts := ClusterDispatchOptions{
 		Operation:     OperationTypeSendMessage,
-		Namespace:     "", // namespace 由 routeToCluster 从 msg 信封提取（msg.Namespace），此处留空不覆盖
-		TargetNodeID:  "", // 不再依赖单节点精确路由（老路径：nodeRegistry 自动发现，gRPC 未启用时会落空）
+		Namespace:     "",         // namespace 由 routeToCluster 从 msg 信封提取（msg.Namespace），此处留空不覆盖
+		TargetNodeID:  "",         // 不再依赖单节点精确路由（老路径：nodeRegistry 自动发现，gRPC 未启用时会落空）
 		TargetNodeIDs: otherNodes, // 已知目标节点列表，传给 routeToCluster：gRPC 未启用时优先定向 PubSub 而非广播频道
 		TargetUserID:  userID,
 	}
@@ -242,7 +243,7 @@ func (h *Hub) handleDistributedMessage(ctx context.Context, distMsg *Distributed
 	//   2. 旧节点/历史路径：仅 DistributedMessage 外层信封带路由，此处补齐 HubMessage 内部信封
 	// 下游所有本地投递过滤（broadcastToUserIDs / broadcastToFiltered / handleBroadcast）统一从 msg 取路由
 	if distMsg.Message != nil {
-		distMsg.Message.ContextWithRoute(ctx, distMsg.Namespace, distMsg.GroupIDs)
+		distMsg.Message.ContextWithRoute(ctx, distMsg.AppID, distMsg.Namespace, distMsg.GroupIDs)
 	}
 
 	h.logger.DebugContextKV(ctx, "收到分布式消息",
@@ -309,16 +310,20 @@ func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *Distrib
 		return fmt.Errorf("marshal message failed: %w", err)
 	}
 
-	// 零拷贝遍历：ForEachUserClientFiltered 持读锁遍历 + namespace 严格匹配，TrySend 非阻塞安全
-	// ⚠️ 必须按 namespace 过滤：同一 userID 可能跨 namespace 多端登录（如 ns1 客服 + ns2 用户），
-	//    不过滤会导致跨租户消息泄露。与本地 P2P 路径 handleDirectMessage 保持一致。
-	// distMsg.Namespace 来自发送端 msg 信封（routeToCluster 从 msg.Namespace 提取），为空时退化为不隔离（兼容旧节点）
+	// 零拷贝遍历：ForEachUserClientFiltered 持读锁遍历 + appId/namespace 严格匹配，TrySend 非阻塞安全
+	// ⚠️ 必须按 appId+namespace 过滤：同一 userID 可能跨 app/ns 多端登录，不过滤会导致跨应用/租户消息泄露
+	// 路由来源优先级：distMsg 外层信封 > msg 内层信封（互为兜底）；appID 空值归一化为 DefaultAppID
+	//   - 老节点未传 AppID 时归一化为 DefaultAppID，与新节点 client 默认 AppID 匹配
+	//   - namespace 保持原值（广播场景可空，严格匹配场景调用方负责归一化）
+	appID := mathx.IfEmpty(distMsg.AppID, distMsg.Message.AppID)
+	appID, _ = routing.NormalizeRoute(appID, "")
+	namespace := mathx.IfEmpty(distMsg.Namespace, distMsg.Message.Namespace)
 	//
 	// 复用 sendToClientSerialized（与本地/gRPC 路径对齐）：
 	// 统一状态回报（Success/Failed → wsc_message_send_records）、接收者统计、失败转存离线、SSE 客户端支持。
 	// 🔥 历史遗漏：此前裸调 client.TrySend，跨节点消息状态永远停留 sending，且 SSE 客户端收不到跨节点消息
 	successCount := 0
-	h.shardedRegistry.ForEachUserClientFiltered(distMsg.TargetID, distMsg.Namespace, nil, func(_ string, client *Client) bool {
+	h.shardedRegistry.ForEachUserClientFiltered(distMsg.TargetID, appID, namespace, nil, func(_ string, client *Client) bool {
 		if h.sendToClientSerialized(ctx, client, distMsg.Message, msgData) {
 			successCount++
 		}
@@ -346,8 +351,8 @@ func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *Distrib
 	)
 
 	// 🔔 通知观察者（跨节点消息也需要通知观察者）
-	// 点对点消息的 groupIDs 由路由信封携带（群组消息场景），观察者按 namespace+groupIDs 三级索引匹配
-	h.notifyObservers(routing.WithNamespaceGroupIDs(ctx, distMsg.Namespace, distMsg.GroupIDs), distMsg.Message)
+	// 点对点消息的 groupIDs 由路由信封携带（群组消息场景），观察者按 appId+namespace+groupIDs 三级索引匹配
+	h.notifyObservers(routing.NewRoute().WithAppID(distMsg.AppID).WithNamespace(distMsg.Namespace).WithGroupIDs(distMsg.GroupIDs).Inject(ctx), distMsg.Message)
 
 	return nil
 }
@@ -368,7 +373,7 @@ func (h *Hub) handleDistributedKickUser(ctx context.Context, distMsg *Distribute
 	case <-ctx.Done():
 		return fmt.Errorf("context cancelled: %w", ctx.Err())
 	default:
-		h.KickUserSimple(distMsg.TargetID, distMsg.Reason)
+		h.KickUserSimple(ctx, distMsg.TargetID, distMsg.Reason)
 		return nil
 	}
 }
@@ -498,10 +503,11 @@ func (h *Hub) handleDistributedGroupsBroadcast(ctx context.Context, distMsg *Dis
 		return fmt.Errorf("groupIDs is empty in distributed message")
 	}
 
-	namespace := distMsg.Namespace
+	// appID/namespace 归一化（与源节点建群时 routeFromCtx 归一化一致，保证 Redis key 同分区，跨 app 不串扰）
+	appID, namespace := routing.NormalizeRoute(distMsg.AppID, distMsg.Namespace)
 
 	// Pipeline 批量获取所有群组成员并合并去重（用户跨群组只收一条）
-	memberSet := h.batchGetGroupMembers(ctx, namespace, groupIDs)
+	memberSet := h.batchGetGroupMembers(ctx, appID, namespace, groupIDs)
 	if len(memberSet) == 0 {
 		return nil
 	}

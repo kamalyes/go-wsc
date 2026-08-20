@@ -79,12 +79,11 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 	msgCopy.Receiver = mathx.IfEmpty(msgCopy.Receiver, toUserID) // 确保 Receiver 非空（离线消息反序列化后可能丢失）
 	msgCopy.CreateAt = mathx.IfNotZero(msgCopy.CreateAt, time.Now())
 
-	// 🔗 从 msg 恢复 trace_id 到 ctx
-	// 离线消息推送路径（pushAndDeleteOffline → sendToUser）：ctx 来自 h.ctx 无原始 trace_id，
-	// msg 信封携带原始 trace_id（存储时注入）。此处恢复保证下游 checkAndRouteToNode → routeToCluster
-	// → dispatch.InjectContext(ctx) 注入正确的 trace_id，跨节点投递不断链。
-	// SendToUserWithRetry 路径：ctx 已有 trace_id，ContextFrom 幂等（已有则不覆盖）。
-	ctx = msgCopy.ContextFrom(ctx)
+	// 🔏 P2P 严格场景：EnsureRouteDefaults 归一化 namespace + InjectRoute 注入信封（防御性，与入口一致）
+	// sendToUser 可被 ack 重试/离线推送等路径直接调用，msg 可能未经过入口归一化；
+	// EnsureRouteDefaults + InjectRoute 幂等，SendToUserWithRetry 路径再调一次无副作用
+	ctx = routing.EnsureRouteDefaults(ctx)
+	ctx = msgCopy.InjectRoute(ctx)
 
 	// 📝 write-ahead：先落 sending 记录再投递（outbox 模式）
 	// 必须先于 checkAndRouteToNode（跨节点 Publish）和 handleBroadcast（本地投递）提交：
@@ -127,8 +126,11 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 	// 🔥 多端跨节点：routed=true 仅代表"已投递到其他节点"，用户可能同时在本地和
 	// 其他节点有设备（如手机连 Pod A、电脑连 Pod B），本地投递不能被跳过，
 	// 否则本地设备永远收不到跨节点发送方的消息（修复前 routed=true 直接 return）
-	// 直接异步执行 handleBroadcast，不经过 EventLoop channel 串行化
-	go h.handleBroadcast(msgCopy)
+	// 同步执行 handleBroadcast：保证同一发送者顺序发送的消息按序投递到接收方
+	// SendToUserWithRetry 本身为阻塞调用，handleBroadcast 内仅做非阻塞的 TrySend
+	// （观察者通知走 batcher 异步、数据库记录已先行提交），不会显著拖慢发送路径；
+	// 此前用 `go` 异步派发会使并发 goroutine 竞争同一接收方 sendChan 导致消息乱序
+	h.handleBroadcast(msgCopy)
 	h.logger.DebugContextKV(ctx, "消息已广播", "message_id", msgCopy.MessageID, "from", msgCopy.Sender, "to", msgCopy.Receiver, "type", msgCopy.MessageType)
 	return nil
 }
@@ -139,29 +141,19 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 
 // SendToUserWithRetry 带重试机制的发送消息给指定用户
 func (h *Hub) SendToUserWithRetry(ctx context.Context, toUserID string, msg *HubMessage) *SendResult {
-	// 源头注入 routing namespace：老系统不传 namespace 时补 DefaultNamespace
-	// 本方法为 P2P 发送，group 不参与（nil），不与群组发送逻辑捆绑
-	// 保证离线消息存储维度（ns::userID）的 namespace 非空，与 client 注册归一化一致
-	if routing.NamespaceFromContext(ctx) == "" {
-		ctx = routing.WithNamespaceGroupIDs(ctx, models.DefaultNamespace, nil)
-	}
+	// 立即创建消息副本，避免并发修改原始消息
+	msg = msg.Clone()
+
+	// 🔏 P2P 严格场景：先 EnsureRouteDefaults 归一化 namespace（空补 DefaultNamespace），再 InjectRoute
+	// InjectRoute 只归一化 appID（namespace 保持 ctx 原值兼容全局广播），故 P2P 入口需显式归一化 namespace
+	ctx = routing.EnsureRouteDefaults(ctx)
+	ctx = msg.InjectRoute(ctx)
 
 	result := &SendResult{
 		Attempts: make([]SendAttempt, 0, h.config.RetryPolicy.MaxRetries+1),
 	}
 
 	startTime := time.Now()
-
-	// 立即创建消息副本，避免并发修改原始消息
-	msg = msg.Clone()
-
-	// 从 ctx 注入 trace_id（OTel span > ctx.Value fallback，已有则不覆盖）
-	msg.InjectContext(ctx)
-
-	// 🔏 入口注入路由信封：将 ctx 中的 (namespace, groupIDs) 同步写入 msg 信封
-	// 下游跨节点 gRPC / PubSub / 离线存储回放统一从 msg 取路由，避免 ctx 丢失导致串扰
-	// P2P 场景下 groupIDs=nil（与入口归一化一致），群组发送由 SendToGroup 显式设置
-	ctx = msg.InjectRoute(ctx)
 
 	// 修改副本对象
 	if msg.Sender == "" {
@@ -811,7 +803,7 @@ func (h *Hub) syncToSenderDevices(ctx context.Context, msg *HubMessage) {
 	// （发送者多端同步不检查 group，同一 user 在不同 group 的设备都应该同步到）
 	var otherDevices []*Client
 	deviceCount := 0
-	h.shardedRegistry.ForEachUserClientFiltered(msg.Sender, msg.Namespace, nil, func(_ string, client *Client) bool {
+	h.shardedRegistry.ForEachUserClientFiltered(msg.Sender, msg.AppID, msg.Namespace, nil, func(_ string, client *Client) bool {
 		deviceCount++
 		if client.ID != msg.SenderClient {
 			otherDevices = append(otherDevices, client)

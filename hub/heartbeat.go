@@ -104,7 +104,7 @@ func (h *Hub) handleHeartbeatMessage(client *Client) {
 	client.SetLastSeen(now)
 
 	// ⏰ 刷新时间轮心跳超时（O(1) 操作，取消旧任务 + 调度新任务）
-	h.refreshHeartbeatTimeout(client)
+	h.RefreshHeartbeatTimeout(client)
 
 	// 💓 记录心跳日志
 	h.logWithClient(logger.DEBUG, "💓 收到心跳消息", client)
@@ -169,9 +169,12 @@ func (h *Hub) scheduleHeartbeatTimeout(client *Client) {
 	h.heartbeatTimer.ScheduleWithKey(client.ID, h.config.ClientTimeout, h.makeHeartbeatTimeoutCallback(client))
 }
 
-// refreshHeartbeatTimeout 刷新客户端心跳超时（O(1) 操作，取消旧 + 调度新）
-// 收到 PING 或任何消息时调用
-func (h *Hub) refreshHeartbeatTimeout(client *Client) {
+// RefreshHeartbeatTimeout 刷新客户端心跳超时（O(1) 操作，取消旧 + 调度新）
+// 收到 PING 或任何消息时调用；公开供集成测试/外部心跳驱动刷新时间轮
+//
+// 设计说明：WebSocket 客户端的超时由时间轮管理（非 checkHeartbeat 全量扫描），
+// 仅更新 client.LastHeartbeat 字段不会重排时间轮任务，必须调用本方法刷新。
+func (h *Hub) RefreshHeartbeatTimeout(client *Client) {
 	if h.heartbeatTimer == nil || client.ConnectionType == ConnectionTypeSSE {
 		return
 	}

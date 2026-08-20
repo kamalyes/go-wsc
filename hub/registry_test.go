@@ -450,7 +450,7 @@ func TestKickUserUserNotOnline(t *testing.T) {
 	hub, shutdown := startTestHub(t, newTestHubConfig())
 	defer shutdown()
 
-	result := hub.KickUser("ghost-user", "test reason", false, "")
+	result := hub.KickUser(context.Background(), "ghost-user", "test reason", false, "")
 	assert.False(t, result.Success, "不在线用户踢出应失败")
 	require.Error(t, result.Error, "应返回错误")
 	assert.Equal(t, 0, result.KickedConnections, "不应有连接被踢")
@@ -465,7 +465,7 @@ func TestKickUserOnlineRemoved(t *testing.T) {
 	hub.Register(client)
 	require.Eventually(t, func() bool { return hub.HasClient(client.ID) }, 2*time.Second, 10*time.Millisecond)
 
-	result := hub.KickUser("kick-user", "force", false, "")
+	result := hub.KickUser(context.Background(), "kick-user", "force", false, "")
 	assert.True(t, result.Success, "在线用户踢出应成功")
 	assert.Equal(t, 1, result.KickedConnections, "应踢出 1 个连接")
 	require.NoError(t, result.Error)
@@ -485,7 +485,7 @@ func TestKickUserSimpleOnlineReturnsCount(t *testing.T) {
 	hub.Register(client)
 	require.Eventually(t, func() bool { return hub.HasClient(client.ID) }, 2*time.Second, 10*time.Millisecond)
 
-	kicked := hub.KickUserSimple("simple-user", "simple reason")
+	kicked := hub.KickUserSimple(context.Background(), "simple-user", "simple reason")
 	assert.Equal(t, 1, kicked, "应踢出 1 个连接")
 
 	require.Eventually(t, func() bool { return !hub.HasClient(client.ID) }, 2*time.Second, 10*time.Millisecond)
@@ -501,7 +501,7 @@ func TestKickUserWithMessageOnlineReturnsNil(t *testing.T) {
 	require.Eventually(t, func() bool { return hub.HasClient(client.ID) }, 2*time.Second, 10*time.Millisecond)
 	require.NotNil(t, client.SendChan, "注册后 SendChan 应已初始化")
 
-	err := hub.KickUserWithMessage("msg-user", "by msg", "you are kicked")
+	err := hub.KickUserWithMessage(context.Background(), "msg-user", "by msg", "you are kicked")
 	require.NoError(t, err, "在线用户踢出应返回 nil")
 
 	// 应向 SendChan 投递 kick_out 通知（通知在 Unregister 关闭通道前同步投递，缓冲消息可读取）

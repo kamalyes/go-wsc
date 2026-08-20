@@ -266,7 +266,7 @@ func testRoutingScenarios(t *testing.T, hub *Hub) {
 				time.Sleep(100 * time.Millisecond)
 				msg := createTestHubMessage(MessageTypeText)
 
-				hub.Broadcast(context.Background(), msg)
+				_ = hub.Deliver(context.Background(), msg, false)
 				time.Sleep(100 * time.Millisecond)
 
 				for j := 0; j < 5; j++ {

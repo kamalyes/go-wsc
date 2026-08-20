@@ -60,18 +60,19 @@ func (h *Hub) CreateConnectionRecord(client *Client) *ConnectionRecord {
 }
 
 // saveConnectionRecord 保存或更新连接记录到数据库
-func (h *Hub) saveConnectionRecord(record *ConnectionRecord) {
+// ctx 应为 client.Context（带 client 维度的 trace_id），实现异步保存的全链路追踪
+func (h *Hub) saveConnectionRecord(ctx context.Context, record *ConnectionRecord) {
 	if h.connectionRecordRepo == nil {
 		return
 	}
 
-	syncx.Go().
+	syncx.Go(ctx).
 		WithTimeout(10 * time.Second).
 		OnPanic(func(r interface{}) {
-			h.logger.ErrorKV("保存连接记录崩溃", "panic", r, "stack", string(debug.Stack()), "user_id", record.UserID)
+			h.logger.ErrorContextKV(ctx, "保存连接记录崩溃", "panic", r, "stack", string(debug.Stack()), "user_id", record.UserID)
 		}).
 		OnError(func(err error) {
-			h.logger.ErrorKV("保存连接记录失败",
+			h.logger.ErrorContextKV(ctx, "保存连接记录失败",
 				"user_id", record.UserID,
 				"connection_id", record.ConnectionID,
 				"error", err,
@@ -83,15 +84,16 @@ func (h *Hub) saveConnectionRecord(record *ConnectionRecord) {
 }
 
 // updateConnectionOnDisconnect 更新连接断开信息
+// 用 client.Context 派生异步任务 ctx，保留 client 维度的 trace_id 实现全链路追踪
 func (h *Hub) updateConnectionOnDisconnect(client *Client, reason DisconnectReason) {
 	if h.connectionRecordRepo == nil {
 		return
 	}
 
-	syncx.Go().
+	syncx.Go(client.Context).
 		WithTimeout(5 * time.Second).
 		OnPanic(func(r interface{}) {
-			h.logger.ErrorKV("更新连接断开记录崩溃", "panic", r, "stack", string(debug.Stack()), "user_id", client.UserID)
+			h.logger.ErrorContextKV(client.Context, "更新连接断开记录崩溃", "panic", r, "stack", string(debug.Stack()), "user_id", client.UserID)
 		}).
 		ExecWithContext(func(ctx context.Context) error {
 			return h.connectionRecordRepo.MarkDisconnected(ctx, client.ID, reason, 1000, string(reason))
@@ -103,6 +105,7 @@ func (h *Hub) updateConnectionOnDisconnect(client *Client, reason DisconnectReas
 // ============================================================================
 
 // sendWelcomeMessage 发送欢迎消息
+// 已有 client 参数，内部直接用 client.Context 保留连接级 trace_id
 func (h *Hub) sendWelcomeMessage(client *Client) {
 	provider := h.welcomeProvider
 	if provider == nil {
@@ -141,7 +144,8 @@ func (h *Hub) sendWelcomeMessage(client *Client) {
 	}
 	msg.Data["title"] = welcomeMsg.Title
 
-	h.sendToClient(h.ctx, client, msg)
+	// 用 client.Context 保留连接级 trace_id，欢迎消息日志可全链路追踪
+	h.sendToClient(client.Context, client, msg)
 }
 
 // ============================================================================
@@ -160,31 +164,33 @@ func (h *Hub) sendWelcomeMessage(client *Client) {
 // （MySQL 跨组覆盖所有 group 的消息，不丢消息，仅 Redis 短期队列残留待自然过期）
 //
 // namespace 取自 client.Namespace（注册时已归一化）；groupIDs 按组动态注入到 drain ctx
+// 已有 client 参数，内部直接用 client.Context 保留连接级 trace_id
 func (h *Hub) pushOfflineMessagesOnConnect(client *Client) {
 	if h.offlineMessageHandler == nil {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(h.ctx, 60*time.Second)
+	// 用 client.Context 派生超时 ctx（保留连接级 trace_id），全链路追踪离线消息推送
+	ctx, cancel := context.WithTimeout(client.Context, 60*time.Second)
 	defer cancel()
 
 	namespace := client.Namespace
-	// 基础 ctx 注入 namespace（groupIDs 按组动态派生，drain 时单独注入对应 group）
-	ctx = routing.WithNamespaceGroupIDs(ctx, namespace, nil)
+	// 基础 ctx 注入 appID+namespace（groupIDs 按组动态派生，drain 时单独注入对应 group）
+	ctx = routing.NewRoute().WithAppID(client.GetAppID()).WithNamespace(namespace).Inject(ctx)
 
 	// MySQL 为双写超集，count==0 表示 Redis/MySQL 均无待推送消息，直接跳过
 	totalCount, err := h.offlineMessageHandler.GetOfflineMessageCount(ctx, client.UserID)
 	if err != nil {
-		h.logger.ErrorKV("获取离线消息数量失败",
+		h.logger.ErrorContextKV(ctx, "获取离线消息数量失败",
 			"user_id", client.UserID, "namespace", namespace, "error", err)
 		return
 	}
 	if totalCount == 0 {
-		h.logger.DebugKV("用户无离线消息", "user_id", client.UserID, "namespace", namespace)
+		h.logger.DebugContextKV(ctx, "用户无离线消息", "user_id", client.UserID, "namespace", namespace)
 		return
 	}
 
-	h.logger.InfoKV("开始推送离线消息",
+	h.logger.InfoContextKV(ctx, "开始推送离线消息",
 		"user_id", client.UserID, "namespace", namespace, "total_count", totalCount)
 
 	totalSuccess, totalFailed := 0, 0
@@ -195,8 +201,8 @@ func (h *Hub) pushOfflineMessagesOnConnect(client *Client) {
 	// groupIDs 首项为 "" 表示 P2P 队列（ns::userID），其后追加用户加入的全部 group
 	groupIDs := []string{""}
 	if h.groupRepo != nil {
-		if userGroups, err := h.GetUserGroups(ctx, namespace, client.UserID); err != nil {
-			h.logger.WarnKV("获取用户群组失败，降级只 drain P2P + 跨组查 MySQL",
+		if userGroups, err := h.GetUserGroups(ctx, client.UserID); err != nil {
+			h.logger.WarnContextKV(ctx, "获取用户群组失败，降级只 drain P2P + 跨组查 MySQL",
 				"user_id", client.UserID, "namespace", namespace, "error", err)
 		} else {
 			groupIDs = append(groupIDs, userGroups...)
@@ -204,11 +210,11 @@ func (h *Hub) pushOfflineMessagesOnConnect(client *Client) {
 	}
 
 	for _, gid := range groupIDs {
-		// 按组注入 (ns, group)，DrainOfflineQueue 据此定位 Redis 队列 ns:group:userID
-		groupCtx := routing.WithNamespaceGroupIDs(ctx, namespace, []string{gid})
+		// 按组注入 (app, ns, group)，DrainOfflineQueue 据此定位 Redis 队列 app:ns:group:userID
+		groupCtx := routing.NewRoute().WithAppID(client.GetAppID()).WithNamespace(namespace).WithGroup(gid).Inject(ctx)
 		msgs, err := h.offlineMessageHandler.DrainOfflineQueue(groupCtx, client.UserID, 0) // 0=一次取尽
 		if err != nil {
-			h.logger.WarnKV("drain 离线队列失败",
+			h.logger.WarnContextKV(ctx, "drain 离线队列失败",
 				"user_id", client.UserID, "namespace", namespace, "group_id", gid, "error", err)
 			continue
 		}
@@ -228,7 +234,7 @@ func (h *Hub) pushOfflineMessagesOnConnect(client *Client) {
 	for {
 		messages, nextCursor, err := h.offlineMessageHandler.GetOfflineMessages(ctx, client.UserID, batchSize, cursor)
 		if err != nil {
-			h.logger.ErrorKV("获取离线消息失败",
+			h.logger.ErrorContextKV(ctx, "获取离线消息失败",
 				"user_id", client.UserID, "cursor", cursor, "error", err)
 			break
 		}
@@ -246,7 +252,7 @@ func (h *Hub) pushOfflineMessagesOnConnect(client *Client) {
 		}
 	}
 
-	h.logger.InfoKV("离线消息推送完成",
+	h.logger.InfoContextKV(ctx, "离线消息推送完成",
 		"user_id", client.UserID, "namespace", namespace,
 		"success", totalSuccess, "failed", totalFailed)
 
@@ -271,14 +277,14 @@ func (h *Hub) pushAndDeleteOffline(ctx context.Context, userID string, messages 
 		message.Data["offline"] = true
 
 		if err := h.sendToUser(ctx, userID, message); err != nil {
-			h.logger.ErrorKV("离线消息推送失败",
+			h.logger.ErrorContextKV(ctx, "离线消息推送失败",
 				"user_id", userID, "message_id", message.MessageID, "error", err)
 			failedIDs = append(failedIDs, message.MessageID)
 			// 🔥 离线推送失败 → 更新 message_record 状态为 Failed
 			// 离线消息推送失败通常因用户连接突然断开或队列满，message_record 应反映最终投递结果
 			h.updateMessageStatusAsync(message.MessageID, MessageSendStatusFailed, FailureReasonConnError, err.Error())
 			if err := h.offlineMessageHandler.UpdatePushStatus(ctx, []string{message.MessageID}, err); err != nil {
-				h.logger.ErrorKV("更新离线消息推送失败状态失败",
+				h.logger.ErrorContextKV(ctx, "更新离线消息推送失败状态失败",
 					"user_id", userID, "message_id", message.MessageID, "error", err)
 			}
 			continue
@@ -289,10 +295,10 @@ func (h *Hub) pushAndDeleteOffline(ctx context.Context, userID string, messages 
 	// 推送成功的按 message_id 删 MySQL（drain 路径去重 + MySQL 路径清理）
 	if len(pushedIDs) > 0 {
 		if err := h.offlineMessageHandler.DeleteOfflineMessages(ctx, userID, pushedIDs); err != nil {
-			h.logger.ErrorKV("删除已推送的离线消息失败",
+			h.logger.ErrorContextKV(ctx, "删除已推送的离线消息失败",
 				"user_id", userID, "count", len(pushedIDs), "error", err)
 		} else {
-			h.logger.DebugKV("删除已推送的离线消息",
+			h.logger.DebugContextKV(ctx, "删除已推送的离线消息",
 				"user_id", userID, "count", len(pushedIDs))
 		}
 	}

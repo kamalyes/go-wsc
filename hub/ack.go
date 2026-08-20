@@ -29,14 +29,8 @@ import (
 
 // SendToUserWithAck 发送消息并等待ACK确认
 func (h *Hub) SendToUserWithAck(ctx context.Context, toUserID string, msg *HubMessage, timeout time.Duration, maxRetry int) (*AckMessage, error) {
-	// 源头注入 routing namespace：老系统不传 namespace 时补 DefaultNamespace（与 SendToUserWithRetry 一致）
-	// 本方法为 P2P 发送，group 不参与（nil），不与群组发送逻辑捆绑
-	if routing.NamespaceFromContext(ctx) == "" {
-		ctx = routing.WithNamespaceGroupIDs(ctx, models.DefaultNamespace, nil)
-	}
-	// 🔏 入口注入路由信封：将 ctx 路由同步到 msg（确保 ackManager 里的 pending msg 路由完整）
-	// SendToUserWithRetry 内部会再次 Clone+InjectRoute，两次写入是幂等的（已有值不覆盖）
-	// InjectRoute 同时回写 ctx，保证下游 ctx 与信封一致
+	// 🔏 P2P 严格场景：先 EnsureRouteDefaults 归一化 namespace，再 InjectRoute（与 SendToUserWithRetry 一致）
+	ctx = routing.EnsureRouteDefaults(ctx)
 	ctx = msg.InjectRoute(ctx)
 
 	// 检查是否启用ACK

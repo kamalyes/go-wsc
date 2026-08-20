@@ -47,14 +47,15 @@ type HubStats struct {
 
 // DistributedMessage 分布式消息结构
 type DistributedMessage struct {
-	Type      OperationType `json:"type"`                // 操作类型
-	NodeID    string        `json:"node_id"`             // 源节点ID
-	TargetID  string        `json:"target_id"`           // 目标ID（用户ID、节点ID等）
-	TraceID   string        `json:"trace_id,omitempty"`  // 全链路追踪ID（从 ctx 自动注入，跨节点序列化携带）
-	Message   *HubMessage   `json:"message"`             // 消息数据（用于 send_message, broadcast, observer_notify）
-	Reason    string        `json:"reason"`              // 原因
-	Timestamp time.Time     `json:"timestamp"`           // 时间戳
-	Namespace string        `json:"namespace,omitempty"` // 命名空间ID（路由信封携带，空=全命名空间广播，非空=指定命名空间）
+	Type          OperationType `json:"type"`                     // 操作类型
+	NodeID        string        `json:"node_id"`                  // 源节点ID
+	TargetID      string        `json:"target_id"`                // 目标ID（用户ID、节点ID等）
+	TraceID       string        `json:"trace_id,omitempty"`       // 全链路追踪ID（从 ctx 自动注入，跨节点序列化携带）
+	Message       *HubMessage   `json:"message"`                  // 消息数据（用于 send_message, broadcast, observer_notify）
+	Reason        string        `json:"reason"`                   // 原因
+	Timestamp     time.Time     `json:"timestamp"`                // 时间戳
+	AppID         string        `json:"app_id,omitempty"`         // 应用ID（最上层隔离维度，路由信封携带，空=全局共享）
+	Namespace     string        `json:"namespace,omitempty"`      // 命名空间ID（路由信封携带，空=全命名空间广播，非空=指定命名空间）
 	GroupIDs      []string      `json:"group_ids,omitempty"`      // 群组ID列表（支持多群组，观察者可订阅多个组；空表示无群组操作）
 	ExcludeSender bool          `json:"exclude_sender,omitempty"` // 是否排除发送者（跨节点群组广播 PubSub 兜底携带，与 gRPC BroadcastGroupRequest 对齐）
 	SenderID      string        `json:"sender_id,omitempty"`      // 发送者ID（排除发送者时用，跨节点 PubSub 兜底场景）

@@ -23,7 +23,9 @@ import (
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
+	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/repository"
+	"github.com/kamalyes/go-wsc/routing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -351,7 +353,7 @@ func TestHubMessaging(t *testing.T) {
 			CreateAt:    time.Now(),
 		}
 
-		hub.Broadcast(context.Background(), message)
+		_ = hub.Deliver(context.Background(), message, false)
 
 		// 验证所有客户端都收到消息
 		for i, client := range clients {
@@ -1688,7 +1690,7 @@ func TestHubHighThroughputMessaging(t *testing.T) {
 				MessageType: MessageTypeText,
 				Content:     fmt.Sprintf("high throughput message %d", i),
 			}
-			hub.Broadcast(context.Background(), msg)
+			_ = hub.Deliver(context.Background(), msg, false)
 		}
 
 		elapsed := time.Since(start)
@@ -1709,7 +1711,7 @@ func TestHubHighThroughputMessaging(t *testing.T) {
 					MessageType: MessageTypeText,
 					Content:     fmt.Sprintf("parallel broadcast %d", idx),
 				}
-				hub.Broadcast(context.Background(), msg)
+				_ = hub.Deliver(context.Background(), msg, false)
 			}(i)
 		}
 
@@ -2139,7 +2141,7 @@ func TestHubBroadcastToGroup(t *testing.T) {
 
 	// 创建群组并加入成员
 	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "sales-group", Namespace: "default", OwnerID: "owner"}))
-	require.NoError(t, groupRepo.AddMembers(ctx, "default", "sales-group", []string{"sales-user-1", "sales-user-2"}))
+	require.NoError(t, groupRepo.AddMembers(ctx, models.DefaultAppID, "default", "sales-group", []string{"sales-user-1", "sales-user-2"}))
 
 	// 注册在线客户端
 	client1 := &Client{
@@ -2187,7 +2189,9 @@ func TestHubBroadcastToGroup(t *testing.T) {
 			Content:     "sales group message",
 			CreateAt:    time.Now(),
 		}
-		count := hub.BroadcastToGroup(ctx, "default", "sales-group", msg, false)
+		groupCtx := routing.NewRoute().WithAppID(models.DefaultAppID).WithNamespace("default").WithGroupIDs([]string{"sales-group"}).Inject(ctx)
+		dr := hub.Deliver(groupCtx, msg, false)
+		count := dr.LocalDelivered
 		assert.Equal(t, 2, count, "应投递给2个在线成员")
 
 		select {
@@ -2214,7 +2218,9 @@ func TestHubBroadcastToGroup(t *testing.T) {
 			Content:     "exclude sender test",
 			CreateAt:    time.Now(),
 		}
-		count := hub.BroadcastToGroup(ctx, "default", "sales-group", msg, true)
+		groupCtx := routing.NewRoute().WithAppID(models.DefaultAppID).WithNamespace("default").WithGroupIDs([]string{"sales-group"}).Inject(ctx)
+		dr := hub.Deliver(groupCtx, msg, true)
+		count := dr.LocalDelivered
 		assert.Equal(t, 1, count, "排除发送者后应只投递给1个成员")
 
 		select {
@@ -2237,7 +2243,9 @@ func TestHubBroadcastToGroup(t *testing.T) {
 			Content:     "nonexistent group",
 			CreateAt:    time.Now(),
 		}
-		count := hub.BroadcastToGroup(ctx, "default", "non-existent", msg, false)
+		groupCtx := routing.NewRoute().WithAppID(models.DefaultAppID).WithNamespace("default").WithGroupIDs([]string{"non-existent"}).Inject(ctx)
+		dr := hub.Deliver(groupCtx, msg, false)
+		count := dr.LocalDelivered
 		assert.Equal(t, 0, count, "不存在的群组应投递0个")
 	})
 }
@@ -2620,7 +2628,7 @@ func TestHubComplexScenarios(t *testing.T) {
 					}
 
 					// 广播到聊天室
-					hub.Broadcast(context.Background(), msg)
+					_ = hub.Deliver(context.Background(), msg, false)
 					atomic.AddInt64(&messageCount, 1)
 
 					// 随机私聊
@@ -2804,7 +2812,7 @@ func TestHubComplexScenarios(t *testing.T) {
 			MessageType: MessageTypeText, // 使用已存在的类型
 			Content:     "URGENT: Server maintenance in 5 minutes",
 		}
-		hub.Broadcast(context.Background(), urgentMsg) // 使用普通广播
+		_ = hub.Deliver(context.Background(), urgentMsg, false) // 使用普通广播
 
 		// 清理
 		hub.Unregister(vipUser)

@@ -138,14 +138,22 @@ func TestHubWorkerPool_SubmitRecord(t *testing.T) {
 
 // TestHubWorkerPool_TrySubmitRecord_Rejected 验证记录队列满时被丢弃（返回 false）
 func TestHubWorkerPool_TrySubmitRecord_Rejected(t *testing.T) {
+	// workers=1, queueSize=1：一个阻塞任务占用 worker，再填满 queue，第三次被拒
 	wp := newTestWorkerPool(t, 1, 1, 1, 1, 1, 1, 1, 1)
 	defer wp.Stop()
 
 	release := make(chan struct{})
-	wp.SubmitRecord(context.Background(), func() { <-release })
-	time.Sleep(50 * time.Millisecond)
+	started := make(chan struct{})
+	// 占用唯一 worker（用 started channel 确定性等待 worker 取走任务，不依赖 sleep）
+	wp.SubmitRecord(context.Background(), func() {
+		close(started) // 信号：worker 已开始执行
+		<-release      // 阻塞占用 worker
+	})
+	<-started // 确定性等待 worker 确认已取走任务
 
+	// 填满 queue（queueSize=1）
 	assert.True(t, wp.TrySubmitRecord(func() {}))
+	// 队列满，丢弃
 	assert.False(t, wp.TrySubmitRecord(func() {}))
 
 	close(release)
@@ -163,14 +171,22 @@ func TestHubWorkerPool_SubmitDistributed(t *testing.T) {
 
 // TestHubWorkerPool_TrySubmitDistributed_Rejected 验证跨节点队列满时被拒
 func TestHubWorkerPool_TrySubmitDistributed_Rejected(t *testing.T) {
+	// workers=1, queueSize=1：一个阻塞任务占用 worker，再填满 queue，第三次被拒
 	wp := newTestWorkerPool(t, 1, 1, 1, 1, 1, 1, 1, 1)
 	defer wp.Stop()
 
 	release := make(chan struct{})
-	wp.SubmitDistributed(context.Background(), func() { <-release })
-	time.Sleep(50 * time.Millisecond)
+	started := make(chan struct{})
+	// 占用唯一 worker（用 started channel 确定性等待 worker 取走任务，不依赖 sleep）
+	wp.SubmitDistributed(context.Background(), func() {
+		close(started) // 信号：worker 已开始执行
+		<-release      // 阻塞占用 worker
+	})
+	<-started // 确定性等待 worker 确认已取走任务
 
+	// 填满 queue（queueSize=1）
 	assert.True(t, wp.TrySubmitDistributed(func() {}))
+	// 队列满，拒绝
 	assert.False(t, wp.TrySubmitDistributed(func() {}))
 
 	close(release)

@@ -1,4 +1,4 @@
-﻿/*
+/*
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-07-29 00:00:15
  * @LastEditors: kamalyes 501893067@qq.com
@@ -29,6 +29,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/repository"
 	"github.com/kamalyes/go-wsc/routing"
@@ -126,7 +127,7 @@ func prepareGroup(b testing.TB, hub *Hub, groupRepo repository.GroupRepository, 
 		b.Fatalf("创建群组失败: %v", err)
 	}
 	if len(memberIDs) > 0 {
-		if err := hub.AddGroupMembers(context.Background(), ns, gid, memberIDs); err != nil {
+		if err := hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(ns).WithGroupIDs([]string{gid}).Inject(context.Background()), memberIDs); err != nil {
 			b.Fatalf("添加成员失败: %v", err)
 		}
 	}
@@ -260,7 +261,7 @@ func BenchmarkBroadcast(b *testing.B) {
 			b.ResetTimer()
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				hub.Broadcast(ctx, msg)
+				_ = hub.Deliver(ctx, msg, false)
 			}
 		})
 
@@ -276,7 +277,7 @@ func BenchmarkBroadcast(b *testing.B) {
 			b.ReportAllocs()
 			b.RunParallel(func(pb *testing.PB) {
 				for pb.Next() {
-					hub.Broadcast(ctx, msg)
+					_ = hub.Deliver(ctx, msg, false)
 				}
 			})
 		})
@@ -298,10 +299,11 @@ func BenchmarkGroupBroadcast(b *testing.B) {
 			ns, gid := prepareGroup(b, hub, groupRepo, "g1", memberIDsFrom(clients))
 			ctx := context.Background()
 			msg := makeBenchMsg("bench", "")
+			groupCtx := routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(ns).WithGroupIDs([]string{gid}).Inject(ctx)
 			b.ResetTimer()
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				hub.BroadcastToGroupMembers(ctx, ns, gid, msg, false)
+				_ = hub.Deliver(groupCtx, msg, false)
 			}
 		})
 
@@ -314,10 +316,12 @@ func BenchmarkGroupBroadcast(b *testing.B) {
 			ns, gid := prepareGroup(b, hub, groupRepo, "g2", memberIDsFrom(clients))
 			ctx := context.Background()
 			msg := makeBenchMsg("bench", "")
+			msg.RequireAck = true
+			groupCtx := routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(ns).WithGroupIDs([]string{gid}).Inject(ctx)
 			b.ResetTimer()
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				hub.SendToGroup(routing.WithNamespaceGroupIDs(ctx, ns, []string{gid}), msg, false)
+				_ = hub.Deliver(groupCtx, msg, false)
 			}
 		})
 	}
@@ -363,13 +367,14 @@ func BenchmarkMixed(b *testing.B) {
 		// 全量广播
 		go func() {
 			defer func() { done <- struct{}{} }()
-			hub.Broadcast(ctx, makeBenchMsg("mix", ""))
+			_ = hub.Deliver(ctx, makeBenchMsg("mix", ""), false)
 		}()
 
 		// 群组广播
 		go func() {
 			defer func() { done <- struct{}{} }()
-			hub.BroadcastToGroupMembers(ctx, ns, gid, makeBenchMsg("mix", ""), false)
+			groupCtx := routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(ns).WithGroupIDs([]string{gid}).Inject(ctx)
+			_ = hub.Deliver(groupCtx, makeBenchMsg("mix", ""), false)
 		}()
 
 		<-done
@@ -405,8 +410,8 @@ func BenchmarkJoinMemberGroupOnConnect(b *testing.B) {
 			for i := 0; i < n; i++ {
 				preIDs[i] = fmt.Sprintf("pre-def-%d", i)
 			}
-			groupRepo.EnsureSystemGroup(ctx, "bench-ns", models.DefaultGroupID)
-			groupRepo.AddMembers(ctx, "bench-ns", models.DefaultGroupID, preIDs)
+			groupRepo.EnsureSystemGroup(ctx, constants.DefaultAppID, "bench-ns", constants.DefaultGroupID)
+			groupRepo.AddMembers(ctx, constants.DefaultAppID, "bench-ns", constants.DefaultGroupID, preIDs)
 
 			b.ResetTimer()
 			b.ReportAllocs()
@@ -430,8 +435,8 @@ func BenchmarkJoinMemberGroupOnConnect(b *testing.B) {
 			for i := 0; i < n; i++ {
 				preIDs[i] = fmt.Sprintf("pre-rc-%d", i)
 			}
-			groupRepo.EnsureSystemGroup(ctx, "bench-ns", models.DefaultGroupID)
-			groupRepo.AddMembers(ctx, "bench-ns", models.DefaultGroupID, preIDs)
+			groupRepo.EnsureSystemGroup(ctx, constants.DefaultAppID, "bench-ns", constants.DefaultGroupID)
+			groupRepo.AddMembers(ctx, constants.DefaultAppID, "bench-ns", constants.DefaultGroupID, preIDs)
 
 			client := &Client{
 				ID:        "c-reconnect",
@@ -459,7 +464,7 @@ func BenchmarkJoinMemberGroupOnConnect(b *testing.B) {
 				preIDs[i] = fmt.Sprintf("pre-bg-%d", i)
 			}
 			groupRepo.CreateGroup(ctx, &Group{GroupID: "bench-bg", Namespace: "bench-ns", OwnerID: "o"})
-			groupRepo.AddMembers(ctx, "bench-ns", "bench-bg", preIDs)
+			groupRepo.AddMembers(ctx, constants.DefaultAppID, "bench-ns", "bench-bg", preIDs)
 
 			b.ResetTimer()
 			b.ReportAllocs()
@@ -481,7 +486,7 @@ func BenchmarkJoinMemberGroupOnConnect(b *testing.B) {
 			defer cleanup()
 			ctx := context.Background()
 			groupRepo.CreateGroup(ctx, &Group{GroupID: "bench-bg-rc", Namespace: "bench-ns", OwnerID: "o"})
-			groupRepo.AddMembers(ctx, "bench-ns", "bench-bg-rc", []string{"u-bg-rc"})
+			groupRepo.AddMembers(ctx, constants.DefaultAppID, "bench-ns", "bench-bg-rc", []string{"u-bg-rc"})
 
 			client := &Client{
 				ID:        "c-bg-rc",
@@ -544,15 +549,17 @@ func BenchmarkSendToGroupDefaultGroup(b *testing.B) {
 			registerAll(hub, clients) // 注册时自动加入默认组（__default_ns__）
 
 			// 确保默认组存在并有成员
-			ns := models.DefaultNamespace
-			groupRepo.EnsureSystemGroup(ctx, ns, models.DefaultGroupID)
-			groupRepo.AddMembers(ctx, ns, models.DefaultGroupID, memberIDsFrom(clients))
+			ns := constants.DefaultNamespace
+			groupRepo.EnsureSystemGroup(ctx, constants.DefaultAppID, ns, constants.DefaultGroupID)
+			groupRepo.AddMembers(ctx, constants.DefaultAppID, ns, constants.DefaultGroupID, memberIDsFrom(clients))
 
 			msg := makeBenchMsg("bench", "")
+			msg.RequireAck = true
+			groupCtx := routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(ns).WithGroupIDs([]string{constants.DefaultGroupID}).Inject(ctx)
 			b.ResetTimer()
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				hub.SendToGroup(routing.WithNamespaceGroupIDs(ctx, ns, []string{models.DefaultGroupID}), msg, false)
+				_ = hub.Deliver(groupCtx, msg, false)
 			}
 		})
 	}
@@ -571,18 +578,20 @@ func BenchmarkBroadcastToAllGroupsWithDefaultGroup(b *testing.B) {
 			ns := "bench-ns"
 			// 每个客户端既在业务组也在默认组（模拟自动加群后的真实分布）
 			_, gid := prepareGroup(b, hub, groupRepo, "bench-dup-g", memberIDsFrom(clients))
-			groupRepo.EnsureSystemGroup(ctx, ns, models.DefaultGroupID)
-			groupRepo.AddMembers(ctx, ns, models.DefaultGroupID, memberIDsFrom(clients))
+			groupRepo.EnsureSystemGroup(ctx, constants.DefaultAppID, ns, constants.DefaultGroupID)
+			groupRepo.AddMembers(ctx, constants.DefaultAppID, ns, constants.DefaultGroupID, memberIDsFrom(clients))
 
 			msg := makeBenchMsg("bench", "")
 			b.ResetTimer()
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				hub.BroadcastToAllGroups(ctx, ns, msg)
+				gids, err := hub.GetNamespaceGroups(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(ns).WithGroupIDs(nil).Inject(ctx))
+				if err == nil && len(gids) > 0 {
+					groupCtx := routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(ns).WithGroupIDs(gids).Inject(ctx)
+					_ = hub.Deliver(groupCtx, msg, false)
+				}
 			}
 			_ = gid
 		})
 	}
 }
-
-

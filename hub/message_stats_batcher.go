@@ -112,7 +112,7 @@ func (u *MessageStatsBatcher) flush(batch []*statsIncrementItem) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := u.hub.connectionRecordRepo.BatchIncrementStats(ctx, entries); err != nil {
+	if err := u.hub.connectionQualityRepo.BatchIncrementStats(ctx, entries); err != nil {
 		u.hub.logger.ErrorKV("批量更新消息统计失败",
 			"error", err,
 			"batch_size", len(entries),

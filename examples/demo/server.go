@@ -44,8 +44,8 @@ func main() {
 	h := hub.NewHub(config)
 
 	// 设置客户端连接回调
-	h.OnClientConnect(func(ctx context.Context, client *models.Client) error {
-		log.Printf("✅ 客户端连接: %s\n", client.UserID)
+	h.OnClientConnect(func(ctx context.Context, client *models.Client, record *models.ConnectionRecord) error {
+		log.Printf("✅ 客户端连接: %s (连接ID: %s)\n", client.UserID, record.ConnectionID)
 
 		// 发送欢迎消息
 		syncx.Go().

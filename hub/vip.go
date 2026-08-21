@@ -13,6 +13,8 @@ package hub
 
 import (
 	"context"
+
+	"github.com/kamalyes/go-wsc/routing"
 )
 
 // ============================================================================
@@ -35,12 +37,13 @@ func (h *Hub) SendToExactVIPLevel(ctx context.Context, vipLevel VIPLevel, msg *H
 }
 
 // SendWithVIPPriority 根据用户VIP等级自动设置消息优先级
-// 使用 ForEachUserClient 零拷贝遍历 + 提前终止，替代 GetUserClients + 手动迭代
+// 使用 ForEachUserClientFiltered 零拷贝遍历（按 ctx 信封过滤）+ 提前终止，替代 GetUserClients + 手动迭代
 func (h *Hub) SendWithVIPPriority(ctx context.Context, userID string, msg *HubMessage) {
-	// 零拷贝获取第一个客户端的VIP等级（提前终止遍历）
+	appID, ns := routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx)
+	// 零拷贝获取第一个匹配信封客户端的VIP等级（提前终止遍历）
 	var vipLevel VIPLevel
 	found := false
-	h.shardedRegistry.ForEachUserClient(userID, func(_ string, client *Client) bool {
+	h.shardedRegistry.ForEachUserClientFiltered(userID, appID, ns, nil, func(_ string, client *Client) bool {
 		vipLevel = client.GetVIPLevel()
 		found = true
 		return false // 第一个即终止
@@ -158,23 +161,24 @@ func (h *Hub) FilterVIPClients(minLevel VIPLevel) []*Client {
 // VIP等级管理
 // ============================================================================
 
-// UpgradeVIPLevel 升级用户VIP等级
-// 使用 ForEachUserClient 零拷贝遍历 + SetVIPLevel 原子更新，消除数据竞争
-func (h *Hub) UpgradeVIPLevel(userID string, newLevel VIPLevel) bool {
+// UpgradeVIPLevel 升级用户VIP等级（按 ctx 路由信封 appID+namespace 隔离）
+// 使用 ForEachUserClientFiltered 零拷贝遍历（仅升级匹配信封的客户端）+ SetVIPLevel 原子更新，消除数据竞争
+func (h *Hub) UpgradeVIPLevel(ctx context.Context, userID string, newLevel VIPLevel) bool {
 	if !newLevel.IsValid() {
 		return false
 	}
+	appID, ns := routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx)
 
-	// 快速检查用户是否存在（O(1)，避免无用户时加锁遍历）
-	if !h.shardedRegistry.HasUser(userID) {
+	// 快速检查同信封下用户是否存在（O(1)，避免无用户时加锁遍历）
+	if !h.shardedRegistry.HasUser(userID, appID, ns) {
 		return false
 	}
 
 	newLevelVal := newLevel.GetLevel()
 	upgraded := false
 
-	// 单次遍历：检查当前等级 + 升级所有客户端（零拷贝，原子更新）
-	h.shardedRegistry.ForEachUserClient(userID, func(_ string, client *Client) bool {
+	// 单次遍历：检查当前等级 + 升级同信封客户端（零拷贝，原子更新）
+	h.shardedRegistry.ForEachUserClientFiltered(userID, appID, ns, nil, func(_ string, client *Client) bool {
 		// 只允许升级，不允许降级
 		if newLevelVal > client.GetVIPLevel().GetLevel() {
 			client.SetVIPLevel(newLevel)

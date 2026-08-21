@@ -4,12 +4,22 @@
  * @LastEditors: kamalyes 501893067@qq.com
  * @LastEditTime: 2026-07-22 15:00:00
  * @FilePath: \go-wsc\hub\group.go
- * @Description: Hub 群组管理 - 命名空间隔离的群组 CRUD、成员管理与群组消息投递
+ * @Description: Hub 群组管理 - appID 隔离的群组 CRUD、成员管理与系统组自动维护
  *
- * 层级结构：Namespace（默认 "default"，类似 k8s namespace）→ Group → Members
- * 群组成员关系持久化于 Redis，跨节点共享：
- *   - 在线成员：通过 SendToUserWithRetry 投递（自动支持跨节点路由）
- *   - 离线成员：通过离线消息处理器存储，上线后自动推送
+ * 本文件只负责群组本身的生命周期（建群/解散/加成员/查成员/系统组自动装配）。
+ * 消息投递与广播统一走 hub.Deliver（见 broadcast.go），路由元数据全由 ctx 传递，
+ * 因此历史 SendToGroup / BroadcastToGroupMembers / BroadcastToGroup / BroadcastToAllGroups /
+ * BroadcastToAllNamespacesAllGroups / BroadcastToGroups / BroadcastToNamespace 七个割裂方法
+ * 以及对应的跨节点辅助均不在此文件，统一收敛到 Deliver 单一入口。
+ *
+ * 路由全 ctx 驱动：appID（最上层隔离维度，默认 __default_app__）+ namespace（默认 default）
+ * + groupID 均从 ctx 提取（routing.NewRoute().WithAppID(...).Inject(ctx) 注入），与 Deliver(ctx, msg, ...) 风格统一。
+ *   - 单群组读方法（GetGroup/GetGroupMembers/IsGroupMember/GetGroupMemberCount）取 ctx 首个 groupID
+ *   - 写/破坏方法（AddGroupMembers/RemoveGroupMembers/DisbandGroup）多群批量：遍历 ctx groupIDs，best-effort，返回最后错误
+ *   - 命名空间方法（GetUserGroups/GetNamespaceGroups）只取 (appID, namespace)
+ *
+ * 层级结构：AppID（应用隔离）→ Namespace（默认 "default"，类似 k8s namespace）→ Group → Members
+ * 群组成员关系持久化于 Redis（key 含 appID 前缀），跨节点共享，跨 app 严格隔离。
  *
  * Copyright (c) 2026 by kamalyes, All Rights Reserved.
  */
@@ -19,92 +29,118 @@ package hub
 import (
 	"context"
 	"errors"
-	"fmt"
-	"sync"
-	"sync/atomic"
 	"time"
 
-	"github.com/kamalyes/go-toolbox/pkg/mathx"
-	"github.com/kamalyes/go-toolbox/pkg/syncx"
+	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/routing"
 )
 
+// routeFromCtx 从 ctx 提取并归一化路由维度（appID + namespace）
+// 群组操作为严格场景（非广播），namespace 不允许空：空补 DefaultNamespace；appID 空补 DefaultAppID
+// 入口层（Route.Inject）已归一化 appID，此处 NormalizeRoute 幂等；namespace 在广播场景可能留空，此处补默认
+func routeFromCtx(ctx context.Context) (appID, namespace string) {
+	return routing.NormalizeRoute(routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx))
+}
+
 // ============================================================================
-// 群组管理方法
+// 群组管理方法（路由全 ctx 驱动）
 // ============================================================================
 
-// GetGroup 获取群组元信息
-func (h *Hub) GetGroup(ctx context.Context, namespace, groupID string) (*Group, error) {
+// GetGroup 获取群组元信息（appID/namespace/groupID 全从 ctx 取，groupID 取首个）
+func (h *Hub) GetGroup(ctx context.Context) (*Group, error) {
 	if h.groupRepo == nil {
 		return nil, ErrGroupRepoNotSet
 	}
-	return h.groupRepo.GetGroup(ctx, namespace, groupID)
+	appID, ns := routeFromCtx(ctx)
+	groupID := routing.FirstGroupIDFromContext(ctx)
+	return h.groupRepo.GetGroup(ctx, appID, ns, groupID)
 }
 
-// DisbandGroup 解散群组
-// 同时清理群组元信息、成员集合、命名空间索引及各成员的反向索引
-func (h *Hub) DisbandGroup(ctx context.Context, namespace, groupID string) error {
+// DisbandGroup 解散群组（多群批量：遍历 ctx groupIDs，best-effort，返回最后错误）
+// 同时清理群组元信息、成员集合、命名空间索引及各成员的反向索引；逐群触发 OnGroupDisband 回调
+func (h *Hub) DisbandGroup(ctx context.Context) error {
 	if h.groupRepo == nil {
 		return ErrGroupRepoNotSet
 	}
-	if err := h.groupRepo.DisbandGroup(ctx, namespace, groupID); err != nil {
-		h.logger.ErrorContextKV(ctx, "解散群组失败",
-			"namespace", namespace, "group_id", groupID, "error", err)
-		return err
+	appID, ns := routeFromCtx(ctx)
+	groupIDs := routing.GroupIDsFromContext(ctx)
+	var lastErr error
+	for _, gid := range groupIDs {
+		if err := h.groupRepo.DisbandGroup(ctx, appID, ns, gid); err != nil {
+			h.logger.ErrorContextKV(ctx, "解散群组失败",
+				"app_id", appID, "namespace", ns, "group_id", gid, "error", err)
+			lastErr = err
+			continue
+		}
+		h.logger.InfoContextKV(ctx, "群组已解散",
+			"app_id", appID, "namespace", ns, "group_id", gid)
+		// 🔔 异步触发群组解散回调（cbCtx 注入路由供回调内 routing.AppIDFromContext 取 appID）
+		h.triggerGroupDisbandCallback(ctx, ns, gid)
 	}
-	h.logger.InfoContextKV(ctx, "群组已解散", "namespace", namespace, "group_id", groupID)
-
-	// 🔔 异步触发群组解散回调
-	if h.groupDisbandCallback != nil {
-		ns, gid := namespace, groupID
-		h.workerPool.TrySubmitCallback(func() {
-			h.groupDisbandCallback(context.Background(), ns, gid)
-		})
-	}
-	return nil
+	return lastErr
 }
 
-// AddGroupMembers 添加成员到群组
-// 同时更新成员的反向索引（user→groups）
-// 群组不存在时自动创建（register 自动装配场景，无需手动 CreateGroup）
-func (h *Hub) AddGroupMembers(ctx context.Context, namespace, groupID string, userIDs []string) error {
+// AddGroupMembers 添加成员到群组（多群批量：遍历 ctx groupIDs，best-effort，返回最后错误）
+// 群组不存在时自动创建（register 自动装配场景，无需手动 CreateGroup）；同时更新成员的反向索引
+// 注意：手动 AddGroupMembers 不触发 OnGroupMemberJoin 回调（仅 register 自动装配触发）
+func (h *Hub) AddGroupMembers(ctx context.Context, userIDs []string) error {
 	if h.groupRepo == nil {
 		return ErrGroupRepoNotSet
 	}
 	if len(userIDs) == 0 {
 		return nil
 	}
+	appID, ns := routeFromCtx(ctx)
+	groupIDs := routing.GroupIDsFromContext(ctx)
+	var lastErr error
+	for _, gid := range groupIDs {
+		if err := h.addGroupMembersSingle(ctx, appID, ns, gid, userIDs); err != nil {
+			lastErr = err
+		}
+	}
+	return lastErr
+}
+
+// addGroupMembersSingle 单群添加成员（含自动建群 + MaxMembers 校验）
+// 抽自原 AddGroupMembers 主体，供多群批量与连接自动入群复用；不触发回调（回调由调用方按需触发）
+// 群组不存在时自动创建（register 自动装配时无需业务方手动建群）
+func (h *Hub) addGroupMembersSingle(ctx context.Context, appID, namespace, groupID string, userIDs []string) error {
+	if len(userIDs) == 0 {
+		return nil
+	}
 	// 校验群组是否存在，不存在则自动创建
-	group, err := h.groupRepo.GetGroup(ctx, namespace, groupID)
+	group, err := h.groupRepo.GetGroup(ctx, appID, namespace, groupID)
 	if err != nil {
 		if !errors.Is(err, ErrGroupNotFound) {
 			return err
 		}
 		// 群组不存在，自动创建（register 自动装配时无需业务方手动建群）
 		newGroup := &Group{
+			AppID:     appID,
 			GroupID:   groupID,
 			Namespace: namespace,
 			CreatedAt: time.Now(),
 		}
 		if err := h.groupRepo.CreateGroup(ctx, newGroup); err != nil && !errors.Is(err, ErrGroupExisted) {
 			h.logger.ErrorContextKV(ctx, "自动创建群组失败",
-				"namespace", namespace, "group_id", groupID, "error", err)
+				"app_id", appID, "namespace", namespace, "group_id", groupID, "error", err)
 			return err
 		}
-		h.logger.InfoContextKV(ctx, "群组自动创建成功", "namespace", namespace, "group_id", groupID)
+		h.logger.InfoContextKV(ctx, "群组自动创建成功",
+			"app_id", appID, "namespace", namespace, "group_id", groupID)
 		group = newGroup
 	}
 	// 校验群组人数上限（排除已存在成员，避免重连用户被误判超限）
 	// 重连场景：用户成员关系在离线时保留，IsMember 返回 true 不计入新增
 	if group.MaxMembers > 0 {
-		current, err := h.groupRepo.GetMemberCount(ctx, namespace, groupID)
+		current, err := h.groupRepo.GetMemberCount(ctx, appID, namespace, groupID)
 		if err != nil {
 			return err
 		}
 		newCount := 0
 		for _, uid := range userIDs {
-			exists, err := h.groupRepo.IsMember(ctx, namespace, groupID, uid)
+			exists, err := h.groupRepo.IsMember(ctx, appID, namespace, groupID, uid)
 			if err != nil {
 				return err
 			}
@@ -116,754 +152,151 @@ func (h *Hub) AddGroupMembers(ctx context.Context, namespace, groupID string, us
 			return ErrGroupFull
 		}
 	}
-	if err := h.groupRepo.AddMembers(ctx, namespace, groupID, userIDs); err != nil {
+	if err := h.groupRepo.AddMembers(ctx, appID, namespace, groupID, userIDs); err != nil {
 		h.logger.ErrorContextKV(ctx, "添加群组成员失败",
-			"namespace", namespace, "group_id", groupID, "users", userIDs, "error", err)
+			"app_id", appID, "namespace", namespace, "group_id", groupID, "users", userIDs, "error", err)
 		return err
 	}
 	h.logger.InfoContextKV(ctx, "群组成员添加成功",
-		"namespace", namespace, "group_id", groupID, "users", userIDs)
+		"app_id", appID, "namespace", namespace, "group_id", groupID, "users", userIDs)
 	return nil
 }
 
-// triggerGroupMemberJoinCallback 异步触发群组成员加入回调
-// 在客户端连接时自动加群成功后调用（register 自动装配 + 系统组自动加入），手动 AddGroupMembers 不触发
-// 复制切片避免调用方后续修改影响异步回调
-func (h *Hub) triggerGroupMemberJoinCallback(namespace, groupID string, userIDs []string) {
-	if h.groupMemberJoinCallback == nil {
-		return
-	}
-	ns, gid := namespace, groupID
-	uids := append([]string(nil), userIDs...)
-	h.workerPool.TrySubmitCallback(func() {
-		cbCtx, cbCancel := context.WithTimeout(h.ctx, 5*time.Second)
-		defer cbCancel()
-		h.groupMemberJoinCallback(cbCtx, ns, gid, uids)
-	})
-}
-
-// RemoveGroupMembers 从群组移除成员
-// 同时清理成员的反向索引
-func (h *Hub) RemoveGroupMembers(ctx context.Context, namespace, groupID string, userIDs []string) error {
+// RemoveGroupMembers 从群组移除成员（多群批量：遍历 ctx groupIDs，best-effort，返回最后错误）
+// 同时清理成员的反向索引；逐群触发 OnGroupMemberLeave 回调
+func (h *Hub) RemoveGroupMembers(ctx context.Context, userIDs []string) error {
 	if h.groupRepo == nil {
 		return ErrGroupRepoNotSet
 	}
 	if len(userIDs) == 0 {
 		return nil
 	}
-	if err := h.groupRepo.RemoveMembers(ctx, namespace, groupID, userIDs); err != nil {
-		h.logger.ErrorContextKV(ctx, "移除群组成员失败",
-			"namespace", namespace, "group_id", groupID, "users", userIDs, "error", err)
-		return err
+	appID, ns := routeFromCtx(ctx)
+	groupIDs := routing.GroupIDsFromContext(ctx)
+	var lastErr error
+	for _, gid := range groupIDs {
+		if err := h.groupRepo.RemoveMembers(ctx, appID, ns, gid, userIDs); err != nil {
+			h.logger.ErrorContextKV(ctx, "移除群组成员失败",
+				"app_id", appID, "namespace", ns, "group_id", gid, "users", userIDs, "error", err)
+			lastErr = err
+			continue
+		}
+		h.logger.InfoContextKV(ctx, "群组成员移除成功",
+			"app_id", appID, "namespace", ns, "group_id", gid, "users", userIDs)
+		// 🔔 异步触发群组成员离开回调（cbCtx 注入路由供回调内 routing.AppIDFromContext 取 appID）
+		h.triggerGroupMemberLeaveCallback(ctx, ns, gid, userIDs)
 	}
-	h.logger.InfoContextKV(ctx, "群组成员移除成功",
-		"namespace", namespace, "group_id", groupID, "users", userIDs)
-
-	// 🔔 异步触发群组成员离开回调（复制切片避免调用方后续修改）
-	if h.groupMemberLeaveCallback != nil {
-		ns, gid := namespace, groupID
-		uids := append([]string(nil), userIDs...)
-		h.workerPool.TrySubmitCallback(func() {
-			cbCtx, cbCancel := context.WithTimeout(h.ctx, 5*time.Second)
-			defer cbCancel()
-			h.groupMemberLeaveCallback(cbCtx, ns, gid, uids)
-		})
-	}
-	return nil
+	return lastErr
 }
 
-// GetGroupMembers 获取群组所有成员ID
-func (h *Hub) GetGroupMembers(ctx context.Context, namespace, groupID string) ([]string, error) {
+// GetGroupMembers 获取群组所有成员ID（groupID 取 ctx 首个 groupID）
+func (h *Hub) GetGroupMembers(ctx context.Context) ([]string, error) {
 	if h.groupRepo == nil {
 		return nil, ErrGroupRepoNotSet
 	}
-	return h.groupRepo.GetMembers(ctx, namespace, groupID)
+	appID, ns := routeFromCtx(ctx)
+	groupID := routing.FirstGroupIDFromContext(ctx)
+	return h.groupRepo.GetMembers(ctx, appID, ns, groupID)
 }
 
-// GetUserGroups 获取用户在指定命名空间下加入的所有群组ID
-func (h *Hub) GetUserGroups(ctx context.Context, namespace, userID string) ([]string, error) {
+// GetUserGroups 获取用户在 ctx 的 (appID, namespace) 下加入的所有群组ID
+func (h *Hub) GetUserGroups(ctx context.Context, userID string) ([]string, error) {
 	if h.groupRepo == nil {
 		return nil, ErrGroupRepoNotSet
 	}
-	return h.groupRepo.GetUserGroups(ctx, namespace, userID)
+	appID, ns := routeFromCtx(ctx)
+	return h.groupRepo.GetUserGroups(ctx, appID, ns, userID)
 }
 
-// IsGroupMember 判断用户是否为群组成员
-func (h *Hub) IsGroupMember(ctx context.Context, namespace, groupID, userID string) (bool, error) {
+// IsGroupMember 判断用户是否为群组成员（groupID 取 ctx 首个 groupID）
+func (h *Hub) IsGroupMember(ctx context.Context, userID string) (bool, error) {
 	if h.groupRepo == nil {
 		return false, ErrGroupRepoNotSet
 	}
-	return h.groupRepo.IsMember(ctx, namespace, groupID, userID)
+	appID, ns := routeFromCtx(ctx)
+	groupID := routing.FirstGroupIDFromContext(ctx)
+	return h.groupRepo.IsMember(ctx, appID, ns, groupID, userID)
 }
 
-// GetGroupMemberCount 获取群组成员数量
-func (h *Hub) GetGroupMemberCount(ctx context.Context, namespace, groupID string) (int64, error) {
+// GetGroupMemberCount 获取群组成员数量（groupID 取 ctx 首个 groupID）
+func (h *Hub) GetGroupMemberCount(ctx context.Context) (int64, error) {
 	if h.groupRepo == nil {
 		return 0, ErrGroupRepoNotSet
 	}
-	return h.groupRepo.GetMemberCount(ctx, namespace, groupID)
+	appID, ns := routeFromCtx(ctx)
+	groupID := routing.FirstGroupIDFromContext(ctx)
+	return h.groupRepo.GetMemberCount(ctx, appID, ns, groupID)
 }
 
-// GetNamespaceGroups 获取命名空间下所有群组ID
-func (h *Hub) GetNamespaceGroups(ctx context.Context, namespace string) ([]string, error) {
+// GetNamespaceGroups 获取 ctx 的 (appID, namespace) 下所有群组ID
+// 调用方需要「向命名空间所有群组广播」时，先调本方法取得 groupIDs，
+// 再通过 routing.NewRoute().WithAppID(...).WithNamespace(...).Inject(ctx) 注入 ctx 后调一次 hub.Deliver。
+func (h *Hub) GetNamespaceGroups(ctx context.Context) ([]string, error) {
 	if h.groupRepo == nil {
 		return nil, ErrGroupRepoNotSet
 	}
-	return h.groupRepo.GetNamespaceGroups(ctx, namespace)
+	appID, ns := routeFromCtx(ctx)
+	return h.groupRepo.GetNamespaceGroups(ctx, appID, ns)
 }
 
 // ============================================================================
-// 群组消息投递
+// 群组生命周期回调触发（签名保持 func(ctx, namespace, groupID, ...)，appID 注入 cbCtx 供业务层 ctx 取）
+//
+// 回调契约不变（GroupDisbandCallback/GroupMemberJoinCallback/GroupMemberLeaveCallback），
+// 仅 cbCtx 额外携带路由元数据（appID+namespace+groupID），业务层可通过
+// routing.AppIDFromContext/NamespaceFromContext 在回调内获取 appID，无需改签名。
 // ============================================================================
 
-// SendToGroup 向群组发送消息（可靠投递）
-//
-// ✅ 路由元数据统一从 ctx 取（调用方使用 routing.WithNamespaceGroupIDs 注入）：
-//   - namespace: 从 routing.NamespaceFromContext(ctx) 取，空时兜底注入 models.DefaultNamespace（老系统兼容）
-//   - groupID:   从 routing.FirstGroupIDFromContext(ctx) 取（单群组语义，必须传至少 1 个 groupID）
-//
-// 投递策略：
-//   - 在线成员：通过 SendToUserWithRetry 投递（自动支持跨节点路由与重试）
-//   - 离线成员：通过离线消息处理器存储，上线后自动推送
-//   - excludeSender 为 true 时跳过消息发送者本人
-//
-// 返回 GroupSendResult 包含详细的投递统计
-func (h *Hub) SendToGroup(ctx context.Context, msg *HubMessage, excludeSender bool) *GroupSendResult {
-	// 🔑 路由来源：统一从 ctx 取（不再通过参数单独传 namespace/groupID，与 SendToUserWithRetry 风格一致）
-	namespace := routing.NamespaceFromContext(ctx)
-	groupID := routing.FirstGroupIDFromContext(ctx)
-
-	// 老系统兼容：ctx 未传 namespace 时，兜底注入 DefaultNamespace
-	if namespace == "" {
-		namespace = models.DefaultNamespace
-		ctx = routing.WithNamespaceGroupIDs(ctx, namespace, routing.GroupIDsFromContext(ctx))
-	}
-
-	result := &GroupSendResult{
-		GroupID: groupID,
-		Errors:  make([]error, 0),
-	}
-
-	if h.groupRepo == nil {
-		result.Errors = append(result.Errors, ErrGroupRepoNotSet)
-		return result
-	}
-
-	// SendToGroup 是单群组语义，ctx 必须至少有 1 个 groupID
-	if groupID == "" {
-		result.Errors = append(result.Errors, fmt.Errorf("SendToGroup: ctx 缺少 groupID，请用 routing.WithNamespaceGroupIDs(ctx, ns, []string{gid}) 注入路由"))
-		return result
-	}
-
-	// 先 Clone 消息：并发给 N 个成员调用 SendToUserWithRetry 会各自再 Clone 一次，
-	// 此处 Clone 保证写入信封/trace_id/CreateAt 不污染调用方原对象
-	msg = msg.Clone()
-	msg.InjectContext(ctx)
-
-	// 1. 获取群组成员列表
-	members, err := h.groupRepo.GetMembers(ctx, namespace, groupID)
-	if err != nil {
-		result.Errors = append(result.Errors, err)
-		h.logger.ErrorContextKV(ctx, "获取群组成员失败",
-			"namespace", namespace, "group_id", groupID, "error", err)
-		return result
-	}
-
-	result.TotalMembers = len(members)
-	if result.TotalMembers == 0 {
-		return result
-	}
-
-	// 2. 过滤发送者（如需）
-	filteredMembers := members
-	if excludeSender && msg.Sender != "" {
-		filteredMembers = mathx.FilterSlice(members, func(id string) bool {
-			return id != msg.Sender
-		})
-		h.logger.DebugContextKV(ctx, "🔄 过滤发送者后的群组成员列表",
-			"namespace", namespace,
-			"group_id", groupID,
-			"original_count", len(members),
-			"filtered_count", len(filteredMembers),
-			"excluded_sender", msg.Sender,
-		)
-	}
-
-	if len(filteredMembers) == 0 {
-		return result
-	}
-
-	// 🔏 群组消息：同时写入 ctx + msg 信封（namespace, [groupID]）
-	// - 离线存储：从 ctx 取路由，存 ns:groupID:userID 维度
-	// - 本地/跨节点投递过滤：从 msg 信封取路由，保证同 ns 且同 group
-	ctx = msg.ContextWithRoute(ctx, namespace, []string{groupID})
-
-	// 3. 并发投递消息 + 原子计数（消除序列化预检查 N 次 Redis 在线探测）
-	// SendToUserWithRetry 内部已处理在线/离线逻辑，并通过 StoredOffline 标志返回分类信息
-	var (
-		sent          int64
-		storedOffline int64
-		failed        int64
-		onlineCount   int64
-		offlineCount  int64
-		errMu         sync.Mutex
-	)
-
-	syncx.NewParallelSliceExecutor[string, *SendResult](filteredMembers).
-		Execute(func(idx int, uid string) (*SendResult, error) {
-			sendResult := h.SendToUserWithRetry(ctx, uid, msg)
-
-			// 原子分类，无锁开销
-			if sendResult.StoredOffline {
-				atomic.AddInt64(&offlineCount, 1)
-				if sendResult.Success {
-					atomic.AddInt64(&storedOffline, 1)
-				} else {
-					atomic.AddInt64(&failed, 1)
-				}
-			} else {
-				atomic.AddInt64(&onlineCount, 1)
-				if sendResult.Success {
-					atomic.AddInt64(&sent, 1)
-				} else {
-					atomic.AddInt64(&failed, 1)
-				}
-			}
-
-			// 仅在有错误时加锁收集错误信息（错误是少数，锁竞争极低）
-			if sendResult.FinalError != nil {
-				errMu.Lock()
-				result.Errors = append(result.Errors, fmt.Errorf("user %s: %w", uid, sendResult.FinalError))
-				errMu.Unlock()
-			}
-
-			return sendResult, nil
-		})
-
-	result.OnlineMembers = int(atomic.LoadInt64(&onlineCount))
-	result.OfflineMembers = int(atomic.LoadInt64(&offlineCount))
-	result.Sent = int(atomic.LoadInt64(&sent))
-	result.StoredOffline = int(atomic.LoadInt64(&storedOffline))
-	result.Failed = int(atomic.LoadInt64(&failed))
-
-	// 🔔 通知观察者（ctx 已在上方 ContextWithRoute 注入路由，直接使用即可）
-	h.notifyObservers(ctx, msg)
-
-	h.logger.InfoContextKV(ctx, "✅ 群组消息投递完成",
-		"namespace", namespace,
-		"group_id", groupID,
-		"message_id", msg.MessageID,
-		"total_members", result.TotalMembers,
-		"online_members", result.OnlineMembers,
-		"offline_members", result.OfflineMembers,
-		"sent", result.Sent,
-		"stored_offline", result.StoredOffline,
-		"failed", result.Failed,
-		"duration", time.Since(msg.CreateAt),
-	)
-
-	return result
-}
-
-// ============================================================================
-// 群组广播方法
-// ============================================================================
-
-// BroadcastToGroupMembers 广播消息给群组在线成员（fire-and-forget）
-//
-// namespace 与 groupID 共同定位群组（空值默认 "default"）
-//
-// 与 SendToGroup 的区别：
-//   - 广播模式：仅投递当前在线成员，不存储离线消息，无重试，性能最优
-//   - 发送模式（SendToGroup）：在线投递 + 离线存储 + 重试，保证可靠送达
-//
-// 投递策略：
-//   - 本地：通过 broadcastToFiltered 预序列化一次，直接 TrySend 给在线群组成员
-//   - 跨节点：通过 PubSub 发布到所有节点，各节点本地过滤群组成员后广播
-//   - excludeSender 为 true 时跳过消息发送者本人
-//
-// 返回本地成功投递数（跨节点投递为异步，不计入返回值）
-func (h *Hub) BroadcastToGroupMembers(ctx context.Context, namespace, groupID string, msg *HubMessage, excludeSender bool) int {
-	// 命名空间归一化：空值兜底为 DefaultNamespace
-	// ⚠️ 未归一化时 msg.Namespace="" → broadcastToUserIDs 的 ForEachUserClientFiltered 跳过 ns 过滤，
-	//    成员跨 ns 多端登录的设备都会收到（跨租户串扰）；且 groupRepo.GetMembers(ctx,"",gid) 查询的是空 ns 的群组
-	namespace = mathx.IfEmpty(namespace, models.DefaultNamespace)
-	if h.groupRepo == nil {
-		h.logger.WarnContextKV(ctx, "群组仓库未设置，无法广播",
-			"namespace", namespace, "group_id", groupID)
-		return 0
-	}
-
-	// 克隆消息避免并发修改 + 写入路由信封（broadcastToUserIDs 内部从 msg 信封取过滤条件）
-	msg = msg.Clone()
-	msg.InjectContext(ctx)
-	// 🔏 写入 ctx+msg 信封（namespace, [groupID]）
-	ctx = msg.ContextWithRoute(ctx, namespace, []string{groupID})
-	if msg.CreateAt.IsZero() {
-		msg.CreateAt = time.Now()
-	}
-
-	// 1. 获取群组成员列表
-	members, err := h.groupRepo.GetMembers(ctx, namespace, groupID)
-	if err != nil {
-		h.logger.ErrorContextKV(ctx, "群组广播：获取群组成员失败",
-			"namespace", namespace, "group_id", groupID, "error", err)
-		return 0
-	}
-
-	if len(members) == 0 {
-		return 0
-	}
-
-	// 2. 排除发送者后得到目标成员列表
-	targetMembers := members
-	if excludeSender && msg.Sender != "" {
-		targetMembers = mathx.FilterSlice(members, func(id string) bool {
-			return id != msg.Sender
-		})
-	}
-
-	if len(targetMembers) == 0 {
-		return 0
-	}
-
-	// 3. 按成员ID查找本地连接并投递（O(m)，m=成员数，不遍历全部连接）
-	localCount := h.broadcastToUserIDs(ctx, targetMembers, msg)
-
-	// 🔔 通知观察者（ctx 已注入路由，直接使用）
-	h.notifyObservers(ctx, msg)
-
-	// 4. 跨节点广播：优先 gRPC 直连，降级 PubSub
-	h.crossNodeGroupBroadcast(routing.WithNamespaceGroupIDs(ctx, namespace, []string{groupID}), msg, excludeSender)
-
-	h.logger.InfoContextKV(ctx, "📢 群组广播已发起",
-		"namespace", namespace,
-		"group_id", groupID,
-		"message_id", msg.MessageID,
-		"total_members", len(members),
-		"local_delivered", localCount,
-		"grpc_enabled", h.IsGRPCEnabled(),
-		"pubsub_enabled", h.pubsub != nil,
-	)
-
-	return localCount
-}
-
-// crossNodeGroupBroadcast 跨节点群组广播（单群组）
-//
-// 统一走 OperationTypeGroupsBroadcast 批量路径，单群组作为 GroupIDs=[groupID] 的特例
-// 提交到 clusterBatcher 批量处理，消除 per-message goroutine
-// namespace/groupID 从 ctx 提取
-func (h *Hub) crossNodeGroupBroadcast(ctx context.Context, msg *HubMessage, excludeSender bool) {
-	if h.pubsub == nil && !h.IsGRPCEnabled() {
-		return // 单机模式，无需跨节点
-	}
-
-	namespace := routing.NamespaceFromContext(ctx)
-	groupIDs := routing.GroupIDsFromContext(ctx)
-
-	senderID := ""
-	if excludeSender {
-		senderID = msg.Sender
-	}
-
-	opts := ClusterDispatchOptions{
-		Operation:     models.OperationTypeGroupBroadcast,
-		Namespace:     namespace,
-		GroupIDs:      groupIDs,
-		ExcludeSender: excludeSender,
-		SenderID:      senderID,
-	}
-
-	if !h.clusterBatcher.Submit(msg, opts) {
-		h.logger.WarnContextKV(ctx, "集群分发队列已满，丢弃跨节点群组广播",
-			"namespace", namespace, "group_ids", groupIDs,
-			"message_id", msg.MessageID)
-	}
-}
-
-// ============================================================================
-// 群组广播快捷方法 - 统一走 BroadcastToGroupMembers，一套逻辑
-// ============================================================================
-
-// BroadcastToGroup 向指定命名空间的指定群组广播消息
-// 便捷方法：显式传入 namespace，委托给 BroadcastToGroupMembers
-// namespace 为空时自动填充 "default"
-func (h *Hub) BroadcastToGroup(ctx context.Context, namespace, groupID string, msg *HubMessage, excludeSender bool) int {
-	return h.BroadcastToGroupMembers(ctx, namespace, groupID, msg, excludeSender)
-}
-
-// batchGetGroupMembers 批量获取多个群组成员并合并去重
-// 使用 Redis Pipeline 一次 RTT 获取所有群组成员，O(totalMembers) 去重
-// 相比逐群组 N 次 GetMembers（N 次 RTT），降为 1 次 RTT
-func (h *Hub) batchGetGroupMembers(ctx context.Context, namespace string, groupIDs []string) map[string]struct{} {
-	memberSet := make(map[string]struct{})
-	if len(groupIDs) == 0 || h.groupRepo == nil {
-		return memberSet
-	}
-
-	groupMembers, err := h.groupRepo.GetMultiGroupMembers(ctx, namespace, groupIDs)
-	if err != nil {
-		h.logger.WarnContextKV(ctx, "批量获取群组成员失败",
-			"namespace", namespace, "group_count", len(groupIDs), "error", err)
-		return memberSet
-	}
-
-	for _, members := range groupMembers {
-		for _, uid := range members {
-			memberSet[uid] = struct{}{}
-		}
-	}
-	return memberSet
-}
-
-// BroadcastToAllGroups 向指定命名空间的所有群组广播消息（高性能版）
-//
-// 性能优化（相比逐群组串行广播）：
-//   - Redis Pipeline 批量查询：N 群组从 N 次 RTT 降为 1 次 RTT
-//   - 成员去重：用户在多个群组只收一条消息
-//   - 一次本地过滤：N 次 broadcastToFiltered 降为 1 次
-//   - 一次跨节点路由：N 次 routeToCluster 降为 1 次（携带所有 groupIDs）
-//
-// namespace 为空时自动填充 DefaultNamespace
-func (h *Hub) BroadcastToAllGroups(ctx context.Context, namespace string, msg *HubMessage) int {
-	// 命名空间归一化：空值兜底为 DefaultNamespace（与 BroadcastToGroupMembers 一致，避免跨 ns 串扰）
-	namespace = mathx.IfEmpty(namespace, models.DefaultNamespace)
-	if h.groupRepo == nil {
-		h.logger.WarnContextKV(ctx, "群组仓库未设置，无法广播", "namespace", namespace)
-		return 0
-	}
-
-	// 1. 获取命名空间所有群组ID
-	groupIDs, err := h.groupRepo.GetNamespaceGroups(ctx, namespace)
-	if err != nil {
-		h.logger.WarnContextKV(ctx, "获取命名空间群组列表失败", "namespace", namespace, "error", err)
-		return 0
-	}
-	if len(groupIDs) == 0 {
-		return 0
-	}
-
-	// 2. Pipeline 批量获取所有群组成员，合并去重
-	memberSet := h.batchGetGroupMembers(ctx, namespace, groupIDs)
-	if len(memberSet) == 0 {
-		return 0
-	}
-
-	// 3. 准备消息 + 🔏 写入路由信封（namespace + 所有 groupIDs，投递过滤时 client.groupID 命中任意一个即可）
-	msg = msg.Clone()
-	msg.InjectContext(ctx)
-	ctx = msg.ContextWithRoute(ctx, namespace, groupIDs)
-	if msg.CreateAt.IsZero() {
-		msg.CreateAt = time.Now()
-	}
-
-	// 4. 按成员ID查找本地连接并投递（O(m) 替代 O(n) 全连接扫描）
-	memberList := make([]string, 0, len(memberSet))
-	for uid := range memberSet {
-		memberList = append(memberList, uid)
-	}
-	localCount := h.broadcastToUserIDs(ctx, memberList, msg)
-
-	// 5. 一次跨节点路由（携带所有 groupIDs，接收端批量处理）
-	h.crossNodeGroupsBroadcast(ctx, namespace, groupIDs, msg)
-
-	// 🔔 通知观察者（命名空间+群组维度，与 BroadcastToGroupMembers/BroadcastToGroups 对齐）
-	// ctx 已在 step 3 注入 namespace+groupIDs，观察者按此三级索引匹配
-	// 历史遗漏：本方法曾缺失观察者通知，导致订阅全群组广播的观察者收不到消息
-	h.notifyObservers(ctx, msg)
-
-	h.logger.DebugContextKV(ctx, "命名空间全群组广播完成",
-		"namespace", namespace,
-		"group_count", len(groupIDs),
-		"unique_members", len(memberSet),
-		"local_delivered", localCount,
-		"message_id", msg.MessageID,
-	)
-
-	return localCount
-}
-
-// crossNodeGroupsBroadcast 跨节点批量群组广播（一次路由）
-// 携带所有 groupIDs，接收端 Pipeline 批量查询 + 去重 + 一次过滤
-// 提交到 clusterBatcher 批量处理，消除 per-message goroutine
-func (h *Hub) crossNodeGroupsBroadcast(ctx context.Context, namespace string, groupIDs []string, msg *HubMessage) {
-	if h.pubsub == nil && !h.IsGRPCEnabled() {
-		return // 单机模式，无需跨节点
-	}
-
-	// 单群组：走 OperationTypeGroupBroadcast
-	if len(groupIDs) == 1 {
-		opts := ClusterDispatchOptions{
-			Operation: models.OperationTypeGroupBroadcast,
-			Namespace: namespace,
-			GroupIDs:  groupIDs,
-		}
-		if !h.clusterBatcher.Submit(msg, opts) {
-			h.logger.WarnContextKV(ctx, "集群分发队列已满，丢弃跨节点群组广播",
-				"namespace", namespace, "group_id", groupIDs[0],
-				"message_id", msg.MessageID)
-		}
+// triggerGroupDisbandCallback 异步触发群组解散回调
+// 在 DisbandGroup 成功后逐群调用；cbCtx 注入路由供回调内 routing.AppIDFromContext 取 appID
+func (h *Hub) triggerGroupDisbandCallback(ctx context.Context, namespace, groupID string) {
+	if h.groupDisbandCallback == nil {
 		return
 	}
-
-	// 批量群组：走 OperationTypeGroupsBroadcast
-	opts := ClusterDispatchOptions{
-		Operation: models.OperationTypeGroupsBroadcast,
-		Namespace: namespace,
-		GroupIDs:  groupIDs,
-	}
-	if !h.clusterBatcher.Submit(msg, opts) {
-		h.logger.WarnContextKV(ctx, "集群分发队列已满，丢弃跨节点批量群组广播",
-			"namespace", namespace, "group_count", len(groupIDs),
-			"message_id", msg.MessageID)
-	}
+	appID := routing.AppIDFromContext(ctx)
+	ns, gid := namespace, groupID
+	h.workerPool.TrySubmitCallback(func() {
+		cbCtx, cbCancel := context.WithTimeout(h.ctx, 5*time.Second)
+		defer cbCancel()
+		cbCtx = routing.NewRoute().WithAppID(appID).WithNamespace(ns).WithGroup(gid).Inject(cbCtx)
+		h.groupDisbandCallback(cbCtx, ns, gid)
+	})
 }
 
-// BroadcastToAllNamespacesAllGroups 向所有命名空间的所有群组广播消息（高性能版）
-//
-// 性能优化：
-//   - 并行处理各命名空间（背压控制：最大并发 10，避免打满 Redis 连接池）
-//   - 每个命名空间走 BroadcastToAllGroups（Pipeline + 去重 + 一次路由）
-//   - 故障隔离：单个命名空间失败不影响其他命名空间
-func (h *Hub) BroadcastToAllNamespacesAllGroups(ctx context.Context, msg *HubMessage) int {
-	if h.groupRepo == nil {
-		h.logger.WarnContextKV(ctx, "群组仓库未设置，无法广播")
-		return 0
+// triggerGroupMemberJoinCallback 异步触发群组成员加入回调
+// 在客户端连接时自动加群成功后调用（register 自动装配 + 系统组自动加入），手动 AddGroupMembers 不触发
+// 复制切片避免调用方后续修改影响异步回调；cbCtx 注入路由供回调内 routing.AppIDFromContext 取 appID
+func (h *Hub) triggerGroupMemberJoinCallback(ctx context.Context, namespace, groupID string, userIDs []string) {
+	if h.groupMemberJoinCallback == nil {
+		return
 	}
-
-	namespaces, err := h.groupRepo.GetAllNamespaces(ctx)
-	if err != nil {
-		h.logger.WarnContextKV(ctx, "获取所有命名空间失败", "error", err)
-		return 0
-	}
-	if len(namespaces) == 0 {
-		return 0
-	}
-
-	// 并行处理各命名空间（背压控制：最大并发 10）
-	var (
-		totalDelivered int64
-		wg             sync.WaitGroup
-		sem            = make(chan struct{}, 10)
-	)
-
-	for _, namespace := range namespaces {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(ns string) {
-			defer wg.Done()
-			defer func() { <-sem }()
-
-			msgCopy := msg.Clone()
-			delivered := h.BroadcastToAllGroups(ctx, ns, msgCopy)
-			atomic.AddInt64(&totalDelivered, int64(delivered))
-		}(namespace)
-	}
-	wg.Wait()
-
-	total := int(atomic.LoadInt64(&totalDelivered))
-	h.logger.DebugContextKV(ctx, "全命名空间全群组广播完成",
-		"namespace_count", len(namespaces),
-		"total_delivered", total,
-		"message_id", msg.MessageID,
-	)
-	return total
+	appID := routing.AppIDFromContext(ctx)
+	ns, gid := namespace, groupID
+	uids := append([]string(nil), userIDs...)
+	h.workerPool.TrySubmitCallback(func() {
+		cbCtx, cbCancel := context.WithTimeout(h.ctx, 5*time.Second)
+		defer cbCancel()
+		cbCtx = routing.NewRoute().WithAppID(appID).WithNamespace(ns).WithGroup(gid).Inject(cbCtx)
+		h.groupMemberJoinCallback(cbCtx, ns, gid, uids)
+	})
 }
 
-// BroadcastToGroups 统一批量群组广播（namespaces 和 groupIDs 可选传，支持多种组合）
-//
-// 组合语义：
-//   - 两者都传：广播给指定命名空间的指定群组（通过反向映射校验 groupID 归属）
-//   - 只传 groupIDs：通过反向映射 group:{groupID}→namespace 反查命名空间，广播给这些群组
-//   - 只传 namespaces：广播给这些命名空间的所有群组
-//   - 都不传：广播给所有命名空间的所有群组（等价 BroadcastToAllNamespacesAllGroups）
-//
-// 性能优化：
-//   - 按命名空间 Pipeline 批量获取成员（每命名空间 1 次 RTT）
-//   - 合并去重（用户跨群组只收一条）
-//   - 一次本地过滤广播
-//   - 按命名空间分组跨节点路由（每命名空间一条消息，携带该命名空间的 GroupIDs）
-func (h *Hub) BroadcastToGroups(ctx context.Context, namespaces, groupIDs []string, msg *HubMessage) int {
-	if h.groupRepo == nil {
-		h.logger.WarnContextKV(ctx, "群组仓库未设置，无法广播")
-		return 0
+// triggerGroupMemberLeaveCallback 异步触发群组成员离开回调
+// 在 RemoveGroupMembers 成功后逐群调用；cbCtx 注入路由供回调内 routing.AppIDFromContext 取 appID
+// 复制切片避免调用方后续修改影响异步回调
+func (h *Hub) triggerGroupMemberLeaveCallback(ctx context.Context, namespace, groupID string, userIDs []string) {
+	if h.groupMemberLeaveCallback == nil {
+		return
 	}
-
-	// 命名空间归一化：切片中空值兜底为 DefaultNamespace（与单 ns 广播方法一致，避免 "" ns 群组查询与跨 ns 串扰）
-	// 复制切片避免修改调用方底层数组
-	if len(namespaces) > 0 {
-		normalized := make([]string, len(namespaces))
-		for i, ns := range namespaces {
-			normalized[i] = mathx.IfEmpty(ns, models.DefaultNamespace)
-		}
-		namespaces = normalized
-	}
-
-	// 1. 解析目标 (namespace → []groupID) 映射
-	namespaceGroups, err := h.resolveTargetGroups(ctx, namespaces, groupIDs)
-	if err != nil {
-		h.logger.WarnContextKV(ctx, "BroadcastToGroups 解析目标群组失败", "error", err)
-		return 0
-	}
-	if len(namespaceGroups) == 0 {
-		return 0
-	}
-
-	// 2. 按命名空间分组投递（路由隔离）：
-	//    - 每个 namespace 独立 Clone msg 并写入专属路由信封（ns + 对应 groupIDs）
-	//    - 避免"多 namespace 成员混合 + 单一 msg 信封"导致除一个 ns 外全部投不出去的串扰问题
-	//    - 跨 namespace 去重不做（同一 userID 跨不同 namespace 登录视为不同身份，各自接收）
-	var localCount int
-	baseMsg := msg.Clone()
-	baseMsg.InjectContext(ctx)
-
-	for namespace, gids := range namespaceGroups {
-		// 获取该 namespace 指定群组的成员（按 ns 批量 Pipeline）
-		members, mErr := h.groupRepo.GetMultiGroupMembers(ctx, namespace, gids)
-		if mErr != nil {
-			h.logger.DebugContextKV(ctx, "批量获取群组成员失败，跳过该命名空间",
-				"namespace", namespace, "error", mErr)
-			continue
-		}
-		// 合并去重（该 ns 内跨群组用户只收一条）
-		nsMemberSet := make(map[string]struct{})
-		for _, mList := range members {
-			for _, uid := range mList {
-				nsMemberSet[uid] = struct{}{}
-			}
-		}
-		if len(nsMemberSet) == 0 {
-			continue
-		}
-		nsMemberList := make([]string, 0, len(nsMemberSet))
-		for uid := range nsMemberSet {
-			nsMemberList = append(nsMemberList, uid)
-		}
-		// 🔏 每个 ns 独立信封：保证 client.Namespace==msg.Namespace 且 client.groupID 在列表内
-		nsMsg := baseMsg.Clone()
-		nsCtx := nsMsg.ContextWithRoute(ctx, namespace, gids)
-		if nsMsg.CreateAt.IsZero() {
-			nsMsg.CreateAt = time.Now()
-		}
-		localCount += h.broadcastToUserIDs(nsCtx, nsMemberList, nsMsg)
-	}
-
-	// 3. 按命名空间分组跨节点路由（每命名空间 Clone msg + 专属信封，携带该命名空间的 GroupIDs）
-	h.crossNodeMultiNamespaceGroupsBroadcast(ctx, namespaceGroups, baseMsg)
-
-	// 🔔 通知观察者（按命名空间+群组维度通知，与 BroadcastToGroupMembers 对齐）
-	// 每个 ns 独立 Clone + 写入专属信封：baseMsg 仅 InjectContext（trace_id），其信封路由为调用方 ctx 原值
-	// （多 ns 场景下可能是空或陈旧值）。观察者消息内容需携带正确 ns，避免下游拿到错误 Namespace 字段
-	for namespace, gids := range namespaceGroups {
-		observerCtx := routing.WithNamespaceGroupIDs(ctx, namespace, gids)
-		observerMsg := baseMsg.Clone()
-		observerMsg.ContextWithRoute(observerCtx, namespace, gids)
-		h.notifyObservers(observerCtx, observerMsg)
-	}
-
-	h.logger.DebugContextKV(ctx, "BroadcastToGroups 完成",
-		"namespace_count", len(namespaceGroups),
-		"local_delivered", localCount,
-		"message_id", msg.MessageID,
-	)
-	return localCount
-}
-
-// resolveTargetGroups 解析目标群组映射（namespace → []groupID）
-// 根据 namespaces 和 groupIDs 的四种组合，返回需要广播的群组按命名空间分组
-func (h *Hub) resolveTargetGroups(ctx context.Context, namespaces, groupIDs []string) (map[string][]string, error) {
-	result := make(map[string][]string)
-
-	switch {
-	case len(namespaces) == 0 && len(groupIDs) == 0:
-		// 都不传：所有命名空间的所有群组
-		namespaces, err := h.groupRepo.GetAllNamespaces(ctx)
-		if err != nil {
-			return nil, err
-		}
-		for _, ns := range namespaces {
-			gids, err := h.groupRepo.GetNamespaceGroups(ctx, ns)
-			if err != nil {
-				continue
-			}
-			if len(gids) > 0 {
-				result[ns] = gids
-			}
-		}
-
-	case len(namespaces) > 0 && len(groupIDs) == 0:
-		// 只传 namespaces：这些命名空间的所有群组
-		for _, ns := range namespaces {
-			gids, err := h.groupRepo.GetNamespaceGroups(ctx, ns)
-			if err != nil {
-				continue
-			}
-			if len(gids) > 0 {
-				result[ns] = gids
-			}
-		}
-
-	case len(namespaces) == 0 && len(groupIDs) > 0:
-		// 只传 groupIDs：通过反向映射反查命名空间
-		groupNamespaces, err := h.groupRepo.GetMultiGroupNamespaces(ctx, groupIDs)
-		if err != nil {
-			return nil, err
-		}
-		for gid, ns := range groupNamespaces {
-			result[ns] = append(result[ns], gid)
-		}
-
-	default:
-		// 都传：指定命名空间的指定群组（通过反向映射校验 groupID 归属）
-		groupNamespaces, err := h.groupRepo.GetMultiGroupNamespaces(ctx, groupIDs)
-		if err != nil {
-			return nil, err
-		}
-		namespaceSet := make(map[string]struct{}, len(namespaces))
-		for _, ns := range namespaces {
-			namespaceSet[ns] = struct{}{}
-		}
-		for gid, ns := range groupNamespaces {
-			if _, ok := namespaceSet[ns]; ok {
-				result[ns] = append(result[ns], gid)
-			}
-		}
-	}
-
-	return result, nil
-}
-
-// crossNodeMultiNamespaceGroupsBroadcast 按命名空间分组跨节点路由
-// 每个命名空间独立 Clone msg + 写入专属路由信封后提交到 clusterBatcher
-//
-// ⚠️ 必须按 ns 独立信封：routeToCluster 优先取 msg.Namespace（信封为路由真相源），
-//
-//	若直接复用同一 msg（多 ns 场景信封为空或陈旧值），dispatch.Namespace 会与 opts.Namespace 不一致，
-//	非该信封 ns 的目标命名空间全部投递到错误的命名空间（跨租户串扰）
-func (h *Hub) crossNodeMultiNamespaceGroupsBroadcast(ctx context.Context, namespaceGroups map[string][]string, msg *HubMessage) {
-	if h.pubsub == nil && !h.IsGRPCEnabled() {
-		return // 单机模式，无需跨节点
-	}
-	for namespace, groupIDs := range namespaceGroups {
-		// 根据群组数量选择单群组或批量操作类型
-		op := models.OperationTypeGroupBroadcast
-		if len(groupIDs) > 1 {
-			op = models.OperationTypeGroupsBroadcast
-		}
-		// 按 ns 独立 Clone + 写入专属信封，确保 routeToCluster 取到的 msg.Namespace 与 opts.Namespace 一致
-		nsMsg := msg.Clone()
-		nsMsg.ContextWithRoute(ctx, namespace, groupIDs)
-		opts := ClusterDispatchOptions{
-			Operation: op,
-			Namespace: namespace,
-			GroupIDs:  groupIDs,
-		}
-		if !h.clusterBatcher.Submit(nsMsg, opts) {
-			h.logger.WarnContextKV(ctx, "集群分发队列已满，丢弃跨节点多命名空间群组广播",
-				"namespace", namespace, "group_count", len(groupIDs), "message_id", msg.MessageID)
-		}
-	}
+	appID := routing.AppIDFromContext(ctx)
+	ns, gid := namespace, groupID
+	uids := append([]string(nil), userIDs...)
+	h.workerPool.TrySubmitCallback(func() {
+		cbCtx, cbCancel := context.WithTimeout(h.ctx, 5*time.Second)
+		defer cbCancel()
+		cbCtx = routing.NewRoute().WithAppID(appID).WithNamespace(ns).WithGroup(gid).Inject(cbCtx)
+		h.groupMemberLeaveCallback(cbCtx, ns, gid, uids)
+	})
 }
 
 // ============================================================================
@@ -872,6 +305,7 @@ func (h *Hub) crossNodeMultiNamespaceGroupsBroadcast(ctx context.Context, namesp
 // 设计：本地分片索引（agentShards/observerShards）保留做 O(1) 缓存，
 //   Redis 系统组（__agents__/__observers__）用于跨节点共享成员关系与显式广播
 //   连接注册时自动加入系统组，断开时自动离开，业务无感
+// appID 隔离：系统组从每 namespace 一份变为每 (appID, namespace) 一份，严格按 app 隔离
 // ============================================================================
 
 // systemGroupOfUserType 返回用户类型对应的系统保留组（无则空）
@@ -879,16 +313,17 @@ func (h *Hub) crossNodeMultiNamespaceGroupsBroadcast(ctx context.Context, namesp
 func systemGroupOfUserType(ut models.UserType) string {
 	switch ut {
 	case models.UserTypeAgent, models.UserTypeBot:
-		return models.SystemGroupAgents
+		return constants.SystemGroupAgents
 	case models.UserTypeObserver:
-		return models.SystemGroupObservers
+		return constants.SystemGroupObservers
 	default:
 		return ""
 	}
 }
 
 // joinSystemGroupsOnConnect 客户端连接时自动加入系统保留组
-// client.Namespace 已在 handleRegister 归一化（全局观察者保持 ""），此处直接使用
+// 注入路由（appID + namespace + 系统组 groupID）供 ensureAndJoinSystemGroup 从 ctx 读取
+// namespace 用 client.Namespace 原值（全局观察者保持 ""，ensureAndJoinSystemGroup 不归一化 namespace）
 func (h *Hub) joinSystemGroupsOnConnect(ctx context.Context, client *Client) {
 	if h.groupRepo == nil {
 		return
@@ -897,17 +332,26 @@ func (h *Hub) joinSystemGroupsOnConnect(ctx context.Context, client *Client) {
 	if groupID == "" {
 		return
 	}
-	h.ensureAndJoinSystemGroup(ctx, client.Namespace, groupID, client.UserID)
+	// registry 传入的 ctx 来自 client.Context，未设置时为 nil；路由元数据全在 client 上，nil ctx 兜底为 Background 避免 panic
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// 系统组支持 namespace="" 全局语义（全局观察者），用 client.Namespace 原值而非 GetNamespace()（后者会把 "" 补成 DefaultNamespace）
+	ctx = routing.NewRoute().WithAppID(client.GetAppID()).WithNamespace(client.Namespace).WithGroup(groupID).Inject(ctx)
+	h.ensureAndJoinSystemGroup(ctx, groupID, client.UserID)
 }
 
-// joinMemberGroupOnConnect 客户端连接时自动加入成员组
+// joinMemberGroupOnConnect 客户端连接时自动加入成员组（多群组）
 //
-// 普通用户（非观察者）连接时自动加入成员组：有 GroupID 加入指定组，无则加入默认组（DefaultGroupID）
-// 群组不存在时自动创建；成员关系持久化于 Redis，离线保留，重连幂等（AddMembers 集合语义）
+// 普通用户（非观察者）连接时遍历 client.GetGroupIDs() 逐群加入：
+//   - 系统保留组名（__ 前缀，如默认组 __default_gp__）走 ensureAndJoinSystemGroup（CreateGroup 拒绝 __ 前缀）
+//   - 业务组名走 addGroupMembersSingle（自动创建 + MaxMembers 校验）
+//
 // 观察者不作为成员加入群组（仅观察，不接收成员消息）
+// GetGroupIDs 回退链保证非空（空→[DefaultGroupID]，保留单值时代加入默认组行为）
+// 每群加入成功后触发 OnGroupMemberJoin 回调
 //
-// 系统组名（__ 前缀，如默认组）走 EnsureSystemGroup 路径创建；
-// 业务组名走 AddGroupMembers 路径（自动创建 + MaxMembers 校验）
+// 逐群注入单群 ctx（routing.NewRoute().WithAppID(...).WithGroup(gid).Inject(ctx)），避免与 AddGroupMembers 多群 best-effort 语义叠加
 func (h *Hub) joinMemberGroupOnConnect(ctx context.Context, client *Client) {
 	if h.groupRepo == nil {
 		return
@@ -916,24 +360,30 @@ func (h *Hub) joinMemberGroupOnConnect(ctx context.Context, client *Client) {
 	if client.UserType == models.UserTypeObserver {
 		return
 	}
-	// 有 GroupID 加入指定组，无则加入默认组（GetGroupID 空值返回 DefaultGroupID）
-	groupID := client.GetGroupID()
-	namespace := client.Namespace
-
-	if models.IsSystemGroup(groupID) {
-		// 系统保留组名（如默认组 __default_gp__）：走 EnsureSystemGroup 路径（CreateGroup 会拒绝 __ 前缀）
-		h.ensureAndJoinSystemGroup(ctx, namespace, groupID, client.UserID)
-		return
+	// registry 传入的 ctx 来自 client.Context，未设置时为 nil；路由元数据全在 client 上，nil ctx 兜底为 Background 避免 panic
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	// 业务组：走 AddGroupMembers（自动创建 + MaxMembers 校验）
-	if err := h.AddGroupMembers(ctx, namespace, groupID, []string{client.UserID}); err != nil {
-		h.logger.WarnContextKV(ctx, "连接时自动加入成员组失败",
-			"namespace", namespace, "group_id", groupID,
-			"user_id", client.UserID, "error", err)
-		return
+	appID := client.GetAppID()
+	namespace := client.GetNamespace()
+	for _, groupID := range client.GetGroupIDs() {
+		// 逐群注入单群 ctx，供 addGroupMembersSingle/ensureAndJoinSystemGroup 从 ctx 读取
+		groupCtx := routing.NewRoute().WithAppID(appID).WithNamespace(namespace).WithGroup(groupID).Inject(ctx)
+		if models.IsSystemGroup(groupID) {
+			// 系统保留组名（如默认组 __default_gp__）：走 EnsureSystemGroup 路径（CreateGroup 会拒绝 __ 前缀）
+			h.ensureAndJoinSystemGroup(groupCtx, groupID, client.UserID)
+			continue
+		}
+		// 业务组：走 addGroupMembersSingle（自动创建 + MaxMembers 校验）
+		if err := h.addGroupMembersSingle(groupCtx, appID, namespace, groupID, []string{client.UserID}); err != nil {
+			h.logger.WarnContextKV(groupCtx, "连接时自动加入成员组失败",
+				"namespace", namespace, "group_id", groupID,
+				"user_id", client.UserID, "error", err)
+			continue
+		}
+		// 触发群组成员加入回调（register 自动装配时触发，手动 AddGroupMembers 不触发）
+		h.triggerGroupMemberJoinCallback(groupCtx, namespace, groupID, []string{client.UserID})
 	}
-	// 触发群组成员加入回调（register 自动装配时触发，手动 AddGroupMembers 不触发）
-	h.triggerGroupMemberJoinCallback(namespace, groupID, []string{client.UserID})
 }
 
 // leaveSystemGroupsOnDisconnect 客户端断开时自动离开系统保留组
@@ -942,6 +392,9 @@ func (h *Hub) joinMemberGroupOnConnect(ctx context.Context, client *Client) {
 // 调用时当前 client 已由 removeClientUnsafe（handleUnregister Phase 1）从注册表移除，
 // 因此 HasUser 查询的是"移除当前连接后是否还存在其他在线连接"
 // 竞态可接受：RemoveMembers 对不存在成员幂等，重连时 joinSystemGroupsOnConnect 会重新加入
+//
+// 系统组单值，appID/namespace 直接从 client 取（与 joinSystemGroupsOnConnect 的 routeFromCtx 归一化一致，
+// 保证 leave 的 Redis key 与 join 时写入的 key 同分区）
 func (h *Hub) leaveSystemGroupsOnDisconnect(ctx context.Context, client *Client) {
 	if h.groupRepo == nil {
 		return
@@ -950,63 +403,41 @@ func (h *Hub) leaveSystemGroupsOnDisconnect(ctx context.Context, client *Client)
 	if groupID == "" {
 		return
 	}
-	// 该 userID 仍有其他在线连接时保留系统组成员身份，避免多端场景下其他端收不到系统组广播
-	if h.shardedRegistry.HasUser(client.UserID) {
-		h.logger.DebugContextKV(ctx, "用户仍有其他在线连接，保留系统组成员身份",
-			"user_id", client.UserID, "group_id", groupID)
+	// 该 userID 仍有其他同 appID+namespace 的在线连接时保留系统组成员身份，避免多端场景下其他端收不到系统组广播
+	// 按 client 自身信封过滤：跨 app/ns 的连接不算（不同应用/命名空间各自管理系统组成员生命周期）
+	if h.shardedRegistry.HasUser(client.UserID, client.GetAppID(), client.GetNamespace()) {
+		h.logger.DebugContextKV(ctx, "用户仍有其他同信封在线连接，保留系统组成员身份",
+			"user_id", client.UserID, "group_id", groupID,
+			"app_id", client.GetAppID(), "namespace", client.GetNamespace())
 		return
 	}
-	if err := h.groupRepo.RemoveMembers(ctx, client.Namespace, groupID, []string{client.UserID}); err != nil {
+	if err := h.groupRepo.RemoveMembers(ctx, client.GetAppID(), client.GetNamespace(), groupID, []string{client.UserID}); err != nil {
 		h.logger.DebugContextKV(ctx, "离开系统组失败",
 			"user_id", client.UserID, "group_id", groupID, "error", err)
 	}
 }
 
 // ensureAndJoinSystemGroup 确保系统组存在并加入成员
-// namespace 已在 register 时归一化（全局观察者保持 ""），此处直接使用
+// appID/namespace 从 ctx 读取（调用方 joinSystemGroupsOnConnect/joinMemberGroupOnConnect 已注入路由）
 // 加入成功后触发 OnGroupMemberJoin 回调（observer/agent 自动入群也通知业务层）
-func (h *Hub) ensureAndJoinSystemGroup(ctx context.Context, namespace, groupID, userID string) {
-	if err := h.groupRepo.EnsureSystemGroup(ctx, namespace, groupID); err != nil {
+func (h *Hub) ensureAndJoinSystemGroup(ctx context.Context, groupID, userID string) {
+	// 系统组（observer/agent）支持 namespace="" 全局语义，不调用 routeFromCtx（后者会把 "" 补成 DefaultNamespace）
+	// appID 仍归一化（最上层隔离维度必填），namespace 保持 ctx 原值
+	appID := routing.AppIDFromContext(ctx)
+	if appID == "" {
+		appID = constants.DefaultAppID
+	}
+	namespace := routing.NamespaceFromContext(ctx)
+	if err := h.groupRepo.EnsureSystemGroup(ctx, appID, namespace, groupID); err != nil {
 		h.logger.WarnContextKV(ctx, "ensureSystemGroup 失败",
 			"namespace", namespace, "group_id", groupID, "error", err)
 		return
 	}
-	if err := h.groupRepo.AddMembers(ctx, namespace, groupID, []string{userID}); err != nil {
+	if err := h.groupRepo.AddMembers(ctx, appID, namespace, groupID, []string{userID}); err != nil {
 		h.logger.WarnContextKV(ctx, "加入系统组失败",
 			"namespace", namespace, "group_id", groupID, "user_id", userID, "error", err)
 		return
 	}
 	// 🔔 触发群组成员加入回调（observer/agent 自动入群也通知业务层）
-	h.triggerGroupMemberJoinCallback(namespace, groupID, []string{userID})
-}
-
-// BroadcastToNamespace 向指定命名空间的所有连接广播消息（不限群组）
-// namespace 为空时自动填充 DefaultNamespace
-// 本地按命名空间过滤广播 + 跨节点命名空间广播（提交到 clusterBatcher）
-func (h *Hub) BroadcastToNamespace(ctx context.Context, namespace string, msg *HubMessage) int {
-	// 命名空间归一化：空值兜底为 DefaultNamespace（与 SendToGroup/BroadcastToGroupMembers 一致）
-	// ⚠️ 未归一化时本地与跨节点语义割裂导致消息"乱掉"：
-	//   - 本地：broadcastToFiltered 的 c.Namespace=="" 仅匹配全局观察者，default 客户端收不到
-	//   - 跨节点：handleDistributedBroadcast 把空 namespace 视为"全命名空间广播"投递给所有客户端（跨租户泄露）
-	namespace = mathx.IfEmpty(namespace, models.DefaultNamespace)
-	// 🔏 写入路由信封：命名空间广播（不限群组，groupIDs=nil → 投递过滤只检查 namespace）
-	msg = msg.Clone()
-	msg.InjectContext(ctx)
-	ctx = msg.ContextWithRoute(ctx, namespace, nil)
-	// 本地按命名空间过滤广播（broadcastToFiltered 内部 combinedCondition 会叠加路由信封匹配，此处 condition 仅作业务兜底）
-	count := h.broadcastToFiltered(ctx, func(c *Client) bool {
-		return c.Namespace == namespace
-	}, msg)
-	// 🔔 通知观察者（命名空间级广播事件，与 Broadcast/BroadcastToGroupMembers 对齐）
-	h.notifyObservers(ctx, msg)
-	// 跨节点命名空间广播（提交到 clusterBatcher 批量处理）
-	opts := ClusterDispatchOptions{
-		Operation: OperationTypeBroadcast,
-		Namespace: namespace,
-	}
-	if !h.clusterBatcher.Submit(msg, opts) {
-		h.logger.WarnContextKV(ctx, "集群分发队列已满，丢弃跨节点命名空间广播",
-			"namespace", namespace, "message_id", msg.MessageID)
-	}
-	return count
+	h.triggerGroupMemberJoinCallback(ctx, namespace, groupID, []string{userID})
 }

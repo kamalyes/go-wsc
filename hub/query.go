@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
+	"github.com/kamalyes/go-wsc/routing"
 )
 
 // ============================================================================
@@ -97,18 +98,22 @@ func (h *Hub) GetClientCount() int64 {
 // 查询方法
 // ============================================================================
 
-// IsUserOnline 检查用户是否在线
-func (h *Hub) IsUserOnline(userID string) (bool, error) {
-	// 检查 shardedRegistry 主存储（原子读，包含 WS + SSE）
-	if h.shardedRegistry.HasUser(userID) {
+// IsUserOnline 检查用户是否在线（按 ctx 路由信封的 appID+namespace 隔离）
+// 路由信封通过 routing 从 ctx 注入，调用方不需传 appID/namespace 参数
+// 本地检查走 shardedRegistry.HasUser，跨节点检查走 onlineStatusRepo.IsUserOnline
+// （bitmap 启用时 HGET→GETBIT 单次往返，未启用时回退 ZCount/全量过滤，与原 IsUserOnline 等价）
+func (h *Hub) IsUserOnline(ctx context.Context, userID string) (bool, error) {
+	appID, ns := routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx)
+	// 检查 shardedRegistry 主存储（按 appID+namespace 信封过滤，包含 WS + SSE）
+	if h.shardedRegistry.HasUser(userID, appID, ns) {
 		return true, nil
 	}
 
-	// 如果有 Redis repository，检查其他节点
+	// 如果有 Redis repository，检查其他节点（从 ctx 派生超时上下文，保留路由信封供 repo 过滤）
 	if h.onlineStatusRepo != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		rctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
-		return h.onlineStatusRepo.IsUserOnline(ctx, userID)
+		return h.onlineStatusRepo.IsUserOnline(rctx, userID)
 	}
 
 	return false, nil
@@ -120,11 +125,13 @@ func (h *Hub) GetClientByID(clientID string) *Client {
 	return client
 }
 
-// GetClientsByUserID 根据用户ID获取所有客户端
-// 使用 ForEachUserClient 持读锁遍历，替代 GetUserClients 锁外 CopyClientsFromMap 的数据竞争
-func (h *Hub) GetClientsByUserID(userID string) []*Client {
+// GetClientsByUserID 根据用户ID获取所有客户端（按 ctx 路由信封的 appID+namespace 隔离）
+// 路由信封通过 routing 从 ctx 注入，调用方不需传 appID/namespace 参数
+// 使用 ForEachUserClientFiltered 持读锁遍历（复用 ClientMatchesEnvelope 单一真相源）
+func (h *Hub) GetClientsByUserID(ctx context.Context, userID string) []*Client {
+	appID, ns := routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx)
 	clients := make([]*Client, 0, 4)
-	h.shardedRegistry.ForEachUserClient(userID, func(_ string, client *Client) bool {
+	h.shardedRegistry.ForEachUserClientFiltered(userID, appID, ns, nil, func(_ string, client *Client) bool {
 		clients = append(clients, client)
 		return true
 	})
@@ -134,12 +141,14 @@ func (h *Hub) GetClientsByUserID(userID string) []*Client {
 	return clients
 }
 
-// GetUserStatus 获取用户状态
-// 使用 ForEachUserClient 零拷贝遍历，替代 GetClientsByUserID 切片拷贝
-func (h *Hub) GetUserStatus(userID string) UserStatus {
+// GetUserStatus 获取用户状态（按 ctx 路由信封的 appID+namespace 隔离）
+// 路由信封通过 routing 从 ctx 注入，调用方不需传 appID/namespace 参数
+// 使用 ForEachUserClientFiltered 零拷贝遍历（复用 ClientMatchesEnvelope 单一真相源）
+func (h *Hub) GetUserStatus(ctx context.Context, userID string) UserStatus {
+	appID, ns := routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx)
 	var mostRecent *Client
 	var mostRecentSeen time.Time
-	h.shardedRegistry.ForEachUserClient(userID, func(_ string, client *Client) bool {
+	h.shardedRegistry.ForEachUserClientFiltered(userID, appID, ns, nil, func(_ string, client *Client) bool {
 		seen := client.GetLastSeen()
 		if mostRecent == nil || seen.After(mostRecentSeen) {
 			mostRecent = client
@@ -153,17 +162,19 @@ func (h *Hub) GetUserStatus(userID string) UserStatus {
 	return UserStatusOffline
 }
 
-// GetClientIPs 获取用户所有客户端的IP地址列表
-// 使用 ForEachUserClient 零拷贝遍历，替代 GetClientsByUserID 切片拷贝
-func (h *Hub) GetClientIPs(userID string) []string {
-	// 先计数预估容量
+// GetClientIPs 获取用户所有客户端的IP地址列表（按 ctx 路由信封的 appID+namespace 隔离）
+// 路由信封通过 routing 从 ctx 注入，调用方不需传 appID/namespace 参数
+// 使用 ForEachUserClientFiltered 零拷贝遍历（复用 ClientMatchesEnvelope 单一真相源）
+func (h *Hub) GetClientIPs(ctx context.Context, userID string) []string {
+	appID, ns := routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx)
+	// 先计数预估容量（不过滤的计数，仅用于预分配）
 	count := h.shardedRegistry.GetUserClientCount(userID)
 	if count == 0 {
 		return nil
 	}
 
 	ips := make([]string, 0, count)
-	h.shardedRegistry.ForEachUserClient(userID, func(_ string, client *Client) bool {
+	h.shardedRegistry.ForEachUserClientFiltered(userID, appID, ns, nil, func(_ string, client *Client) bool {
 		if ip := h.getClientIPFromClient(client); ip != "" {
 			ips = append(ips, ip)
 		}
@@ -297,12 +308,13 @@ func (h *Hub) FilterClients(predicate func(*Client) bool) []*Client {
 // 客户端存在性检查（原 context.go，合并至此避免文件碎片化）
 // ============================================================================
 
-// GetMostRecentClient 获取用户对应的客户端（返回最近活跃的客户端）
-// 使用 ForEachUserClient 零拷贝遍历（持读锁），替代 GetUserClients 锁外遍历内部 map 的数据竞争
-func (h *Hub) GetMostRecentClient(userID string) *Client {
+// GetMostRecentClient 获取用户对应的客户端（返回最近活跃的客户端，按 ctx 路由信封 appID+namespace 隔离）
+// 使用 ForEachUserClientFiltered 零拷贝遍历（持读锁），替代 GetUserClients 锁外遍历内部 map 的数据竞争
+func (h *Hub) GetMostRecentClient(ctx context.Context, userID string) *Client {
+	appID, ns := routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx)
 	var mostRecent *Client
 	var mostRecentSeen time.Time
-	h.shardedRegistry.ForEachUserClient(userID, func(_ string, client *Client) bool {
+	h.shardedRegistry.ForEachUserClientFiltered(userID, appID, ns, nil, func(_ string, client *Client) bool {
 		seen := client.GetLastSeen()
 		if mostRecent == nil || seen.After(mostRecentSeen) {
 			mostRecent = client
@@ -336,9 +348,11 @@ func (h *Hub) HasClient(clientID string) bool {
 	return exists
 }
 
-// HasUserClient 检查是否存在指定用户ID的客户端
-func (h *Hub) HasUserClient(userID string) bool {
-	return h.shardedRegistry.HasUser(userID)
+// HasUserClient 检查是否存在指定用户ID的客户端（按 ctx 路由信封的 appID+namespace 隔离）
+// 路由信封通过 routing 从 ctx 注入，调用方不需传 appID/namespace 参数
+func (h *Hub) HasUserClient(ctx context.Context, userID string) bool {
+	appID, ns := routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx)
+	return h.shardedRegistry.HasUser(userID, appID, ns)
 }
 
 // HasSSEClient 检查是否存在指定用户ID的SSE连接 - O(1)
@@ -377,21 +391,28 @@ func (h *Hub) GetUserClientsMapWithLock(userID string) (map[string]*Client, bool
 	return h.shardedRegistry.GetUserClients(userID)
 }
 
-// GetClientsCopyForUser 获取用户的客户端列表副本（线程安全）
-// 如果指定了 clientID，只返回该客户端；否则返回用户的所有客户端
-// 使用 ForEachUserClient 持读锁遍历，替代 GetUserClients 锁外遍历的数据竞争
-func (h *Hub) GetClientsCopyForUser(userID, clientID string) []*Client {
-	// 指定 clientID 时用 O(1) 查找
+// GetClientsCopyForUser 获取用户的客户端列表副本（线程安全，按 ctx 路由信封 appID+namespace 隔离）
+// 如果指定了 clientID，只返回该客户端（O(1) 查找，仍校验 client 的 appID+namespace 信封匹配）
+// 否则返回用户匹配信封的所有客户端
+// 使用 ForEachUserClientFiltered 持读锁遍历，替代 GetUserClients 锁外遍历的数据竞争
+func (h *Hub) GetClientsCopyForUser(ctx context.Context, userID, clientID string) []*Client {
+	appID, ns := routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx)
+	// 指定 clientID 时用 O(1) 查找（仍校验信封匹配，避免跨 app/ns 返回）
 	if clientID != "" {
-		if client, exists := h.shardedRegistry.GetClient(clientID); exists && client.UserID == userID {
-			return []*Client{client}
+		client, exists := h.shardedRegistry.GetClient(clientID)
+		if !exists || client.UserID != userID {
+			return nil
 		}
-		return nil
+		// appID 为空时退化（兼容无路由 ctx），否则校验信封
+		if appID != "" && !ClientMatchesEnvelope(client, appID, ns, nil) {
+			return nil
+		}
+		return []*Client{client}
 	}
 
-	// 未指定 clientID 时零拷贝遍历收集
+	// 未指定 clientID 时零拷贝遍历收集（按信封过滤）
 	clients := make([]*Client, 0, 4)
-	h.shardedRegistry.ForEachUserClient(userID, func(_ string, client *Client) bool {
+	h.shardedRegistry.ForEachUserClientFiltered(userID, appID, ns, nil, func(_ string, client *Client) bool {
 		clients = append(clients, client)
 		return true
 	})
@@ -401,11 +422,13 @@ func (h *Hub) GetClientsCopyForUser(userID, clientID string) []*Client {
 	return clients
 }
 
-// GetConnectionsByUserID 获取用户的所有连接
-// 使用 ForEachUserClient 持读锁遍历，替代 GetUserClients 锁外 CopyClientsFromMap 的数据竞争
-func (h *Hub) GetConnectionsByUserID(userID string) []*Client {
+// GetConnectionsByUserID 获取用户的所有连接（按 ctx 路由信封的 appID+namespace 隔离）
+// 路由信封通过 routing 从 ctx 注入，调用方不需传 appID/namespace 参数
+// 使用 ForEachUserClientFiltered 持读锁遍历（复用 ClientMatchesEnvelope 单一真相源）
+func (h *Hub) GetConnectionsByUserID(ctx context.Context, userID string) []*Client {
+	appID, ns := routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx)
 	clients := make([]*Client, 0, 4)
-	h.shardedRegistry.ForEachUserClient(userID, func(_ string, client *Client) bool {
+	h.shardedRegistry.ForEachUserClientFiltered(userID, appID, ns, nil, func(_ string, client *Client) bool {
 		clients = append(clients, client)
 		return true
 	})
@@ -415,26 +438,34 @@ func (h *Hub) GetConnectionsByUserID(userID string) []*Client {
 	return clients
 }
 
-// checkUserOnline 检查用户是否在线（支持分布式）
-func (h *Hub) checkUserOnline(userID string) bool {
-	// 1. 先检查本地 shardedRegistry 是否在线（原子读，零锁开销）
-	if h.shardedRegistry.HasUser(userID) {
+// checkUserOnline 检查用户是否在线（支持分布式，按 ctx 路由信封的 appID+namespace 隔离）
+// 路由信封通过 routing 从 ctx 注入；本地与 Redis 查询均按 appID+namespace 信封过滤，
+// 避免同名 userID 跨 app/ns 误判在线导致不必要的跨节点路由
+//
+// 性能热路径：调 IsUserOnline（bitmap 启用时 HGET uid_map → GETBIT 单次 Lua 往返，
+// 未启用或无路由信封时回退 ZCount/全量过滤，永远最终一致）。
+// 不调 GetUserNodes（ZRANGE + GET ×N + N 次解压，热路径不可接受）；
+// 跨节点路由取节点列表由 distributed.go::checkAndRouteToNode 专用路径负责
+func (h *Hub) checkUserOnline(ctx context.Context, userID string) bool {
+	appID, ns := routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx)
+	// 1. 先检查本地 shardedRegistry 是否在线（按 appID+namespace 信封过滤，原子读零锁开销）
+	if h.shardedRegistry.HasUser(userID, appID, ns) {
 		return true
 	}
 
-	// 2. 如果本地不在线，且启用了分布式，则查询Redis
+	// 2. 如果本地不在线，且启用了分布式，则查询 Redis（从 ctx 派生超时上下文，保留路由信封供 repo 过滤）
 	if h.onlineStatusRepo != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		rctx, cancel := context.WithTimeout(ctx, 1*time.Second)
 		defer cancel()
 
-		nodes, err := h.onlineStatusRepo.GetUserNodes(ctx, userID)
-		if err == nil && len(nodes) > 0 {
-			// 用户在其他节点在线
+		online, err := h.onlineStatusRepo.IsUserOnline(rctx, userID)
+		if err == nil && online {
+			// 用户在其他节点在线（IsUserOnline 已按 appID+namespace 信封过滤）
 			return true
 		}
 	}
 
-	// 3. 本地和Redis都没有，用户离线
+	// 3. 本地和 Redis 都没有，用户离线
 	return false
 }
 

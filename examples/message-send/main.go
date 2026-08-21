@@ -79,13 +79,13 @@ func batchSend(ctx context.Context, h *hub.Hub) {
 		result.TotalUsers, result.SuccessCount, result.FailureCount)
 }
 
-// broadcast 广播消息给所有客户端
+// broadcast 全局广播消息给所有客户端（ctx 无 namespace/groupIDs → Deliver 走全局广播分支）
 func broadcast(ctx context.Context, h *hub.Hub) {
 	msg := models.NewHubMessage()
 	msg.MessageType = models.MessageTypeText
 	msg.Content = "系统通知：服务器将在 10 分钟后维护"
 
-	h.Broadcast(ctx, msg)
+	h.Deliver(ctx, msg, false)
 	log.Println("📢 广播消息已发送")
 }
 

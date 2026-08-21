@@ -69,6 +69,16 @@ func (h *Hub) Run() {
 
 	// 心跳统计批量更新器在构造时已自动启动（BatchProcessor 内部 worker）
 
+	// ⏰ 心跳时间轮已在 NewHub() 构造期初始化（避免与并发 Register 产生数据竞争）
+
+	// ⏰ 初始化跨节点 ACK 超时时间轮（替代 timeoutStaleSendingRecords 的 30s 全量 DB 扫描主路径）
+	// recordMessageToDatabase 创建 sending 记录时调度 per-message 超时任务，
+	// updateMessageStatusAsync 状态变更时 O(1) 取消；详见 ack_timer.go
+	// 依赖 messageRecordRepo / pubsub（由 InitializeRepositories / SetPubSub 在 Run 前注入）
+	if h.messageRecordRepo != nil && h.pubsub != nil {
+		h.ackTimeoutTimer = syncx.NewHashedWheelTimer()
+	}
+
 	// 启动心跳 Redis 更新 worker（单 goroutine 处理所有客户端的心跳 Redis 更新）
 	if h.onlineStatusRepo != nil {
 		syncx.Go().
@@ -127,7 +137,7 @@ func (h *Hub) Run() {
 	// 使用 EventLoop 管理事件循环
 	// 统一处理客户端注册/注销、消息广播和定时任务
 	syncx.NewEventLoop(h.ctx).
-		// 心跳检查定时器：定期检查客户端心跳，清理超时连接
+		// 心跳检查定时器：SSE 客户端超时兜底（WebSocket 由 heartbeatTimer O(1) 管理）
 		OnTicker(h.config.HeartbeatInterval, h.checkHeartbeat).
 		// 统计计数器定时刷写：将原子计数器累积的统计批量写入 Redis
 		OnTicker(30*time.Second, h.flushStatsCounters).
@@ -146,11 +156,11 @@ func (h *Hub) Run() {
 		IfTicker(h.messageRecordRepo != nil,
 			mathx.IfNotZero(h.config.RecordCleanupInterval, 30*time.Minute),
 			h.cleanupExpiredMessageRecords).
-		// ⏰ 跨节点投递 ACK 超时兜底：超时仍 sending 的记录标记 AckTimeout + 转存离线
-		// （PubSub 至多一次投递：目标节点订阅失活/消息丢失时状态会永远停留 sending，
-		//   见 node_ack_timeout.go）
+		// ⏰ 跨节点投递 ACK 超时兜底（崩溃安全网）：主路径由 ack_timer.go 的 per-message 时间轮接管，
+		// 此低频扫描仅恢复发送节点宕机导致 in-memory timer 丢失、永久停留 sending 的记录
+		// （PubSub 至多一次投递：目标节点订阅失活/消息丢失时状态会永远停留 sending，见 node_ack_timeout.go）
 		IfTicker(h.messageRecordRepo != nil && h.pubsub != nil,
-			nodeAckScanInterval,
+			nodeAckFallbackScanInterval,
 			h.timeoutStaleSendingRecords).
 		// Panic处理：捕获事件处理过程中的panic，防止整个Hub崩溃
 		OnPanic(func(r interface{}) {
@@ -406,6 +416,16 @@ func (h *Hub) SafeShutdown() error {
 		h.heartbeatBatcher.Stop()
 	}
 
+	// 停止心跳时间轮（停止所有 worker，不再触发超时注销）
+	if h.heartbeatTimer != nil {
+		h.heartbeatTimer.Stop()
+	}
+
+	// 停止跨节点 ACK 超时时间轮（停止所有 worker，pending 超时任务由 5min 兜底扫描接管）
+	if h.ackTimeoutTimer != nil {
+		h.ackTimeoutTimer.Stop()
+	}
+
 	// 停止消息统计批量更新器，刷写剩余数据
 	if h.messageStatsBatcher != nil {
 		h.messageStatsBatcher.Stop()
@@ -594,6 +614,21 @@ func (h *Hub) batchCleanupOnShutdown(clients []*Client) {
 			defer cancel()
 			if err := h.connectionRecordRepo.MarkDisconnected(ctx, client.ID, DisconnectReasonServerShutdown, 1001, "server shutdown"); err != nil {
 				h.logger.DebugKV("shutdown: 更新连接断开记录失败",
+					"client_id", client.ID,
+					"user_id", client.UserID,
+					"error", err,
+				)
+			}
+		})
+	}
+
+	// 批量质量终评（读 connect.duration 算 FinalScore 写 quality_score）
+	if h.connectionQualityRepo != nil {
+		syncx.ParallelForEachSlice(clients, func(i int, client *Client) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := h.connectionQualityRepo.FinalizeOnDisconnect(ctx, client.ID); err != nil {
+				h.logger.DebugKV("shutdown: 质量终评失败",
 					"client_id", client.ID,
 					"user_id", client.UserID,
 					"error", err,

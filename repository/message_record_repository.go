@@ -22,6 +22,7 @@ import (
 	sqlbuilder "github.com/kamalyes/go-sqlbuilder/repository"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
+	"github.com/kamalyes/go-wsc/models"
 	"gorm.io/gorm"
 )
 
@@ -79,6 +80,12 @@ type MessageRecordRepository interface {
 	// 相同 status/reason/errorMsg 的消息用一条 SQL 批量更新（WHERE message_id IN (...)）
 	// 用于广播场景下大量消息同时成功/失败的状态更新，大幅减少 DB 压力
 	BatchUpdateStatus(ctx context.Context, messageIDs []string, status MessageSendStatus, reason FailureReason, errorMsg string) error
+
+	// ClaimStaleSending 原子认领超时的 sending 记录：仅当记录当前状态仍为 sending 时更新为 newStatus
+	// 返回实际认领成功的 messageID 列表（状态已被并发方更新则不认领）
+	// 多节点并发扫描共享记录表时，状态守卫（WHERE status='sending'）保证每条记录
+	// 只被一个节点认领成功，认领者负责后续兜底动作（如转存离线），消除 N Pod 重复处理
+	ClaimStaleSending(ctx context.Context, messageIDs []string, newStatus MessageSendStatus, reason FailureReason, errorMsg string) ([]string, error)
 
 	// IncrementRetry 增加重试次数
 	IncrementRetry(ctx context.Context, messageID string, attempt RetryAttempt) error
@@ -148,7 +155,7 @@ func (r *MessageRecordGormRepository) FindByID(ctx context.Context, id uint) (*M
 // FindByMessageID 根据消息ID查找
 func (r *MessageRecordGormRepository) FindByMessageID(ctx context.Context, messageID string) (*MessageSendRecord, error) {
 	var record MessageSendRecord
-	err := r.db.WithContext(ctx).Where(QueryMessageIDWhere, messageID).First(&record).Error
+	err := r.db.WithContext(ctx).Where(models.QueryMessageIDWhere, messageID).First(&record).Error
 	if err != nil {
 		return nil, err
 	}
@@ -191,8 +198,8 @@ func (r *MessageRecordGormRepository) FindRetryable(ctx context.Context, limit i
 
 	// 使用 go-sqlbuilder 构建基础查询
 	retryableStatuses := []interface{}{
-		MessageSendStatusFailed,
-		MessageSendStatusAckTimeout,
+		models.MessageSendStatusFailed,
+		models.MessageSendStatusAckTimeout,
 	}
 
 	query := sqlbuilder.NewQuery().
@@ -231,7 +238,7 @@ func (r *MessageRecordGormRepository) Delete(ctx context.Context, id uint) error
 
 // DeleteByMessageID 根据消息ID删除
 func (r *MessageRecordGormRepository) DeleteByMessageID(ctx context.Context, messageID string) error {
-	return r.db.WithContext(ctx).Where(QueryMessageIDWhere, messageID).Delete(&MessageSendRecord{}).Error
+	return r.db.WithContext(ctx).Where(models.QueryMessageIDWhere, messageID).Delete(&MessageSendRecord{}).Error
 }
 
 // UpdateStatus 更新状态
@@ -259,13 +266,13 @@ func (r *MessageRecordGormRepository) UpdateStatus(ctx context.Context, messageI
 	}
 
 	// 🔥 如果发送成功,设置成功时间
-	if status == MessageSendStatusSuccess {
+	if status == models.MessageSendStatusSuccess {
 		updates["success_time"] = &now
 	}
 
 	// 单次 UPDATE 完成所有字段更新（含 first_send_time 的条件更新）
 	result := r.db.WithContext(ctx).Model(&MessageSendRecord{}).
-		Where(QueryMessageIDWhere, messageID).
+		Where(models.QueryMessageIDWhere, messageID).
 		Updates(updates)
 
 	// 🔥 如果没有找到记录（RowsAffected == 0），静默返回（记录可能尚未创建或不需要记录）
@@ -296,7 +303,7 @@ func (r *MessageRecordGormRepository) BatchUpdateStatus(ctx context.Context, mes
 		updates["error_message"] = errorMsg
 	}
 
-	if status == MessageSendStatusSuccess {
+	if status == models.MessageSendStatusSuccess {
 		updates["success_time"] = &now
 	}
 
@@ -305,6 +312,47 @@ func (r *MessageRecordGormRepository) BatchUpdateStatus(ctx context.Context, mes
 		Updates(updates)
 
 	return result.Error
+}
+
+// ClaimStaleSending 原子认领超时的 sending 记录（接口说明见 MessageRecordRepository）
+//
+// 实现说明：逐条带状态守卫的 UPDATE（WHERE message_id = ? AND status = 'sending'），
+// RowsAffected==1 即认领成功。虽是逐条更新（单轮扫描上限 200 条，30s 一次的后台任务），
+// 但这是唯一能在多节点并发下精确判定"哪条记录被哪个节点认领"的方式——
+// 单条批量 UPDATE 只能返回总命中行数，无法区分每条的认领归属
+func (r *MessageRecordGormRepository) ClaimStaleSending(ctx context.Context, messageIDs []string, newStatus MessageSendStatus, reason FailureReason, errorMsg string) ([]string, error) {
+	if len(messageIDs) == 0 {
+		return nil, nil
+	}
+
+	now := time.Now()
+	claimed := make([]string, 0, len(messageIDs))
+
+	for _, messageID := range messageIDs {
+		updates := map[string]interface{}{
+			"status":          newStatus,
+			"last_send_time":  &now,
+			"first_send_time": gorm.Expr("CASE WHEN first_send_time IS NULL THEN ? ELSE first_send_time END", now),
+		}
+		if reason != "" {
+			updates["failure_reason"] = reason
+		}
+		if errorMsg != "" {
+			updates["error_message"] = errorMsg
+		}
+
+		result := r.db.WithContext(ctx).Model(&MessageSendRecord{}).
+			Where(models.QueryMessageIDWhere+" AND status = ?", messageID, models.MessageSendStatusSending).
+			Updates(updates)
+		if result.Error != nil {
+			return claimed, result.Error
+		}
+		if result.RowsAffected > 0 {
+			claimed = append(claimed, messageID)
+		}
+	}
+
+	return claimed, nil
 }
 
 // IncrementRetry 增加重试次数
@@ -360,11 +408,11 @@ func (r *MessageRecordGormRepository) IncrementRetry(ctx context.Context, messag
 		string(attemptJSON),
 		now,
 		now,
-		successFlag, MessageSendStatusSuccess,
-		attempt.AttemptNumber, MessageSendStatusFailed,
-		MessageSendStatusRetrying,
+		successFlag, models.MessageSendStatusSuccess,
+		attempt.AttemptNumber, models.MessageSendStatusFailed,
+		models.MessageSendStatusRetrying,
 		successFlag, now,
-		successFlag, attempt.AttemptNumber, FailureReasonMaxRetry,
+		successFlag, attempt.AttemptNumber, models.FailureReasonMaxRetry,
 		successFlag, hasError, attempt.Error,
 		now,
 		messageID,
@@ -383,14 +431,14 @@ func (r *MessageRecordGormRepository) GetStatistics(ctx context.Context) (map[st
 
 	// 预初始化所有状态为 0，保持与原实现一致的返回结构
 	statuses := []MessageSendStatus{
-		MessageSendStatusPending,
-		MessageSendStatusSending,
-		MessageSendStatusSuccess,
-		MessageSendStatusFailed,
-		MessageSendStatusRetrying,
-		MessageSendStatusAckTimeout,
-		MessageSendStatusUserOffline,
-		MessageSendStatusExpired,
+		models.MessageSendStatusPending,
+		models.MessageSendStatusSending,
+		models.MessageSendStatusSuccess,
+		models.MessageSendStatusFailed,
+		models.MessageSendStatusRetrying,
+		models.MessageSendStatusAckTimeout,
+		models.MessageSendStatusUserOffline,
+		models.MessageSendStatusExpired,
 	}
 	for _, s := range statuses {
 		stats[string(s)] = 0
@@ -425,9 +473,9 @@ func (r *MessageRecordGormRepository) GetStatistics(ctx context.Context) (map[st
 // CleanupOld 清理旧记录
 func (r *MessageRecordGormRepository) CleanupOld(ctx context.Context, before time.Time) (int64, error) {
 	result := r.db.WithContext(ctx).Where("create_time < ? AND status IN ?", before, []MessageSendStatus{
-		MessageSendStatusSuccess,
-		MessageSendStatusFailed,
-		MessageSendStatusExpired,
+		models.MessageSendStatusSuccess,
+		models.MessageSendStatusFailed,
+		models.MessageSendStatusExpired,
 	}).Delete(&MessageSendRecord{})
 
 	return result.RowsAffected, result.Error

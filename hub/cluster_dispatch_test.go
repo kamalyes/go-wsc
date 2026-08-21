@@ -29,9 +29,11 @@ import (
 
 	"github.com/kamalyes/go-cachex"
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/models"
 	wscpb "github.com/kamalyes/go-wsc/models/pb"
 	"github.com/kamalyes/go-wsc/repository"
+	"github.com/kamalyes/go-wsc/routing"
 )
 
 // clusterHubPortSeq 为每个 newClusterHub 分配唯一的 WS 端口，确保 generateNodeID 产出不同 nodeID
@@ -176,7 +178,7 @@ func TestRouteToCluster_GRPCDirect_GroupBroadcast(t *testing.T) {
 
 	ctx := context.Background()
 	require.NoError(t, hubB.groupRepo.CreateGroup(ctx, &Group{GroupID: "g-bc", Namespace: "ns-bc", OwnerID: "owner"}))
-	require.NoError(t, hubB.AddGroupMembers(ctx, "ns-bc", "g-bc", []string{"u-m1", "u-m2"}))
+	require.NoError(t, hubB.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("ns-bc").WithGroupIDs([]string{"g-bc"}).Inject(ctx), []string{"u-m1", "u-m2"}))
 
 	m1 := makeTestClient("c-m1", "u-m1", "ns-bc")
 	m2 := makeTestClient("c-m2", "u-m2", "ns-bc")
@@ -202,8 +204,8 @@ func TestRouteToCluster_GRPCDirect_GroupsBroadcast(t *testing.T) {
 	ctx := context.Background()
 	require.NoError(t, hubB.groupRepo.CreateGroup(ctx, &Group{GroupID: "g1", Namespace: "ns-gb", OwnerID: "owner"}))
 	require.NoError(t, hubB.groupRepo.CreateGroup(ctx, &Group{GroupID: "g2", Namespace: "ns-gb", OwnerID: "owner"}))
-	require.NoError(t, hubB.AddGroupMembers(ctx, "ns-gb", "g1", []string{"u-a"}))
-	require.NoError(t, hubB.AddGroupMembers(ctx, "ns-gb", "g2", []string{"u-b"}))
+	require.NoError(t, hubB.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("ns-gb").WithGroupIDs([]string{"g1"}).Inject(ctx), []string{"u-a"}))
+	require.NoError(t, hubB.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("ns-gb").WithGroupIDs([]string{"g2"}).Inject(ctx), []string{"u-b"}))
 
 	ca := makeTestClient("c-a", "u-a", "ns-gb")
 	cb := makeTestClient("c-b", "u-b", "ns-gb")
@@ -397,26 +399,26 @@ func TestResolveGRPCTargetNodes(t *testing.T) {
 	assert.ElementsMatch(t, []string{hubB.GetNodeID()}, hubA.resolveGRPCTargetNodes(ClusterDispatchOptions{}))
 }
 
-// TestExecuteGRPCDispatch_UnknownOperation 验证未知操作类型返回 false
+// TestExecuteGRPCDispatch_UnknownOperation 验证未知操作类型返回 fallback
 func TestExecuteGRPCDispatch_UnknownOperation(t *testing.T) {
 	hubA, hubB, cleanup := newClusterPair(t)
 	defer cleanup()
 
 	msgData := mustMarshalHubMessagePB(t, makeGroupMessage("s"))
 	// 使用未定义的操作类型
-	assert.False(t, hubA.executeGRPCDispatch(context.Background(), clusterHubAddr(hubB), msgData, ClusterDispatchOptions{
+	assert.Equal(t, grpcOutcomeFallback, hubA.executeGRPCDispatch(context.Background(), clusterHubAddr(hubB), msgData, ClusterDispatchOptions{
 		Operation:    models.OperationType("unknown_op_999"),
 		TargetNodeID: hubB.GetNodeID(),
 	}))
 }
 
-// TestExecuteGRPCDispatch_NilPool 验证 grpcClientPool 为 nil 时返回 false
+// TestExecuteGRPCDispatch_NilPool 验证 grpcClientPool 为 nil 时返回 fallback
 func TestExecuteGRPCDispatch_NilPool(t *testing.T) {
 	hub, _, _, cleanup := setupGroupTestHub(t)
 	defer cleanup()
 	// setupGroupTestHub 的 grpcClientPool 为 nil
 	msgData := mustMarshalHubMessagePB(t, makeGroupMessage("s"))
-	assert.False(t, hub.executeGRPCDispatch(context.Background(), "127.0.0.1:1", msgData, ClusterDispatchOptions{
+	assert.Equal(t, grpcOutcomeFallback, hub.executeGRPCDispatch(context.Background(), "127.0.0.1:1", msgData, ClusterDispatchOptions{
 		Operation: models.OperationTypeSendMessage,
 	}))
 }

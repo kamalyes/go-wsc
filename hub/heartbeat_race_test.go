@@ -389,7 +389,7 @@ func TestHeartbeatRedisWorkerNoDeadlock(t *testing.T) {
 	}
 
 	// 验证在线索引确实被 worker 重建（后半部分客户端仍在线）
-	online, err := hub.IsUserOnline(clients[numClients-1].UserID)
+	online, err := hub.IsUserOnline(context.Background(), clients[numClients-1].UserID)
 	assert.NoError(t, err)
 	assert.True(t, online, "在线客户端应被心跳 worker 重建到 Redis 在线索引")
 }

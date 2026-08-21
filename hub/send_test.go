@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/repository"
 	"github.com/kamalyes/go-wsc/routing"
@@ -160,9 +161,11 @@ func TestSendToClientSerializedNormalWS(t *testing.T) {
 	hub, _, _, cleanup := setupGroupTestHub(t)
 	defer cleanup()
 
-	// 注入 mock 连接记录仓库以观测统计计数
-	mockRepo := &mockConnRecordRepo{}
-	hub.SetConnectionRecordRepository(mockRepo)
+	// 注入 mock 质量仓库以观测统计计数（trackReceiverMessageStats 走 connectionQualityRepo）
+	mockQualityRepo := &fakeConnQualityRepo{}
+	hub.connectionQualityRepo = mockQualityRepo
+	hub.SetConnectionRecordRepository(&mockConnRecordRepo{})
+	replaceBatchersForTest(hub)
 
 	client := makeTestClient("c-normal", "u-normal")
 	msg := makeGroupMessage("sender")
@@ -183,11 +186,12 @@ func TestSendToClientSerializedNormalWS(t *testing.T) {
 
 	// trackReceiverMessageStats 通过批量处理器异步刷写，等待计数落库
 	require.Eventually(t, func() bool {
-		e, ok := mockRepo.findStatEntry("c-normal")
-		if !ok {
-			return false
+		for _, e := range mockQualityRepo.getIncrementEntries() {
+			if e.ConnectionID == "c-normal" {
+				return e.MessagesReceived == 1 && e.BytesReceived > 0
+			}
 		}
-		return e.MessagesReceived == 1 && e.BytesReceived > 0
+		return false
 	}, 3*time.Second, 50*time.Millisecond, "trackReceiverMessageStats 应触发统计计数")
 }
 
@@ -585,6 +589,9 @@ func TestSyncToSenderDevices(t *testing.T) {
 
 		msg := makeGroupMessage("u-multi")
 		msg.SenderClient = "c-dev1" // dev1 为发送设备，dev2 应收到同步
+		// 与生产入口契约一致：上游 InjectRoute 注入路由信封（appID 归一化为 DefaultAppID），
+		// syncToSenderDevices 内部 ForEachUserClientFiltered 按 msg.AppID 严格匹配
+		msg.InjectRoute(hub.ctx)
 		hub.syncToSenderDevices(hub.ctx, msg)
 
 		// dev2 收到
@@ -825,7 +832,7 @@ func TestSendToUserWithRetry_InjectDefaultNamespaceForLegacy(t *testing.T) {
 
 	ns, groups, count := h.snapshot()
 	require.Equal(t, 1, count, "离线用户应触发一次 StoreOfflineMessage")
-	assert.Equal(t, models.DefaultNamespace, ns, "老系统不传 namespace 应注入 DefaultNamespace")
+	assert.Equal(t, constants.DefaultNamespace, ns, "老系统不传 namespace 应注入 DefaultNamespace")
 	assert.Empty(t, groups, "P2P 发送方法 group 不参与，应保持空")
 }
 
@@ -836,7 +843,7 @@ func TestSendToUserWithRetry_PreservesExistingNamespace(t *testing.T) {
 	hub.SetOfflineMessageHandler(h)
 	defer hub.SafeShutdown()
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), "ns-custom", nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace("ns-custom").WithGroupIDs(nil).Inject(context.Background())
 	hub.SendToUserWithRetry(ctx, "u-offline-custom", makeGroupMessage("sender"))
 
 	ns, groups, count := h.snapshot()
@@ -861,7 +868,7 @@ func TestSendToUserWithAck_InjectDefaultNamespaceForLegacy(t *testing.T) {
 
 	ns, groups, count := h.snapshot()
 	require.Equal(t, 1, count, "ACK 路径离线用户应触发一次 StoreOfflineMessage")
-	assert.Equal(t, models.DefaultNamespace, ns, "ACK 入口同样应注入 DefaultNamespace")
+	assert.Equal(t, constants.DefaultNamespace, ns, "ACK 入口同样应注入 DefaultNamespace")
 	assert.Empty(t, groups, "P2P 发送方法 group 不参与")
 }
 
@@ -872,7 +879,7 @@ func TestSendToUserWithAck_PreservesExistingNamespace(t *testing.T) {
 	hub.SetOfflineMessageHandler(h)
 	defer hub.SafeShutdown()
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), "ns-ack", nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace("ns-ack").WithGroupIDs(nil).Inject(context.Background())
 	hub.SendToUserWithAck(ctx, "u-offline-ack2", makeGroupMessage("sender"), time.Second, 1)
 
 	ns, _, count := h.snapshot()

@@ -14,6 +14,7 @@ package hub
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -81,8 +82,10 @@ type ClientAttributes struct {
 	UserID    string   // 用户ID
 	UserType  UserType // 用户类型
 	DeviceID  string   // 设备ID
+	AppID     string   // 应用ID（最上层隔离维度，默认 "__default_app__"，用于应用间消息隔离）
 	Namespace string   // 命名空间ID（默认 "default"，用于命名空间隔离与消息过滤）
-	GroupID   string   // 群组ID（观察者表示观察范围；普通用户表示连接后自动加入的成员组；空则加入默认组）
+	GroupID   string   // 群组ID原始字符串（支持逗号分隔多群组"g1,g2,g3"；观察者表示观察范围；普通用户表示连接后自动加入的成员组；空则加入默认组）
+	GroupIDs  []string // 解析后的群组ID列表（由 GroupID 逗号解析得到；单值时为 [GroupID]）
 }
 
 // CreateClientFromRequest 从 HTTP 请求创建 WebSocket 客户端
@@ -104,16 +107,18 @@ func (h *Hub) CreateClientFromRequest(r *http.Request, conn *websocket.Conn, att
 	metaMap["x-device-id"] = attrs.DeviceID
 
 	// 使用 NewClient 构造函数创建客户端（自动初始化时间和状态）
-	// 观察者：GroupID 表示观察范围；普通用户：GroupID 表示连接后自动加入的成员组（空则加入默认组）
-	// 群组成员关系：连接时自动加入成员组（有 GroupID 加入指定组，无则加入默认组）
+	// appID：最上层隔离维度（入口层归一化在 handleRegister 兜底，此处透传请求值）
+	// 观察者：GroupID 表示观察范围；普通用户：GroupIDs 表示连接后自动加入的全部成员组（空则加入默认组）
+	// 群组成员关系：连接时自动加入成员组（joinMemberGroupOnConnect 遍历 GroupIDs 自动加入）
 	// 业务层仍可通过 API（AddGroupMembers/RemoveGroupMembers）管理成员关系
 	client := NewClient(attrs.ClientID, attrs.UserID, attrs.UserType).
 		WithClientIP(requestMeta.ClientIP).
 		WithClientType(MapDeviceTypeToClientType(requestMeta.DeviceType)).
 		WithWebSocketConn(conn).
 		WithNodeInfo(h.nodeID, h.config.NodeIP, h.config.NodePort).
+		WithAppID(attrs.AppID).
 		WithNamespace(attrs.Namespace).
-		WithGroupID(attrs.GroupID).
+		WithGroupIDs(attrs.GroupIDs).
 		WithMetadataMap(metaMap).
 		// 从 Hub 生命周期 ctx 派生连接级 ctx（r.Context() 在 WebSocket 升级后会取消，不适合长连接）
 		// 但需要从 r.Context() 提取 trace_id 注入，保证客户端生命周期内的日志都有 trace_id
@@ -157,19 +162,24 @@ func (h *Hub) extractClientAttributes(r *http.Request) *ClientAttributes {
 			userID := claims.UserID
 			userType := claims.UserType
 			deviceID := claims.DeviceID
+			appID := claims.AppID
 			namespace := claims.Namespace
 			groupID := claims.GroupID
 			// UserType 默认值为 visitor
 			userType = mathx.IfEmpty(userType, string(UserTypeVisitor))
 			// 基于 UserID + DeviceID + UserType 时间窗口哈希生成 ClientID
 			clientID := h.temporalHasher.Hash(userID, deviceID, userType)
+			// GroupID 逗号解析为 GroupIDs（兼容单值与多值，多值时 GroupID 取首项）
+			groupIDs := parseGroupIDs(groupID)
 			return &ClientAttributes{
 				ClientID:  clientID,
 				UserID:    userID,
 				UserType:  UserType(userType),
 				DeviceID:  deviceID,
+				AppID:     appID,
 				Namespace: namespace,
 				GroupID:   groupID,
+				GroupIDs:  groupIDs,
 			}
 		}
 	}
@@ -179,7 +189,8 @@ func (h *Hub) extractClientAttributes(r *http.Request) *ClientAttributes {
 	userID := gccommon.ExtractAttribute(r, h.config.ClientAttributes.UserIDSources)
 	deviceID := gccommon.ExtractAttribute(r, h.config.ClientAttributes.DeviceIdSources)
 	userType := gccommon.ExtractAttribute(r, h.config.ClientAttributes.UserTypeSources)
-	// 命名空间从配置来源提取；GroupID 仅观察者使用（从 query/header 提取观察范围）
+	// AppID/命名空间从配置来源提取；GroupID 支持逗号分隔多群组（从 query/header 提取）
+	appID := gccommon.ExtractAttribute(r, h.config.ClientAttributes.AppIDSources)
 	namespace := gccommon.ExtractAttribute(r, h.config.ClientAttributes.NamespaceSources)
 	groupID := gccommon.ExtractAttribute(r, h.config.ClientAttributes.GroupIDSources)
 
@@ -190,14 +201,42 @@ func (h *Hub) extractClientAttributes(r *http.Request) *ClientAttributes {
 	// 请求显式传入的 client_id 优先使用，避免覆盖调用方指定的标识
 	clientID = mathx.IfEmpty(clientID, h.temporalHasher.Hash(userID, deviceID, userType))
 
+	// GroupID 逗号解析为 GroupIDs（兼容单值与多值，多值时 GroupID 取首项）
+	groupIDs := parseGroupIDs(groupID)
 	return &ClientAttributes{
 		ClientID:  clientID,
 		UserID:    userID,
 		UserType:  UserType(userType),
 		DeviceID:  deviceID,
+		AppID:     appID,
 		Namespace: namespace,
 		GroupID:   groupID,
+		GroupIDs:  groupIDs,
 	}
+}
+
+// parseGroupIDs 将逗号分隔的群组ID字符串解析为列表（向后兼容单值）
+// 与 routing.go gRPC metadata 的 strings.Join(gids, ",") 约定一致：
+//   - 单值 "g-1"（无逗号）→ ["g-1"]（向后兼容）
+//   - 多值 "g1,g2,g3" → ["g1","g2","g3"]
+//   - 空串 "" → nil（调用方走默认组兜底）
+//   - 带空白 "g1, g2 , g3" → ["g1","g2","g3"]（TrimSpace 容错）
+func parseGroupIDs(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	gids := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if g := strings.TrimSpace(p); g != "" {
+			gids = append(gids, g)
+		}
+	}
+	if len(gids) == 0 {
+		return nil
+	}
+	return gids
 }
 
 // ============================================================================

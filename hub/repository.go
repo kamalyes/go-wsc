@@ -104,6 +104,15 @@ func (h *Hub) InitializeRepositories(redisClient redis.UniversalClient, db *gorm
 	)
 	h.SetConnectionRecordRepository(connectionRecordRepo)
 
+	// 5.1 连接质量仓库 (MySQL GORM)
+	// 复用 ConnectionRecord 配置（清理策略待定，暂不启用质量表自动清理）
+	connectionQualityRepo := repository.NewConnectionQualityRepository(
+		db,
+		h.config.Database.ConnectionRecord,
+		hubLogger,
+	)
+	h.SetConnectionQualityRepository(connectionQualityRepo)
+
 	// 6. 群组仓库 (Redis)
 	groupKeyPrefix := ""
 	if h.config.RedisRepository.Group != nil {
@@ -230,6 +239,18 @@ func (h *Hub) SetMessageRecordRepository(repo MessageRecordRepository) {
 func (h *Hub) SetConnectionRecordRepository(repo ConnectionRecordRepository) {
 	h.connectionRecordRepo = repo
 	h.logger.InfoKV("连接记录仓库已设置", "repository_type", "mysql")
+}
+
+// SetConnectionQualityRepository 设置连接质量仓库（MySQL）
+// 拆表后承载 wsc_connection_qualities 表，由 batcher/stats 路径写入，断开终评调用
+func (h *Hub) SetConnectionQualityRepository(repo ConnectionQualityRepository) {
+	h.connectionQualityRepo = repo
+	h.logger.InfoKV("连接质量仓库已设置", "repository_type", "mysql")
+}
+
+// GetConnectionQualityRepository 获取连接质量仓库（供 batcher/stats 路径调用）
+func (h *Hub) GetConnectionQualityRepository() ConnectionQualityRepository {
+	return h.connectionQualityRepo
 }
 
 // SetGroupRepository 设置群组仓库（Redis）

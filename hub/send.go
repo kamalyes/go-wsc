@@ -79,12 +79,11 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 	msgCopy.Receiver = mathx.IfEmpty(msgCopy.Receiver, toUserID) // 确保 Receiver 非空（离线消息反序列化后可能丢失）
 	msgCopy.CreateAt = mathx.IfNotZero(msgCopy.CreateAt, time.Now())
 
-	// 🔗 从 msg 恢复 trace_id 到 ctx
-	// 离线消息推送路径（pushAndDeleteOffline → sendToUser）：ctx 来自 h.ctx 无原始 trace_id，
-	// msg 信封携带原始 trace_id（存储时注入）。此处恢复保证下游 checkAndRouteToNode → routeToCluster
-	// → dispatch.InjectContext(ctx) 注入正确的 trace_id，跨节点投递不断链。
-	// SendToUserWithRetry 路径：ctx 已有 trace_id，ContextFrom 幂等（已有则不覆盖）。
-	ctx = msgCopy.ContextFrom(ctx)
+	// 🔏 P2P 严格场景：EnsureRouteDefaults 归一化 namespace + InjectRoute 注入信封（防御性，与入口一致）
+	// sendToUser 可被 ack 重试/离线推送等路径直接调用，msg 可能未经过入口归一化；
+	// EnsureRouteDefaults + InjectRoute 幂等，SendToUserWithRetry 路径再调一次无副作用
+	ctx = routing.EnsureRouteDefaults(ctx)
+	ctx = msgCopy.InjectRoute(ctx)
 
 	// 📝 write-ahead：先落 sending 记录再投递（outbox 模式）
 	// 必须先于 checkAndRouteToNode（跨节点 Publish）和 handleBroadcast（本地投递）提交：
@@ -96,6 +95,9 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 	h.recordMessageToDatabase(msgCopy, nil)
 
 	// 🌐 分布式路由：检查用户是否在其他节点
+	// 先快照本地在线状态：路由决策与本地投递共用，避免两次查询间的连接抖动造成判定漂移
+	// 按 ctx 路由信封(appID+namespace)过滤，避免跨 app/ns 误判在线
+	localOnline := h.shardedRegistry.HasUser(toUserID, routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx))
 	routed, err := h.checkAndRouteToNode(ctx, toUserID, msgCopy)
 	if err != nil {
 		// 路由失败，记录错误但继续尝试本地发送
@@ -106,9 +108,15 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 			"message_id", msgCopy.MessageID,
 			"error", err,
 		)
+		// 🔥 本地无连接且跨节点路由失败：本地投递必然扑空，返回错误让上层
+		// 重试机制（瞬时故障如 Redis 抖动可重试成功）或最终失败离线兜底接管，
+		// 避免 fire-and-forget 谎报成功导致消息静默丢失
+		if !localOnline {
+			return errorx.NewError(models.ErrTypeTemporaryFailure, "跨节点路由失败(用户不在本节点): %v", err)
+		}
 	}
-	if routed {
-		// 消息已路由到其他节点，本地不需要处理
+	if routed && !localOnline {
+		// 用户仅在其他节点（本地无连接），消息已路由到其他节点，本地无需处理
 		h.logger.DebugContextKV(ctx, "消息已路由到其他节点",
 			"message_id", msgCopy.MessageID,
 			"user_id", toUserID,
@@ -116,8 +124,14 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 		return nil
 	}
 	// 用户在本节点或单机模式，正常发送
-	// 直接异步执行 handleBroadcast，不经过 EventLoop channel 串行化
-	go h.handleBroadcast(msgCopy)
+	// 🔥 多端跨节点：routed=true 仅代表"已投递到其他节点"，用户可能同时在本地和
+	// 其他节点有设备（如手机连 Pod A、电脑连 Pod B），本地投递不能被跳过，
+	// 否则本地设备永远收不到跨节点发送方的消息（修复前 routed=true 直接 return）
+	// 同步执行 handleBroadcast：保证同一发送者顺序发送的消息按序投递到接收方
+	// SendToUserWithRetry 本身为阻塞调用，handleBroadcast 内仅做非阻塞的 TrySend
+	// （观察者通知走 batcher 异步、数据库记录已先行提交），不会显著拖慢发送路径；
+	// 此前用 `go` 异步派发会使并发 goroutine 竞争同一接收方 sendChan 导致消息乱序
+	h.handleBroadcast(msgCopy)
 	h.logger.DebugContextKV(ctx, "消息已广播", "message_id", msgCopy.MessageID, "from", msgCopy.Sender, "to", msgCopy.Receiver, "type", msgCopy.MessageType)
 	return nil
 }
@@ -128,29 +142,19 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 
 // SendToUserWithRetry 带重试机制的发送消息给指定用户
 func (h *Hub) SendToUserWithRetry(ctx context.Context, toUserID string, msg *HubMessage) *SendResult {
-	// 源头注入 routing namespace：老系统不传 namespace 时补 DefaultNamespace
-	// 本方法为 P2P 发送，group 不参与（nil），不与群组发送逻辑捆绑
-	// 保证离线消息存储维度（ns::userID）的 namespace 非空，与 client 注册归一化一致
-	if routing.NamespaceFromContext(ctx) == "" {
-		ctx = routing.WithNamespaceGroupIDs(ctx, models.DefaultNamespace, nil)
-	}
+	// 立即创建消息副本，避免并发修改原始消息
+	msg = msg.Clone()
+
+	// 🔏 P2P 严格场景：先 EnsureRouteDefaults 归一化 namespace（空补 DefaultNamespace），再 InjectRoute
+	// InjectRoute 只归一化 appID（namespace 保持 ctx 原值兼容全局广播），故 P2P 入口需显式归一化 namespace
+	ctx = routing.EnsureRouteDefaults(ctx)
+	ctx = msg.InjectRoute(ctx)
 
 	result := &SendResult{
 		Attempts: make([]SendAttempt, 0, h.config.RetryPolicy.MaxRetries+1),
 	}
 
 	startTime := time.Now()
-
-	// 立即创建消息副本，避免并发修改原始消息
-	msg = msg.Clone()
-
-	// 从 ctx 注入 trace_id（OTel span > ctx.Value fallback，已有则不覆盖）
-	msg.InjectContext(ctx)
-
-	// 🔏 入口注入路由信封：将 ctx 中的 (namespace, groupIDs) 同步写入 msg 信封
-	// 下游跨节点 gRPC / PubSub / 离线存储回放统一从 msg 取路由，避免 ctx 丢失导致串扰
-	// P2P 场景下 groupIDs=nil（与入口归一化一致），群组发送由 SendToGroup 显式设置
-	ctx = msg.InjectRoute(ctx)
 
 	// 修改副本对象
 	if msg.Sender == "" {
@@ -174,8 +178,8 @@ func (h *Hub) SendToUserWithRetry(ctx context.Context, toUserID string, msg *Hub
 	// 若业务消息ID为空，则使用Hub生成的ID
 	msg.MessageID = mathx.IfNotEmpty(msg.MessageID, snowflakeId)
 
-	// 检查用户是否在线
-	isOnline := h.checkUserOnline(toUserID)
+	// 检查用户是否在线（按 ctx 路由信封 appID+namespace 隔离，避免跨 app/ns 误判在线）
+	isOnline := h.checkUserOnline(ctx, toUserID)
 	h.logger.InfoContextKV(ctx, "📍 [投递诊断] 用户在线检查",
 		"user_id", toUserID,
 		"message_id", msg.MessageID,
@@ -243,6 +247,15 @@ func (h *Hub) SendToUserWithRetry(ctx context.Context, toUserID string, msg *Hub
 
 	// 设置最终结果
 	h.finalizeSendResult(result, finalErr, startTime)
+
+	// 🔥 在线判定成功但重试耗尽仍失败 → 标记 Failed + 异步转存离线（消息不丢，用户上线时推送）
+	// 此前该路径仅依赖 30s 后的 ACK 超时扫描兜底：延迟窗口大、依赖扫描器存活，
+	// 且 sendToUser fire-and-forget 谎报成功时连扫描器都捞不到（状态被误报 success 的路径除外）
+	// tryStoreOfflineOnDeliveryFailure 内部：转存成功覆盖状态为 UserOffline，失败保持 Failed
+	if finalErr != nil && !result.StoredOffline {
+		h.updateMessageStatusAsync(msg.MessageID, MessageSendStatusFailed, models.FailureReasonMaxRetry, finalErr.Error())
+		h.tryStoreOfflineOnDeliveryFailure(msg, finalErr)
+	}
 
 	// 调用消息发送完成回调
 	h.invokeMessageSendCallback(msg, result)
@@ -559,6 +572,10 @@ func (h *Hub) recordMessageToDatabase(msg *HubMessage, sendErr error) {
 				"message_id", msg.MessageID,
 				"error", err,
 			)
+		} else if record.Status == MessageSendStatusSending {
+			// ⏰ 在时间轮上调度跨节点 ACK 超时任务（per-message，+nodeAckTimeout 触发兜底）
+			// 状态由 sending 变更时由 updateMessageStatusAsync O(1) 取消；详见 ack_timer.go
+			h.scheduleAckTimeout(record.MessageID)
 		}
 	})
 }
@@ -568,6 +585,10 @@ func (h *Hub) updateMessageStatusAsync(msgID string, status MessageSendStatus, r
 	if h.messageRecordRepo == nil || h.statusUpdater == nil {
 		return
 	}
+
+	// ⏰ 状态由 sending 变更时 O(1) 取消跨节点 ACK 超时任务（本地投递即时取消，跨节点目标取消为 no-op）
+	// 本节点持有的 timer 被取消后不再触发冗余 ClaimStaleSending 检查；详见 ack_timer.go
+	h.cancelAckTimeout(msgID)
 	if !h.statusUpdater.Submit(&statusUpdateItem{
 		msgID:  msgID,
 		status: status,
@@ -783,7 +804,7 @@ func (h *Hub) syncToSenderDevices(ctx context.Context, msg *HubMessage) {
 	// （发送者多端同步不检查 group，同一 user 在不同 group 的设备都应该同步到）
 	var otherDevices []*Client
 	deviceCount := 0
-	h.shardedRegistry.ForEachUserClientFiltered(msg.Sender, msg.Namespace, nil, func(_ string, client *Client) bool {
+	h.shardedRegistry.ForEachUserClientFiltered(msg.Sender, msg.AppID, msg.Namespace, nil, func(_ string, client *Client) bool {
 		deviceCount++
 		if client.ID != msg.SenderClient {
 			otherDevices = append(otherDevices, client)

@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/repository"
 )
 
@@ -128,7 +129,7 @@ func TestHeartbeatRebuildsEvictedOnlineIndex(t *testing.T) {
 
 	// 等 syncOnlineStatus 写入 Redis，node-B 可见
 	require.Eventually(t, func() bool {
-		online, _ := hubB.IsUserOnline(client.UserID)
+		online, _ := hubB.IsUserOnline(ctx, client.UserID)
 		return online
 	}, 2*time.Second, 30*time.Millisecond, "Register 后 node-B 应可见用户在线")
 
@@ -144,13 +145,13 @@ func TestHeartbeatRebuildsEvictedOnlineIndex(t *testing.T) {
 
 	// 验证 bug 状态：node-B 现在看不到该用户在线、跨节点路由丢失
 	require.Eventually(t, func() bool {
-		online, _ := hubB.IsUserOnline(client.UserID)
+		online, _ := hubB.IsUserOnline(ctx, client.UserID)
 		return !online
 	}, 2*time.Second, 30*time.Millisecond, "索引淘汰后用户应不可见")
 
 	// 索引淘汰后 GetUserNodes 返回 ErrUserNotFound（跨节点路由丢失）
 	_, err = hubB.GetOnlineStatusRepo().GetUserNodes(ctx, client.UserID)
-	assert.ErrorIs(t, err, repository.ErrUserNotFound, "索引淘汰后跨节点路由应丢失")
+	assert.ErrorIs(t, err, models.ErrUserNotFound, "索引淘汰后跨节点路由应丢失")
 
 	// 对照：旧路径 UpdateClientHeartbeat 在 client:<id> 缺失时静默 no-op，不会重建
 	require.NoError(t, hubA.UpdateClientHeartbeat(client.ID))
@@ -165,7 +166,7 @@ func TestHeartbeatRebuildsEvictedOnlineIndex(t *testing.T) {
 
 	// 等 worker flush（2s ticker）重建索引
 	require.Eventually(t, func() bool {
-		online, _ := hubB.IsUserOnline(client.UserID)
+		online, _ := hubB.IsUserOnline(ctx, client.UserID)
 		return online
 	}, 5*time.Second, 50*time.Millisecond, "心跳应重建在线索引使 node-B 重新可见")
 

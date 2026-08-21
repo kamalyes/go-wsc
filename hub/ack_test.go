@@ -431,6 +431,11 @@ func TestCreateAckRetryFunc_AttemptIncrement(t *testing.T) {
 	client := makeTestClient("c-retry-inc", "u-retry-inc")
 	hub.shardedRegistry.AddClient(client)
 
+	// 先注入 repo：sendToUser 会异步派生 goroutine 读取 h.messageRecordRepo，
+	// 若在 retryFunc() 调用后再 SetMessageRecordRepository 会与该 goroutine 的读产生数据竞争
+	repo := newAckFakeMessageRecordRepo()
+	hub.SetMessageRecordRepository(repo)
+
 	ctx := context.Background()
 	msg := makeGroupMessage("sender-retry-inc")
 	attemptNum := 0
@@ -443,9 +448,6 @@ func TestCreateAckRetryFunc_AttemptIncrement(t *testing.T) {
 	assert.Equal(t, 1, attemptNum)
 
 	// 第 2 次：attemptNum 1→2，>1 触发 recordAckRetryAttempt
-	repo := newAckFakeMessageRecordRepo()
-	hub.SetMessageRecordRepository(repo)
-
 	err = retryFunc()
 	require.NoError(t, err)
 	assert.Equal(t, 2, attemptNum)

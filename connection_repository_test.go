@@ -4,7 +4,11 @@
  * @LastEditors: kamalyes 501893067@qq.com
  * @LastEditTime: 2025-12-19 00:00:00
  * @FilePath: \go-wsc\connection_repository_test.go
- * @Description: WebSocket连接记录仓储测试
+ * @Description: WebSocket连接记录仓储测试（拆表版）
+ *
+ * 拆表后 connect 表承载身份+会话生命周期+心跳时间戳(last_ping_at/last_pong_at)，
+ * 质量指标(Ping统计/消息/错误/评分)由 ConnectionQualityRepository 落到 wsc_connection_qualities 表。
+ * 本测试同时持有 connect repo 和 quality repo，两表用同 span 后缀隔离，覆盖拆表后的正确语义
  *
  * Copyright (c) 2025 by kamalyes, All Rights Reserved.
  */
@@ -30,16 +34,20 @@ import (
 )
 
 // testConnectionRepoContext 测试上下文
+// 拆表后同时持有 connect repo 和 quality repo，两表用同后缀隔离测试
 type testConnectionRepoContext struct {
-	t           *testing.T
-	db          *gorm.DB
-	repo        repository.ConnectionRecordRepository
-	ctx         context.Context
-	idGenerator *idgen.ShortFlakeGenerator
-	tableName   string
+	t                *testing.T
+	db               *gorm.DB
+	repo             repository.ConnectionRecordRepository
+	qualityRepo      repository.ConnectionQualityRepository
+	ctx              context.Context
+	idGenerator      *idgen.ShortFlakeGenerator
+	tableName        string
+	qualityTableName string
 }
 
 // newTestConnectionRepoContext 创建测试上下文
+// 同时创建 connect 表和 quality 表（同 span 后缀），两 repo 各自 WithTableName 隔离
 func newTestConnectionRepoContext(t *testing.T) *testConnectionRepoContext {
 	workerID := osx.GetWorkerIdForSnowflake()
 
@@ -49,25 +57,38 @@ func newTestConnectionRepoContext(t *testing.T) *testConnectionRepoContext {
 	idGenerator := getTestIDGenerator()
 	table := idGenerator.GenerateSpanID()
 	tableName := fmt.Sprintf("wsc_connection_records_%s", table)
+	qualityTableName := fmt.Sprintf("wsc_connection_qualities_%s", table)
 
-	// 获取基础数据库连接并创建表
+	// 获取基础数据库连接并创建 connect 表
 	db := getConnectTestDB(t, tableName)
+
+	// 创建 quality 表（与 connect 表同后缀，1:1 关联）
+	err := db.Table(qualityTableName).Migrator().CreateTable(&models.ConnectionQuality{})
+	require.NoError(t, err, "创建质量表失败: %s", qualityTableName)
+	time.Sleep(50 * time.Millisecond)
+	require.True(t, db.Migrator().HasTable(qualityTableName), "质量表创建后验证失败: %s", qualityTableName)
 
 	// 创建 repository 并使用 WithTableName 设置自定义表名
 	baseRepo := repository.NewConnectionRecordRepository(db, nil, NewDefaultWSCLogger())
 	scopedRepo := baseRepo.WithTableName(tableName)
 
+	baseQualityRepo := repository.NewConnectionQualityRepository(db, nil, NewDefaultWSCLogger())
+	scopedQualityRepo := baseQualityRepo.WithTableName(qualityTableName)
+
 	tc := &testConnectionRepoContext{
-		t:           t,
-		db:          db,
-		repo:        scopedRepo,
-		ctx:         context.Background(),
-		idGenerator: idgen.NewShortFlakeGenerator(workerID),
-		tableName:   tableName,
+		t:                t,
+		db:               db,
+		repo:             scopedRepo,
+		qualityRepo:      scopedQualityRepo,
+		ctx:              context.Background(),
+		idGenerator:      idgen.NewShortFlakeGenerator(workerID),
+		tableName:        tableName,
+		qualityTableName: qualityTableName,
 	}
 
-	// 测试结束后清理表
+	// 测试结束后清理两张表（先 quality 后 connect，避免外键依赖）
 	t.Cleanup(func() {
+		db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS \"%s\"", qualityTableName))
 		db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS \"%s\"", tableName))
 	})
 
@@ -116,12 +137,13 @@ func getConnectTestDB(t *testing.T, tableName string) *gorm.DB {
 }
 
 // TestUpsert 测试创建或更新连接记录
+// 拆表后 connect repo 只写 connect 表，重连计数由 quality repo 维护
 func TestUpsert(t *testing.T) {
 	tc := newTestConnectionRepoContext(t)
 	userID := tc.generateUserID()
 	connID1 := tc.generateConnectionID()
 
-	// 首次连接 - 创建记录
+	// 首次连接 - 创建 connect 记录
 	record := &models.ConnectionRecord{
 		ConnectionID: connID1,
 		UserID:       userID,
@@ -134,21 +156,40 @@ func TestUpsert(t *testing.T) {
 	err := tc.repo.Upsert(tc.ctx, record)
 	assert.NoError(t, err)
 
-	// 验证记录已创建
+	// 验证 connect 记录已创建
 	saved, err := tc.repo.GetByConnectionID(tc.ctx, connID1)
 	assert.NoError(t, err)
 	assert.Equal(t, connID1, saved.ConnectionID)
-	assert.Equal(t, 0, saved.ReconnectCount)
 
-	// 同一连接重连 - 更新记录
-	time.Sleep(100 * time.Millisecond)
-	err = tc.repo.Upsert(tc.ctx, record)
+	// 首次连接 - 创建 quality 记录（初始 ReconnectCount=0）
+	quality := &models.ConnectionQuality{
+		ConnectionID: connID1,
+		UserID:       userID,
+	}
+	err = tc.qualityRepo.Upsert(tc.ctx, quality)
 	assert.NoError(t, err)
 
-	// 验证重连次数增加
+	// 验证质量记录初始重连次数为 0
+	savedQuality, err := tc.qualityRepo.GetByConnectionID(tc.ctx, connID1)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, savedQuality.ReconnectCount)
+
+	// 同一连接重连 - 再次 Upsert quality，reconnect_count+1
+	time.Sleep(100 * time.Millisecond)
+	err = tc.qualityRepo.Upsert(tc.ctx, &models.ConnectionQuality{
+		ConnectionID: connID1,
+		UserID:       userID,
+	})
+	assert.NoError(t, err)
+
+	// 验证重连次数递增为 1
+	updatedQuality, err := tc.qualityRepo.GetByConnectionID(tc.ctx, connID1)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, updatedQuality.ReconnectCount)
+
+	// connect 记录仍为活跃
 	updated, err := tc.repo.GetByConnectionID(tc.ctx, connID1)
 	assert.NoError(t, err)
-	assert.Equal(t, 1, updated.ReconnectCount)
 	assert.True(t, updated.IsActive)
 }
 
@@ -215,28 +256,112 @@ func TestMarkDisconnected(t *testing.T) {
 	assert.True(t, disconnected.IsAbnormal)
 }
 
-// TestAddError 测试记录错误
-func TestAddError(t *testing.T) {
+// TestBatchUpdateHeartbeats 测试批量更新心跳（拆表分工版）
+// 心跳时间戳(last_ping_at/last_pong_at)由 connect repo 写 wsc_connection_records，
+// Ping 统计(average/max/min_ping_ms)与活跃时间由 quality repo 写 wsc_connection_qualities
+func TestBatchUpdateHeartbeats(t *testing.T) {
 	tc := newTestConnectionRepoContext(t)
+	userID := tc.generateUserID()
 	connID := tc.generateConnectionID()
 
-	// 创建连接记录
+	// 创建 connect 记录 + quality 记录（心跳更新要求两表行已存在）
+	err := tc.repo.Upsert(tc.ctx, &models.ConnectionRecord{
+		ConnectionID: connID,
+		UserID:       userID,
+		ConnectedAt:  time.Now(),
+		IsActive:     true,
+	})
+	assert.NoError(t, err)
+
+	err = tc.qualityRepo.Upsert(tc.ctx, &models.ConnectionQuality{
+		ConnectionID: connID,
+		UserID:       userID,
+	})
+	assert.NoError(t, err)
+
+	// 批量更新心跳：混入不存在的 connectionID，验证单条失败不影响整批
+	pingTime := time.Now().Add(-200 * time.Millisecond)
+	pongTime := time.Now()
+	entries := []*repository.HeartbeatUpdateEntry{
+		{ConnectionID: connID, PingTime: &pingTime, PongTime: &pongTime, PingMs: 100},
+		{ConnectionID: "not-exist-conn", PingTime: &pingTime, PongTime: &pongTime, PingMs: 50},
+	}
+
+	// 1. connect repo 写心跳时间戳（wsc_connection_records）
+	err = tc.repo.BatchUpdateHeartbeats(tc.ctx, entries)
+	assert.NoError(t, err, "含不存在连接的批次不应整体失败")
+
+	saved, err := tc.repo.GetByConnectionID(tc.ctx, connID)
+	assert.NoError(t, err)
+	require.NotNil(t, saved.LastPingAt, "last_ping_at 应写入 connect 表")
+	require.NotNil(t, saved.LastPongAt, "last_pong_at 应写入 connect 表")
+	assert.WithinDuration(t, pingTime, *saved.LastPingAt, time.Second, "last_ping_at 应等于提交的心跳时间")
+	assert.WithinDuration(t, pongTime, *saved.LastPongAt, time.Second, "last_pong_at 应等于提交的Pong时间")
+
+	// 2. quality repo 写 Ping 统计与活跃时间（wsc_connection_qualities）
+	err = tc.qualityRepo.BatchUpdateHeartbeats(tc.ctx, entries)
+	assert.NoError(t, err)
+
+	savedQuality, err := tc.qualityRepo.GetByConnectionID(tc.ctx, connID)
+	assert.NoError(t, err)
+	assert.Equal(t, 100.0, savedQuality.AveragePingMs, "首次 Ping 统计 average 应为 100")
+	assert.Equal(t, 100.0, savedQuality.MaxPingMs)
+	assert.Equal(t, 100.0, savedQuality.MinPingMs)
+	require.NotNil(t, savedQuality.LastActiveAt, "last_active_at 应随心跳刷新")
+	assert.WithinDuration(t, pingTime, *savedQuality.LastActiveAt, time.Second)
+
+	// 3. 重连（Upsert 已存在记录）应重置 connect 表心跳时间戳
+	time.Sleep(10 * time.Millisecond)
+	err = tc.repo.Upsert(tc.ctx, &models.ConnectionRecord{
+		ConnectionID: connID,
+		UserID:       userID,
+		ConnectedAt:  time.Now(),
+		IsActive:     true,
+	})
+	assert.NoError(t, err)
+
+	reconnected, err := tc.repo.GetByConnectionID(tc.ctx, connID)
+	assert.NoError(t, err)
+	assert.Nil(t, reconnected.LastPingAt, "重连后 last_ping_at 应重置为 nil")
+	assert.Nil(t, reconnected.LastPongAt, "重连后 last_pong_at 应重置为 nil")
+
+	// 4. 空 batch 直接返回，不产生 DB 调用
+	err = tc.repo.BatchUpdateHeartbeats(tc.ctx, nil)
+	assert.NoError(t, err)
+	err = tc.qualityRepo.BatchUpdateHeartbeats(tc.ctx, nil)
+	assert.NoError(t, err)
+}
+
+// TestQualityAddError 测试记录错误（拆表后由 ConnectionQualityRepository 承载）
+func TestQualityAddError(t *testing.T) {
+	tc := newTestConnectionRepoContext(t)
+	connID := tc.generateConnectionID()
+	userID := tc.generateUserID()
+
+	// 创建 connect 记录
 	record := &models.ConnectionRecord{
 		ConnectionID: connID,
-		UserID:       tc.generateUserID(),
+		UserID:       userID,
 		ConnectedAt:  time.Now(),
 		IsActive:     true,
 	}
 	err := tc.repo.Upsert(tc.ctx, record)
 	assert.NoError(t, err)
 
-	// 记录错误
-	testErr := errors.New("test error")
-	err = tc.repo.AddError(tc.ctx, connID, testErr)
+	// 创建 quality 记录（AddError 要求质量行已存在）
+	err = tc.qualityRepo.Upsert(tc.ctx, &models.ConnectionQuality{
+		ConnectionID: connID,
+		UserID:       userID,
+	})
 	assert.NoError(t, err)
 
-	// 验证错误记录
-	updated, err := tc.repo.GetByConnectionID(tc.ctx, connID)
+	// 记录错误（qualityRepo.AddError）
+	testErr := errors.New("test error")
+	err = tc.qualityRepo.AddError(tc.ctx, connID, testErr)
+	assert.NoError(t, err)
+
+	// 验证错误记录（从 quality 表读）
+	updated, err := tc.qualityRepo.GetByConnectionID(tc.ctx, connID)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, updated.ErrorCount)
 	assert.Equal(t, "test error", updated.LastError)
@@ -339,6 +464,8 @@ func TestCount(t *testing.T) {
 }
 
 // TestGetConnectionStats 测试获取连接统计
+// 拆表后 connect 表无 MessagesSent/MessagesReceived 字段，stats 中质量维度零填充
+// 消息统计需跨表从 qualityRepo 取，本测试只验证 connect 身份维度统计
 func TestGetConnectionStats(t *testing.T) {
 	tc := newTestConnectionRepoContext(t)
 
@@ -346,15 +473,13 @@ func TestGetConnectionStats(t *testing.T) {
 	startTime := now.Add(-1 * time.Hour)
 	endTime := now.Add(1 * time.Hour)
 
-	// 创建测试数据
+	// 创建测试数据（connect 表不再承载消息计数字段）
 	for i := 1; i <= 3; i++ {
 		record := &models.ConnectionRecord{
-			ConnectionID:     tc.generateConnectionID(),
-			UserID:           tc.generateUserID(),
-			ConnectedAt:      now,
-			MessagesSent:     int64(i * 10),
-			MessagesReceived: int64(i * 5),
-			IsActive:         i <= 2,
+			ConnectionID: tc.generateConnectionID(),
+			UserID:       tc.generateUserID(),
+			ConnectedAt:  now,
+			IsActive:     i <= 2,
 		}
 		err := tc.repo.Upsert(tc.ctx, record)
 		assert.NoError(t, err)
@@ -366,24 +491,24 @@ func TestGetConnectionStats(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, int64(3), stats.TotalConnections)
 	assert.Equal(t, int64(2), stats.ActiveConnections)
-	assert.Equal(t, int64(60), stats.TotalMessagesSent)
-	assert.Equal(t, int64(30), stats.TotalMessagesReceived)
+	// 拆表后质量维度由本方法零填充，跨表补充由调用方按需从 qualityRepo 取
+	assert.Equal(t, int64(0), stats.TotalMessagesSent)
+	assert.Equal(t, int64(0), stats.TotalMessagesReceived)
 }
 
 // TestGetUserConnectionStats 测试获取用户连接统计
+// 拆表后 connect 表无 MessagesSent/MessagesReceived 字段，stats 中质量维度零填充
 func TestGetUserConnectionStats(t *testing.T) {
 	tc := newTestConnectionRepoContext(t)
 	userID := tc.generateUserID()
 
-	// 创建用户的多个连接
+	// 创建用户的多个连接（connect 表不再承载消息计数字段）
 	for i := 1; i <= 3; i++ {
 		record := &models.ConnectionRecord{
-			ConnectionID:     tc.generateConnectionID(),
-			UserID:           userID,
-			ConnectedAt:      time.Now(),
-			MessagesSent:     int64(i * 10),
-			MessagesReceived: int64(i * 5),
-			IsActive:         i <= 2,
+			ConnectionID: tc.generateConnectionID(),
+			UserID:       userID,
+			ConnectedAt:  time.Now(),
+			IsActive:     i <= 2,
 		}
 		err := tc.repo.Upsert(tc.ctx, record)
 		assert.NoError(t, err)
@@ -395,27 +520,27 @@ func TestGetUserConnectionStats(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, userID, stats.UserID)
 	assert.True(t, stats.IsActive) // 有活跃连接
-	assert.Equal(t, int64(60), stats.MessagesSent)
-	assert.Equal(t, int64(30), stats.MessagesReceived)
+	// 拆表后质量维度零填充，跨表补充由调用方按需从 qualityRepo 取
+	assert.Equal(t, int64(0), stats.MessagesSent)
+	assert.Equal(t, int64(0), stats.MessagesReceived)
 }
 
 // TestGetNodeConnectionStats 测试获取节点连接统计
+// 拆表后 connect 表无 MessagesSent/MessagesReceived 字段，stats 中质量维度零填充
 func TestGetNodeConnectionStats(t *testing.T) {
 	tc := newTestConnectionRepoContext(t)
 	nodeID := "node-test"
 
-	// 创建节点的多个连接
+	// 创建节点的多个连接（connect 表不再承载消息计数字段）
 	for i := 1; i <= 3; i++ {
 		record := &models.ConnectionRecord{
-			ConnectionID:     tc.generateConnectionID(),
-			UserID:           tc.generateUserID(),
-			NodeID:           nodeID,
-			NodeIP:           "192.168.1.100",
-			NodePort:         8080,
-			ConnectedAt:      time.Now(),
-			MessagesSent:     int64(i * 10),
-			MessagesReceived: int64(i * 5),
-			IsActive:         i <= 2,
+			ConnectionID: tc.generateConnectionID(),
+			UserID:       tc.generateUserID(),
+			NodeID:       nodeID,
+			NodeIP:       "192.168.1.100",
+			NodePort:     8080,
+			ConnectedAt:  time.Now(),
+			IsActive:     i <= 2,
 		}
 		err := tc.repo.Upsert(tc.ctx, record)
 		assert.NoError(t, err)
@@ -430,8 +555,9 @@ func TestGetNodeConnectionStats(t *testing.T) {
 	assert.Equal(t, 8080, stats.NodePort)
 	assert.Equal(t, int64(3), stats.TotalConnections)
 	assert.Equal(t, int64(2), stats.ActiveConnections)
-	assert.Equal(t, int64(60), stats.TotalMessagesSent)
-	assert.Equal(t, int64(30), stats.TotalMessagesReceived)
+	// 拆表后质量维度零填充，跨表补充由调用方按需从 qualityRepo 取
+	assert.Equal(t, int64(0), stats.TotalMessagesSent)
+	assert.Equal(t, int64(0), stats.TotalMessagesReceived)
 }
 
 // TestCleanupInactiveRecords 测试清理非活跃记录
@@ -514,24 +640,34 @@ func TestBatchUpsert(t *testing.T) {
 }
 
 // TestGetFrequentReconnectConnections 测试获取频繁重连的连接
+// 拆表后重连次数由 ConnectionQualityRepository 承载，本测试从 qualityRepo 写入并查询
 func TestGetFrequentReconnectConnections(t *testing.T) {
 	tc := newTestConnectionRepoContext(t)
 
-	// 创建测试数据
-	records := []*models.ConnectionRecord{
-		{ConnectionID: tc.generateConnectionID(), UserID: tc.generateUserID(), ConnectedAt: time.Now(), ReconnectCount: 10, IsActive: true},
-		{ConnectionID: tc.generateConnectionID(), UserID: tc.generateUserID(), ConnectedAt: time.Now(), ReconnectCount: 5, IsActive: true},
-		{ConnectionID: tc.generateConnectionID(), UserID: tc.generateUserID(), ConnectedAt: time.Now(), ReconnectCount: 2, IsActive: true},
+	// 创建 3 个质量记录，ReconnectCount 分别为 10/5/2
+	// 首次 Upsert 时 ReconnectCount 用传入值（OnConflict 才走 +1）
+	qualityRecords := []*models.ConnectionQuality{
+		{ConnectionID: tc.generateConnectionID(), UserID: tc.generateUserID(), ReconnectCount: 10},
+		{ConnectionID: tc.generateConnectionID(), UserID: tc.generateUserID(), ReconnectCount: 5},
+		{ConnectionID: tc.generateConnectionID(), UserID: tc.generateUserID(), ReconnectCount: 2},
 	}
 
-	for _, record := range records {
-		err := tc.repo.Upsert(tc.ctx, record)
+	for _, q := range qualityRecords {
+		// 先建 connect 记录保持语义完整（1:1 关联）
+		_ = tc.repo.Upsert(tc.ctx, &models.ConnectionRecord{
+			ConnectionID: q.ConnectionID,
+			UserID:       q.UserID,
+			ConnectedAt:  time.Now(),
+			IsActive:     true,
+		})
+		// 直接写质量行（绕过 OnConflict +1，用 Create 写入指定 ReconnectCount）
+		err := tc.qualityRepo.Upsert(tc.ctx, q)
 		assert.NoError(t, err)
 		time.Sleep(2 * time.Millisecond)
 	}
 
-	// 获取重连次数>=5的连接
-	frequentConns, err := tc.repo.GetFrequentReconnectConnections(tc.ctx, 5, 10)
+	// 获取重连次数>=5的连接（从 qualityRepo 查）
+	frequentConns, err := tc.qualityRepo.GetFrequentReconnectConnections(tc.ctx, 5, 10)
 	assert.NoError(t, err)
 	assert.Equal(t, 2, len(frequentConns))
 }

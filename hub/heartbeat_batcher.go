@@ -12,7 +12,8 @@
  * 工作流程：
  *   1. 心跳路径调用 Submit（非阻塞，队列满时丢弃）
  *   2. BatchProcessor 后台 worker 收集，满 batchSize 或每 flushInterval 触发 flush
- *   3. flush 时按 clientID 去重，合并成一次 BatchUpdateHeartbeats 调用（单事务）
+ *   3. flush 时按 clientID 去重，分别调用 connect/quality 两 repo 的
+ *      BatchUpdateHeartbeats（时间戳落 wsc_connection_records，Ping 统计落 wsc_connection_qualities）
  *   4. SafeShutdown 时调用 Stop，flush 剩余数据后退出
  *
  * Copyright (c) 2026 by kamalyes, All Rights Reserved.
@@ -93,10 +94,23 @@ func (u *HeartbeatStatsUpdater) flush(batch []*heartbeatStatsEntry) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := u.hub.connectionRecordRepo.BatchUpdateHeartbeats(ctx, entries); err != nil {
-		u.hub.logger.ErrorKV("批量更新心跳统计失败",
-			"error", err,
-			"batch_size", len(entries),
-		)
+	// 心跳时间戳落 connect 表（会话生命周期语义，wsc_connection_records）
+	if u.hub.connectionRecordRepo != nil {
+		if err := u.hub.connectionRecordRepo.BatchUpdateHeartbeats(ctx, entries); err != nil {
+			u.hub.logger.ErrorKV("批量更新心跳时间戳失败",
+				"error", err,
+				"batch_size", len(entries),
+			)
+		}
+	}
+
+	// Ping 统计与活跃时间落 quality 表（质量指标语义，wsc_connection_qualities）
+	if u.hub.connectionQualityRepo != nil {
+		if err := u.hub.connectionQualityRepo.BatchUpdateHeartbeats(ctx, entries); err != nil {
+			u.hub.logger.ErrorKV("批量更新心跳统计失败",
+				"error", err,
+				"batch_size", len(entries),
+			)
+		}
 	}
 }

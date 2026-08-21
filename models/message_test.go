@@ -35,9 +35,10 @@ import (
 func TestHubMessage_SizeAndAlignment(t *testing.T) {
 	size := unsafe.Sizeof(HubMessage{})
 
-	// 416 是新增 Namespace/GroupID（各16字节）+ mu 指针（8字节）后的预期大小
-	// 由于 Go 版本/平台差异，允许浮动，但必须 <= 416
-	assert.LessOrEqual(t, size, uintptr(416), "HubMessage size should be optimized (<= 416 bytes), got %d", size)
+	// 432 是新增 AppID（16字节，应用隔离维度）后的预期大小：
+	// 基线 416（Namespace/GroupID + mu 指针）+ AppID string(16) = 432
+	// 由于 Go 版本/平台差异，允许浮动，但必须 <= 432
+	assert.LessOrEqual(t, size, uintptr(432), "HubMessage size should be optimized (<= 432 bytes), got %d", size)
 
 	// 验证 3 个 bool 字段位于结构体末尾（地址偏移接近 size）
 	msg := HubMessage{}

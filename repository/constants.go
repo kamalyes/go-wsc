@@ -4,7 +4,13 @@
  * @LastEditors: kamalyes 501893067@qq.com
  * @LastEditTime: 2026-01-31 11:08:55
  * @FilePath: \go-wsc\repository\constants.go
- * @Description: Repository 层常量定义 - 统一管理 Redis key 前缀和字段名
+ * @Description: Repository 层私有常量（实现细节，不跨包共享）
+ *
+ * 跨包共享的常量已迁 constants 包：
+ *   - Redis key 前缀 → constants/redis_key.go
+ *   - Bitmap 分层常量（GlobalBitmapNS + 默认配置）→ constants/bitmap.go
+ *   - 统计字段 StatsField* 为 dead constants 已删（hub_stats_repository.go 用自己的 Field*）
+ * 本文件仅保留 repository 实现层私有常量（key 拼接后缀、环境变量名）。
  *
  * Copyright (c) 2026 by kamalyes, All Rights Reserved.
  */
@@ -12,43 +18,40 @@ package repository
 
 const (
 	// ============================================================================
-	// Redis Key 前缀常量 - 各模块默认前缀
+	// Bitmap key 拼接后缀（实现细节，仅 online_status_repository.go 用）
+	// 完整 key: <keyPrefix> + bitmapKeySuffix + <appID> + ":" + <ns>
 	// ============================================================================
 
-	// DefaultOnlineKeyPrefix 在线状态默认 key 前缀
-	DefaultOnlineKeyPrefix = "wsc:online:"
+	// bitmapKeySuffix Bitmap key 的后缀(接在 keyPrefix 之后)
+	bitmapKeySuffix = "bm:"
 
-	// DefaultWorkloadKeyPrefix 负载管理默认 key 前缀
-	DefaultWorkloadKeyPrefix = "wsc:workload:"
+	// uidMapKeySuffix userID→数字 offset 的 Hash key 后缀
+	// 完整 key: <keyPrefix> + uidMapKeySuffix
+	uidMapKeySuffix = "uid_map"
 
-	// DefaultQueueKeyPrefix 消息队列默认 key 前缀
-	DefaultQueueKeyPrefix = "wsc:queue:"
-
-	// DefaultStatsKeyPrefix 统计信息默认 key 前缀
-	DefaultStatsKeyPrefix = "wsc:stats:"
-
-	// DefaultGroupKeyPrefix 群组默认 key 前缀
-	DefaultGroupKeyPrefix = "wsc:group:"
+	// uidCounterKeySuffix offset 自增计数器 key 后缀
+	// 完整 key: <keyPrefix> + uidCounterKeySuffix
+	uidCounterKeySuffix = "uid_counter"
 
 	// ============================================================================
-	// Redis Hash 字段名常量 - 统计信息
+	// Bitmap 配置环境变量名 - 短期方案(避免立即升级 go-config 模块)
+	//
+	// 长期方案:在 go-config 的 wscconfig.OnlineStatus 结构体正式声明字段,
+	// 短期通过环境变量覆盖默认值,未设置时用 constants.DefaultXxx 常量
 	// ============================================================================
 
-	// StatsFieldTotalConnections 总连接数字段
-	StatsFieldTotalConnections = "total_connections"
+	// envEnableBitmap 是否启用 bitmap 快速路径(灰度开关)
+	envEnableBitmap = "WSC_ONLINE_ENABLE_BITMAP"
 
-	// StatsFieldActiveConnections 活跃连接数字段
-	StatsFieldActiveConnections = "active_connections"
+	// envBitmapTTL bitmap EXPIRE(字符串,如 "8s"),默认 HeartbeatRefreshInterval × 4
+	envBitmapTTL = "WSC_ONLINE_BITMAP_TTL"
 
-	// StatsFieldMessagesSent 已发送消息数字段
-	StatsFieldMessagesSent = "messages_sent"
+	// envMaxBitmapOffset offset 上限(防恶意膨胀,0=不限制)
+	envMaxBitmapOffset = "WSC_ONLINE_MAX_BITMAP_OFFSET"
 
-	// StatsFieldMessagesReceived 已接收消息数字段
-	StatsFieldMessagesReceived = "messages_received"
+	// envMaxCachedUIDs 本地 L1 缓存容量上限
+	envMaxCachedUIDs = "WSC_ONLINE_MAX_CACHED_UIDS"
 
-	// StatsFieldBroadcastsSent 已发送广播数字段
-	StatsFieldBroadcastsSent = "broadcasts_sent"
-
-	// StatsFieldStartTime 启动时间字段
-	StatsFieldStartTime = "start_time"
+	// envBitmapMigrationPhase 灰度阶段:dual-write|new-only|disabled
+	envBitmapMigrationPhase = "WSC_ONLINE_BITMAP_MIGRATION_PHASE"
 )

@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/routing"
 )
@@ -158,7 +159,7 @@ func TestWorkload_NamespacePassthrough(t *testing.T) {
 	hub.SetWorkloadRepository(repo)
 	// 注入自定义 namespace 到 ctx，验证透传
 	customNS := "custom-ns"
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), customNS, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(customNS).WithGroupIDs(nil).Inject(context.Background())
 
 	t.Run("GetAgentWorkload→CustomNamespace", func(t *testing.T) {
 		_, _ = hub.GetAgentWorkload(ctx, "a1")
@@ -200,12 +201,12 @@ func TestForceSetAgentWorkload_WithRepo(t *testing.T) {
 
 	repo := &fakeWorkloadRepo{}
 	hub.SetWorkloadRepository(repo)
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 
 	require.NoError(t, hub.ForceSetAgentWorkload(ctx, "a1", 42))
 	assert.Equal(t, "a1", repo.lastForceSetAgent)
 	assert.Equal(t, int64(42), repo.lastForceSetWorkload)
-	assert.Equal(t, models.DefaultNamespace, repo.lastNamespace)
+	assert.Equal(t, constants.DefaultNamespace, repo.lastNamespace)
 }
 
 // TestGetAgentWorkload_WithRepo 验证获取工作负载

@@ -21,7 +21,9 @@ import (
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/zipx"
+	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/models"
+	"github.com/kamalyes/go-wsc/repository"
 	"github.com/kamalyes/go-wsc/routing"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
@@ -33,11 +35,12 @@ import (
 
 // OfflineMessageHandler 离线消息处理器接口（业务逻辑层）
 //
-// 存储维度：按 (namespace, groupID, userID) 三元组隔离。
-//   - Redis 队列 key = "{prefix}{ns}:{groupID}:{userID}"（P2P 消息 groupID 为空）
-//   - MySQL 记录带 namespace + group_id + receiver 列
+// 存储维度：按 (appID, namespace, groupID, userID) 四元组隔离。
+//   - Redis 队列 key = "{prefix}{appID}:{ns}:{groupID}:{userID}"（P2P 消息 groupID 为空）
+//   - MySQL 记录带 app_id + namespace + group_id + receiver 列
 //
-// namespace + groupID 一律从 ctx 路由元数据提取（hub 层 WithNamespaceGroupIDs 注入）
+// appID 是最上层隔离维度（默认 "__default_app__"），namespace + groupID 从 ctx 路由元数据提取
+// （hub 层 routing.NewRoute().WithAppID(...).Inject(ctx) 注入）。appID 严格隔离，跨 app 不串扰
 type OfflineMessageHandler interface {
 	// StoreOfflineMessage 存储离线消息（双写 Redis + MySQL）
 	// 落入 ctx 的 (ns, group) 对应的分区：Redis key = ns:group:userID
@@ -201,47 +204,55 @@ func (h *HybridOfflineMessageHandler) shouldSkipOfflineStorage(userID string, ms
 	return false
 }
 
-// normalizeGroupID 归一化存储维度的 groupID：P2P（空）补 DefaultGroupID
-// 保证 Redis 队列 key 与 MySQL group_id 维度一致，三段非空格式统一
-// 与 client.GetGroupID() 归一化对齐（注册时空 group 已归一化为 DefaultGroupID）
-func normalizeGroupID(groupID string) string {
-	return mathx.IfEmpty(groupID, models.DefaultGroupID)
-}
-
-// queueKey 构造命名空间+群组隔离的 Redis 队列名：ns:group:userID
-// 纯参数构造（不依赖 ctx），避免异步队列消费时 ctx 路由元数据丢失导致串扰
-// groupID 为空（P2P）补 DefaultGroupID，三段非空；namespace 传真实值（不补默认）
-//   - 完整群组消息：ns:group:userID
-//   - 点对点消息：ns:__default_gp__:userID（groupID 补默认组）
-func queueKey(ns, groupID, userID string) string {
-	return ns + ":" + groupID + ":" + userID
+// queueKey 构造应用+命名空间+群组隔离的 Redis 队列名：appID:ns:group:userID
+// 纯参数构造（不依赖 ctx、不做归一化），避免异步队列消费时 ctx 路由元数据丢失导致串扰
+// 调用方负责归一化：appID 经 routing.AppIDFromContext（内部 constants.NormalizeAppID）补默认；
+//                   groupID 经 constants.NormalizeGroupID 补 DefaultGroupID（P2P 空补默认组）
+//   - 完整群组消息：appID:ns:group:userID
+//   - 点对点消息：appID:ns:__default_gp__:userID（groupID 补默认组）
+func queueKey(appID, ns, groupID, userID string) string {
+	return appID + ":" + ns + ":" + groupID + ":" + userID
 }
 
 // resolveOfflineRoute 从 msg 信封提取存储路由（写入路径专用，优先 msg 信封，ctx 仅作极端兜底）
-// 异步队列消费时 ctx 会丢失路由，因此 ns 和 firstGroupID 优先从 msg 自带信封读取：
-//   - ns:          msg.Namespace（空串保持空，不补 default）
-//   - firstGroupID: msg.FirstGroupID()，P2P（GroupIDs=nil/空）返回 ""，调用方后续 normalizeGroupID 补默认
-func resolveOfflineRoute(ctx context.Context, msg *HubMessage) (ns string, firstGroupID string) {
+// 异步队列消费时 ctx 会丢失路由，因此 appID/ns/firstGroupID 优先从 msg 自带信封读取：
+//   - appID:        msg.AppID（空补 DefaultAppID，最上层隔离维度必填）
+//   - ns:           msg.Namespace（空串保持空，不补 default，与广播语义一致）
+//   - firstGroupID: msg.FirstGroupID()，P2P（GroupIDs=nil/空）返回 ""，调用方后续 constants.NormalizeGroupID 补默认
+//
+// 归一化策略：appID 统一由末尾 constants.NormalizeAppID 收口（msg 信封这条未经 routing 的路径必须补默认）；
+// ctx 兜底分支取 raw 路由（不经 routing.AppIDFromContext 二次归一化），保证"提取 raw → 末尾统一归一化"单一职责
+func resolveOfflineRoute(ctx context.Context, msg *HubMessage) (appID, ns, firstGroupID string) {
+	appID = msg.AppID
 	ns = msg.Namespace
 	firstGroupID = msg.FirstGroupID()
-	// 兜底：如果 msg 信封完全为空（理论上入口已注入，仅作最后防护），从 ctx 恢复
-	if ns == "" && firstGroupID == "" {
-		ns = routing.NamespaceFromContext(ctx)
-		firstGroupID = routing.FirstGroupIDFromContext(ctx)
+	// 兜底：msg 信封完全为空（理论上入口已注入，仅作最后防护），从 ctx 取 raw 路由
+	// 取 raw 而非 routing.*FromContext，避免与末尾 constants.NormalizeAppID 形成二次归一化
+	if appID == "" && ns == "" && firstGroupID == "" {
+		if rc := routing.RoutingFromContext(ctx); rc != nil {
+			appID = rc.AppID
+			ns = rc.Namespace
+			if len(rc.GroupIDs) > 0 {
+				firstGroupID = rc.GroupIDs[0]
+			}
+		}
 	}
+	// appID 统一归一化收口（幂等：已归一化的值不变，msg 信封路径在此补 DefaultAppID）
+	appID = constants.NormalizeAppID(appID)
 	return
 }
 
-// storeToRedis 存储到 Redis 队列（按 ns:group:userID 分区）
+// storeToRedis 存储到 Redis 队列（按 appID:ns:group:userID 分区）
 // ⚠️ 路由必须从 msg 信封读取（不依赖 ctx）：异步队列消费时 ctx 路由会丢失
 func (h *HybridOfflineMessageHandler) storeToRedis(ctx context.Context, userID string, msg *HubMessage) error {
-	ns, firstGID := resolveOfflineRoute(ctx, msg)
-	key := queueKey(ns, normalizeGroupID(firstGID), userID)
+	appID, ns, firstGID := resolveOfflineRoute(ctx, msg)
+	key := queueKey(appID, ns, constants.NormalizeGroupID(firstGID), userID)
 	if err := h.queueRepo.Enqueue(ctx, key, msg); err != nil {
 		h.logger.ErrorKV("存储离线消息到 Redis 失败",
 			"user_id", userID,
 			"id", msg.ID,
 			"message_id", msg.MessageID,
+			"app_id", appID,
 			"namespace", ns,
 			"group_id", firstGID,
 			"error", err,
@@ -253,6 +264,7 @@ func (h *HybridOfflineMessageHandler) storeToRedis(ctx context.Context, userID s
 		"user_id", userID,
 		"id", msg.ID,
 		"message_id", msg.MessageID,
+		"app_id", appID,
 		"namespace", ns,
 		"group_id", firstGID,
 	)
@@ -260,12 +272,13 @@ func (h *HybridOfflineMessageHandler) storeToRedis(ctx context.Context, userID s
 }
 
 // DrainOfflineQueue 排空 Redis 队列（单组 FIFO，仅 Redis）
-// 按 ctx 的单个 (ns, group) 出队；limit<=0 表示一次取尽该队列
+// 按 ctx 的单个 (appID, ns, group) 出队；limit<=0 表示一次取尽该队列
 func (h *HybridOfflineMessageHandler) DrainOfflineQueue(ctx context.Context, userID string, limit int) ([]*HubMessage, error) {
-	// 同步流程（用户上线回放）：ctx 含有完整路由（客户端注册时注入）
+	// 同步流程（用户上线回放）：ctx 含有完整路由（客户端注册时注入 appID+ns+group）
+	appID := routing.AppIDFromContext(ctx)
 	ns := routing.NamespaceFromContext(ctx)
 	firstGID := routing.FirstGroupIDFromContext(ctx)
-	key := queueKey(ns, normalizeGroupID(firstGID), userID)
+	key := queueKey(appID, ns, constants.NormalizeGroupID(firstGID), userID)
 
 	count := limit
 	if count <= 0 {
@@ -315,16 +328,17 @@ func (h *HybridOfflineMessageHandler) storeToDatabase(ctx context.Context, msg *
 	compressionRatio := float64(compressedSize) / float64(dataSize) * 100
 
 	// 从 msg 信封提取路由元数据（异步队列 ctx 丢路由，以 msg 信封为准）
-	// namespace 直接取真实值（不做默认值归一化，没有就是空串）
+	// appID 归一化补 DefaultAppID；namespace 直接取真实值（不做默认值归一化，没有就是空串）
 	// groupID 取首个并归一化（P2P 补 DefaultGroupID，与 Redis key 维度一致）
-	ns, firstGID := resolveOfflineRoute(ctx, msg)
+	appID, ns, firstGID := resolveOfflineRoute(ctx, msg)
 	namespace := ns
-	groupID := normalizeGroupID(firstGID)
+	groupID := constants.NormalizeGroupID(firstGID)
 
 	record := &OfflineMessageRecord{
 		MessageID:      msg.MessageID, // 业务消息ID
 		Sender:         msg.Sender,
 		Receiver:       msg.Receiver,
+		AppID:          appID,     // 应用ID（归一化为 DefaultAppID，最上层隔离维度）
 		Namespace:      namespace, // 真实命名空间（ctx 路由元数据，没有就是空串）
 		GroupID:        groupID,   // 群组ID（P2P 补 DefaultGroupID，与 Redis key 维度一致）
 		SessionID:      msg.SessionID,
@@ -368,13 +382,16 @@ func (h *HybridOfflineMessageHandler) GetOfflineMessages(ctx context.Context, us
 	messages := make([]*HubMessage, 0)
 	nextCursor := ""
 
-	// namespace 从 ctx 路由元数据提取（用户上线回放时由 hub 注入 client.Namespace）
-	// 直接取真实值，不做默认值归一化；GroupID 留空 → 跨组查询该命名空间内全部 group 的离线消息
+	// appID/namespace 从 ctx 路由元数据提取（用户上线回放时由 hub 注入 client.AppID + client.Namespace）
+	// appID 归一化补 DefaultAppID；namespace 直接取真实值，不做默认值归一化
+	// GroupID 留空 → 跨组查询该 (appID, namespace) 内全部 group 的离线消息
+	appID := routing.AppIDFromContext(ctx)
 	namespace := routing.NamespaceFromContext(ctx)
 
 	records, err := h.dbRepo.QueryMessages(ctx, &OfflineMessageFilter{
 		UserID:    userID,
-		Role:      MessageRoleReceiver,
+		Role:      repository.MessageRoleReceiver,
+		AppID:     appID,
 		Namespace: namespace,
 		Limit:     limit,
 		Cursor:    cursor,
@@ -382,6 +399,7 @@ func (h *HybridOfflineMessageHandler) GetOfflineMessages(ctx context.Context, us
 	if err != nil {
 		h.logger.ErrorKV("从 MySQL 读取离线消息失败",
 			"user_id", userID,
+			"app_id", appID,
 			"namespace", namespace,
 			"cursor", cursor,
 			"error", err,
@@ -410,6 +428,7 @@ func (h *HybridOfflineMessageHandler) GetOfflineMessages(ctx context.Context, us
 
 	h.logger.InfoKV("从 MySQL 读取离线消息",
 		"user_id", userID,
+		"app_id", appID,
 		"namespace", namespace,
 		"count", len(messages),
 		"limit", limit,
@@ -420,19 +439,21 @@ func (h *HybridOfflineMessageHandler) GetOfflineMessages(ctx context.Context, us
 	return messages, nextCursor, nil
 }
 
-// DeleteOfflineMessages 删除已推送的离线消息（namespace 从 ctx 提取）
+// DeleteOfflineMessages 删除已推送的离线消息（appID/namespace 从 ctx 提取）
 func (h *HybridOfflineMessageHandler) DeleteOfflineMessages(ctx context.Context, userID string, messageIDs []string) error {
 	if len(messageIDs) == 0 {
 		return nil
 	}
 
 	// Redis 队列是先进先出，已经 Dequeue 的消息自动删除
-	// 这里主要处理 MySQL 的消息删除（按命名空间隔离，跨组按 message_id 删）
+	// 这里主要处理 MySQL 的消息删除（按应用+命名空间隔离，跨组按 message_id 删）
+	appID := routing.AppIDFromContext(ctx)
 	namespace := routing.NamespaceFromContext(ctx)
 
-	if err := h.dbRepo.DeleteByMessageIDs(ctx, namespace, userID, messageIDs); err != nil {
+	if err := h.dbRepo.DeleteByMessageIDs(ctx, appID, namespace, userID, messageIDs); err != nil {
 		h.logger.ErrorKV("从 MySQL offline_messages 表删除离线消息失败",
 			"user_id", userID,
+			"app_id", appID,
 			"namespace", namespace,
 			"count", len(messageIDs),
 			"error", err,
@@ -442,6 +463,7 @@ func (h *HybridOfflineMessageHandler) DeleteOfflineMessages(ctx context.Context,
 
 	h.logger.DebugKV("从 MySQL offline_messages 表删除离线消息成功",
 		"user_id", userID,
+		"app_id", appID,
 		"namespace", namespace,
 		"count", len(messageIDs),
 	)
@@ -452,12 +474,14 @@ func (h *HybridOfflineMessageHandler) DeleteOfflineMessages(ctx context.Context,
 // GetOfflineMessageCount 获取离线消息数量（MySQL 跨组计数）
 // MySQL 为双写超集（含 Redis 内 + Redis 已过期的全部待推送消息），故直接以 MySQL 计数为准
 func (h *HybridOfflineMessageHandler) GetOfflineMessageCount(ctx context.Context, userID string) (int64, error) {
+	appID := routing.AppIDFromContext(ctx)
 	namespace := routing.NamespaceFromContext(ctx)
 
-	count, err := h.dbRepo.GetCountByReceiver(ctx, namespace, userID)
+	count, err := h.dbRepo.GetCountByReceiver(ctx, appID, namespace, userID)
 	if err != nil {
 		h.logger.ErrorKV("从 MySQL 获取离线消息数量失败",
 			"user_id", userID,
+			"app_id", appID,
 			"namespace", namespace,
 			"error", err,
 		)
@@ -468,15 +492,16 @@ func (h *HybridOfflineMessageHandler) GetOfflineMessageCount(ctx context.Context
 }
 
 // ClearOfflineMessages 清空用户的离线消息
-// groupIDs: 用户在该命名空间下的全部 group（含 "" 表示 P2P 队列），逐组清 Redis + 一次清 MySQL
+// groupIDs: 用户在该 (appID, namespace) 下的全部 group（含 "" 表示 P2P 队列），逐组清 Redis + 一次清 MySQL
 func (h *HybridOfflineMessageHandler) ClearOfflineMessages(ctx context.Context, userID string, groupIDs []string) error {
+	appID := routing.AppIDFromContext(ctx)
 	namespace := routing.NamespaceFromContext(ctx)
 
 	var errs []error
 
-	// 1. 逐组清空 Redis 队列（Redis 按 ns:group:userID 分区，P2P 的空 group 补 DefaultGroupID）
+	// 1. 逐组清空 Redis 队列（Redis 按 appID:ns:group:userID 分区，P2P 的空 group 补 DefaultGroupID）
 	for _, groupID := range groupIDs {
-		key := namespace + ":" + normalizeGroupID(groupID) + ":" + userID
+		key := queueKey(appID, namespace, constants.NormalizeGroupID(groupID), userID)
 		if err := h.queueRepo.Clear(ctx, key); err != nil {
 			errs = append(errs, errorx.WrapError("redis", err))
 			h.logger.ErrorKV("清空 Redis 离线消息队列失败",
@@ -487,17 +512,19 @@ func (h *HybridOfflineMessageHandler) ClearOfflineMessages(ctx context.Context, 
 		}
 	}
 
-	// 2. 清空 MySQL offline_messages 表（按命名空间隔离，跨组一次清完）
-	if err := h.dbRepo.ClearByReceiver(ctx, namespace, userID); err != nil {
+	// 2. 清空 MySQL offline_messages 表（按应用+命名空间隔离，跨组一次清完）
+	if err := h.dbRepo.ClearByReceiver(ctx, appID, namespace, userID); err != nil {
 		errs = append(errs, errorx.WrapError("mysql", err))
 		h.logger.ErrorKV("清空 MySQL offline_messages 表失败",
 			"user_id", userID,
+			"app_id", appID,
 			"namespace", namespace,
 			"error", err,
 		)
 	} else {
 		h.logger.DebugKV("清空 MySQL offline_messages 表成功",
 			"user_id", userID,
+			"app_id", appID,
 			"namespace", namespace,
 		)
 	}
@@ -520,9 +547,9 @@ func (h *HybridOfflineMessageHandler) UpdatePushStatus(ctx context.Context, mess
 	var status MessageSendStatus
 	var errorMsg string
 	if pushErr == nil {
-		status = MessageSendStatusSuccess
+		status = models.MessageSendStatusSuccess
 	} else {
-		status = MessageSendStatusFailed
+		status = models.MessageSendStatusFailed
 		errorMsg = pushErr.Error()
 	}
 

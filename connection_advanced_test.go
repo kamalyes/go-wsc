@@ -12,9 +12,6 @@ package wsc
 
 import (
 	"fmt"
-	"github.com/gorilla/websocket"
-	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
-	"github.com/stretchr/testify/assert"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,6 +19,10 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/stretchr/testify/assert"
 )
 
 // TestConnection_ReadMessages_TextMessage 测试读取文本消息

@@ -397,8 +397,10 @@ func TestObserverReceiveBroadcastMessages(t *testing.T) {
 	msg.SetSender(UserTypeSystem.String()).
 		SetContent("Global broadcast message").
 		SetBroadcastType(BroadcastTypeGlobal)
+	// 广播消息无指定接收者：清空默认 Receiver，避免 Deliver 误路由到 P2P
+	msg.Receiver = ""
 
-	hub2.Broadcast(ctx, msg)
+	_ = hub2.Deliver(ctx, msg, false)
 
 	// 等待消息传播
 	time.Sleep(300 * time.Millisecond)

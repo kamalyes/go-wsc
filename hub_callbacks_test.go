@@ -96,6 +96,7 @@ type CallbackRecorder struct {
 	// ClientConnectCallback 记录
 	clientConnectCount int64
 	lastConnectClient  *Client
+	lastConnectRecord  *ConnectionRecord
 	lastConnectError   error
 
 	// ClientDisconnectCallback 记录
@@ -158,11 +159,20 @@ func (r *CallbackRecorder) OnHeartbeatTimeout(clientID string, userID string, la
 }
 
 // OnClientConnect 实现客户端连接回调
-func (r *CallbackRecorder) OnClientConnect(ctx context.Context, client *Client) error {
+// 拆表后 OnClientConnect 增强签名，携带 ConnectionRecord 供调用方落盘/审计
+func (r *CallbackRecorder) OnClientConnect(ctx context.Context, client *Client, record *ConnectionRecord) error {
 	return syncx.WithLockReturnValue(&r.mu, func() error {
 		atomic.AddInt64(&r.clientConnectCount, 1)
 		r.lastConnectClient = client
+		r.lastConnectRecord = record
 		return r.lastConnectError
+	})
+}
+
+// GetLastConnectRecord 返回最后一次连接回调收到的 ConnectionRecord（测试验证用）
+func (r *CallbackRecorder) GetLastConnectRecord() *ConnectionRecord {
+	return syncx.WithLockReturnValue(&r.mu, func() *ConnectionRecord {
+		return r.lastConnectRecord
 	})
 }
 

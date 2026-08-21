@@ -185,16 +185,16 @@ func TestMessageType_GetCategory(t *testing.T) {
 
 func TestGetAllMessageTypes(t *testing.T) {
 	allTypes := GetAllMessageTypes()
-	
+
 	// 检查总数
 	assert.Greater(t, len(allTypes), 50, "应该有50+种消息类型")
-	
+
 	// 检查包含基本类型
 	assert.Contains(t, allTypes, MessageTypeText)
 	assert.Contains(t, allTypes, MessageTypeImage)
 	assert.Contains(t, allTypes, MessageTypeVideo)
 	assert.Contains(t, allTypes, MessageTypeSystem)
-	
+
 	// 检查包含新类型
 	assert.Contains(t, allTypes, MessageTypeLocation)
 	assert.Contains(t, allTypes, MessageTypeMarkdown)
@@ -244,9 +244,9 @@ func TestGetMessageTypesByCategory(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			types := GetMessageTypesByCategory(tt.category)
-			
+
 			assert.GreaterOrEqual(t, len(types), tt.minCount, "类型数量不足")
-			
+
 			for _, expectedType := range tt.expectedContains {
 				assert.Contains(t, types, expectedType, "应该包含类型: %s", expectedType)
 			}
@@ -368,12 +368,12 @@ func TestMessageType_GetDefaultPriority(t *testing.T) {
 		// 关键优先级
 		{"错误消息", MessageTypeError, MessagePriorityCritical},
 		{"警告消息", MessageTypeAlert, MessagePriorityCritical},
-		
+
 		// 紧急优先级
 		{"系统消息", MessageTypeSystem, MessagePriorityUrgent},
 		{"公告消息", MessageTypeAnnouncement, MessagePriorityUrgent},
 		{"警告消息", MessageTypeWarning, MessagePriorityUrgent},
-		
+
 		// 高优先级
 		{"通知消息", MessageTypeNotice, MessagePriorityHigh},
 		{"事件消息", MessageTypeEvent, MessagePriorityHigh},
@@ -383,7 +383,7 @@ func TestMessageType_GetDefaultPriority(t *testing.T) {
 		{"邀请消息", MessageTypeInvite, MessagePriorityHigh},
 		{"任务消息", MessageTypeTask, MessagePriorityHigh},
 		{"撤回消息", MessageTypeRecall, MessagePriorityHigh},
-		
+
 		// 普通优先级
 		{"文本消息", MessageTypeText, MessagePriorityNormal},
 		{"图片消息", MessageTypeImage, MessagePriorityNormal},
@@ -393,7 +393,7 @@ func TestMessageType_GetDefaultPriority(t *testing.T) {
 		{"卡片消息", MessageTypeCard, MessagePriorityNormal},
 		{"链接消息", MessageTypeLink, MessagePriorityNormal},
 		{"位置消息", MessageTypeLocation, MessagePriorityNormal},
-		
+
 		// 低优先级
 		{"正在输入", MessageTypeTyping, MessagePriorityLow},
 		{"已读消息", MessageTypeRead, MessagePriorityLow},
@@ -453,9 +453,9 @@ func TestGetMessageTypesByPriority(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			types := GetMessageTypesByPriority(tt.priority)
-			
+
 			assert.GreaterOrEqual(t, len(types), tt.minCount, "类型数量不足")
-			
+
 			for _, expectedType := range tt.expectedContains {
 				assert.Contains(t, types, expectedType, "应该包含类型: %s", expectedType)
 			}
@@ -475,7 +475,7 @@ func TestGetPriorityStats(t *testing.T) {
 	// 基本验证
 	assert.NotNil(t, stats)
 	assert.Greater(t, stats.Total, 0, "总数应该大于0")
-	
+
 	// 验证各优先级都有消息类型
 	assert.Greater(t, stats.Critical, 0, "应该有关键优先级消息")
 	assert.Greater(t, stats.Urgent, 0, "应该有紧急优先级消息")

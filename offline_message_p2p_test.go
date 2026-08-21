@@ -6,7 +6,7 @@
  * @FilePath: \go-wsc\offline_message_p2p_test.go
  * @Description: P2P 离线消息补默认组维度一致性集成测试
  *
- * 验证 P2P（group=nil）场景下，store/drain/clear 三处复用 normalizeGroupID 补默认组后：
+ * 验证 P2P（group=nil）场景下，store/drain/clear 三处复用 constants.NormalizeGroupID 补默认组后：
  *   - Redis store 落点与 drain 取点 key 一致（不丢消息）
  *   - Redis clear key 与 store key 一致（清得掉）
  *   - MySQL group_id 字段补 DefaultGroupID（与 Redis key 维度一致）
@@ -18,7 +18,7 @@ package wsc
 import (
 	"testing"
 
-	"github.com/kamalyes/go-wsc/models"
+	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/routing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -47,7 +47,7 @@ func TestOfflineMessageHandler_P2PStoreDrainDimension(t *testing.T) {
 	require.NoError(t, db.Where("receiver = ?", userID).Find(&records).Error)
 	require.Len(t, records, 3, "MySQL 应有 3 条记录")
 	for _, r := range records {
-		assert.Equal(t, models.DefaultGroupID, r.GroupID,
+		assert.Equal(t, constants.DefaultGroupID, r.GroupID,
 			"P2P 消息 MySQL group_id 应补 DefaultGroupID，与 Redis key 维度一致")
 	}
 
@@ -63,7 +63,7 @@ func TestOfflineMessageHandler_P2PStoreDrainDimension(t *testing.T) {
 }
 
 // TestOfflineMessageHandler_P2PClearDimension P2P 消息 clear 维度一致
-// clear 的 groupIDs=[""]（P2P）经 normalizeGroupID 补默认组后，clear key = store key
+// clear 的 groupIDs=[""]（P2P）经 constants.NormalizeGroupID 补默认组后，clear key = store key
 func TestOfflineMessageHandler_P2PClearDimension(t *testing.T) {
 	tc := newTestOfflineHandlerContext(t)
 	defer tc.cleanup()
@@ -105,7 +105,7 @@ func TestOfflineMessageHandler_P2PAndGroupIsolation(t *testing.T) {
 	require.NoError(t, tc.handler.StoreOfflineMessage(tc.ctx, userID, p2pMsg))
 
 	// 群组消息（注入真实 group，namespace 保持 DefaultNamespace）
-	groupCtx := routing.WithNamespaceGroupIDs(tc.ctx, models.DefaultNamespace, []string{"g-real"})
+	groupCtx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-real"}).Inject(tc.ctx)
 	groupMsg := tc.createTestMessage(userID)
 	groupMsg.MessageID = tc.idGen.GenerateCorrelationID()
 	require.NoError(t, tc.handler.StoreOfflineMessage(groupCtx, userID, groupMsg))

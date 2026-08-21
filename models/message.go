@@ -81,6 +81,9 @@ type HubMessage struct {
 	// ========== 路由信封（投递精确隔离，跨节点随消息体携带） ==========
 	// ctx 路由元数据在异步队列消费时会丢失，故信封必须随消息体流转。
 	// 入口层注入（InjectRoute），投递/跨节点/离线回放统一从 msg 取。
+	// 隔离层次：AppID(应用) > Namespace(租户) > GroupID(平台) > UserID
+	// 空 AppID = 全局共享（老部署兼容，不参与 appId 严格匹配过滤）
+	AppID     string   `json:"app_id,omitempty"`    // 应用ID（最上层隔离维度，空=全局共享）
 	Namespace string   `json:"namespace,omitempty"` // 命名空间ID（空=全局，已归一化时非空）
 	GroupIDs  []string `json:"group_ids,omitempty"` // 群组ID列表（P2P 为 nil；单群组 len==1；多群组 len>1）
 
@@ -504,6 +507,13 @@ func (m *HubMessage) GetTraceID() string {
 
 // ========== 路由信封 helper（统一从 msg 取，不依赖 ctx，避免异步/跨节点 ctx 丢失） ==========
 
+// SetAppID 设置应用ID（链式调用，最上层隔离维度）
+func (m *HubMessage) SetAppID(appID string) *HubMessage {
+	defer m.lockWrite()()
+	m.AppID = appID
+	return m
+}
+
 // SetNamespace 设置命名空间（链式调用）
 func (m *HubMessage) SetNamespace(ns string) *HubMessage {
 	defer m.lockWrite()()
@@ -516,6 +526,12 @@ func (m *HubMessage) SetGroupIDs(groupIDs []string) *HubMessage {
 	defer m.lockWrite()()
 	m.GroupIDs = groupIDs
 	return m
+}
+
+// GetAppID 获取应用ID（空值返回空串，不补默认值，保持「空=全局共享」语义）
+func (m *HubMessage) GetAppID() string {
+	defer m.lockRead()()
+	return m.AppID
 }
 
 // GetNamespace 获取命名空间
@@ -542,44 +558,72 @@ func (m *HubMessage) FirstGroupID() string {
 	return m.GroupIDs[0]
 }
 
-// InjectRoute 从 ctx 提取路由元数据注入信封（入口层统一调用，一次性写入 msg+ctx）
-// - 已有值不覆盖（跨节点消息保留源路由）
-// - 同步写入 ctx，保证下游同步调用链 routing.FromContext 与信封一致
+// InjectRoute 从 ctx 提取路由元数据 + trace_id 注入信封（入口层统一调用，一次性写入 msg+ctx）
+//
+// 一个方法搞定四件事（广播与 P2P 共用同一套路由提取逻辑，无特殊分支）：
+//  1. 注入 trace_id：已有不覆盖（跨节点消息保留源 trace），优先 OTel span，fallback ctx.Value
+//  2. 归一化 appID：空值补 DefaultAppID（appID 无全局语义，必填）
+//  3. 注入信封：已有值不覆盖（跨节点消息保留源路由），空值从 ctx 补；namespace 保持 ctx 原值
+//  4. 回写 ctx：保证下游 routing.FromContext 与信封一致
+//
+// namespace 不归一化的设计意图（一套逻辑打通广播与 P2P）：
+//   - 全局广播：ctx 无 namespace → msg.Namespace="" → ClientMatchesEnvelope 跳过 ns 过滤匹配所有
+//   - 命名空间广播/P2P：ctx 有 namespace → msg.Namespace=ns → 严格匹配
+//   - P2P 严格场景需 namespace 归一化时，调用方在入口 EnsureRouteDefaults 或 NormalizeRoute
 func (m *HubMessage) InjectRoute(ctx context.Context) context.Context {
 	defer m.lockWrite()()
+	// 1. trace_id 注入（与 InjectContext 逻辑一致，已有不覆盖）
+	if m.TraceID == "" {
+		m.TraceID = logger.ExtractTraceID(ctx)
+	}
+	// 2-3. 路由信封注入（appID 归一化，namespace 保持 ctx 原值）
+	appID, _ := routing.NormalizeRoute(routing.AppIDFromContext(ctx), "")
 	ns := routing.NamespaceFromContext(ctx)
 	groupIDs := routing.GroupIDsFromContext(ctx)
-	if m.Namespace == "" && ns != "" {
-		m.Namespace = ns
+	if m.AppID == "" {
+		m.AppID = appID
+	}
+	if m.Namespace == "" {
+		m.Namespace = ns // 保留 ctx 原值（空=全局广播，非空=命名空间隔离）
 	}
 	if m.GroupIDs == nil && len(groupIDs) > 0 {
 		m.GroupIDs = append([]string(nil), groupIDs...)
 	}
-	// 回写 ctx，确保信封值与 ctx 一致（下游路由模块从 ctx 取）
-	return routing.WithNamespaceGroupIDs(ctx, m.Namespace, m.GroupIDs)
+	// 4. 回写 ctx，确保信封值与 ctx 一致（下游路由模块从 ctx 取）
+	return routing.NewRoute().WithAppID(m.AppID).WithNamespace(m.Namespace).WithGroupIDs(m.GroupIDs).Inject(ctx)
 }
 
 // RouteContext 从信封恢复路由 ctx（异步队列/跨节点/离线回放场景，ctx 已丢失时重建）
-// 如果信封为空则返回原 ctx（不制造默认值，符合"没有就是没有"原则）
+// 如果信封为空则返回原 ctx；非空则归一化 appID 后重建 ctx
 func (m *HubMessage) RouteContext(parent context.Context) context.Context {
 	defer m.lockRead()()
-	if m.Namespace == "" && len(m.GroupIDs) == 0 {
+	if m.AppID == "" && m.Namespace == "" && len(m.GroupIDs) == 0 {
 		return parent
 	}
-	return routing.WithNamespaceGroupIDs(parent, m.Namespace, m.GroupIDs)
+	return routing.NewRoute().WithAppID(m.AppID).WithNamespace(m.Namespace).WithGroupIDs(m.GroupIDs).Inject(parent)
 }
 
-// ContextWithRoute 将给定 namespace+groupIDs 同时写入 msg 信封和 ctx
-// 入口层首选；没有上下文时单独调用 SetNamespace/SetGroupIDs
-func (m *HubMessage) ContextWithRoute(parent context.Context, ns string, groupIDs []string) context.Context {
+// ContextWithRoute 将给定 appID+namespace+groupIDs + trace_id 同时写入 msg 信封和 ctx
+//
+// 与 InjectRoute 的区别：路由参数显式传入（不从 ctx 取），适用于 BroadcastToGroupMembers 等
+// 带命名空间参数的公开 API；InjectRoute 适用于从 ctx 取路由的内部发送链路
+//
+// 入口层首选；没有上下文时单独调用 SetAppID/SetNamespace/SetGroupIDs
+// 空值 appID 归一化为 DefaultAppID；namespace 保持原值（广播场景可传空）
+func (m *HubMessage) ContextWithRoute(parent context.Context, appID, ns string, groupIDs []string) context.Context {
 	defer m.lockWrite()()
+	// trace_id 注入（已有不覆盖）
+	if m.TraceID == "" {
+		m.TraceID = logger.ExtractTraceID(parent)
+	}
+	m.AppID, _ = routing.NormalizeRoute(appID, "")
 	m.Namespace = ns
 	if groupIDs == nil {
 		m.GroupIDs = nil
 	} else {
 		m.GroupIDs = append([]string(nil), groupIDs...)
 	}
-	return routing.WithNamespaceGroupIDs(parent, ns, groupIDs)
+	return routing.NewRoute().WithAppID(m.AppID).WithNamespace(ns).WithGroupIDs(groupIDs).Inject(parent)
 }
 
 // Clone 创建消息的深拷贝，避免并发修改问题
@@ -597,6 +641,7 @@ func (m *HubMessage) Clone() *HubMessage {
 	msg.mu = &sync.RWMutex{}
 
 	// 仅 Data map 和 GroupIDs slice 需要深拷贝，其他字段均为值类型
+	// （AppID/Namespace 为 string 值类型，*m 值拷贝已自动复制，无需显式深拷贝）
 	if m.Data != nil {
 		msg.Data = make(map[string]interface{}, len(m.Data))
 		for k, v := range m.Data {

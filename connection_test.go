@@ -79,7 +79,7 @@ func TestCloseConnection(t *testing.T) {
 // TestClosed_ThreadSafety 测试Closed方法的线程安全性
 func TestClosed_ThreadSafety(t *testing.T) {
 	client := New("ws://localhost:8080")
-	
+
 	// 测试线程安全
 	done := make(chan bool)
 	for i := 0; i < 10; i++ {
@@ -90,10 +90,10 @@ func TestClosed_ThreadSafety(t *testing.T) {
 			done <- true
 		}()
 	}
-	
+
 	for i := 0; i < 10; i++ {
 		<-done
 	}
-	
+
 	assert.True(t, true, "Thread safety test completed")
 }

@@ -1,4 +1,4 @@
-﻿/*
+/*
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-08-08 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/routing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -36,14 +37,16 @@ func TestSendToGroup_InjectGroupForOfflineDimension(t *testing.T) {
 
 	ctx := context.Background()
 	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-dim", Namespace: "tenantA", OwnerID: "owner1"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, "tenantA", "g-dim", []string{"u-offline-dim"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("tenantA").WithGroupIDs([]string{"g-dim"}).Inject(ctx), []string{"u-offline-dim"}))
 
 	go hub.Run()
 	defer hub.Shutdown()
 	time.Sleep(100 * time.Millisecond)
 
 	msg := makeGroupMessage("owner1")
-	result := hub.SendToGroup(routing.WithNamespaceGroupIDs(ctx, "tenantA", []string{"g-dim"}), msg, false)
+	msg.RequireAck = true
+	groupCtx := routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("tenantA").WithGroupIDs([]string{"g-dim"}).Inject(ctx)
+	result := hub.Deliver(groupCtx, msg, false)
 	require.NotNil(t, result)
 
 	ns, groups, count := handler.snapshot()
@@ -62,7 +65,7 @@ func TestHandleForwardableMessage_P2PGroupNil(t *testing.T) {
 	defer hub.SafeShutdown()
 
 	// 模拟 handleTextMessage 源头注入发送方 namespace+group
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), "ns-sender", []string{"g-sender"})
+	ctx := routing.NewRoute().WithAppID("").WithNamespace("ns-sender").WithGroupIDs([]string{"g-sender"}).Inject(context.Background())
 
 	msg := makeGroupMessage("sender")
 	msg.Receiver = "u-offline-p2p"
@@ -84,7 +87,7 @@ func TestSendToUserWithRetry_P2PNotUseSenderGroup(t *testing.T) {
 	defer hub.SafeShutdown()
 
 	// P2P 调用方正确传入 group=nil（P2P 不捆绑 group）
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), "ns-p2p", nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace("ns-p2p").WithGroupIDs(nil).Inject(context.Background())
 	hub.SendToUserWithRetry(ctx, "u-offline-direct", makeGroupMessage("sender"))
 
 	ns, groups, count := handler.snapshot()

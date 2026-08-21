@@ -12,16 +12,20 @@
 package wsc
 
 import (
+	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/repository"
 )
 
 // ============================================
-// 命名空间常量
+// 路由隔离维度默认值（最上层为 appID，其次命名空间）
 // ============================================
 
+// DefaultAppID 默认应用ID（最上层隔离维度，跨应用消息隔离）
+const DefaultAppID = constants.DefaultAppID
+
 // DefaultNamespace 默认命名空间ID（类似 k8s default namespace）
-const DefaultNamespace = models.DefaultNamespace
+const DefaultNamespace = constants.DefaultNamespace
 
 // ============================================
 // 系统保留组（agent/observer 统一到 group 体系）
@@ -32,8 +36,8 @@ const DefaultNamespace = models.DefaultNamespace
 // 本地分片索引（agentShards/observerShards）保留做 O(1) 缓存，
 // Redis 系统组用于跨节点共享成员关系与显式广播
 const (
-	SystemGroupAgents    = models.SystemGroupAgents    // 客服系统组（每命名空间一个）
-	SystemGroupObservers = models.SystemGroupObservers // 观察者系统组（全局 namespace="" 或命名空间级）
+	SystemGroupAgents    = constants.SystemGroupAgents    // 客服系统组（每命名空间一个）
+	SystemGroupObservers = constants.SystemGroupObservers // 观察者系统组（全局 namespace="" 或命名空间级）
 )
 
 // IsSystemGroup 判断 groupID 是否为系统保留组（__ 前缀）
@@ -46,8 +50,22 @@ var IsSystemGroup = models.IsSystemGroup
 // Group 群组模型
 type Group = models.Group
 
-// GroupSendResult 群组消息投递结果
+// GroupSendResult 群组消息投递结果（历史类型，保留供旧调用方引用；新代码请用 DeliverResult）
 type GroupSendResult = models.GroupSendResult
+
+// DeliverResult 统一投递结果（覆盖 P2P/群组/命名空间/全局广播所有场景）
+type DeliverResult = models.DeliverResult
+
+// DeliveryMode 投递模式
+type DeliveryMode = models.DeliveryMode
+
+const (
+	DeliveryModeP2P            = models.DeliveryModeP2P            // 点对点（msg.Receiver 非空）
+	DeliveryModeGroupReliable  = models.DeliveryModeGroupReliable  // 群组可靠投递（RequireAck=true）
+	DeliveryModeGroupBroadcast = models.DeliveryModeGroupBroadcast // 群组广播（RequireAck=false，fire-and-forget）
+	DeliveryModeNamespace      = models.DeliveryModeNamespace      // 命名空间广播
+	DeliveryModeGlobal         = models.DeliveryModeGlobal         // 全局广播
+)
 
 // ============================================
 // 群组仓库类型与构造函数
@@ -108,14 +126,13 @@ var (
 // - GetNamespaceGroups(ctx context.Context, namespace string) ([]string, error): 获取命名空间下所有群组ID
 // - GetGroupRepository() GroupRepository: 获取群组仓库
 //
-// 群组消息投递方法（namespace/groupID 统一从 ctx 取，调用方使用 routing.WithNamespaceGroupIDs 注入）：
-// - SendToGroup(ctx context.Context, msg *HubMessage, excludeSender bool) *GroupSendResult: 向群组发送消息（可靠投递，含离线存储与重试；ctx 必须注入 namespace 且至少 1 个 groupID）
-// - BroadcastToGroupMembers(ctx context.Context, namespace, groupID string, msg *HubMessage, excludeSender bool) int: 向群组在线成员广播（fire-and-forget，性能最优）
-// - BroadcastToGroup(ctx context.Context, namespace, groupID string, msg *HubMessage, excludeSender bool) int: 向指定命名空间的指定群组广播（便捷方法，委托给 BroadcastToGroupMembers）
-// - BroadcastToAllGroups(ctx context.Context, namespace string, msg *HubMessage) int: 向指定命名空间的所有群组广播（Pipeline 批量查询+成员去重+一次路由）
-// - BroadcastToAllNamespacesAllGroups(ctx context.Context, msg *HubMessage) int: 向所有命名空间的所有群组广播（并行命名空间处理，背压控制最大并发 10）
-// - BroadcastToGroups(ctx context.Context, namespaces, groupIDs []string, msg *HubMessage) int: 统一批量群组广播（namespaces/groupIDs 可选传，反向映射支持只传 groupID 反查命名空间）
-// - BroadcastToNamespace(ctx context.Context, namespace string, msg *HubMessage) int: 向指定命名空间的所有连接广播（不限群组）
+// 消息投递（统一入口，路由全由 ctx + msg 决定）：
+// - Deliver(ctx context.Context, msg *HubMessage, excludeSender bool) *DeliverResult: 统一投递入口
+//   调用方通过 routing.NewRoute().WithAppID(appID).WithNamespace(namespace).WithGroupIDs(groupIDs).Inject(ctx) 注入路由后调一次 Deliver，
+//   按 msg.Receiver / groupIDs / namespace 自动分派到 P2P / 群组可靠投递(RequireAck=true) /
+//   群组广播(RequireAck=false) / 命名空间广播 / 全局广播。
+//   替代历史的 SendToGroup/BroadcastToGroupMembers/BroadcastToGroup/BroadcastToAllGroups/
+//   BroadcastToAllNamespacesAllGroups/BroadcastToGroups/BroadcastToNamespace/Broadcast 等割裂方法。
 //
 // 观察者方法（支持命名空间隔离）：
 // - GetObserverClientsByNamespace(namespace string) []*Client: 获取指定命名空间的观察者客户端（含全局观察者，Namespace 为空）

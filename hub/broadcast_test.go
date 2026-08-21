@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/routing"
 )
@@ -52,7 +53,7 @@ func TestBroadcastToFiltered_WSAndSSE(t *testing.T) {
 	msg.MessageID = "filtered-1"
 
 	// 注入路由使 namespace 匹配（makeTestClient 默认 ns=default）
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 
 	delivered := hub.broadcastToFiltered(ctx, func(c *Client) bool {
 		return true // 全匹配
@@ -89,7 +90,7 @@ func TestBroadcastToFiltered_ConditionFilter(t *testing.T) {
 	hub.shardedRegistry.AddClient(matched)
 	hub.shardedRegistry.AddClient(unmatched)
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 	msg := makeGroupMessage("sender")
 
 	delivered := hub.broadcastToFiltered(ctx, func(c *Client) bool {
@@ -121,7 +122,7 @@ func TestBroadcastToFiltered_NamespaceIsolation(t *testing.T) {
 	hub.shardedRegistry.AddClient(ns2Client)
 
 	// 向 ns-alpha 广播
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), "ns-alpha", nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace("ns-alpha").WithGroupIDs(nil).Inject(context.Background())
 	msg := makeGroupMessage("sender")
 
 	delivered := hub.broadcastToFiltered(ctx, func(c *Client) bool {
@@ -153,13 +154,13 @@ func TestBroadcastToFiltered_GroupNotIsolated(t *testing.T) {
 	hub, _, _, cleanup := setupGroupTestHub(t)
 	defer cleanup()
 
-	g1Client := makeTestClient("c-g1", "u-g1", models.DefaultNamespace, "group-a")
-	g2Client := makeTestClient("c-g2", "u-g2", models.DefaultNamespace, "group-b")
+	g1Client := makeTestClient("c-g1", "u-g1", constants.DefaultNamespace, "group-a")
+	g2Client := makeTestClient("c-g2", "u-g2", constants.DefaultNamespace, "group-b")
 	hub.shardedRegistry.AddClient(g1Client)
 	hub.shardedRegistry.AddClient(g2Client)
 
 	// 向 group-a 广播（broadcastToFiltered 仅做 namespace 隔离，不做业务群组隔离）
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, []string{"group-a"})
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"group-a"}).Inject(context.Background())
 	msg := makeGroupMessage("sender")
 
 	delivered := hub.broadcastToFiltered(ctx, func(c *Client) bool {
@@ -182,6 +183,9 @@ func TestBroadcastToFiltered_GroupNotIsolated(t *testing.T) {
 }
 
 // TestBroadcastToFiltered_EmptyNamespaceMatchesAll 验证 msg.Namespace 为空时跳过 ns 过滤（全局广播）
+//
+// 设计：ClientMatchesEnvelope 对 namespace 空值兼容——msgNamespace=="" 表示全局广播，
+// 跳过 ns 过滤匹配所有客户端（跨命名空间的系统通知场景）
 func TestBroadcastToFiltered_EmptyNamespaceMatchesAll(t *testing.T) {
 	hub, _, _, cleanup := setupGroupTestHub(t)
 	defer cleanup()
@@ -191,14 +195,14 @@ func TestBroadcastToFiltered_EmptyNamespaceMatchesAll(t *testing.T) {
 	hub.shardedRegistry.AddClient(ns1Client)
 	hub.shardedRegistry.AddClient(ns2Client)
 
-	// ctx 无路由 → msg.Namespace 为空 → 跳过 ns 过滤
+	// ctx 无路由 → InjectRoute 保留 namespace="" → ClientMatchesEnvelope 跳过 ns 过滤匹配所有
 	msg := makeGroupMessage("sender")
 
 	delivered := hub.broadcastToFiltered(context.Background(), func(c *Client) bool {
 		return true
 	}, msg)
 
-	assert.Equal(t, 2, delivered, "空 namespace 应匹配所有客户端")
+	assert.Equal(t, 2, delivered, "空 namespace 应匹配所有客户端（全局广播）")
 }
 
 // TestBroadcastToFiltered_ClosedClientSkipped 验证已关闭客户端被跳过
@@ -212,7 +216,7 @@ func TestBroadcastToFiltered_ClosedClientSkipped(t *testing.T) {
 	hub.shardedRegistry.AddClient(closed)
 	hub.shardedRegistry.AddClient(open)
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 	msg := makeGroupMessage("sender")
 
 	delivered := hub.broadcastToFiltered(ctx, func(c *Client) bool {
@@ -240,7 +244,7 @@ func TestBroadcastToFiltered_TrySendFail(t *testing.T) {
 	}
 	hub.shardedRegistry.AddClient(client)
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 	msg := makeGroupMessage("sender")
 
 	delivered := hub.broadcastToFiltered(ctx, func(c *Client) bool {
@@ -258,7 +262,7 @@ func TestBroadcastToFiltered_NoMatchReturnsZero(t *testing.T) {
 	client := makeTestClient("c-1", "u-1")
 	hub.shardedRegistry.AddClient(client)
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 	msg := makeGroupMessage("sender")
 	msg.MessageID = "no-match-1"
 
@@ -284,7 +288,7 @@ func TestBroadcastToFiltered_MarshalFailReturnsZero(t *testing.T) {
 	client := makeTestClient("c-1", "u-1")
 	hub.shardedRegistry.AddClient(client)
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 	msg := makeGroupMessage("sender")
 	// Data 中放入不可序列化的值（func），触发 json.Marshal 失败
 	msg.Data = map[string]interface{}{
@@ -311,7 +315,7 @@ func TestBroadcastToFiltered_UpdatesMessageStatus(t *testing.T) {
 	client := makeTestClient("c-1", "u-1")
 	hub.shardedRegistry.AddClient(client)
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 	msg := makeGroupMessage("sender")
 	msg.MessageID = "status-1"
 
@@ -360,7 +364,7 @@ func TestBroadcastToUserIDs_WSAndSSE(t *testing.T) {
 	hub.shardedRegistry.AddClient(wsClient)
 	hub.shardedRegistry.AddClient(sseClient)
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 	msg := makeGroupMessage("sender")
 	msg.MessageID = "uids-1"
 
@@ -395,7 +399,7 @@ func TestBroadcastToUserIDs_NamespaceIsolation(t *testing.T) {
 	hub.shardedRegistry.AddClient(ns2Client)
 
 	// 向 ns-alpha 广播给 u-shared
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), "ns-alpha", nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace("ns-alpha").WithGroupIDs(nil).Inject(context.Background())
 	msg := makeGroupMessage("sender")
 
 	delivered := hub.broadcastToUserIDs(ctx, []string{"u-shared"}, msg)
@@ -424,7 +428,7 @@ func TestBroadcastToUserIDs_ClosedClientSkipped(t *testing.T) {
 	hub.shardedRegistry.AddClient(closed)
 	hub.shardedRegistry.AddClient(open)
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 	msg := makeGroupMessage("sender")
 
 	delivered := hub.broadcastToUserIDs(ctx, []string{"u-closed", "u-open"}, msg)
@@ -445,7 +449,7 @@ func TestBroadcastToUserIDs_NonExistentUser(t *testing.T) {
 	client := makeTestClient("c-1", "u-exist")
 	hub.shardedRegistry.AddClient(client)
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 	msg := makeGroupMessage("sender")
 
 	// 包含不存在 userID 和存在 userID
@@ -470,7 +474,7 @@ func TestBroadcastToUserIDs_TrySendFail(t *testing.T) {
 	}
 	hub.shardedRegistry.AddClient(client)
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 	msg := makeGroupMessage("sender")
 
 	delivered := hub.broadcastToUserIDs(ctx, []string{"u-full"}, msg)
@@ -485,7 +489,7 @@ func TestBroadcastToUserIDs_MarshalFailReturnsZero(t *testing.T) {
 	client := makeTestClient("c-1", "u-1")
 	hub.shardedRegistry.AddClient(client)
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 	msg := makeGroupMessage("sender")
 	msg.Data = map[string]interface{}{
 		"bad": func() {},
@@ -513,7 +517,7 @@ func TestBroadcastByUserType(t *testing.T) {
 	hub.shardedRegistry.AddClient(customer2)
 	hub.shardedRegistry.AddClient(agent)
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 	msg := makeGroupMessage("sender")
 
 	delivered := hub.BroadcastByUserType(ctx, UserTypeCustomer, msg)
@@ -546,7 +550,7 @@ func TestBroadcastByUserType_NoMatch(t *testing.T) {
 	client := makeTestClient("c-1", "u-1")
 	hub.shardedRegistry.AddClient(client)
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 	msg := makeGroupMessage("sender")
 
 	delivered := hub.BroadcastByUserType(ctx, UserTypeBot, msg)
@@ -567,7 +571,7 @@ func TestBroadcastToRole(t *testing.T) {
 	hub.shardedRegistry.AddClient(customer)
 	hub.shardedRegistry.AddClient(admin)
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 	msg := makeGroupMessage("sender")
 
 	delivered := hub.BroadcastToRole(ctx, models.UserRoleAdmin, msg)
@@ -599,7 +603,7 @@ func TestBroadcastToClientType(t *testing.T) {
 	hub.shardedRegistry.AddClient(webClient)
 	hub.shardedRegistry.AddClient(mobileClient)
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 	msg := makeGroupMessage("sender")
 
 	delivered := hub.BroadcastToClientType(ctx, models.ClientTypeWeb, msg)
@@ -631,7 +635,7 @@ func TestBroadcastToDepartment(t *testing.T) {
 	hub.shardedRegistry.AddClient(salesClient)
 	hub.shardedRegistry.AddClient(techClient)
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 	msg := makeGroupMessage("sender")
 
 	delivered := hub.BroadcastToDepartment(ctx, models.DepartmentTechnical, msg)
@@ -667,7 +671,7 @@ func TestBroadcastExclude(t *testing.T) {
 	hub.shardedRegistry.AddClient(c3)
 	hub.shardedRegistry.AddClient(c4)
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 	msg := makeGroupMessage("sender")
 
 	// 排除 u-2 和 u-4
@@ -708,7 +712,7 @@ func TestBroadcastExclude_EmptyExclude(t *testing.T) {
 	hub.shardedRegistry.AddClient(c1)
 	hub.shardedRegistry.AddClient(c2)
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 	msg := makeGroupMessage("sender")
 
 	delivered := hub.BroadcastExclude(ctx, msg, nil)
@@ -723,7 +727,7 @@ func TestBroadcastExclude_AllExcluded(t *testing.T) {
 	c1 := makeTestClient("c-1", "u-1")
 	hub.shardedRegistry.AddClient(c1)
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 	msg := makeGroupMessage("sender")
 
 	delivered := hub.BroadcastExclude(ctx, msg, []string{"u-1"})
@@ -741,12 +745,12 @@ func setupDiverseClients(t *testing.T) *Hub {
 	t.Cleanup(cleanup)
 
 	clients := []*Client{
-		{ID: "c-customer-1", UserID: "u-c1", UserType: UserTypeCustomer, Role: models.UserRoleCustomer, ClientType: models.ClientTypeWeb, Department: models.DepartmentGeneral, Namespace: models.DefaultNamespace, SendChan: make(chan []byte, 1)},
-		{ID: "c-customer-2", UserID: "u-c2", UserType: UserTypeCustomer, Role: models.UserRoleCustomer, ClientType: models.ClientTypeDesktop, Department: models.DepartmentGeneral, Namespace: models.DefaultNamespace, SendChan: make(chan []byte, 1)},
-		{ID: "c-agent-1", UserID: "u-a1", UserType: UserTypeAgent, Role: models.UserRoleAgent, ClientType: models.ClientTypeWeb, Department: models.DepartmentSales, Namespace: models.DefaultNamespace, SendChan: make(chan []byte, 1)},
-		{ID: "c-agent-2", UserID: "u-a2", UserType: UserTypeAgent, Role: models.UserRoleAgent, ClientType: models.ClientTypeMobile, Department: models.DepartmentTechnical, Namespace: models.DefaultNamespace, SendChan: make(chan []byte, 1)},
-		{ID: "c-vip-1", UserID: "u-v1", UserType: UserTypeVIP, Role: models.UserRoleCustomer, ClientType: models.ClientTypeAPI, Department: models.DepartmentGeneral, Namespace: models.DefaultNamespace, SendChan: make(chan []byte, 1)},
-		{ID: "c-admin-1", UserID: "u-ad1", UserType: UserTypeAdmin, Role: models.UserRoleAdmin, ClientType: models.ClientTypeDesktop, Department: models.DepartmentGeneral, Namespace: models.DefaultNamespace, SendChan: make(chan []byte, 1)},
+		{ID: "c-customer-1", UserID: "u-c1", UserType: UserTypeCustomer, Role: models.UserRoleCustomer, ClientType: models.ClientTypeWeb, Department: models.DepartmentGeneral, Namespace: constants.DefaultNamespace, SendChan: make(chan []byte, 1)},
+		{ID: "c-customer-2", UserID: "u-c2", UserType: UserTypeCustomer, Role: models.UserRoleCustomer, ClientType: models.ClientTypeDesktop, Department: models.DepartmentGeneral, Namespace: constants.DefaultNamespace, SendChan: make(chan []byte, 1)},
+		{ID: "c-agent-1", UserID: "u-a1", UserType: UserTypeAgent, Role: models.UserRoleAgent, ClientType: models.ClientTypeWeb, Department: models.DepartmentSales, Namespace: constants.DefaultNamespace, SendChan: make(chan []byte, 1)},
+		{ID: "c-agent-2", UserID: "u-a2", UserType: UserTypeAgent, Role: models.UserRoleAgent, ClientType: models.ClientTypeMobile, Department: models.DepartmentTechnical, Namespace: constants.DefaultNamespace, SendChan: make(chan []byte, 1)},
+		{ID: "c-vip-1", UserID: "u-v1", UserType: UserTypeVIP, Role: models.UserRoleCustomer, ClientType: models.ClientTypeAPI, Department: models.DepartmentGeneral, Namespace: constants.DefaultNamespace, SendChan: make(chan []byte, 1)},
+		{ID: "c-admin-1", UserID: "u-ad1", UserType: UserTypeAdmin, Role: models.UserRoleAdmin, ClientType: models.ClientTypeDesktop, Department: models.DepartmentGeneral, Namespace: constants.DefaultNamespace, SendChan: make(chan []byte, 1)},
 	}
 
 	// 设置 VIP 等级
@@ -934,7 +938,7 @@ func TestBroadcastByUserType_WithNamespaceIsolation(t *testing.T) {
 	hub.shardedRegistry.AddClient(ns2Customer)
 
 	// 向 ns-alpha 的 Customer 广播
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), "ns-alpha", nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace("ns-alpha").WithGroupIDs(nil).Inject(context.Background())
 	msg := makeGroupMessage("sender")
 
 	delivered := hub.BroadcastByUserType(ctx, UserTypeCustomer, msg)
@@ -961,11 +965,11 @@ func TestBroadcastToRole_NoGroupIsolation(t *testing.T) {
 	hub, _, _, cleanup := setupGroupTestHub(t)
 	defer cleanup()
 
-	g1Agent := makeTestClient("c-g1", "u-g1", models.DefaultNamespace, "group-a")
+	g1Agent := makeTestClient("c-g1", "u-g1", constants.DefaultNamespace, "group-a")
 	g1Agent.UserType = UserTypeAgent
 	g1Agent.Role = models.UserRoleAgent
 
-	g2Agent := makeTestClient("c-g2", "u-g2", models.DefaultNamespace, "group-b")
+	g2Agent := makeTestClient("c-g2", "u-g2", constants.DefaultNamespace, "group-b")
 	g2Agent.UserType = UserTypeAgent
 	g2Agent.Role = models.UserRoleAgent
 
@@ -973,7 +977,7 @@ func TestBroadcastToRole_NoGroupIsolation(t *testing.T) {
 	hub.shardedRegistry.AddClient(g2Agent)
 
 	// 向 Agent 角色广播（broadcastToFiltered 仅做 namespace 隔离，不做 group 隔离）
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, []string{"group-a"})
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"group-a"}).Inject(context.Background())
 	msg := makeGroupMessage("sender")
 
 	delivered := hub.BroadcastToRole(ctx, models.UserRoleAgent, msg)
@@ -1006,7 +1010,7 @@ func TestBroadcastToFiltered_MultiSuccessUpdatesStatusOnce(t *testing.T) {
 		hub.shardedRegistry.AddClient(c)
 	}
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 	msg := makeGroupMessage("sender")
 	msg.MessageID = "multi-status-1"
 
@@ -1044,7 +1048,7 @@ func TestBroadcastToUserIDs_MultiUsersMixedTypes(t *testing.T) {
 	hub.shardedRegistry.AddClient(ws3)
 	hub.shardedRegistry.AddClient(sse3)
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 	msg := makeGroupMessage("sender")
 
 	delivered := hub.broadcastToUserIDs(ctx, []string{"u1", "u2", "u3"}, msg)
@@ -1083,7 +1087,7 @@ func TestBroadcastToFiltered_OnlySSEClients(t *testing.T) {
 	hub.shardedRegistry.AddClient(sse1)
 	hub.shardedRegistry.AddClient(sse2)
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 	msg := makeGroupMessage("sender")
 
 	delivered := hub.broadcastToFiltered(ctx, func(c *Client) bool {
@@ -1113,7 +1117,7 @@ func TestBroadcastToFiltered_OnlyWSClients(t *testing.T) {
 	hub.shardedRegistry.AddClient(ws1)
 	hub.shardedRegistry.AddClient(ws2)
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 	msg := makeGroupMessage("sender")
 
 	delivered := hub.broadcastToFiltered(ctx, func(c *Client) bool {

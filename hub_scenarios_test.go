@@ -246,7 +246,7 @@ func testRoutingScenarios(t *testing.T, hub *Hub) {
 				hub.Register(receiver)
 				// 等待 receiver 注册完成，避免 race detector 下 50ms 不够导致 flaky
 				require.Eventually(t, func() bool {
-					online, _ := hub.IsUserOnline(receiver.UserID)
+					online, _ := hub.IsUserOnline(context.Background(), receiver.UserID)
 					return online
 				}, 2*time.Second, 10*time.Millisecond)
 
@@ -266,7 +266,7 @@ func testRoutingScenarios(t *testing.T, hub *Hub) {
 				time.Sleep(100 * time.Millisecond)
 				msg := createTestHubMessage(MessageTypeText)
 
-				hub.Broadcast(context.Background(), msg)
+				_ = hub.Deliver(context.Background(), msg, false)
 				time.Sleep(100 * time.Millisecond)
 
 				for j := 0; j < 5; j++ {

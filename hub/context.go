@@ -7,7 +7,7 @@
  * @Description: hub 层上下文扩展
  *
  * 路由元数据（namespace/groupIDs + gRPC metadata 传播）已抽离到独立的 routing 包，
- * 全项目共用，无循环依赖。hub 层通过 routing.WithNamespaceGroupIDs /
+ * 全项目共用，无循环依赖。hub 层通过 routing.NewRoute().WithAppID(...).Inject(ctx) /
  * routing.NamespaceFromContext / routing.InjectToOutgoingMetadata 等直接调用。
  *
  * 本文件仅保留 hub 专用的 context key（UserID/SenderID）。

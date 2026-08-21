@@ -27,6 +27,7 @@ import (
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/osx"
 	"github.com/kamalyes/go-toolbox/pkg/safe"
+	"github.com/kamalyes/go-toolbox/pkg/syncx"
 
 	"github.com/kamalyes/go-wsc/handler"
 	"github.com/kamalyes/go-wsc/middleware"
@@ -40,62 +41,75 @@ import (
 // ============================================================================
 
 type (
-	HubMessage                 = models.HubMessage
-	AckManager                 = protocol.AckManager
-	MessageRecordRepository    = repository.MessageRecordRepository
-	OnlineStatusRepository     = repository.OnlineStatusRepository
-	Client                     = models.Client
-	HubStatsRepository         = repository.HubStatsRepository
-	WorkloadRepository         = repository.WorkloadRepository
-	OfflineMessageHandler      = handler.OfflineMessageHandler
-	ConnectionRecordRepository = repository.ConnectionRecordRepository
-	ConnectionRecord           = models.ConnectionRecord
-	IDGenerator                = models.IDGenerator
-	WSCLogger                  = middleware.WSCLogger
-	WelcomeMessageProvider     = models.WelcomeMessageProvider
-	RateLimiter                = middleware.RateLimiter
-	DistributedMessage         = models.DistributedMessage
-	DisconnectReason           = models.DisconnectReason
-	ErrorSeverity              = models.ErrorSeverity
-	UserType                   = models.UserType
-	ErrorType                  = errorx.ErrorType
-	MessageType                = models.MessageType
-	QueueType                  = models.QueueType
-	VIPLevel                   = models.VIPLevel
-	UserRole                   = models.UserRole
-	UserStatus                 = models.UserStatus
-	Department                 = models.Department
-	Skill                      = models.Skill
-	NodeStatus                 = models.NodeStatus
-	ClientType                 = models.ClientType
-	RetryAttempt               = models.RetryAttempt
-	MessageSendStatus          = models.MessageSendStatus
-	FailureReason              = models.FailureReason
-	MessageSendRecord          = models.MessageSendRecord
-	WorkloadInfo               = repository.WorkloadInfo
-	MessageClassification      = models.MessageClassification
-	GroupRepository            = repository.GroupRepository
-	Group                      = repository.Group
-	GroupSendResult            = repository.GroupSendResult
-	Priority                   = models.Priority
-	AckMessage                 = protocol.AckMessage
-	AckStatus                  = protocol.AckStatus
-	HubStats                   = models.HubStats
-	SendResult                 = models.SendResult
-	NodeInfo                   = models.NodeInfo
-	KickUserResult             = models.KickUserResult
-	SendAttempt                = models.SendAttempt
-	BroadcastResult            = models.BroadcastResult
-	HubHealthInfo              = models.HubHealthInfo
-	ConnectionType             = models.ConnectionType
-	ObserverManagerStats       = models.ObserverManagerStats
-	NamespaceObserverStats     = models.NamespaceObserverStats
-	GroupObserverStats         = models.GroupObserverStats
-	ObserverStats              = models.ObserverStats
-	MessageRecordFilter        = repository.MessageRecordFilter
-	OfflineMessageFilter       = repository.OfflineMessageFilter
-	MessageRole                = repository.MessageRole
-	WorkloadDimension          = models.WorkloadDimension
+	HubMessage                  = models.HubMessage
+	AckManager                  = protocol.AckManager
+	MessageRecordRepository     = repository.MessageRecordRepository
+	OnlineStatusRepository      = repository.OnlineStatusRepository
+	Client                      = models.Client
+	HubStatsRepository          = repository.HubStatsRepository
+	WorkloadRepository          = repository.WorkloadRepository
+	OfflineMessageHandler       = handler.OfflineMessageHandler
+	ConnectionRecordRepository  = repository.ConnectionRecordRepository
+	ConnectionRecord            = models.ConnectionRecord
+	ConnectionQualityRepository = repository.ConnectionQualityRepository
+	ConnectionQuality           = models.ConnectionQuality
+	IDGenerator                 = models.IDGenerator
+	WSCLogger                   = middleware.WSCLogger
+	WelcomeMessageProvider      = models.WelcomeMessageProvider
+	RateLimiter                 = middleware.RateLimiter
+	DistributedMessage          = models.DistributedMessage
+	DisconnectReason            = models.DisconnectReason
+	ErrorSeverity               = models.ErrorSeverity
+	UserType                    = models.UserType
+	ErrorType                   = errorx.ErrorType
+	MessageType                 = models.MessageType
+	QueueType                   = models.QueueType
+	VIPLevel                    = models.VIPLevel
+	UserRole                    = models.UserRole
+	UserStatus                  = models.UserStatus
+	Department                  = models.Department
+	Skill                       = models.Skill
+	NodeStatus                  = models.NodeStatus
+	ClientType                  = models.ClientType
+	RetryAttempt                = models.RetryAttempt
+	MessageSendStatus           = models.MessageSendStatus
+	FailureReason               = models.FailureReason
+	MessageSendRecord           = models.MessageSendRecord
+	WorkloadInfo                = repository.WorkloadInfo
+	MessageClassification       = models.MessageClassification
+	GroupRepository             = repository.GroupRepository
+	Group                       = repository.Group
+	GroupSendResult             = repository.GroupSendResult
+	Priority                    = models.Priority
+	AckMessage                  = protocol.AckMessage
+	AckStatus                   = protocol.AckStatus
+	HubStats                    = models.HubStats
+	SendResult                  = models.SendResult
+	NodeInfo                    = models.NodeInfo
+	KickUserResult              = models.KickUserResult
+	SendAttempt                 = models.SendAttempt
+	BroadcastResult             = models.BroadcastResult
+	DeliverResult               = models.DeliverResult
+	DeliveryMode                = models.DeliveryMode
+	HubHealthInfo               = models.HubHealthInfo
+	ConnectionType              = models.ConnectionType
+	ObserverManagerStats        = models.ObserverManagerStats
+	NamespaceObserverStats      = models.NamespaceObserverStats
+	GroupObserverStats          = models.GroupObserverStats
+	ObserverStats               = models.ObserverStats
+	MessageRecordFilter         = repository.MessageRecordFilter
+	OfflineMessageFilter        = repository.OfflineMessageFilter
+	MessageRole                 = repository.MessageRole
+	WorkloadDimension           = models.WorkloadDimension
+)
+
+// DeliveryMode 投递模式常量（Deliver 决策树分派用，由 models 包统一收敛）
+const (
+	DeliveryModeP2P            = models.DeliveryModeP2P            // 点对点（msg.Receiver 非空）
+	DeliveryModeGroupReliable  = models.DeliveryModeGroupReliable  // 群组可靠投递（RequireAck=true）
+	DeliveryModeGroupBroadcast = models.DeliveryModeGroupBroadcast // 群组广播（RequireAck=false，fire-and-forget）
+	DeliveryModeNamespace      = models.DeliveryModeNamespace      // 命名空间广播
+	DeliveryModeGlobal         = models.DeliveryModeGlobal         // 全局广播
 )
 
 // 函数导入
@@ -151,6 +165,7 @@ const (
 	FailureReasonQueueFull   = models.FailureReasonQueueFull
 	FailureReasonConnError   = models.FailureReasonConnError
 	FailureReasonUserOffline = models.FailureReasonUserOffline
+	FailureReasonAckTimeout  = models.FailureReasonAckTimeout
 
 	// MessageSendStatus 常量
 	MessageSendStatusPending      = models.MessageSendStatusPending
@@ -158,6 +173,7 @@ const (
 	MessageSendStatusSuccess      = models.MessageSendStatusSuccess
 	MessageSendStatusFailed       = models.MessageSendStatusFailed
 	MessageSendStatusUserOffline  = models.MessageSendStatusUserOffline
+	MessageSendStatusAckTimeout   = models.MessageSendStatusAckTimeout
 	MessageTypeHealthCheck        = models.MessageTypeHealthCheck
 	MessageTypeConnectionRejected = models.MessageTypeConnectionRejected
 
@@ -171,11 +187,6 @@ const (
 	BroadcastTypeGlobal  = models.BroadcastTypeGlobal
 	BroadcastTypeSession = models.BroadcastTypeSession
 	BroadcastTypeNone    = models.BroadcastTypeNone
-)
-
-const (
-	DefaultNamespace = models.DefaultNamespace
-	DefaultGroupID   = models.DefaultGroupID
 )
 
 var (
@@ -287,7 +298,8 @@ type (
 	// AfterHeartbeatCallback 心跳处理后回调
 	AfterHeartbeatCallback func(client *Client)
 	// ClientConnectCallback 客户端连接回调
-	ClientConnectCallback func(ctx context.Context, client *Client) error
+	// record 为已构造的连接记录（内存对象，已异步落库），调用方可获取 connect 身份+会话生命周期做额外落盘
+	ClientConnectCallback func(ctx context.Context, client *Client, record *ConnectionRecord) error
 	// ClientDisconnectCallback 客户端断开回调
 	ClientDisconnectCallback func(ctx context.Context, client *Client, reason DisconnectReason) error
 	// MessageReceivedCallback 消息接收回调
@@ -328,6 +340,7 @@ type Hub struct {
 	workloadRepo           WorkloadRepository
 	offlineMessageHandler  OfflineMessageHandler
 	connectionRecordRepo   ConnectionRecordRepository
+	connectionQualityRepo  ConnectionQualityRepository
 	groupRepo              GroupRepository
 	connectionTokenDecoder ConnectionTokenDecoder // 连接 Token 解码器（可选启用，nil 时走明文参数）
 	idGenerator            IDGenerator
@@ -355,6 +368,12 @@ type Hub struct {
 	// statusUpdater 消息状态批量更新器
 	// 收集消息状态更新请求，按 batch flush 到 DB，减少广播场景下的 DB 压力
 	statusUpdater *MessageStatusUpdater
+
+	// ⏰ 跨节点 ACK 超时时间轮（主路径，替代原 timeoutStaleSendingRecords 的 30s 全量 DB 扫描）
+	// 每条跨节点消息调度一个 ACK 超时任务，收到 ACK 时 O(1) 取消，超时回调标记 AckTimeout + 转存离线
+	// timeoutStaleSendingRecords 已降级为 5min 兜底安全网（节点崩溃导致 in-memory timer 丢失时接管）
+	// 详见 ack_timer.go（主路径）与 node_ack_timeout.go（兜底）
+	ackTimeoutTimer *syncx.HashedWheelTimer
 
 	offlineMessagePushCallback OfflineMessagePushCallback
 	messageSendCallback        MessageSendCallback
@@ -384,6 +403,11 @@ type Hub struct {
 
 	// 心跳统计批量更新器（基于 syncx.BatchProcessor，单事务批量 UPDATE）
 	heartbeatBatcher *HeartbeatStatsUpdater
+
+	// ⏰ 分片时间轮（心跳超时管理，替代 O(N) 全量扫描）
+	// WebSocket 客户端注册时调度超时任务，收到 PING 时 Refresh，
+	// 超时未刷新则触发注销。SSE 客户端由 checkHeartbeat 扫描兜底。
+	heartbeatTimer *syncx.HashedWheelTimer
 
 	// 消息统计批量更新器（替代每消息 syncx.Go() goroutine）
 	messageStatsBatcher *MessageStatsBatcher
@@ -534,6 +558,12 @@ func NewHub(config *wscconfig.WSC) *Hub {
 	// 跨节点分发批量处理器（替代每条广播消息 go func() { routeToCluster(...) }()）
 	clusterDisp := batcherCfg.GetClusterDispatchParams()
 	hub.clusterBatcher = NewClusterDispatchBatcher(hub, clusterDisp.QueueSize, clusterDisp.BatchSize, clusterDisp.FlushInterval)
+
+	// ⏰ 构造期初始化心跳时间轮（替代 checkHeartbeat 的 O(N) 全量扫描）
+	// 必须在 NewHub 完成初始化，确保 Register/Refresh/Cancel 在任何 goroutine 启动前读到非 nil 值，
+	// 避免与 Run() 的延迟初始化产生数据竞争。用默认 1ms tick（极致精度）：
+	// 短超时场景（测试用 200ms）不会被向上取整，百万连接下 64 分片 rounds-- 开销 <1% CPU，可接受
+	hub.heartbeatTimer = syncx.NewHashedWheelTimer()
 
 	return hub
 }

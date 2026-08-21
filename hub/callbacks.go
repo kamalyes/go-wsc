@@ -41,13 +41,13 @@ package hub
 // 【使用示例】
 //
 // 回调处理本地逻辑
-// hub.OnClientConnect(func(ctx context.Context, client *Client) error {
+// hub.OnClientConnect(func(ctx context.Context, client *Client, record *ConnectionRecord) error {
 //     本地处理：验证权限、初始化会话
 //     return userService.InitSession(ctx, client.UserID)
 // })
 //
 // 事件用于跨节点通知（在回调中发布事件）
-// hub.OnClientConnect(func(ctx context.Context, client *Client) error {
+// hub.OnClientConnect(func(ctx context.Context, client *Client, record *ConnectionRecord) error {
 //     本地处理
 //     userService.InitSession(ctx, client.UserID)
 //

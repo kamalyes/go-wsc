@@ -311,6 +311,6 @@ func BenchmarkBroadcast_WithBatcher(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		hub.Broadcast(ctx, msg)
+		_ = hub.Deliver(ctx, msg, false)
 	}
 }

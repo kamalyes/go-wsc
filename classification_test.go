@@ -93,7 +93,7 @@ func TestBusinessCategory_Simplified(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			if test.category.IsValid() != test.valid {
-				t.Errorf("BusinessCategory.IsValid() = %v, want %v", 
+				t.Errorf("BusinessCategory.IsValid() = %v, want %v",
 					test.category.IsValid(), test.valid)
 			}
 		})
@@ -110,9 +110,9 @@ func TestMessageClassification_Simplified(t *testing.T) {
 		{
 			MessageClassification{
 				Type:             MessageTypeText,
-				Priority:         MessagePriorityNormal, // 2*5=10
-				VIPLevel:         VIPLevelV0,            // 0*5=0  
-				UrgencyLevel:     UrgencyLevelNormal,    // 1*10=10
+				Priority:         MessagePriorityNormal,   // 2*5=10
+				VIPLevel:         VIPLevelV0,              // 0*5=0
+				UrgencyLevel:     UrgencyLevelNormal,      // 1*10=10
 				BusinessCategory: BusinessCategoryGeneral, // 0
 			},
 			20, // 10+0+10+0=20
@@ -122,9 +122,9 @@ func TestMessageClassification_Simplified(t *testing.T) {
 		{
 			MessageClassification{
 				Type:             MessageTypeAlert,
-				Priority:         MessagePriorityCritical, // 5*5=25
-				VIPLevel:         VIPLevelV8,              // 8*5=40
-				UrgencyLevel:     UrgencyLevelHigh,        // 2*10=20
+				Priority:         MessagePriorityCritical,  // 5*5=25
+				VIPLevel:         VIPLevelV8,               // 8*5=40
+				UrgencyLevel:     UrgencyLevelHigh,         // 2*10=20
 				BusinessCategory: BusinessCategorySecurity, // 15
 			},
 			100, // 25+40+20+15=100
@@ -134,9 +134,9 @@ func TestMessageClassification_Simplified(t *testing.T) {
 		{
 			MessageClassification{
 				Type:             MessageTypeOrder,
-				Priority:         MessagePriorityHigh,   // 3*5=15
-				VIPLevel:         VIPLevelV5,            // 5*5=25
-				UrgencyLevel:     UrgencyLevelNormal,    // 1*10=10
+				Priority:         MessagePriorityHigh,     // 3*5=15
+				VIPLevel:         VIPLevelV5,              // 5*5=25
+				UrgencyLevel:     UrgencyLevelNormal,      // 1*10=10
 				BusinessCategory: BusinessCategoryFinance, // 10
 			},
 			60, // 15+25+10+10=60
@@ -167,7 +167,7 @@ func TestGetAllMethods_Simplified(t *testing.T) {
 		t.Errorf("GetAllVIPLevels() returned %d levels, want 9", len(vipLevels))
 	}
 
-	// 测试紧急等级数量 (3个)  
+	// 测试紧急等级数量 (3个)
 	urgencyLevels := GetAllUrgencyLevels()
 	if len(urgencyLevels) != 3 {
 		t.Errorf("GetAllUrgencyLevels() returned %d levels, want 3", len(urgencyLevels))
@@ -197,7 +197,7 @@ func TestVIPLevelComparison_V_Format(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			result := test.level1.IsHigherThan(test.level2)
 			if result != test.expected {
-				t.Errorf("%s.IsHigherThan(%s) = %v, want %v", 
+				t.Errorf("%s.IsHigherThan(%s) = %v, want %v",
 					test.level1, test.level2, result, test.expected)
 			}
 		})

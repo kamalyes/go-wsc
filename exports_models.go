@@ -439,7 +439,8 @@ const (
 
 // ==================== 连接模型 ====================
 type (
-	ConnectionRecord = models.ConnectionRecord
+	ConnectionRecord  = models.ConnectionRecord
+	ConnectionQuality = models.ConnectionQuality
 )
 
 // ==================== 负载统计相关 ====================

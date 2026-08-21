@@ -41,7 +41,10 @@ var (
 
 // GetTestRedisClient 获取测试用 Redis 客户端（单例模式）
 // 基于 miniredis 本地内存实例，零外部依赖，无需连接真实 Redis
-func GetTestRedisClient(t *testing.T) *redis.Client {
+//
+// 参数接受 testing.TB 接口，*testing.T 与 *testing.B 均满足，
+// 让 benchmark 也能复用同一 miniredis 实例（避免每个 benchmark 启动独立实例）
+func GetTestRedisClient(t testing.TB) *redis.Client {
 	testRedisOnce.Do(func() {
 		mr, err := miniredis.Run()
 		require.NoError(t, err, "启动 miniredis 失败")
@@ -64,7 +67,7 @@ func GetTestRedisClient(t *testing.T) *redis.Client {
 
 // GetTestRedisClientWithFlush 获取测试用 Redis 客户端并清空测试数据
 // 适用于需要干净环境的测试
-func GetTestRedisClientWithFlush(t *testing.T) *redis.Client {
+func GetTestRedisClientWithFlush(t testing.TB) *redis.Client {
 	client := GetTestRedisClient(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -79,7 +82,7 @@ func GetTestRedisClientWithFlush(t *testing.T) *redis.Client {
 
 // NewTestRedisClient 创建新的 Redis 客户端（连同一 miniredis 实例的独立连接）
 // 适用于需要独立连接的测试
-func NewTestRedisClient(t *testing.T) *redis.Client {
+func NewTestRedisClient(t testing.TB) *redis.Client {
 	// 确保 miniredis 已启动
 	if testMiniRedis == nil {
 		GetTestRedisClient(t)
@@ -100,7 +103,7 @@ func NewTestRedisClient(t *testing.T) *redis.Client {
 }
 
 // GetTestRedisUniversalClient 获取 Redis UniversalClient（兼容旧代码）
-func GetTestRedisUniversalClient(t *testing.T) redis.UniversalClient {
+func GetTestRedisUniversalClient(t testing.TB) redis.UniversalClient {
 	return GetTestRedisClient(t)
 }
 

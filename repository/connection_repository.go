@@ -4,7 +4,11 @@
  * @LastEditors: kamalyes 501893067@qq.com
  * @LastEditTime: 2025-12-28 15:00:16
  * @FilePath: \go-wsc\repository\connection_repository.go
- * @Description: WebSocket连接记录仓库接口
+ * @Description: WebSocket连接记录仓库接口（瘦身版）
+ *
+ * 拆表后承载 connect 身份+会话生命周期+心跳时间戳(wsc_connection_records)
+ * Ping统计/消息/错误/评分等质量指标已迁移到 ConnectionQualityRepository(wsc_connection_qualities)
+ * HeartbeatUpdateEntry/StatsIncrementEntry 类型在此定义，两 repo 共用，供 batcher 提交
  *
  * Copyright (c) 2025 by kamalyes, All Rights Reserved.
  */
@@ -21,21 +25,27 @@ import (
 	"github.com/kamalyes/go-logger"
 	sqlbuilder "github.com/kamalyes/go-sqlbuilder/repository"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
+	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/models"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
-// ConnectionRecordRepository WebSocket连接记录仓储接口
+// ConnectionRecordRepository WebSocket连接记录仓储接口（瘦身版）
 // 设计原则：支持多设备登录，每个连接维护独立记录
+// 质量指标(Ping统计/消息字节统计/错误/评分)由 ConnectionQualityRepository 承载
+// 心跳时间戳(last_ping_at/last_pong_at)属会话生命周期语义，由本仓储随心跳批量更新
 type ConnectionRecordRepository interface {
 	// ========== 核心操作 ==========
 
 	// Upsert 创建或更新连接记录（首次连接创建，重连时更新）
 	Upsert(ctx context.Context, record *models.ConnectionRecord) error
 
-	// MarkDisconnected 标记连接为已断开
+	// MarkDisconnected 标记连接为已断开（写 duration/disconnected_at/is_abnormal 供质量终评读）
 	MarkDisconnected(ctx context.Context, connectionID string, reason models.DisconnectReason, code int, message string) error
+
+	// BatchUpdateHeartbeats 批量更新心跳时间戳（connect 表 last_ping_at/last_pong_at，单事务）
+	BatchUpdateHeartbeats(ctx context.Context, entries []*HeartbeatUpdateEntry) error
 
 	// GetByConnectionID 根据连接ID获取连接记录
 	GetByConnectionID(ctx context.Context, connectionID string) (*models.ConnectionRecord, error)
@@ -45,17 +55,6 @@ type ConnectionRecordRepository interface {
 
 	// GetActiveByUserID 根据用户ID获取所有活跃连接记录
 	GetActiveByUserID(ctx context.Context, userID string) ([]*models.ConnectionRecord, error)
-
-	// ========== 统计更新操作 ==========
-
-	// AddError 记录错误
-	AddError(ctx context.Context, connectionID string, err error) error
-
-	// BatchUpdateHeartbeats 批量更新心跳时间和 Ping 统计（单事务，避免 N 次 BeginTx/Commit）
-	BatchUpdateHeartbeats(ctx context.Context, entries []*HeartbeatUpdateEntry) error
-
-	// BatchIncrementStats 批量递增消息/字节统计（单事务，聚合同一 connectionID 的增量）
-	BatchIncrementStats(ctx context.Context, entries []*StatsIncrementEntry) error
 
 	// ========== 查询操作 ==========
 
@@ -67,7 +66,7 @@ type ConnectionRecordRepository interface {
 
 	// ========== 统计分析操作 ==========
 
-	// GetConnectionStats 获取连接统计信息
+	// GetConnectionStats 获取连接统计信息（仅 connect 身份维度，质量维度由 qualityRepo 补充）
 	GetConnectionStats(ctx context.Context, startTime, endTime time.Time) (*ConnectionStats, error)
 
 	// GetConnectionStatsByID 根据连接ID获取单个连接的统计信息
@@ -78,14 +77,6 @@ type ConnectionRecordRepository interface {
 
 	// GetNodeConnectionStats 获取节点连接统计
 	GetNodeConnectionStats(ctx context.Context, nodeID string) (*NodeConnectionStats, error)
-
-	// ========== 异常检测操作 ==========
-
-	// GetHighErrorRateConnections 获取高错误率连接
-	GetHighErrorRateConnections(ctx context.Context, errorThreshold int, limit int) ([]*models.ConnectionRecord, error)
-
-	// GetFrequentReconnectConnections 获取频繁重连的连接
-	GetFrequentReconnectConnections(ctx context.Context, reconnectThreshold int, limit int) ([]*models.ConnectionRecord, error)
 
 	// ========== 批量操作 ==========
 
@@ -106,9 +97,11 @@ type ConnectionRecordRepository interface {
 	Close() error
 }
 
-// ========== 统计结构体定义 ==========
+// ========== 统计结构体定义（两 repo 共用） ==========
 
-// HeartbeatUpdateEntry 心跳批量更新条目
+// HeartbeatUpdateEntry 心跳批量更新条目（两 repo 分工消费）
+// PingTime/PongTime 由 ConnectionRecordRepository.BatchUpdateHeartbeats 写 connect 表时间戳
+// PingMs 由 ConnectionQualityRepository.BatchUpdateHeartbeats 写 quality 表 Ping 统计与活跃时间
 type HeartbeatUpdateEntry struct {
 	ConnectionID string
 	PingTime     *time.Time
@@ -116,7 +109,7 @@ type HeartbeatUpdateEntry struct {
 	PingMs       float64 // >0 时更新 average/max/min_ping_ms
 }
 
-// StatsIncrementEntry 统计递增条目
+// StatsIncrementEntry 统计递增条目（由 ConnectionQualityRepository.BatchIncrementStats 消费）
 type StatsIncrementEntry struct {
 	ConnectionID     string
 	MessagesSent     int64
@@ -138,35 +131,41 @@ type ConnectionQueryOptions struct {
 }
 
 // ConnectionStats 连接统计信息
+// 质量维度字段(TotalMessages*/TotalBytes*/AveragePingMs/AverageReconnectCount)保留兼容调用方
+// 拆表后由本方法零填充，跨表补充由调用方按需 JOIN qualityRepo
 type ConnectionStats struct {
 	TotalConnections      int64   `json:"total_connections"`       // 总连接数
 	ActiveConnections     int64   `json:"active_connections"`      // 活跃连接数
 	AverageDuration       float64 `json:"average_duration"`        // 平均连接时长(秒)
-	TotalMessagesSent     int64   `json:"total_messages_sent"`     // 总发送消息数
-	TotalMessagesReceived int64   `json:"total_messages_received"` // 总接收消息数
-	TotalBytesSent        int64   `json:"total_bytes_sent"`        // 总发送字节数
-	TotalBytesReceived    int64   `json:"total_bytes_received"`    // 总接收字节数
-	AveragePingMs         float64 `json:"average_ping_ms"`         // 平均Ping延迟
+	TotalMessagesSent     int64   `json:"total_messages_sent"`     // 总发送消息数（拆表后零填充，跨表补充由调用方）
+	TotalMessagesReceived int64   `json:"total_messages_received"` // 总接收消息数（拆表后零填充）
+	TotalBytesSent        int64   `json:"total_bytes_sent"`        // 总发送字节数（拆表后零填充）
+	TotalBytesReceived    int64   `json:"total_bytes_received"`    // 总接收字节数（拆表后零填充）
+	AveragePingMs         float64 `json:"average_ping_ms"`         // 平均Ping延迟（拆表后零填充）
 	AbnormalRate          float64 `json:"abnormal_rate"`           // 异常断开率
-	AverageReconnectCount float64 `json:"average_reconnect_count"` // 平均重连次数
+	AverageReconnectCount float64 `json:"average_reconnect_count"` // 平均重连次数（拆表后零填充）
 }
 
 // UserConnectionStats 用户连接统计
+// 质量维度字段(ReconnectCount/ErrorCount/MessagesSent/MessagesReceived/AveragePingMs/ConnectionQuality)
+// 拆表后由本方法零填充，跨表补充由调用方按需从 qualityRepo 取
 type UserConnectionStats struct {
 	UserID            string     `json:"user_id"`
 	IsActive          bool       `json:"is_active"`
 	ConnectedAt       time.Time  `json:"connected_at"`
 	DisconnectedAt    *time.Time `json:"disconnected_at,omitempty"`
 	Duration          int64      `json:"duration"`
-	ReconnectCount    int        `json:"reconnect_count"`
-	ErrorCount        int        `json:"error_count"`
-	MessagesSent      int64      `json:"messages_sent"`
-	MessagesReceived  int64      `json:"messages_received"`
-	AveragePingMs     float64    `json:"average_ping_ms"`
-	ConnectionQuality float64    `json:"connection_quality"`
+	ReconnectCount    int        `json:"reconnect_count"`    // 拆表后零填充
+	ErrorCount        int        `json:"error_count"`        // 拆表后零填充
+	MessagesSent      int64      `json:"messages_sent"`      // 拆表后零填充
+	MessagesReceived  int64      `json:"messages_received"`  // 拆表后零填充
+	AveragePingMs     float64    `json:"average_ping_ms"`    // 拆表后零填充
+	ConnectionQuality float64    `json:"connection_quality"` // 拆表后零填充
 }
 
 // NodeConnectionStats 节点连接统计
+// 质量维度字段(TotalMessages*/TotalBytes*/TotalErrors/ErrorRate/AveragePingMs/MaxPingMs/MinPingMs/
+// TotalReconnects/AverageReconnectCount/ConnectionQuality)拆表后由本方法零填充，跨表补充由调用方按需从 qualityRepo 取
 type NodeConnectionStats struct {
 	NodeID                string  `json:"node_id"`                 // 节点ID
 	NodeIP                string  `json:"node_ip"`                 // 节点IP
@@ -176,19 +175,19 @@ type NodeConnectionStats struct {
 	DisconnectedCount     int64   `json:"disconnected_count"`      // 已断开连接数
 	AbnormalCount         int64   `json:"abnormal_count"`          // 异常断开数
 	AbnormalRate          float64 `json:"abnormal_rate"`           // 异常断开率(%)
-	TotalMessagesSent     int64   `json:"total_messages_sent"`     // 总发送消息数
-	TotalMessagesReceived int64   `json:"total_messages_received"` // 总接收消息数
-	TotalBytesSent        int64   `json:"total_bytes_sent"`        // 总发送字节数
-	TotalBytesReceived    int64   `json:"total_bytes_received"`    // 总接收字节数
-	TotalErrors           int64   `json:"total_errors"`            // 总错误数
-	ErrorRate             float64 `json:"error_rate"`              // 错误率(%)
-	AveragePingMs         float64 `json:"average_ping_ms"`         // 平均Ping延迟
-	MaxPingMs             float64 `json:"max_ping_ms"`             // 最大Ping延迟
-	MinPingMs             float64 `json:"min_ping_ms"`             // 最小Ping延迟
+	TotalMessagesSent     int64   `json:"total_messages_sent"`     // 拆表后零填充
+	TotalMessagesReceived int64   `json:"total_messages_received"` // 拆表后零填充
+	TotalBytesSent        int64   `json:"total_bytes_sent"`        // 拆表后零填充
+	TotalBytesReceived    int64   `json:"total_bytes_received"`    // 拆表后零填充
+	TotalErrors           int64   `json:"total_errors"`            // 拆表后零填充
+	ErrorRate             float64 `json:"error_rate"`              // 拆表后零填充
+	AveragePingMs         float64 `json:"average_ping_ms"`         // 拆表后零填充
+	MaxPingMs             float64 `json:"max_ping_ms"`             // 拆表后零填充
+	MinPingMs             float64 `json:"min_ping_ms"`             // 拆表后零填充
 	AverageDuration       float64 `json:"average_duration"`        // 平均连接时长(秒)
-	TotalReconnects       int64   `json:"total_reconnects"`        // 总重连次数
-	AverageReconnectCount float64 `json:"average_reconnect_count"` // 平均重连次数
-	ConnectionQuality     float64 `json:"connection_quality"`      // 连接质量评分(0-100)
+	TotalReconnects       int64   `json:"total_reconnects"`        // 拆表后零填充
+	AverageReconnectCount float64 `json:"average_reconnect_count"` // 拆表后零填充
+	ConnectionQuality     float64 `json:"connection_quality"`      // 拆表后零填充
 }
 
 // connectionRecordRepositoryImpl WebSocket连接记录仓储实现
@@ -257,6 +256,10 @@ func (r *connectionRecordRepositoryImpl) Upsert(ctx context.Context, record *mod
 		return fmt.Errorf("connection_id cannot be empty")
 	}
 
+	// 兜底多租户维度（与 Bitmap/ZSET 分桶一致，避免零值导致跨域查询错位）
+	record.AppID = constants.NormalizeAppID(record.AppID)
+	record.Namespace = constants.NormalizeNamespace(record.Namespace)
+
 	existing, err := r.GetByConnectionID(ctx, record.ConnectionID)
 	if err != nil && err != gorm.ErrRecordNotFound {
 		return fmt.Errorf("查询连接记录失败: %w", err)
@@ -273,6 +276,7 @@ func (r *connectionRecordRepositoryImpl) Upsert(ctx context.Context, record *mod
 }
 
 // updateConnectionRecord 更新现有连接记录（重连场景）
+// 拆表后只刷新 connect 身份+会话生命周期字段（含重置心跳时间戳），质量指标重置由 qualityRepo.Upsert 负责
 func (r *connectionRecordRepositoryImpl) updateConnectionRecord(ctx context.Context, record *models.ConnectionRecord) error {
 	now := time.Now()
 	updates := map[string]any{
@@ -285,14 +289,12 @@ func (r *connectionRecordRepositoryImpl) updateConnectionRecord(ctx context.Cont
 		"connected_at":       now,
 		"disconnected_at":    nil,
 		"duration":           0,
+		"last_ping_at":       nil,
+		"last_pong_at":       nil,
 		"is_active":          true,
 		"is_abnormal":        false,
 		"is_forced_offline":  false,
-		"reconnect_count":    gorm.Expr("reconnect_count + ?", 1),
 		"metadata":           record.Metadata,
-		"error_count":        0,
-		"last_error":         "",
-		"last_error_at":      nil,
 		"disconnect_reason":  "",
 		"disconnect_code":    0,
 		"disconnect_message": "",
@@ -304,6 +306,7 @@ func (r *connectionRecordRepositoryImpl) updateConnectionRecord(ctx context.Cont
 }
 
 // MarkDisconnected 标记连接为已断开
+// 写 duration/disconnected_at/is_abnormal 等会话终态字段，供 qualityRepo.FinalizeOnDisconnect 读 duration 算终评
 func (r *connectionRecordRepositoryImpl) MarkDisconnected(ctx context.Context, connectionID string, reason models.DisconnectReason, code int, message string) error {
 	record, err := r.GetByConnectionID(ctx, connectionID)
 	if err != nil {
@@ -333,6 +336,41 @@ func (r *connectionRecordRepositoryImpl) MarkDisconnected(ctx context.Context, c
 		Updates(updates).Error
 }
 
+// BatchUpdateHeartbeats 批量更新心跳时间戳（connect 表 last_ping_at/last_pong_at）
+// 使用单事务包裹所有更新，将 N 次 BeginTx/Commit 压缩为 1 次
+// 单条失败不影响其他条目（continue 跳过），Ping 统计由 ConnectionQualityRepository 写 quality 表
+func (r *connectionRecordRepositoryImpl) BatchUpdateHeartbeats(ctx context.Context, entries []*HeartbeatUpdateEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		query := tx
+		if r.tableName != "" {
+			query = tx.Table(r.tableName)
+		} else {
+			query = tx.Model(&models.ConnectionRecord{})
+		}
+
+		for _, entry := range entries {
+			updates := make(map[string]any)
+			if entry.PingTime != nil {
+				updates["last_ping_at"] = entry.PingTime
+			}
+			if entry.PongTime != nil {
+				updates["last_pong_at"] = entry.PongTime
+			}
+			if len(updates) == 0 {
+				continue
+			}
+			if err := query.Where("connection_id = ?", entry.ConnectionID).Updates(updates).Error; err != nil {
+				continue // 单条失败不影响其他条目
+			}
+		}
+		return nil // 始终提交事务（单条失败已跳过）
+	})
+}
+
 // GetByConnectionID 根据连接ID获取连接记录
 func (r *connectionRecordRepositoryImpl) GetByConnectionID(ctx context.Context, connectionID string) (*models.ConnectionRecord, error) {
 	var record models.ConnectionRecord
@@ -358,111 +396,6 @@ func (r *connectionRecordRepositoryImpl) GetActiveByUserID(ctx context.Context, 
 	return r.List(ctx, &ConnectionQueryOptions{
 		UserID:   userID,
 		IsActive: &isActive,
-	})
-}
-
-// ========== 统计更新操作 ==========
-
-// AddError 记录错误
-func (r *connectionRecordRepositoryImpl) AddError(ctx context.Context, connectionID string, err error) error {
-	if err == nil {
-		return nil
-	}
-
-	now := time.Now()
-	updates := map[string]any{
-		"error_count":   gorm.Expr("error_count + ?", 1),
-		"last_error":    err.Error(),
-		"last_error_at": now,
-	}
-
-	return r.getDB(ctx).
-		Where("connection_id = ?", connectionID).
-		Updates(updates).Error
-}
-
-// BatchUpdateHeartbeats 批量更新心跳时间和 Ping 统计
-// 使用单事务包裹所有更新，将 N 次 BeginTx/Commit 压缩为 1 次
-// 单条失败不影响其他条目（continue 跳过）
-func (r *connectionRecordRepositoryImpl) BatchUpdateHeartbeats(ctx context.Context, entries []*HeartbeatUpdateEntry) error {
-	if len(entries) == 0 {
-		return nil
-	}
-
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		query := tx
-		if r.tableName != "" {
-			query = tx.Table(r.tableName)
-		} else {
-			query = tx.Model(&models.ConnectionRecord{})
-		}
-
-		for _, entry := range entries {
-			// 更新心跳时间
-			updates := make(map[string]any)
-			if entry.PingTime != nil {
-				updates["last_ping_at"] = entry.PingTime
-			}
-			if entry.PongTime != nil {
-				updates["last_pong_at"] = entry.PongTime
-			}
-			if len(updates) > 0 {
-				if err := query.Where("connection_id = ?", entry.ConnectionID).Updates(updates).Error; err != nil {
-					continue // 单条失败不影响其他条目
-				}
-			}
-
-			// 更新 Ping 统计（移动平均）
-			if entry.PingMs > 0 {
-				pingUpdates := map[string]any{
-					"average_ping_ms": gorm.Expr("CASE WHEN average_ping_ms > 0 THEN average_ping_ms * 0.7 + ? * 0.3 ELSE ? END", entry.PingMs, entry.PingMs),
-					"max_ping_ms":     gorm.Expr("CASE WHEN max_ping_ms = 0 OR max_ping_ms < ? THEN ? ELSE max_ping_ms END", entry.PingMs, entry.PingMs),
-					"min_ping_ms":     gorm.Expr("CASE WHEN min_ping_ms = 0 OR min_ping_ms > ? THEN ? ELSE min_ping_ms END", entry.PingMs, entry.PingMs),
-				}
-				query.Where("connection_id = ?", entry.ConnectionID).Updates(pingUpdates)
-			}
-		}
-		return nil // 始终提交事务（单条失败已跳过）
-	})
-}
-
-// BatchIncrementStats 批量递增消息/字节统计
-// 使用单事务包裹所有更新，将 N 次 BeginTx/Commit 压缩为 1 次
-// 调用方应先按 connectionID 聚合增量，减少事务内 UPDATE 条数
-func (r *connectionRecordRepositoryImpl) BatchIncrementStats(ctx context.Context, entries []*StatsIncrementEntry) error {
-	if len(entries) == 0 {
-		return nil
-	}
-
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		query := tx
-		if r.tableName != "" {
-			query = tx.Table(r.tableName)
-		} else {
-			query = tx.Model(&models.ConnectionRecord{})
-		}
-
-		for _, entry := range entries {
-			updates := make(map[string]any)
-			if entry.MessagesSent > 0 {
-				updates["messages_sent"] = gorm.Expr("messages_sent + ?", entry.MessagesSent)
-			}
-			if entry.MessagesReceived > 0 {
-				updates["messages_received"] = gorm.Expr("messages_received + ?", entry.MessagesReceived)
-			}
-			if entry.BytesSent > 0 {
-				updates["bytes_sent"] = gorm.Expr("bytes_sent + ?", entry.BytesSent)
-			}
-			if entry.BytesReceived > 0 {
-				updates["bytes_received"] = gorm.Expr("bytes_received + ?", entry.BytesReceived)
-			}
-			if len(updates) > 0 {
-				if err := query.Where("connection_id = ?", entry.ConnectionID).Updates(updates).Error; err != nil {
-					continue // 单条失败不影响其他条目
-				}
-			}
-		}
-		return nil
 	})
 }
 
@@ -530,6 +463,8 @@ func (r *connectionRecordRepositoryImpl) applyQueryOptions(query *gorm.DB, opts 
 // ========== 统计分析操作 ==========
 
 // GetConnectionStats 获取连接统计信息
+// 拆表后只统计 connect 表维度(total/active/avg_duration/abnormal_rate)
+// 质量维度字段(TotalMessages*/TotalBytes*/AveragePingMs/AverageReconnectCount)保持零值，由调用方按需从 qualityRepo 补充
 func (r *connectionRecordRepositoryImpl) GetConnectionStats(ctx context.Context, startTime, endTime time.Time) (*ConnectionStats, error) {
 	stats := &ConnectionStats{}
 
@@ -539,12 +474,6 @@ func (r *connectionRecordRepositoryImpl) GetConnectionStats(ctx context.Context,
 			COUNT(*) as total_connections,
 			SUM(CASE WHEN is_active = true THEN 1 ELSE 0 END) as active_connections,
 			AVG(CASE WHEN duration > 0 THEN duration ELSE NULL END) as average_duration,
-			SUM(messages_sent) as total_messages_sent,
-			SUM(messages_received) as total_messages_received,
-			SUM(bytes_sent) as total_bytes_sent,
-			SUM(bytes_received) as total_bytes_received,
-			AVG(CASE WHEN average_ping_ms > 0 THEN average_ping_ms ELSE NULL END) as average_ping_ms,
-			AVG(reconnect_count) as average_reconnect_count,
 			CASE WHEN COUNT(*) > 0
 				THEN SUM(CASE WHEN is_abnormal = true THEN 1 ELSE 0 END) * 100.0 / COUNT(*)
 				ELSE 0
@@ -560,6 +489,7 @@ func (r *connectionRecordRepositoryImpl) GetConnectionStats(ctx context.Context,
 }
 
 // GetConnectionStatsByID 根据连接ID获取单个连接的统计信息
+// 质量维度字段保持零值，由调用方按需从 qualityRepo.GetByConnectionID 补充
 func (r *connectionRecordRepositoryImpl) GetConnectionStatsByID(ctx context.Context, connectionID string) (*UserConnectionStats, error) {
 	record, err := r.GetByConnectionID(ctx, connectionID)
 	if err != nil {
@@ -567,21 +497,17 @@ func (r *connectionRecordRepositoryImpl) GetConnectionStatsByID(ctx context.Cont
 	}
 
 	return &UserConnectionStats{
-		UserID:            record.UserID,
-		IsActive:          record.IsActive,
-		ConnectedAt:       record.ConnectedAt,
-		DisconnectedAt:    record.DisconnectedAt,
-		Duration:          record.Duration,
-		ReconnectCount:    record.ReconnectCount,
-		ErrorCount:        record.ErrorCount,
-		MessagesSent:      record.MessagesSent,
-		MessagesReceived:  record.MessagesReceived,
-		AveragePingMs:     record.AveragePingMs,
-		ConnectionQuality: record.GetConnectionQuality(),
+		UserID:         record.UserID,
+		IsActive:       record.IsActive,
+		ConnectedAt:    record.ConnectedAt,
+		DisconnectedAt: record.DisconnectedAt,
+		Duration:       record.Duration,
 	}, nil
 }
 
 // GetUserConnectionStats 获取用户所有连接的汇总统计
+// 拆表后只汇总 connect 表维度(Duration/ConnectedAt/DisconnectedAt/IsActive)
+// 质量维度字段保持零值，由调用方按需从 qualityRepo.GetByUserID 补充
 func (r *connectionRecordRepositoryImpl) GetUserConnectionStats(ctx context.Context, userID string) (*UserConnectionStats, error) {
 	records, err := r.GetByUserID(ctx, userID)
 	if err != nil {
@@ -591,18 +517,13 @@ func (r *connectionRecordRepositoryImpl) GetUserConnectionStats(ctx context.Cont
 		return nil, gorm.ErrRecordNotFound
 	}
 
-	// 汇总统计
+	// 汇总 connect 表维度统计
 	stats := &UserConnectionStats{
 		UserID: userID,
 	}
 
-	var totalPing float64
-	var pingCount int
-	var activeCount int
-
 	for _, record := range records {
 		if record.IsActive {
-			activeCount++
 			stats.IsActive = true
 		}
 
@@ -619,75 +540,14 @@ func (r *connectionRecordRepositoryImpl) GetUserConnectionStats(ctx context.Cont
 		}
 
 		stats.Duration += record.Duration
-		stats.ReconnectCount += record.ReconnectCount
-		stats.ErrorCount += record.ErrorCount
-		stats.MessagesSent += record.MessagesSent
-		stats.MessagesReceived += record.MessagesReceived
-
-		if record.AveragePingMs > 0 {
-			totalPing += record.AveragePingMs
-			pingCount++
-		}
 	}
-
-	// 计算平均 Ping
-	if pingCount > 0 {
-		stats.AveragePingMs = totalPing / float64(pingCount)
-	}
-
-	// 计算连接质量（基于汇总数据）
-	stats.ConnectionQuality = r.calculateAggregatedQuality(stats, activeCount, len(records))
 
 	return stats, nil
 }
 
-// calculateAggregatedQuality 计算汇总连接质量评分
-func (r *connectionRecordRepositoryImpl) calculateAggregatedQuality(stats *UserConnectionStats, activeCount, totalCount int) float64 {
-	score := 100.0
-
-	// 活跃连接占比影响（最多扣20分）
-	if totalCount > 0 {
-		activeRate := float64(activeCount) / float64(totalCount)
-		if activeRate < 0.5 {
-			score -= 20
-		} else if activeRate < 0.8 {
-			score -= 10
-		}
-	}
-
-	// 延迟影响（最多扣30分）
-	if stats.AveragePingMs > 0 {
-		if stats.AveragePingMs > 500 {
-			score -= 30
-		} else if stats.AveragePingMs > 200 {
-			score -= 20
-		} else if stats.AveragePingMs > 100 {
-			score -= 10
-		}
-	}
-
-	// 错误率影响（最多扣30分）
-	totalMessages := stats.MessagesSent + stats.MessagesReceived
-	if totalMessages > 0 {
-		errorRate := float64(stats.ErrorCount) / float64(totalMessages)
-		score -= errorRate * 30
-	}
-
-	// 重连次数影响（最多扣20分）
-	if stats.ReconnectCount > 0 {
-		score -= float64(stats.ReconnectCount) * 2
-		if score < 0 {
-			score = 0
-		}
-	}
-
-	if score < 0 {
-		score = 0
-	}
-	return score
-}
-
 // GetNodeConnectionStats 获取节点连接统计
+// 拆表后只统计 connect 表维度(total/active/disconnected/abnormal/avg_duration)
+// 质量维度字段保持零值，由调用方按需从 qualityRepo 补充
 func (r *connectionRecordRepositoryImpl) GetNodeConnectionStats(ctx context.Context, nodeID string) (*NodeConnectionStats, error) {
 	stats := &NodeConnectionStats{}
 
@@ -702,17 +562,7 @@ func (r *connectionRecordRepositoryImpl) GetNodeConnectionStats(ctx context.Cont
 			SUM(CASE WHEN is_active = true THEN 1 ELSE 0 END) as active_connections,
 			SUM(CASE WHEN is_active = false THEN 1 ELSE 0 END) as disconnected_count,
 			SUM(CASE WHEN is_abnormal = true THEN 1 ELSE 0 END) as abnormal_count,
-			SUM(messages_sent) as total_messages_sent,
-			SUM(messages_received) as total_messages_received,
-			SUM(bytes_sent) as total_bytes_sent,
-			SUM(bytes_received) as total_bytes_received,
-			SUM(error_count) as total_errors,
-			SUM(reconnect_count) as total_reconnects,
-			AVG(CASE WHEN duration > 0 THEN duration ELSE NULL END) as average_duration,
-			AVG(CASE WHEN average_ping_ms > 0 THEN average_ping_ms ELSE NULL END) as average_ping_ms,
-			MAX(CASE WHEN max_ping_ms > 0 THEN max_ping_ms ELSE NULL END) as max_ping_ms,
-			MIN(CASE WHEN min_ping_ms > 0 THEN min_ping_ms ELSE NULL END) as min_ping_ms,
-			AVG(reconnect_count) as average_reconnect_count
+			AVG(CASE WHEN duration > 0 THEN duration ELSE NULL END) as average_duration
 		`, nodeID).
 		Scan(stats).Error
 
@@ -725,122 +575,7 @@ func (r *connectionRecordRepositoryImpl) GetNodeConnectionStats(ctx context.Cont
 		stats.AbnormalRate = float64(stats.AbnormalCount) / float64(stats.TotalConnections) * 100
 	}
 
-	// 计算错误率
-	totalMessages := stats.TotalMessagesSent + stats.TotalMessagesReceived
-	if totalMessages > 0 {
-		stats.ErrorRate = float64(stats.TotalErrors) / float64(totalMessages) * 100
-	}
-
-	// 计算连接质量评分
-	stats.ConnectionQuality = r.calculateNodeQuality(stats)
-
 	return stats, nil
-}
-
-// calculateNodeQuality 计算节点连接质量评分
-func (r *connectionRecordRepositoryImpl) calculateNodeQuality(stats *NodeConnectionStats) float64 {
-	score := 100.0
-
-	// 异常率影响（最多扣30分）
-	if stats.AbnormalRate > 0 {
-		if stats.AbnormalRate > 20 {
-			score -= 30
-		} else if stats.AbnormalRate > 10 {
-			score -= 20
-		} else if stats.AbnormalRate > 5 {
-			score -= 10
-		}
-	}
-
-	// 延迟影响（最多扣30分）
-	if stats.AveragePingMs > 0 {
-		if stats.AveragePingMs > 500 {
-			score -= 30
-		} else if stats.AveragePingMs > 200 {
-			score -= 20
-		} else if stats.AveragePingMs > 100 {
-			score -= 10
-		}
-	}
-
-	// 错误率影响（最多扣25分）
-	if stats.ErrorRate > 0 {
-		if stats.ErrorRate > 5 {
-			score -= 25
-		} else if stats.ErrorRate > 2 {
-			score -= 15
-		} else if stats.ErrorRate > 1 {
-			score -= 8
-		}
-	}
-
-	// 重连次数影响（最多扣15分）
-	if stats.AverageReconnectCount > 0 {
-		if stats.AverageReconnectCount > 10 {
-			score -= 15
-		} else if stats.AverageReconnectCount > 5 {
-			score -= 10
-		} else if stats.AverageReconnectCount > 2 {
-			score -= 5
-		}
-	}
-
-	if score < 0 {
-		score = 0
-	}
-	return score
-}
-
-// ========== 异常检测操作 ==========
-
-// GetHighErrorRateConnections 获取高错误率连接
-func (r *connectionRecordRepositoryImpl) GetHighErrorRateConnections(ctx context.Context, errorThreshold int, limit int) ([]*models.ConnectionRecord, error) {
-	var records []*models.ConnectionRecord
-
-	// 使用 go-sqlbuilder 构建查询
-	query := sqlbuilder.NewQuery().
-		AddFilter(sqlbuilder.NewGteFilter("error_count", errorThreshold)).
-		AddOrder("error_count", "DESC")
-
-	if limit > 0 {
-		query.Limit(limit)
-	}
-
-	// 应用到 GORM
-	gormDB := r.getDB(ctx)
-	gormDB = sqlbuilder.ApplyFilters(gormDB, query.Filters)
-	gormDB = sqlbuilder.ApplyOrders(gormDB, query.Orders)
-	if query.LimitValue != nil {
-		gormDB = gormDB.Limit(*query.LimitValue)
-	}
-
-	err := gormDB.Find(&records).Error
-	return records, err
-}
-
-// GetFrequentReconnectConnections 获取频繁重连的连接
-func (r *connectionRecordRepositoryImpl) GetFrequentReconnectConnections(ctx context.Context, reconnectThreshold int, limit int) ([]*models.ConnectionRecord, error) {
-	var records []*models.ConnectionRecord
-
-	// 使用 go-sqlbuilder 构建查询
-	query := sqlbuilder.NewQuery().
-		AddFilter(sqlbuilder.NewGteFilter("reconnect_count", reconnectThreshold)).
-		AddOrder("reconnect_count", "DESC")
-
-	if limit > 0 {
-		query.Limit(limit)
-	}
-
-	// 应用到 GORM
-	gormDB := r.getDB(ctx)
-	gormDB = sqlbuilder.ApplyFilters(gormDB, query.Filters)
-	gormDB = sqlbuilder.ApplyOrders(gormDB, query.Orders)
-	if query.LimitValue != nil {
-		gormDB = gormDB.Limit(*query.LimitValue)
-	}
-
-	err := gormDB.Find(&records).Error
-	return records, err
 }
 
 // ========== 批量操作 ==========
@@ -848,6 +583,7 @@ func (r *connectionRecordRepositoryImpl) GetFrequentReconnectConnections(ctx con
 // BatchUpsert 批量创建或更新连接记录
 // 使用 INSERT ... ON DUPLICATE KEY UPDATE 替代逐条 SELECT + INSERT/UPDATE
 // 将 2N 次 DB 调用压缩为 1 次批量 SQL
+// 拆表后 OnConflict 只更新 connect 身份+会话生命周期字段，质量指标重置由 qualityRepo 负责
 func (r *connectionRecordRepositoryImpl) BatchUpsert(ctx context.Context, records []*models.ConnectionRecord) error {
 	if len(records) == 0 {
 		return nil
@@ -868,14 +604,12 @@ func (r *connectionRecordRepositoryImpl) BatchUpsert(ctx context.Context, record
 			"connected_at":       gorm.Expr("CURRENT_TIMESTAMP"),
 			"disconnected_at":    nil,
 			"duration":           0,
+			"last_ping_at":       nil,
+			"last_pong_at":       nil,
 			"is_active":          true,
 			"is_abnormal":        false,
 			"is_forced_offline":  false,
-			"reconnect_count":    gorm.Expr("reconnect_count + 1"),
 			"metadata":           gorm.Expr(dialect.UpsertColumnRef("metadata")),
-			"error_count":        0,
-			"last_error":         "",
-			"last_error_at":      nil,
 			"disconnect_reason":  "",
 			"disconnect_code":    0,
 			"disconnect_message": "",

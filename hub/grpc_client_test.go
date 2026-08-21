@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/kamalyes/go-wsc/constants"
 	wscpb "github.com/kamalyes/go-wsc/models/pb"
 	"github.com/kamalyes/go-wsc/routing"
 )
@@ -92,7 +93,7 @@ func TestGRPCClientPool_BroadcastGroup_PropagatesNamespaceMetadata(t *testing.T)
 
 	ctx := context.Background()
 	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-meta", Namespace: "ns-A", OwnerID: "owner"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, "ns-A", "g-meta", []string{"u-meta"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("ns-A").WithGroupIDs([]string{"g-meta"}).Inject(ctx), []string{"u-meta"}))
 
 	hub.shardedRegistry.AddClient(makeTestClient("c-meta", "u-meta", "ns-A"))
 
@@ -103,13 +104,13 @@ func TestGRPCClientPool_BroadcastGroup_PropagatesNamespaceMetadata(t *testing.T)
 	require.NoError(t, err)
 
 	// 用错误的 namespace 路由 → 服务端 GetMembers("ns-B", "g-meta") 返回空 → delivered 0
-	wrongNsCtx := routing.WithNamespaceGroupIDs(ctx, "ns-B", []string{"g-meta"})
+	wrongNsCtx := routing.NewRoute().WithAppID("").WithNamespace("ns-B").WithGroupIDs([]string{"g-meta"}).Inject(ctx)
 	delivered, err := pool.BroadcastGroup(wrongNsCtx, addr, msgData, false, "")
 	require.NoError(t, err)
 	assert.Equal(t, int32(0), delivered)
 
 	// 用正确的 namespace 路由 → 命中成员 → delivered 1
-	rightNsCtx := routing.WithNamespaceGroupIDs(ctx, "ns-A", []string{"g-meta"})
+	rightNsCtx := routing.NewRoute().WithAppID("").WithNamespace("ns-A").WithGroupIDs([]string{"g-meta"}).Inject(ctx)
 	delivered, err = pool.BroadcastGroup(rightNsCtx, addr, msgData, false, "")
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), delivered)

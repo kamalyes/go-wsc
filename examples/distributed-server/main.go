@@ -35,7 +35,7 @@ func main() {
 	// 1. 创建配置
 	config := wscconfig.Default()
 	config.NodeIP = "192.168.1.101" // 节点 IP
-	config.NodePort = 8080           // 节点端口
+	config.NodePort = 8080          // 节点端口
 
 	// 2. 创建 Redis 客户端
 	redisClient := redis.NewClient(&redis.Options{
@@ -60,8 +60,8 @@ func main() {
 	h.SetOnlineStatusRepository(onlineStatusRepo)
 
 	// 7. 设置回调（与单机模式完全相同）
-	h.OnClientConnect(func(ctx context.Context, client *models.Client) error {
-		log.Printf("👤 客户端连接到节点 %s: %s\n", h.GetNodeID(), client.UserID)
+	h.OnClientConnect(func(ctx context.Context, client *models.Client, record *models.ConnectionRecord) error {
+		log.Printf("👤 客户端连接到节点 %s: %s (连接ID: %s)\n", h.GetNodeID(), client.UserID, record.ConnectionID)
 		return nil
 	})
 

@@ -23,7 +23,9 @@ import (
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
+	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/repository"
+	"github.com/kamalyes/go-wsc/routing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -155,7 +157,7 @@ func TestHubClientRegistration(t *testing.T) {
 
 		// 验证客户端已注册
 		assert.True(t, hub.HasClient(client.ID))
-		assert.True(t, hub.HasUserClient(client.UserID))
+		assert.True(t, hub.HasUserClient(context.Background(), client.UserID))
 
 		stats := hub.GetStats()
 		assert.Equal(t, int64(1), stats.WebSocketClients)
@@ -167,7 +169,7 @@ func TestHubClientRegistration(t *testing.T) {
 
 		// 验证客户端已注销
 		assert.False(t, hub.HasClient(client.ID))
-		assert.False(t, hub.HasUserClient(client.UserID))
+		assert.False(t, hub.HasUserClient(context.Background(), client.UserID))
 
 		stats = hub.GetStats()
 		assert.Equal(t, int64(0), stats.WebSocketClients)
@@ -218,8 +220,8 @@ func TestHubClientRegistration(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 
 		// 验证第一个客户端已注册
-		assert.True(t, hub.HasUserClient(userID))
-		assert.Equal(t, client1, hub.GetMostRecentClient(userID))
+		assert.True(t, hub.HasUserClient(context.Background(), userID))
+		assert.Equal(t, client1, hub.GetMostRecentClient(context.Background(), userID))
 
 		// 创建第二个客户端（相同用户ID）
 		client2 := &Client{
@@ -237,10 +239,10 @@ func TestHubClientRegistration(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 
 		// 验证Hub支持同一用户的多个客户端连接
-		assert.True(t, hub.HasUserClient(userID))
-		assert.Equal(t, client2, hub.GetMostRecentClient(userID)) // 最近的是client2
-		assert.True(t, hub.HasClient(client1.ID))                 // client1仍然在线
-		assert.True(t, hub.HasClient(client2.ID))                 // client2也在线
+		assert.True(t, hub.HasUserClient(context.Background(), userID))
+		assert.Equal(t, client2, hub.GetMostRecentClient(context.Background(), userID)) // 最近的是client2
+		assert.True(t, hub.HasClient(client1.ID))                                       // client1仍然在线
+		assert.True(t, hub.HasClient(client2.ID))                                       // client2也在线
 
 		hub.Unregister(client1)
 		hub.Unregister(client2)
@@ -351,7 +353,7 @@ func TestHubMessaging(t *testing.T) {
 			CreateAt:    time.Now(),
 		}
 
-		hub.Broadcast(context.Background(), message)
+		_ = hub.Deliver(context.Background(), message, false)
 
 		// 验证所有客户端都收到消息
 		for i, client := range clients {
@@ -994,7 +996,7 @@ func TestHubExtendedAPI(t *testing.T) {
 		hub.Register(client)
 		time.Sleep(100 * time.Millisecond)
 
-		retrieved := hub.GetMostRecentClient(userID)
+		retrieved := hub.GetMostRecentClient(context.Background(), userID)
 		assert.NotNil(t, retrieved)
 		assert.Equal(t, client.ID, retrieved.ID)
 
@@ -1117,19 +1119,19 @@ func TestHubExtendedAPI(t *testing.T) {
 		}
 
 		// 未注册时离线
-		isOnline, _ := hub.IsUserOnline(userID)
+		isOnline, _ := hub.IsUserOnline(context.Background(), userID)
 		assert.False(t, isOnline)
 
 		// 注册后在线
 		hub.Register(client)
 		time.Sleep(100 * time.Millisecond)
-		isOnline, _ = hub.IsUserOnline(userID)
+		isOnline, _ = hub.IsUserOnline(context.Background(), userID)
 		assert.True(t, isOnline)
 
 		// 注销后离线
 		hub.Unregister(client)
 		time.Sleep(100 * time.Millisecond)
-		isOnline2, _ := hub.IsUserOnline(userID)
+		isOnline2, _ := hub.IsUserOnline(context.Background(), userID)
 		assert.False(t, isOnline2)
 	})
 	t.Run("GetUserStatus", func(t *testing.T) {
@@ -1146,12 +1148,12 @@ func TestHubExtendedAPI(t *testing.T) {
 		}
 
 		// 未注册时离线
-		assert.Equal(t, UserStatusOffline, hub.GetUserStatus(userID))
+		assert.Equal(t, UserStatusOffline, hub.GetUserStatus(context.Background(), userID))
 
 		// 注册后在线
 		hub.Register(client)
 		time.Sleep(100 * time.Millisecond)
-		assert.Equal(t, UserStatusOnline, hub.GetUserStatus(userID))
+		assert.Equal(t, UserStatusOnline, hub.GetUserStatus(context.Background(), userID))
 
 		hub.Unregister(client)
 	})
@@ -1209,11 +1211,11 @@ func TestHubExtendedAPI(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 
 		// 断开连接
-		err := hub.DisconnectUser(userID, "test disconnect")
+		err := hub.DisconnectUser(context.Background(), userID, "test disconnect")
 		assert.NoError(t, err)
 
 		// 不存在的用户
-		err = hub.DisconnectUser("nonexistent", "test")
+		err = hub.DisconnectUser(context.Background(), "nonexistent", "test")
 		assert.Error(t, err)
 	})
 
@@ -1247,7 +1249,7 @@ func TestHubExtendedAPI(t *testing.T) {
 		assert.NotNil(t, agents)
 		// 验证所有返回的都是agent类型
 		for _, userID := range agents {
-			client := hub.GetMostRecentClient(userID)
+			client := hub.GetMostRecentClient(context.Background(), userID)
 			if client != nil {
 				assert.Equal(t, UserTypeAgent, client.UserType)
 			}
@@ -1275,7 +1277,7 @@ func TestHubExtendedAPI(t *testing.T) {
 
 		time.Sleep(200 * time.Millisecond)
 
-		connections := hub.GetConnectionsByUserID(userID)
+		connections := hub.GetConnectionsByUserID(context.Background(), userID)
 		assert.GreaterOrEqual(t, len(connections), 1)
 	})
 
@@ -1688,7 +1690,7 @@ func TestHubHighThroughputMessaging(t *testing.T) {
 				MessageType: MessageTypeText,
 				Content:     fmt.Sprintf("high throughput message %d", i),
 			}
-			hub.Broadcast(context.Background(), msg)
+			_ = hub.Deliver(context.Background(), msg, false)
 		}
 
 		elapsed := time.Since(start)
@@ -1709,7 +1711,7 @@ func TestHubHighThroughputMessaging(t *testing.T) {
 					MessageType: MessageTypeText,
 					Content:     fmt.Sprintf("parallel broadcast %d", idx),
 				}
-				hub.Broadcast(context.Background(), msg)
+				_ = hub.Deliver(context.Background(), msg, false)
 			}(i)
 		}
 
@@ -1950,7 +1952,7 @@ func TestHubEdgeCases(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 
 		// 最后只应该有一个连接
-		client := hub.GetMostRecentClient(userID)
+		client := hub.GetMostRecentClient(context.Background(), userID)
 		assert.NotNil(t, client)
 	})
 
@@ -2001,7 +2003,7 @@ func TestHubEdgeCases(t *testing.T) {
 		}
 		assert.True(t, registered, "客户端应该成功注册")
 
-		retrieved := testHub.GetMostRecentClient(longUserID)
+		retrieved := testHub.GetMostRecentClient(context.Background(), longUserID)
 		assert.NotNil(t, retrieved, "应该能获取到客户端")
 		if retrieved != nil {
 			assert.Equal(t, longUserID, retrieved.UserID)
@@ -2085,7 +2087,7 @@ func TestHubStatusTransitions(t *testing.T) {
 		hub.Unregister(client)
 		time.Sleep(100 * time.Millisecond)
 
-		isOnline, _ := hub.IsUserOnline(userID)
+		isOnline, _ := hub.IsUserOnline(context.Background(), userID)
 		assert.False(t, isOnline)
 	})
 
@@ -2139,7 +2141,7 @@ func TestHubBroadcastToGroup(t *testing.T) {
 
 	// 创建群组并加入成员
 	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "sales-group", Namespace: "default", OwnerID: "owner"}))
-	require.NoError(t, groupRepo.AddMembers(ctx, "default", "sales-group", []string{"sales-user-1", "sales-user-2"}))
+	require.NoError(t, groupRepo.AddMembers(ctx, constants.DefaultAppID, "default", "sales-group", []string{"sales-user-1", "sales-user-2"}))
 
 	// 注册在线客户端
 	client1 := &Client{
@@ -2187,7 +2189,9 @@ func TestHubBroadcastToGroup(t *testing.T) {
 			Content:     "sales group message",
 			CreateAt:    time.Now(),
 		}
-		count := hub.BroadcastToGroup(ctx, "default", "sales-group", msg, false)
+		groupCtx := routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("default").WithGroupIDs([]string{"sales-group"}).Inject(ctx)
+		dr := hub.Deliver(groupCtx, msg, false)
+		count := dr.LocalDelivered
 		assert.Equal(t, 2, count, "应投递给2个在线成员")
 
 		select {
@@ -2214,7 +2218,9 @@ func TestHubBroadcastToGroup(t *testing.T) {
 			Content:     "exclude sender test",
 			CreateAt:    time.Now(),
 		}
-		count := hub.BroadcastToGroup(ctx, "default", "sales-group", msg, true)
+		groupCtx := routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("default").WithGroupIDs([]string{"sales-group"}).Inject(ctx)
+		dr := hub.Deliver(groupCtx, msg, true)
+		count := dr.LocalDelivered
 		assert.Equal(t, 1, count, "排除发送者后应只投递给1个成员")
 
 		select {
@@ -2237,7 +2243,9 @@ func TestHubBroadcastToGroup(t *testing.T) {
 			Content:     "nonexistent group",
 			CreateAt:    time.Now(),
 		}
-		count := hub.BroadcastToGroup(ctx, "default", "non-existent", msg, false)
+		groupCtx := routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("default").WithGroupIDs([]string{"non-existent"}).Inject(ctx)
+		dr := hub.Deliver(groupCtx, msg, false)
+		count := dr.LocalDelivered
 		assert.Equal(t, 0, count, "不存在的群组应投递0个")
 	})
 }
@@ -2620,7 +2628,7 @@ func TestHubComplexScenarios(t *testing.T) {
 					}
 
 					// 广播到聊天室
-					hub.Broadcast(context.Background(), msg)
+					_ = hub.Deliver(context.Background(), msg, false)
 					atomic.AddInt64(&messageCount, 1)
 
 					// 随机私聊
@@ -2804,7 +2812,7 @@ func TestHubComplexScenarios(t *testing.T) {
 			MessageType: MessageTypeText, // 使用已存在的类型
 			Content:     "URGENT: Server maintenance in 5 minutes",
 		}
-		hub.Broadcast(context.Background(), urgentMsg) // 使用普通广播
+		_ = hub.Deliver(context.Background(), urgentMsg, false) // 使用普通广播
 
 		// 清理
 		hub.Unregister(vipUser)
@@ -2906,7 +2914,7 @@ func TestHubStressAndPerformance(t *testing.T) {
 		// 验证用户是否成功注册
 		registeredCount := 0
 		for _, user := range users {
-			if isOnline, _ := hub.IsUserOnline(user.UserID); isOnline {
+			if isOnline, _ := hub.IsUserOnline(context.Background(), user.UserID); isOnline {
 				registeredCount++
 			}
 		}
@@ -3200,7 +3208,7 @@ func TestGetClientsCopyForUser_AllClients(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// 测试：获取所有客户端（不指定clientID）
-	clients := hub.GetClientsCopyForUser(userID, "")
+	clients := hub.GetClientsCopyForUser(context.Background(), userID, "")
 
 	assert.NotNil(t, clients, "应该返回客户端列表")
 	assert.Equal(t, 3, len(clients), "应该返回3个客户端")
@@ -3209,7 +3217,7 @@ func TestGetClientsCopyForUser_AllClients(t *testing.T) {
 	originalLen := len(clients)
 	clients = append(clients, &Client{ID: "fake-client"})
 
-	clientsAgain := hub.GetClientsCopyForUser(userID, "")
+	clientsAgain := hub.GetClientsCopyForUser(context.Background(), userID, "")
 	assert.Equal(t, originalLen, len(clientsAgain), "修改副本不应影响原始数据")
 }
 
@@ -3244,7 +3252,7 @@ func TestGetClientsCopyForUser_SpecificClient(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// 测试：获取指定客户端
-	clients := hub.GetClientsCopyForUser(userID, "client-1")
+	clients := hub.GetClientsCopyForUser(context.Background(), userID, "client-1")
 
 	assert.NotNil(t, clients, "应该返回客户端列表")
 	assert.Equal(t, 1, len(clients), "应该只返回1个客户端")
@@ -3272,7 +3280,7 @@ func TestGetClientsCopyForUser_NonExistentClient(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// 测试：获取不存在的客户端
-	clients := hub.GetClientsCopyForUser(userID, "non-existent-client")
+	clients := hub.GetClientsCopyForUser(context.Background(), userID, "non-existent-client")
 
 	assert.Nil(t, clients, "不存在的客户端应该返回nil")
 }
@@ -3285,7 +3293,7 @@ func TestGetClientsCopyForUser_NonExistentUser(t *testing.T) {
 	defer hub.Shutdown()
 
 	// 测试：获取不存在的用户
-	clients := hub.GetClientsCopyForUser("non-existent-user", "")
+	clients := hub.GetClientsCopyForUser(context.Background(), "non-existent-user", "")
 
 	assert.Nil(t, clients, "不存在的用户应该返回nil")
 }
@@ -3322,7 +3330,7 @@ func TestGetClientsCopyForUser_ThreadSafety(t *testing.T) {
 	// Goroutine 2: 持续获取客户端副本
 	go func() {
 		for i := 0; i < 20; i++ {
-			clients := hub.GetClientsCopyForUser(userID, "")
+			clients := hub.GetClientsCopyForUser(context.Background(), userID, "")
 			_ = clients // 使用返回值
 			time.Sleep(5 * time.Millisecond)
 		}
@@ -3372,7 +3380,7 @@ func TestCopyClientsFromMap(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// 通过GetClientsCopyForUser测试复制功能
-	clients := hub.GetClientsCopyForUser(userID, "")
+	clients := hub.GetClientsCopyForUser(context.Background(), userID, "")
 
 	assert.NotNil(t, clients, "应该返回客户端列表")
 	assert.Equal(t, 3, len(clients), "应该复制所有客户端")
@@ -3381,7 +3389,7 @@ func TestCopyClientsFromMap(t *testing.T) {
 	originalLen := len(clients)
 	clients = append(clients, &Client{ID: "fake-client"})
 
-	clientsAgain := hub.GetClientsCopyForUser(userID, "")
+	clientsAgain := hub.GetClientsCopyForUser(context.Background(), userID, "")
 	assert.Equal(t, originalLen, len(clientsAgain), "修改副本不应影响原始数据")
 }
 
@@ -3393,7 +3401,7 @@ func TestCopyClientsFromMap_EmptyMap(t *testing.T) {
 	defer hub.Shutdown()
 
 	// 测试不存在的用户（空map情况）
-	clients := hub.GetClientsCopyForUser("non-existent-user", "")
+	clients := hub.GetClientsCopyForUser(context.Background(), "non-existent-user", "")
 
 	assert.Nil(t, clients, "不存在的用户应该返回nil")
 }

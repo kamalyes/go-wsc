@@ -51,7 +51,7 @@ func newTestOfflineMessageRepoContext(t *testing.T) *testOfflineMessageRepoConte
 // cleanup 清理测试数据
 func (c *testOfflineMessageRepoContext) cleanup() {
 	for _, receiverID := range c.cleanupIDs {
-		_ = c.repo.ClearByReceiver(c.ctx, DefaultNamespace, receiverID)
+		_ = c.repo.ClearByReceiver(c.ctx, DefaultAppID, DefaultNamespace, receiverID)
 	}
 }
 
@@ -283,7 +283,7 @@ func TestOfflineMessageRepository_GetBySender(t *testing.T) {
 
 	t.Run("使用cursor分页查询", func(t *testing.T) {
 		// 清空之前的测试数据
-		_ = tc.repo.ClearByReceiver(tc.ctx, DefaultNamespace, tc.idGen.GenerateCorrelationID())
+		_ = tc.repo.ClearByReceiver(tc.ctx, DefaultAppID, DefaultNamespace, tc.idGen.GenerateCorrelationID())
 
 		senderID2 := tc.idGen.GenerateCorrelationID()
 		// 创建5条消息
@@ -385,7 +385,7 @@ func TestOfflineMessageRepository_DeleteByMessageIDs(t *testing.T) {
 		}
 
 		// 删除前3条
-		err := tc.repo.DeleteByMessageIDs(tc.ctx, DefaultNamespace, receiverID, messageIDs[:3])
+		err := tc.repo.DeleteByMessageIDs(tc.ctx, DefaultAppID, DefaultNamespace, receiverID, messageIDs[:3])
 		assert.NoError(t, err)
 
 		// 验证剩余2条
@@ -401,7 +401,7 @@ func TestOfflineMessageRepository_DeleteByMessageIDs(t *testing.T) {
 	})
 
 	t.Run("删除空列表", func(t *testing.T) {
-		err := tc.repo.DeleteByMessageIDs(tc.ctx, DefaultNamespace, receiverID, []string{})
+		err := tc.repo.DeleteByMessageIDs(tc.ctx, DefaultAppID, DefaultNamespace, receiverID, []string{})
 		assert.NoError(t, err)
 	})
 }
@@ -422,16 +422,16 @@ func TestOfflineMessageRepository_ClearByReceiver(t *testing.T) {
 		}
 
 		// 验证有消息
-		before, err := tc.repo.GetCountByReceiver(tc.ctx, DefaultNamespace, receiverID)
+		before, err := tc.repo.GetCountByReceiver(tc.ctx, DefaultAppID, DefaultNamespace, receiverID)
 		require.NoError(t, err)
 		assert.GreaterOrEqual(t, before, int64(10))
 
 		// 清空
-		err = tc.repo.ClearByReceiver(tc.ctx, DefaultNamespace, receiverID)
+		err = tc.repo.ClearByReceiver(tc.ctx, DefaultAppID, DefaultNamespace, receiverID)
 		assert.NoError(t, err)
 
 		// 验证已清空
-		after, err := tc.repo.GetCountByReceiver(tc.ctx, DefaultNamespace, receiverID)
+		after, err := tc.repo.GetCountByReceiver(tc.ctx, DefaultAppID, DefaultNamespace, receiverID)
 		assert.NoError(t, err)
 		assert.Zero(t, after)
 	})
@@ -457,7 +457,7 @@ func TestOfflineMessageRepository_GetCount(t *testing.T) {
 			require.NoError(t, err)
 		}
 
-		count, err := tc.repo.GetCountByReceiver(tc.ctx, DefaultNamespace, receiverID)
+		count, err := tc.repo.GetCountByReceiver(tc.ctx, DefaultAppID, DefaultNamespace, receiverID)
 		assert.NoError(t, err)
 		assert.GreaterOrEqual(t, count, int64(8))
 	})
@@ -471,7 +471,7 @@ func TestOfflineMessageRepository_GetCount(t *testing.T) {
 			require.NoError(t, err)
 		}
 
-		count, err := tc.repo.GetCountBySender(tc.ctx, DefaultNamespace, senderID)
+		count, err := tc.repo.GetCountBySender(tc.ctx, DefaultAppID, DefaultNamespace, senderID)
 		assert.NoError(t, err)
 		assert.GreaterOrEqual(t, count, int64(5))
 	})

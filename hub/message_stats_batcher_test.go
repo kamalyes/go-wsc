@@ -9,7 +9,7 @@
  *   - Submit 提交多条
  *   - flush 按 connectionID 聚合
  *   - Stop 停止
- *   使用 fakeConnRecordRepo 的 BatchIncrementStats 验证聚合结果
+ *   使用 fakeConnQualityRepo 的 BatchIncrementStats 验证聚合结果
  *
  * Copyright (c) 2026 by kamalyes, All Rights Reserved.
  */
@@ -27,8 +27,8 @@ import (
 	"github.com/kamalyes/go-wsc/repository"
 )
 
-// newStatsTestHub 创建带 fakeConnRecordRepo 的测试 Hub
-func newStatsTestHub(t *testing.T) (*Hub, *fakeConnRecordRepo, func()) {
+// newStatsTestHub 创建带 fakeConnQualityRepo 的测试 Hub
+func newStatsTestHub(t *testing.T) (*Hub, *fakeConnQualityRepo, func()) {
 	t.Helper()
 	config := wscconfig.Default().
 		WithNodeInfo("127.0.0.1", 18080).
@@ -36,8 +36,8 @@ func newStatsTestHub(t *testing.T) (*Hub, *fakeConnRecordRepo, func()) {
 		WithMessageBufferSize(256)
 
 	hub := NewHub(config)
-	fakeRepo := &fakeConnRecordRepo{}
-	hub.connectionRecordRepo = fakeRepo
+	fakeRepo := &fakeConnQualityRepo{}
+	hub.connectionQualityRepo = fakeRepo
 
 	cleanup := func() {
 		hub.Shutdown()

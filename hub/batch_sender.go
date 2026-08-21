@@ -142,8 +142,6 @@ func (bs *BatchSender) Execute() *BatchSendResult {
 
 	// 并发发送每个用户的消息
 	for userID, msgs := range messagesCopy {
-		userID := userID   // 捕获循环变量
-		msgs := msgs       // 捕获循环变量
 		syncx.Go(bs.ctx).Exec(func() {
 			defer wg.Done()
 			bs.sendUserMessages(userID, msgs, result)

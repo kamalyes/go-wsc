@@ -20,22 +20,24 @@ import (
 
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
+	"github.com/kamalyes/go-wsc/routing"
 )
 
 // ============================================================================
 // 主动断开连接
 // ============================================================================
 
-// DisconnectUser 主动断开指定用户的所有连接
-// 使用 ForEachUserClient 持读锁收集客户端，替代 GetUserClientsMapWithLock 锁外遍历的数据竞争
-func (h *Hub) DisconnectUser(userID string, reason string) error {
-	if !h.shardedRegistry.HasUser(userID) {
+// DisconnectUser 主动断开指定用户的所有连接（按 ctx 路由信封 appID+namespace 隔离）
+// 使用 ForEachUserClientFiltered 持读锁收集匹配信封的客户端，替代 GetUserClientsMapWithLock 锁外遍历的数据竞争
+func (h *Hub) DisconnectUser(ctx context.Context, userID string, reason string) error {
+	appID, ns := routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx)
+	if !h.shardedRegistry.HasUser(userID, appID, ns) {
 		return errorx.NewError(ErrTypeUserNotFound, "user_id: %s", userID)
 	}
 
-	// 持读锁零拷贝收集客户端
+	// 持读锁零拷贝收集匹配信封的客户端
 	var clients []*Client
-	h.shardedRegistry.ForEachUserClient(userID, func(_ string, client *Client) bool {
+	h.shardedRegistry.ForEachUserClientFiltered(userID, appID, ns, nil, func(_ string, client *Client) bool {
 		clients = append(clients, client)
 		return true
 	})

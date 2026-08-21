@@ -6,7 +6,12 @@
  * @FilePath: \go-wsc\repository\aliases.go
  * @Description: 类型别名 - 为 models 包中的类型创建别名，便于在 repository 层使用
  *
- * Copyright (c) 2025 by kamalyes, All Rights Reserved.
+ * 仅保留类型别名（= models.X 的 type alias，零运行时成本，调用方免写 models. 前缀）。
+ * 常量/变量/函数别名已全部删除：业务枚举（WorkloadDimension 系列、MessageSendStatus 系列、
+ * FailureReason 系列）、错误（Err 系列）、查询常量（QueryMessageIDWhere、OrderBy 系列）、
+ * IsSystemGroup 等请直接用 models.X 引用，避免多层 const 别名中转造成真相源不清。
+ *
+ * Copyright (c) 2026 by kamalyes, All Rights Reserved.
  */
 package repository
 
@@ -47,74 +52,3 @@ type (
 	// GroupSendResult 群组消息投递结果
 	GroupSendResult = models.GroupSendResult
 )
-
-// 变量别名 - 待推送的离线消息状态列表
-var (
-	PendingOfflineStatuses = models.PendingOfflineStatuses
-
-	// AllWorkloadDimensions 所有负载统计维度
-	AllWorkloadDimensions = models.AllWorkloadDimensions
-)
-
-// 常量别名 - 负载统计维度
-const (
-	WorkloadDimensionRealtime = models.WorkloadDimensionRealtime
-	WorkloadDimensionHourly   = models.WorkloadDimensionHourly
-	WorkloadDimensionDaily    = models.WorkloadDimensionDaily
-	WorkloadDimensionMonthly  = models.WorkloadDimensionMonthly
-	WorkloadDimensionYearly   = models.WorkloadDimensionYearly
-)
-
-// 常量别名 - 消息发送状态
-const (
-	MessageSendStatusPending     = models.MessageSendStatusPending
-	MessageSendStatusSending     = models.MessageSendStatusSending
-	MessageSendStatusSuccess     = models.MessageSendStatusSuccess
-	MessageSendStatusFailed      = models.MessageSendStatusFailed
-	MessageSendStatusRetrying    = models.MessageSendStatusRetrying
-	MessageSendStatusAckTimeout  = models.MessageSendStatusAckTimeout
-	MessageSendStatusUserOffline = models.MessageSendStatusUserOffline
-	MessageSendStatusExpired     = models.MessageSendStatusExpired
-)
-
-// 常量别名 - 失败原因
-const (
-	FailureReasonQueueFull    = models.FailureReasonQueueFull
-	FailureReasonUserOffline  = models.FailureReasonUserOffline
-	FailureReasonConnError    = models.FailureReasonConnError
-	FailureReasonAckTimeout   = models.FailureReasonAckTimeout
-	FailureReasonSendTimeout  = models.FailureReasonSendTimeout
-	FailureReasonNetworkError = models.FailureReasonNetworkError
-	FailureReasonUnknown      = models.FailureReasonUnknown
-	FailureReasonMaxRetry     = models.FailureReasonMaxRetry
-	FailureReasonExpired      = models.FailureReasonExpired
-)
-
-var (
-	ErrUserNotFound = models.ErrUserNotFound
-
-	// 群组相关错误
-	ErrGroupNotFound      = models.ErrGroupNotFound
-	ErrGroupMemberExisted = models.ErrGroupMemberExisted
-	ErrGroupFull          = models.ErrGroupFull
-	ErrGroupRepoNotSet    = models.ErrGroupRepoNotSet
-	ErrGroupExisted       = models.ErrGroupExisted
-	ErrGroupReserved      = models.ErrGroupReserved
-)
-
-// 常量别名 - 查询相关
-const (
-	QueryMessageIDWhere   = models.QueryMessageIDWhere
-	OrderByCreateTimeDesc = models.OrderByCreateTimeDesc
-	OrderByCreateTimeAsc  = models.OrderByCreateTimeAsc
-	OrderByExpiresAtAsc   = models.OrderByExpiresAtAsc
-)
-
-// 常量别名 - 群组系统保留组
-const (
-	SystemGroupAgents    = models.SystemGroupAgents
-	SystemGroupObservers = models.SystemGroupObservers
-)
-
-// 函数别名 - 群组相关
-var IsSystemGroup = models.IsSystemGroup

@@ -33,6 +33,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/repository"
 	"github.com/kamalyes/go-wsc/routing"
@@ -64,7 +65,7 @@ func setupGroupTestHub(t *testing.T) (*Hub, repository.GroupRepository, *minired
 // makeTestClient 创建测试客户端，SendChan 缓冲 16
 // makeTestClient 创建测试客户端
 // clientID/userID 必填；namespace/groupID 可选（0~2 个附加参数：[0]=namespace, [1]=groupID）
-// 不填时 namespace=models.DefaultNamespace(与SendToUserWithRetry入口兜底对齐), groupID=""(P2P/默认组)
+// 不填时 namespace=constants.DefaultNamespace(与SendToUserWithRetry入口兜底对齐), groupID=""(P2P/默认组)
 func makeTestClient(clientID, userID string, opts ...string) *Client {
 	c := &Client{
 		ID:          clientID,
@@ -76,7 +77,8 @@ func makeTestClient(clientID, userID string, opts ...string) *Client {
 		SendChan:    make(chan []byte, 16),
 		Context:     context.WithValue(context.Background(), ContextKeyUserID, userID),
 		ConnectedAt: time.Now(),
-		Namespace:   models.DefaultNamespace, // 默认值：与老系统入口兜底 DefaultNamespace 对齐
+		AppID:       constants.DefaultAppID,     // 默认应用ID（与 NewClient 默认值一致，ClientMatchesEnvelope 严格匹配要求）
+		Namespace:   constants.DefaultNamespace, // 默认命名空间（与 NewClient 默认值一致）
 	}
 	if len(opts) >= 1 {
 		c.Namespace = opts[0] // 显式传参则覆盖（用于多 namespace 场景）
@@ -110,17 +112,17 @@ func TestHubCreateAndGetGroup(t *testing.T) {
 	t.Run("创建群组后可查询且字段一致", func(t *testing.T) {
 		g := &Group{
 			GroupID:    "g1",
-			Namespace:  models.DefaultNamespace,
+			Namespace:  constants.DefaultNamespace,
 			Name:       "测试群",
 			OwnerID:    "owner1",
 			MaxMembers: 50,
 		}
 		require.NoError(t, groupRepo.CreateGroup(ctx, g))
 
-		got, err := hub.GetGroup(ctx, models.DefaultNamespace, "g1")
+		got, err := hub.GetGroup(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g1"}).Inject(ctx))
 		require.NoError(t, err)
 		assert.Equal(t, "g1", got.GroupID)
-		assert.Equal(t, models.DefaultNamespace, got.GetNamespace())
+		assert.Equal(t, constants.DefaultNamespace, got.GetNamespace())
 		assert.Equal(t, "测试群", got.Name)
 		assert.Equal(t, 50, got.MaxMembers)
 	})
@@ -131,9 +133,9 @@ func TestHubCreateAndGetGroup(t *testing.T) {
 		require.NoError(t, groupRepo.CreateGroup(ctx, g))
 
 		// 业务查询传明确 namespace（归一化由 register/CreateGroup 层统一）
-		got, err := hub.GetGroup(ctx, models.DefaultNamespace, "g-default")
+		got, err := hub.GetGroup(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-default"}).Inject(ctx))
 		require.NoError(t, err)
-		assert.Equal(t, models.DefaultNamespace, got.GetNamespace())
+		assert.Equal(t, constants.DefaultNamespace, got.GetNamespace())
 	})
 }
 
@@ -143,15 +145,15 @@ func TestHubDisbandGroup(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-disband", Namespace: models.DefaultNamespace, OwnerID: "o1"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "g-disband", []string{"u1", "u2"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-disband", Namespace: constants.DefaultNamespace, OwnerID: "o1"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-disband"}).Inject(ctx), []string{"u1", "u2"}))
 
-	require.NoError(t, hub.DisbandGroup(ctx, models.DefaultNamespace, "g-disband"))
+	require.NoError(t, hub.DisbandGroup(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-disband"}).Inject(ctx)))
 
-	_, err := hub.GetGroup(ctx, models.DefaultNamespace, "g-disband")
+	_, err := hub.GetGroup(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-disband"}).Inject(ctx))
 	assert.ErrorIs(t, err, ErrGroupNotFound)
 
-	members, err := hub.GetGroupMembers(ctx, models.DefaultNamespace, "g-disband")
+	members, err := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-disband"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Empty(t, members)
 }
@@ -162,31 +164,31 @@ func TestHubAddAndRemoveMembers(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-members", Namespace: models.DefaultNamespace, OwnerID: "o1"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-members", Namespace: constants.DefaultNamespace, OwnerID: "o1"}))
 
 	// 添加成员
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "g-members", []string{"u1", "u2", "u3"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-members"}).Inject(ctx), []string{"u1", "u2", "u3"}))
 
-	cnt, err := hub.GetGroupMemberCount(ctx, models.DefaultNamespace, "g-members")
+	cnt, err := hub.GetGroupMemberCount(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-members"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Equal(t, int64(3), cnt)
 
 	// 判定成员
-	ok, err := hub.IsGroupMember(ctx, models.DefaultNamespace, "g-members", "u2")
+	ok, err := hub.IsGroupMember(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-members"}).Inject(ctx), "u2")
 	require.NoError(t, err)
 	assert.True(t, ok)
 
-	ok, err = hub.IsGroupMember(ctx, models.DefaultNamespace, "g-members", "uX")
+	ok, err = hub.IsGroupMember(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-members"}).Inject(ctx), "uX")
 	require.NoError(t, err)
 	assert.False(t, ok)
 
 	// 移除成员
-	require.NoError(t, hub.RemoveGroupMembers(ctx, models.DefaultNamespace, "g-members", []string{"u2"}))
-	cnt, err = hub.GetGroupMemberCount(ctx, models.DefaultNamespace, "g-members")
+	require.NoError(t, hub.RemoveGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-members"}).Inject(ctx), []string{"u2"}))
+	cnt, err = hub.GetGroupMemberCount(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-members"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), cnt)
 
-	ok, err = hub.IsGroupMember(ctx, models.DefaultNamespace, "g-members", "u2")
+	ok, err = hub.IsGroupMember(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-members"}).Inject(ctx), "u2")
 	require.NoError(t, err)
 	assert.False(t, ok)
 }
@@ -197,11 +199,11 @@ func TestHubGroupMaxMembers(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-max", Namespace: models.DefaultNamespace, OwnerID: "o1", MaxMembers: 2}))
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "g-max", []string{"u1", "u2"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-max", Namespace: constants.DefaultNamespace, OwnerID: "o1", MaxMembers: 2}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-max"}).Inject(ctx), []string{"u1", "u2"}))
 
 	// 超出上限应返回 ErrGroupFull
-	err := hub.AddGroupMembers(ctx, models.DefaultNamespace, "g-max", []string{"u3"})
+	err := hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-max"}).Inject(ctx), []string{"u3"})
 	assert.ErrorIs(t, err, ErrGroupFull)
 }
 
@@ -212,25 +214,25 @@ func TestHubGroupNamespaceIsolation(t *testing.T) {
 	ctx := context.Background()
 
 	// 两个命名空间创建同名群组
-	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-same", Namespace: models.DefaultNamespace, Name: "A群", OwnerID: "oA"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-same", Namespace: constants.DefaultNamespace, Name: "A群", OwnerID: "oA"}))
 	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-same", Namespace: "tenantB", Name: "B群", OwnerID: "oB"}))
 
 	// 各自添加成员
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "g-same", []string{"userA"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, "tenantB", "g-same", []string{"userB"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-same"}).Inject(ctx), []string{"userA"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("tenantB").WithGroupIDs([]string{"g-same"}).Inject(ctx), []string{"userB"}))
 
 	// 成员不跨命名空间
-	aMembers, err := hub.GetGroupMembers(ctx, models.DefaultNamespace, "g-same")
+	aMembers, err := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-same"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"userA"}, aMembers)
 
-	bMembers, err := hub.GetGroupMembers(ctx, "tenantB", "g-same")
+	bMembers, err := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("tenantB").WithGroupIDs([]string{"g-same"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"userB"}, bMembers)
 
 	// 解散 tenantA 不影响 tenantB
-	require.NoError(t, hub.DisbandGroup(ctx, models.DefaultNamespace, "g-same"))
-	_, err = hub.GetGroup(ctx, "tenantB", "g-same")
+	require.NoError(t, hub.DisbandGroup(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-same"}).Inject(ctx)))
+	_, err = hub.GetGroup(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("tenantB").WithGroupIDs([]string{"g-same"}).Inject(ctx))
 	require.NoError(t, err)
 }
 
@@ -241,17 +243,17 @@ func TestHubGetUserGroupsAndNamespaceGroups(t *testing.T) {
 	ctx := context.Background()
 
 	for _, gid := range []string{"g1", "g2", "g3"} {
-		require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: gid, Namespace: models.DefaultNamespace, OwnerID: "o1"}))
-		require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, gid, []string{"userX"}))
+		require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: gid, Namespace: constants.DefaultNamespace, OwnerID: "o1"}))
+		require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{gid}).Inject(ctx), []string{"userX"}))
 	}
 
 	// 用户群组列表
-	groups, err := hub.GetUserGroups(ctx, models.DefaultNamespace, "userX")
+	groups, err := hub.GetUserGroups(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(ctx), "userX")
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"g1", "g2", "g3"}, groups)
 
 	// 命名空间群组列表
-	tenantGroups, err := hub.GetNamespaceGroups(ctx, models.DefaultNamespace)
+	tenantGroups, err := hub.GetNamespaceGroups(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(ctx))
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"g1", "g2", "g3"}, tenantGroups)
 }
@@ -267,23 +269,24 @@ func TestBroadcastToGroupMembersLocal(t *testing.T) {
 	ctx := context.Background()
 
 	// 创建群组并添加成员
-	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-broadcast", Namespace: models.DefaultNamespace, OwnerID: "owner1"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "g-broadcast", []string{"user1", "user2", "user3"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-broadcast", Namespace: constants.DefaultNamespace, OwnerID: "owner1"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-broadcast"}).Inject(ctx), []string{"user1", "user2", "user3"}))
 
 	// 启动 Hub 并注册在线客户端（user1 和 user2 在本节点）
 	go hub.Run()
 	defer hub.Shutdown()
 	time.Sleep(100 * time.Millisecond)
 
-	client1 := makeTestClient("c1", "user1", models.DefaultNamespace)
-	client2 := makeTestClient("c2", "user2", models.DefaultNamespace)
+	client1 := makeTestClient("c1", "user1", constants.DefaultNamespace)
+	client2 := makeTestClient("c2", "user2", constants.DefaultNamespace)
 	hub.Register(client1)
 	hub.Register(client2)
 	time.Sleep(100 * time.Millisecond)
 
 	// 广播消息（不排除发送者）
 	msg := makeGroupMessage("owner1")
-	delivered := hub.BroadcastToGroupMembers(ctx, models.DefaultNamespace, "g-broadcast", msg, false)
+	groupCtx := routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-broadcast"}).Inject(ctx)
+	delivered := hub.Deliver(groupCtx, msg, false).LocalDelivered
 
 	// 本地应投递给 user1 和 user2（user3 不在本节点）
 	assert.Equal(t, 2, delivered, "应投递给本地 2 个在线成员")
@@ -310,22 +313,23 @@ func TestBroadcastToGroupMembersExcludeSender(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-exclude", Namespace: models.DefaultNamespace, OwnerID: "owner1"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "g-exclude", []string{"sender", "user2"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-exclude", Namespace: constants.DefaultNamespace, OwnerID: "owner1"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-exclude"}).Inject(ctx), []string{"sender", "user2"}))
 
 	go hub.Run()
 	defer hub.Shutdown()
 	time.Sleep(100 * time.Millisecond)
 
-	senderClient := makeTestClient("c-sender", "sender", models.DefaultNamespace)
-	otherClient := makeTestClient("c-other", "user2", models.DefaultNamespace)
+	senderClient := makeTestClient("c-sender", "sender", constants.DefaultNamespace)
+	otherClient := makeTestClient("c-other", "user2", constants.DefaultNamespace)
 	hub.Register(senderClient)
 	hub.Register(otherClient)
 	time.Sleep(100 * time.Millisecond)
 
 	// 广播并排除发送者
 	msg := makeGroupMessage("sender")
-	delivered := hub.BroadcastToGroupMembers(ctx, models.DefaultNamespace, "g-exclude", msg, true)
+	groupCtx := routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-exclude"}).Inject(ctx)
+	delivered := hub.Deliver(groupCtx, msg, true).LocalDelivered
 
 	// 仅投递给 user2（sender 被排除）
 	assert.Equal(t, 1, delivered, "排除发送者后应只投递给 1 个成员")
@@ -368,7 +372,7 @@ func TestRouteToClusterSingleNode(t *testing.T) {
 	// 单机模式（无 PubSub、无 gRPC）routeToCluster 应直接返回 nil
 	opts := ClusterDispatchOptions{
 		Operation:    OperationTypeSendMessage,
-		Namespace:    models.DefaultNamespace,
+		Namespace:    constants.DefaultNamespace,
 		TargetUserID: "user1",
 	}
 	err := hub.routeToCluster(ctx, msg, opts)
@@ -435,7 +439,7 @@ func TestCrossNodeGroupBroadcastSingleNode(t *testing.T) {
 
 	// 不应 panic
 	assert.NotPanics(t, func() {
-		hub.crossNodeGroupBroadcast(routing.WithNamespaceGroupIDs(ctx, models.DefaultNamespace, []string{"g1"}), msg, false)
+		hub.crossNodeGroupBroadcast(routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g1"}).Inject(ctx), msg, false)
 	})
 }
 
@@ -450,8 +454,8 @@ func TestSendToGroupOfflineMembers(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-send", Namespace: models.DefaultNamespace, OwnerID: "owner1"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "g-send", []string{"u-online", "u-offline"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-send", Namespace: constants.DefaultNamespace, OwnerID: "owner1"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-send"}).Inject(ctx), []string{"u-online", "u-offline"}))
 
 	go hub.Run()
 	defer hub.Shutdown()
@@ -463,7 +467,9 @@ func TestSendToGroupOfflineMembers(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	msg := makeGroupMessage("owner1")
-	result := hub.SendToGroup(routing.WithNamespaceGroupIDs(ctx, models.DefaultNamespace, []string{"g-send"}), msg, false)
+	msg.RequireAck = true
+	groupCtx := routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-send"}).Inject(ctx)
+	result := hub.Deliver(groupCtx, msg, false)
 
 	assert.Equal(t, 2, result.TotalMembers, "总成员数应为 2")
 	// 未配置离线消息处理器时，离线成员投递失败
@@ -481,10 +487,12 @@ func TestSendToGroupRepoNotSet(t *testing.T) {
 
 	ctx := context.Background()
 	msg := makeGroupMessage("sender")
-	result := hub.SendToGroup(routing.WithNamespaceGroupIDs(ctx, models.DefaultNamespace, []string{"any-group"}), msg, false)
+	msg.RequireAck = true
+	groupCtx := routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"any-group"}).Inject(ctx)
+	result := hub.Deliver(groupCtx, msg, false)
 
 	assert.False(t, len(result.Errors) == 0, "应有错误返回")
-	assert.Equal(t, "any-group", result.GroupID)
+	assert.Equal(t, "any-group", result.GroupIDs[0])
 }
 
 // ============================================================================
@@ -528,14 +536,14 @@ func TestBroadcastToAllGroupsDedup(t *testing.T) {
 	ctx := context.Background()
 
 	// 创建 3 个群组
-	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g1", Namespace: models.DefaultNamespace, OwnerID: "o1"}))
-	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g2", Namespace: models.DefaultNamespace, OwnerID: "o1"}))
-	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g3", Namespace: models.DefaultNamespace, OwnerID: "o1"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g1", Namespace: constants.DefaultNamespace, OwnerID: "o1"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g2", Namespace: constants.DefaultNamespace, OwnerID: "o1"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g3", Namespace: constants.DefaultNamespace, OwnerID: "o1"}))
 
 	// user1 同时在 g1、g2、g3 三个群组（应去重，只收一条）
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "g1", []string{"user1", "user2"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "g2", []string{"user1", "user3"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "g3", []string{"user1", "user4"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g1"}).Inject(ctx), []string{"user1", "user2"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g2"}).Inject(ctx), []string{"user1", "user3"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g3"}).Inject(ctx), []string{"user1", "user4"}))
 
 	go hub.Run()
 	defer hub.Shutdown()
@@ -550,7 +558,12 @@ func TestBroadcastToAllGroupsDedup(t *testing.T) {
 
 	// 向 tenantA 所有群组广播
 	msg := makeGroupMessage("owner1")
-	delivered := hub.BroadcastToAllGroups(ctx, models.DefaultNamespace, msg)
+	gids, gErr := hub.GetNamespaceGroups(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(ctx))
+	var delivered int
+	if gErr == nil && len(gids) > 0 {
+		groupCtx := routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs(gids).Inject(ctx)
+		delivered = hub.Deliver(groupCtx, msg, false).LocalDelivered
+	}
 
 	// 本地应投递给 user1 和 user2（user3/user4 不在本节点）
 	assert.Equal(t, 2, delivered, "应投递给本地 2 个在线成员")
@@ -590,7 +603,12 @@ func TestBroadcastToAllGroupsEmptyNamespace(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	msg := makeGroupMessage("sender")
-	delivered := hub.BroadcastToAllGroups(ctx, "empty-tenant", msg)
+	gids, _ := hub.GetNamespaceGroups(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("empty-tenant").WithGroupIDs(nil).Inject(ctx))
+	var delivered int
+	if len(gids) > 0 {
+		groupCtx := routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("empty-tenant").WithGroupIDs(gids).Inject(ctx)
+		delivered = hub.Deliver(groupCtx, msg, false).LocalDelivered
+	}
 	assert.Equal(t, 0, delivered, "无群组的命名空间应投递 0 条")
 }
 
@@ -604,7 +622,7 @@ func TestBroadcastToAllGroupsDefaultNamespace(t *testing.T) {
 	// CreateGroup 时 groupRepo 将空 Namespace 归一化为 DefaultNamespace
 	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-default", OwnerID: "o1"}))
 	// 业务方法调用方传明确 namespace（DefaultNamespace）
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "g-default", []string{"user1"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-default"}).Inject(ctx), []string{"user1"}))
 
 	go hub.Run()
 	defer hub.Shutdown()
@@ -615,7 +633,12 @@ func TestBroadcastToAllGroupsDefaultNamespace(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	msg := makeGroupMessage("sender")
-	delivered := hub.BroadcastToAllGroups(ctx, models.DefaultNamespace, msg)
+	gids, _ := hub.GetNamespaceGroups(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(ctx))
+	var delivered int
+	if len(gids) > 0 {
+		groupCtx := routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs(gids).Inject(ctx)
+		delivered = hub.Deliver(groupCtx, msg, false).LocalDelivered
+	}
 	assert.Equal(t, 1, delivered, "default 命名空间应投递给 1 个在线成员")
 }
 
@@ -630,15 +653,17 @@ func TestBroadcastToNamespaceEmptyNamespaceNormalized(t *testing.T) {
 	ctx := context.Background()
 
 	// default 命名空间客户端（模拟正常业务连接）
-	defaultClient := makeTestClient("c-default", "u-default", models.DefaultNamespace)
+	defaultClient := makeTestClient("c-default", "u-default", constants.DefaultNamespace)
 	hub.shardedRegistry.AddClient(defaultClient)
 	// 全局观察者（Namespace=""），用于验证不会"误中"default 广播的客户端直投路径
 	globalObs := registerObserver(hub, "c-g", "u-g", "", "")
 	_ = globalObs
 
-	// 传空 namespace，应归一化为 DefaultNamespace
+	// 传空 namespace，旧 BroadcastToNamespace 内部归一化为 DefaultNamespace；
+	// 新 Deliver 把 namespace="" 视为全局广播，故此处显式传 DefaultNamespace 以保留原语义。
 	msg := makeGroupMessage("sender")
-	delivered := hub.BroadcastToNamespace(ctx, "", msg)
+	nsCtx := routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(ctx)
+	delivered := hub.Deliver(nsCtx, msg, false).LocalDelivered
 	assert.Equal(t, 1, delivered, "空 namespace 归一化为 default 后应投递给 1 个 default 客户端")
 
 	select {
@@ -658,15 +683,17 @@ func TestBroadcastToGroupMembersEmptyNamespaceNormalized(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g1", Namespace: models.DefaultNamespace, OwnerID: "o1"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "g1", []string{"user1"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g1", Namespace: constants.DefaultNamespace, OwnerID: "o1"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g1"}).Inject(ctx), []string{"user1"}))
 
-	client1 := makeTestClient("c1", "user1", models.DefaultNamespace)
+	client1 := makeTestClient("c1", "user1", constants.DefaultNamespace)
 	hub.shardedRegistry.AddClient(client1)
 
 	// 传空 namespace，应归一化为 DefaultNamespace
+	// Deliver 群组分支内部 EnsureRouteDefaults 会归一化 namespace
 	msg := makeGroupMessage("sender")
-	delivered := hub.BroadcastToGroupMembers(ctx, "", "g1", msg, false)
+	groupCtx := routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("").WithGroupIDs([]string{"g1"}).Inject(ctx)
+	delivered := hub.Deliver(groupCtx, msg, false).LocalDelivered
 	assert.Equal(t, 1, delivered, "空 namespace 归一化后应投递给 1 个群组成员")
 
 	select {
@@ -685,17 +712,21 @@ func TestBroadcastToAllGroupsNotifiesObservers(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g1", Namespace: models.DefaultNamespace, OwnerID: "o1"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "g1", []string{"user1"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g1", Namespace: constants.DefaultNamespace, OwnerID: "o1"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g1"}).Inject(ctx), []string{"user1"}))
 
 	// 命名空间+群组级观察者
-	nsGroupObs := registerObserver(hub, "c-obs", "u-obs", models.DefaultNamespace, "g1")
+	nsGroupObs := registerObserver(hub, "c-obs", "u-obs", constants.DefaultNamespace, "g1")
 
-	client1 := makeTestClient("c1", "user1", models.DefaultNamespace)
+	client1 := makeTestClient("c1", "user1", constants.DefaultNamespace)
 	hub.shardedRegistry.AddClient(client1)
 
 	msg := makeGroupMessage("sender")
-	hub.BroadcastToAllGroups(ctx, models.DefaultNamespace, msg)
+	gids, _ := hub.GetNamespaceGroups(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(ctx))
+	if len(gids) > 0 {
+		groupCtx := routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs(gids).Inject(ctx)
+		_ = hub.Deliver(groupCtx, msg, false)
+	}
 
 	assertObserverReceived(t, nsGroupObs, "命名空间+群组级观察者应收到全群组广播")
 }
@@ -711,16 +742,23 @@ func TestBroadcastToGroupsMultiNamespaceObserverEnvelope(t *testing.T) {
 
 	// 两个命名空间各一个群组
 	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "gA", Namespace: "nsA", OwnerID: "o1"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, "nsA", "gA", []string{"userA"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("nsA").WithGroupIDs([]string{"gA"}).Inject(ctx), []string{"userA"}))
 	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "gB", Namespace: "nsB", OwnerID: "o1"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, "nsB", "gB", []string{"userB"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("nsB").WithGroupIDs([]string{"gB"}).Inject(ctx), []string{"userB"}))
 
 	// 各命名空间+群组级观察者
 	obsA := registerObserver(hub, "c-obsA", "u-obsA", "nsA", "gA")
 	obsB := registerObserver(hub, "c-obsB", "u-obsB", "nsB", "gB")
 
 	msg := makeGroupMessage("sender")
-	hub.BroadcastToGroups(ctx, []string{"nsA", "nsB"}, nil, msg)
+	for _, ns := range []string{"nsA", "nsB"} {
+		gids, gErr := hub.GetNamespaceGroups(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(ns).WithGroupIDs(nil).Inject(ctx))
+		if gErr != nil || len(gids) == 0 {
+			continue
+		}
+		nsCtx := routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(ns).WithGroupIDs(gids).Inject(ctx)
+		_ = hub.Deliver(nsCtx, msg, false)
+	}
 
 	// 观察者 A 应收到且消息 Namespace=nsA
 	mA, okA := waitForObserverMsg(t, obsA, time.Second)
@@ -740,17 +778,17 @@ func TestBroadcastToAllNamespacesAllGroups(t *testing.T) {
 	ctx := context.Background()
 
 	// 两个命名空间各创建群组
-	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "gA", Namespace: models.DefaultNamespace, OwnerID: "o1"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "gA", []string{"userA"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "gA", Namespace: constants.DefaultNamespace, OwnerID: "o1"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"gA"}).Inject(ctx), []string{"userA"}))
 	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "gB", Namespace: "tenantB", OwnerID: "o1"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, "tenantB", "gB", []string{"userB"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("tenantB").WithGroupIDs([]string{"gB"}).Inject(ctx), []string{"userB"}))
 
 	go hub.Run()
 	defer hub.Shutdown()
 	time.Sleep(100 * time.Millisecond)
 
 	clientA := makeTestClient("cA", "userA")
-	clientA.Namespace = models.DefaultNamespace
+	clientA.Namespace = constants.DefaultNamespace
 	clientB := makeTestClient("cB", "userB")
 	clientB.Namespace = "tenantB"
 	hub.Register(clientA)
@@ -758,7 +796,16 @@ func TestBroadcastToAllNamespacesAllGroups(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	msg := makeGroupMessage("sender")
-	total := hub.BroadcastToAllNamespacesAllGroups(ctx, msg)
+	namespaces, _ := groupRepo.GetAllNamespaces(ctx, constants.DefaultAppID)
+	var total int
+	for _, ns := range namespaces {
+		gids, gErr := hub.GetNamespaceGroups(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(ns).WithGroupIDs(nil).Inject(ctx))
+		if gErr != nil || len(gids) == 0 {
+			continue
+		}
+		nsCtx := routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(ns).WithGroupIDs(gids).Inject(ctx)
+		total += hub.Deliver(nsCtx, msg, false).LocalDelivered
+	}
 	assert.Equal(t, 2, total, "应投递给 2 个在线成员（tenantA + tenantB）")
 
 	// 两个客户端都应收到
@@ -781,8 +828,8 @@ func TestHandleDistributedGroupsBroadcastSingleGroup(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-single", Namespace: models.DefaultNamespace, OwnerID: "o1"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "g-single", []string{"user1"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-single", Namespace: constants.DefaultNamespace, OwnerID: "o1"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-single"}).Inject(ctx), []string{"user1"}))
 
 	go hub.Run()
 	defer hub.Shutdown()
@@ -796,9 +843,9 @@ func TestHandleDistributedGroupsBroadcastSingleGroup(t *testing.T) {
 	msg := makeGroupMessage("remote-sender")
 	distMsg := &DistributedMessage{
 		Type:      OperationTypeGroupsBroadcast,
-		NodeID:    "remote-node",           // 模拟来自其他节点
-		TargetID:  "g-single",              // 单群组回退路径
-		Namespace: models.DefaultNamespace, // 命名空间必须与群组一致，否则查不到成员
+		NodeID:    "remote-node",              // 模拟来自其他节点
+		TargetID:  "g-single",                 // 单群组回退路径
+		Namespace: constants.DefaultNamespace, // 命名空间必须与群组一致，否则查不到成员
 		Message:   msg,
 	}
 
@@ -814,7 +861,7 @@ func TestHandleDistributedGroupsBroadcastSingleGroup(t *testing.T) {
 }
 
 // 确保引入 models 包避免未使用导入
-var _ = models.DefaultNamespace
+var _ = constants.DefaultNamespace
 
 // ============================================================================
 // 系统保留组测试（agent/observer 统一到 group 体系）
@@ -829,18 +876,18 @@ func TestJoinSystemGroupsOnConnectAgent(t *testing.T) {
 	// 创建 agent 客户端
 	client := makeTestClient("c-agent", "agent-001")
 	client.UserType = UserTypeAgent
-	client.Namespace = models.DefaultNamespace
+	client.Namespace = constants.DefaultNamespace
 
 	// 调用 joinSystemGroupsOnConnect
 	hub.joinSystemGroupsOnConnect(ctx, client)
 
 	// 验证系统组 __agents__ 已创建且包含 agent-001
-	members, err := hub.groupRepo.GetMembers(ctx, models.DefaultNamespace, models.SystemGroupAgents)
+	members, err := hub.groupRepo.GetMembers(ctx, constants.DefaultAppID, constants.DefaultNamespace, constants.SystemGroupAgents)
 	require.NoError(t, err)
 	assert.Contains(t, members, "agent-001", "agent 应自动加入 __agents__ 系统组")
 
 	// 验证系统组元信息 owner 为 system
-	g, err := hub.groupRepo.GetGroup(ctx, models.DefaultNamespace, models.SystemGroupAgents)
+	g, err := hub.groupRepo.GetGroup(ctx, constants.DefaultAppID, constants.DefaultNamespace, constants.SystemGroupAgents)
 	require.NoError(t, err)
 	assert.Equal(t, "system", g.OwnerID)
 }
@@ -858,7 +905,7 @@ func TestJoinSystemGroupsOnConnectObserver(t *testing.T) {
 
 	hub.joinSystemGroupsOnConnect(ctx, client)
 
-	members, err := hub.groupRepo.GetMembers(ctx, "tenantB", models.SystemGroupObservers)
+	members, err := hub.groupRepo.GetMembers(ctx, constants.DefaultAppID, "tenantB", constants.SystemGroupObservers)
 	require.NoError(t, err)
 	assert.Contains(t, members, "observer-001")
 }
@@ -877,12 +924,12 @@ func TestJoinSystemGroupsOnConnectGlobalObserver(t *testing.T) {
 	hub.joinSystemGroupsOnConnect(ctx, client)
 
 	// 应加入 tenant="" 的 __observers__（非 default）
-	members, err := hub.groupRepo.GetMembers(ctx, "", models.SystemGroupObservers)
+	members, err := hub.groupRepo.GetMembers(ctx, constants.DefaultAppID, "", constants.SystemGroupObservers)
 	require.NoError(t, err)
 	assert.Contains(t, members, "global-observer", "全局观察者应加入 tenant='' 的系统组")
 
 	// 确认未加入 default 命名空间的系统组
-	membersDefault, _ := hub.groupRepo.GetMembers(ctx, "default", models.SystemGroupObservers)
+	membersDefault, _ := hub.groupRepo.GetMembers(ctx, constants.DefaultAppID, "default", constants.SystemGroupObservers)
 	assert.NotContains(t, membersDefault, "global-observer", "全局观察者不应加入 default 命名空间系统组")
 }
 
@@ -895,12 +942,12 @@ func TestJoinSystemGroupsOnConnectNormalUser(t *testing.T) {
 	// 普通客户
 	client := makeTestClient("c-cust", "customer-001")
 	client.UserType = UserTypeCustomer
-	client.Namespace = models.DefaultNamespace
+	client.Namespace = constants.DefaultNamespace
 
 	hub.joinSystemGroupsOnConnect(ctx, client)
 
 	// __agents__ 不应存在或不含 customer-001
-	members, _ := hub.groupRepo.GetMembers(ctx, models.DefaultNamespace, models.SystemGroupAgents)
+	members, _ := hub.groupRepo.GetMembers(ctx, constants.DefaultAppID, constants.DefaultNamespace, constants.SystemGroupAgents)
 	assert.NotContains(t, members, "customer-001", "普通客户不应加入 __agents__")
 }
 
@@ -913,18 +960,18 @@ func TestLeaveSystemGroupsOnDisconnect(t *testing.T) {
 	// agent 连接 → 加入系统组
 	client := makeTestClient("c-agent2", "agent-002")
 	client.UserType = UserTypeAgent
-	client.Namespace = models.DefaultNamespace
+	client.Namespace = constants.DefaultNamespace
 	hub.joinSystemGroupsOnConnect(ctx, client)
 
 	// 确认已加入
-	members, _ := hub.groupRepo.GetMembers(ctx, models.DefaultNamespace, models.SystemGroupAgents)
+	members, _ := hub.groupRepo.GetMembers(ctx, constants.DefaultAppID, constants.DefaultNamespace, constants.SystemGroupAgents)
 	assert.Contains(t, members, "agent-002")
 
 	// 断开 → 离开系统组
 	hub.leaveSystemGroupsOnDisconnect(ctx, client)
 
 	// 确认已离开
-	members, err := hub.groupRepo.GetMembers(ctx, models.DefaultNamespace, models.SystemGroupAgents)
+	members, err := hub.groupRepo.GetMembers(ctx, constants.DefaultAppID, constants.DefaultNamespace, constants.SystemGroupAgents)
 	require.NoError(t, err)
 	assert.NotContains(t, members, "agent-002", "断开后应离开 __agents__ 系统组")
 }
@@ -937,7 +984,7 @@ func TestRejoinSystemGroupOnReconnect(t *testing.T) {
 
 	client := makeTestClient("c-reconnect", "agent-003")
 	client.UserType = UserTypeAgent
-	client.Namespace = models.DefaultNamespace
+	client.Namespace = constants.DefaultNamespace
 
 	// 连接 → 断开 → 重连
 	hub.joinSystemGroupsOnConnect(ctx, client)
@@ -945,7 +992,7 @@ func TestRejoinSystemGroupOnReconnect(t *testing.T) {
 	hub.joinSystemGroupsOnConnect(ctx, client)
 
 	// 重连后应再次加入
-	members, err := hub.groupRepo.GetMembers(ctx, models.DefaultNamespace, models.SystemGroupAgents)
+	members, err := hub.groupRepo.GetMembers(ctx, constants.DefaultAppID, constants.DefaultNamespace, constants.SystemGroupAgents)
 	require.NoError(t, err)
 	assert.Contains(t, members, "agent-003", "重连后应重新加入系统组")
 	assert.Len(t, members, 1, "不应重复加入")
@@ -990,14 +1037,14 @@ func TestGroupLifecycleCallbacks(t *testing.T) {
 		leaveCh <- memberEvt{ns, gid, uids}
 	})
 
-	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-cb", Namespace: models.DefaultNamespace, OwnerID: "o1", MaxMembers: 10}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-cb", Namespace: constants.DefaultNamespace, OwnerID: "o1", MaxMembers: 10}))
 
 	// 1. Join（模拟 register 自动装配：AddGroupMembers 落库 + triggerGroupMemberJoinCallback 触发回调）
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "g-cb", []string{"u1", "u2"}))
-	hub.triggerGroupMemberJoinCallback(models.DefaultNamespace, "g-cb", []string{"u1", "u2"})
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-cb"}).Inject(ctx), []string{"u1", "u2"}))
+	hub.triggerGroupMemberJoinCallback(ctx, constants.DefaultNamespace, "g-cb", []string{"u1", "u2"})
 	select {
 	case e := <-joinCh:
-		assert.Equal(t, models.DefaultNamespace, e.namespace)
+		assert.Equal(t, constants.DefaultNamespace, e.namespace)
 		assert.Equal(t, "g-cb", e.groupID)
 		assert.ElementsMatch(t, []string{"u1", "u2"}, e.userIDs)
 	case <-time.After(time.Second):
@@ -1005,10 +1052,10 @@ func TestGroupLifecycleCallbacks(t *testing.T) {
 	}
 
 	// 2. Leave
-	require.NoError(t, hub.RemoveGroupMembers(ctx, models.DefaultNamespace, "g-cb", []string{"u1"}))
+	require.NoError(t, hub.RemoveGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-cb"}).Inject(ctx), []string{"u1"}))
 	select {
 	case e := <-leaveCh:
-		assert.Equal(t, models.DefaultNamespace, e.namespace)
+		assert.Equal(t, constants.DefaultNamespace, e.namespace)
 		assert.Equal(t, "g-cb", e.groupID)
 		assert.ElementsMatch(t, []string{"u1"}, e.userIDs)
 	case <-time.After(time.Second):
@@ -1016,10 +1063,10 @@ func TestGroupLifecycleCallbacks(t *testing.T) {
 	}
 
 	// 3. Disband
-	require.NoError(t, hub.DisbandGroup(ctx, models.DefaultNamespace, "g-cb"))
+	require.NoError(t, hub.DisbandGroup(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-cb"}).Inject(ctx)))
 	select {
 	case e := <-disbandCh:
-		assert.Equal(t, models.DefaultNamespace, e.namespace)
+		assert.Equal(t, constants.DefaultNamespace, e.namespace)
 		assert.Equal(t, "g-cb", e.groupID)
 	case <-time.After(time.Second):
 		t.Fatal("OnGroupDisband 未触发")
@@ -1038,7 +1085,7 @@ func TestGroupCallbackSliceSnapshot(t *testing.T) {
 	})
 
 	original := []string{"u1", "u2"}
-	hub.triggerGroupMemberJoinCallback("tA", "g-snap", original)
+	hub.triggerGroupMemberJoinCallback(context.Background(), "tA", "g-snap", original)
 
 	// 立即修改原切片，验证回调收到的是快照副本
 	original[0] = "MUTATED"
@@ -1065,7 +1112,7 @@ func TestGroupCallbackNotTriggeredOnError(t *testing.T) {
 		hub.OnGroupMemberJoin(func(_ context.Context, _, _ string, uids []string) { joinCh <- uids })
 
 		// 手动 AddGroupMembers 不应触发回调（回调仅在 register 自动装配时触发）
-		require.NoError(t, hub.AddGroupMembers(ctx, "tA", "g-manual", []string{"u1", "u2"}))
+		require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("tA").WithGroupIDs([]string{"g-manual"}).Inject(ctx), []string{"u1", "u2"}))
 
 		select {
 		case uids := <-joinCh:
@@ -1081,12 +1128,12 @@ func TestGroupCallbackNotTriggeredOnError(t *testing.T) {
 		ctx := context.Background()
 
 		require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-full", Namespace: "tA", OwnerID: "o", MaxMembers: 1}))
-		require.NoError(t, hub.AddGroupMembers(ctx, "tA", "g-full", []string{"u1"}))
+		require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("tA").WithGroupIDs([]string{"g-full"}).Inject(ctx), []string{"u1"}))
 
 		joinCh := make(chan []string, 1)
 		hub.OnGroupMemberJoin(func(_ context.Context, _, _ string, uids []string) { joinCh <- uids })
 
-		err := hub.AddGroupMembers(ctx, "tA", "g-full", []string{"u2"})
+		err := hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("tA").WithGroupIDs([]string{"g-full"}).Inject(ctx), []string{"u2"})
 		require.ErrorIs(t, err, ErrGroupFull)
 
 		select {
@@ -1105,7 +1152,7 @@ func TestGroupCallbackNotTriggeredOnError(t *testing.T) {
 		disbandCh := make(chan string, 1)
 		hub.OnGroupDisband(func(_ context.Context, _, gid string) { disbandCh <- gid })
 
-		err := hub.DisbandGroup(context.Background(), "tA", "any")
+		err := hub.DisbandGroup(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("tA").WithGroupIDs([]string{"any"}).Inject(context.Background()))
 		require.Error(t, err, "groupRepo 未设置应返回错误")
 
 		select {
@@ -1130,11 +1177,11 @@ func TestSystemGroupTriggersCallback(t *testing.T) {
 	// agent 连接 → 自动加入 __agents__ 系统组
 	client := makeTestClient("c-agent", "agent-001")
 	client.UserType = UserTypeAgent
-	client.Namespace = models.DefaultNamespace
+	client.Namespace = constants.DefaultNamespace
 	hub.joinSystemGroupsOnConnect(ctx, client)
 
 	// 确认已加入系统组（底层生效）
-	members, err := hub.groupRepo.GetMembers(ctx, models.DefaultNamespace, models.SystemGroupAgents)
+	members, err := hub.groupRepo.GetMembers(ctx, constants.DefaultAppID, constants.DefaultNamespace, constants.SystemGroupAgents)
 	require.NoError(t, err)
 	assert.Contains(t, members, "agent-001")
 
@@ -1157,10 +1204,10 @@ func TestLeaveSystemGroupMultiClient(t *testing.T) {
 	// 同 userID 的两个 agent 连接（模拟多端登录）
 	client1 := makeTestClient("c-agent-a", "agent-multi")
 	client1.UserType = UserTypeAgent
-	client1.Namespace = models.DefaultNamespace
+	client1.Namespace = constants.DefaultNamespace
 	client2 := makeTestClient("c-agent-b", "agent-multi")
 	client2.UserType = UserTypeAgent
-	client2.Namespace = models.DefaultNamespace
+	client2.Namespace = constants.DefaultNamespace
 
 	// 注册到 registry（模拟在线）
 	hub.shardedRegistry.AddClient(client1)
@@ -1171,7 +1218,7 @@ func TestLeaveSystemGroupMultiClient(t *testing.T) {
 	hub.joinSystemGroupsOnConnect(ctx, client2)
 
 	// 确认系统组包含 agent-multi
-	members, err := hub.groupRepo.GetMembers(ctx, models.DefaultNamespace, models.SystemGroupAgents)
+	members, err := hub.groupRepo.GetMembers(ctx, constants.DefaultAppID, constants.DefaultNamespace, constants.SystemGroupAgents)
 	require.NoError(t, err)
 	assert.Contains(t, members, "agent-multi")
 
@@ -1180,7 +1227,7 @@ func TestLeaveSystemGroupMultiClient(t *testing.T) {
 	hub.leaveSystemGroupsOnDisconnect(ctx, client1)
 
 	// client2 仍在线，系统组应保留 agent-multi
-	members, err = hub.groupRepo.GetMembers(ctx, models.DefaultNamespace, models.SystemGroupAgents)
+	members, err = hub.groupRepo.GetMembers(ctx, constants.DefaultAppID, constants.DefaultNamespace, constants.SystemGroupAgents)
 	require.NoError(t, err)
 	assert.Contains(t, members, "agent-multi", "仍有其他端在线时不应离开系统组")
 
@@ -1189,7 +1236,7 @@ func TestLeaveSystemGroupMultiClient(t *testing.T) {
 	hub.leaveSystemGroupsOnDisconnect(ctx, client2)
 
 	// 所有连接断开，系统组应移除 agent-multi
-	members, err = hub.groupRepo.GetMembers(ctx, models.DefaultNamespace, models.SystemGroupAgents)
+	members, err = hub.groupRepo.GetMembers(ctx, constants.DefaultAppID, constants.DefaultNamespace, constants.SystemGroupAgents)
 	require.NoError(t, err)
 	assert.NotContains(t, members, "agent-multi", "所有连接断开后应离开系统组")
 }
@@ -1211,33 +1258,33 @@ func TestAddGroupMembersReconnectIdempotent(t *testing.T) {
 	require.NoError(t, groupRepo.CreateGroup(ctx, group))
 
 	// 用户 A 首次加群（成员数=1）
-	require.NoError(t, hub.AddGroupMembers(ctx, "default", "room-1", []string{"userA"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("default").WithGroupIDs([]string{"room-1"}).Inject(ctx), []string{"userA"}))
 
 	// 用户 A 重连再次加群：A 已存在，不应误报 ErrGroupFull（1+0=1 ≤ 2）
-	require.NoError(t, hub.AddGroupMembers(ctx, "default", "room-1", []string{"userA"}),
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("default").WithGroupIDs([]string{"room-1"}).Inject(ctx), []string{"userA"}),
 		"重连用户已在群内，不应误报超限")
 
 	// 用户 B 加群（成员数=2，满员）
-	require.NoError(t, hub.AddGroupMembers(ctx, "default", "room-1", []string{"userB"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("default").WithGroupIDs([]string{"room-1"}).Inject(ctx), []string{"userB"}))
 
 	// 用户 B 重连再次加群：B 已存在，不应误报（2+0=2 ≤ 2）
-	require.NoError(t, hub.AddGroupMembers(ctx, "default", "room-1", []string{"userB"}),
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("default").WithGroupIDs([]string{"room-1"}).Inject(ctx), []string{"userB"}),
 		"重连用户已在群内，满员时也不应误报超限")
 
 	// 用户 C 加群：真正超限（2+1=3 > 2），应报 ErrGroupFull
-	err := hub.AddGroupMembers(ctx, "default", "room-1", []string{"userC"})
+	err := hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("default").WithGroupIDs([]string{"room-1"}).Inject(ctx), []string{"userC"})
 	assert.ErrorIs(t, err, ErrGroupFull, "真正新增超限应报错")
 
 	// 验证 A/B 成员关系保留（离线不销毁语义）
-	exists, err := groupRepo.IsMember(ctx, "default", "room-1", "userA")
+	exists, err := groupRepo.IsMember(ctx, constants.DefaultAppID, "default", "room-1", "userA")
 	require.NoError(t, err)
 	assert.True(t, exists, "用户 A 成员关系应保留")
-	exists, err = groupRepo.IsMember(ctx, "default", "room-1", "userB")
+	exists, err = groupRepo.IsMember(ctx, constants.DefaultAppID, "default", "room-1", "userB")
 	require.NoError(t, err)
 	assert.True(t, exists, "用户 B 成员关系应保留")
 
 	// 验证成员总数仍为 2（A、B），C 未加入
-	count, err := groupRepo.GetMemberCount(ctx, "default", "room-1")
+	count, err := groupRepo.GetMemberCount(ctx, constants.DefaultAppID, "default", "room-1")
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), count, "成员总数应为 2")
 }
@@ -1253,26 +1300,26 @@ func TestAddGroupMembersAutoCreate(t *testing.T) {
 	ctx := context.Background()
 
 	// 群组 "g-auto" 不存在，addGroupMembers 应自动创建
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "g-auto", []string{"u1", "u2"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-auto"}).Inject(ctx), []string{"u1", "u2"}))
 
 	// 验证群组已被自动创建
-	g, err := groupRepo.GetGroup(ctx, models.DefaultNamespace, "g-auto")
+	g, err := groupRepo.GetGroup(ctx, constants.DefaultAppID, constants.DefaultNamespace, "g-auto")
 	require.NoError(t, err)
 	assert.Equal(t, "g-auto", g.GroupID)
-	assert.Equal(t, models.DefaultNamespace, g.GetNamespace())
+	assert.Equal(t, constants.DefaultNamespace, g.GetNamespace())
 
 	// 验证成员关系已建立
-	members, err := hub.GetGroupMembers(ctx, models.DefaultNamespace, "g-auto")
+	members, err := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-auto"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"u1", "u2"}, members)
 
 	// 验证命名空间索引包含该群组
-	nsGroups, err := hub.GetNamespaceGroups(ctx, models.DefaultNamespace)
+	nsGroups, err := hub.GetNamespaceGroups(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(ctx))
 	require.NoError(t, err)
 	assert.Contains(t, nsGroups, "g-auto")
 
 	// 验证用户反向索引
-	userGroups, err := hub.GetUserGroups(ctx, models.DefaultNamespace, "u1")
+	userGroups, err := hub.GetUserGroups(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(ctx), "u1")
 	require.NoError(t, err)
 	assert.Contains(t, userGroups, "g-auto")
 }
@@ -1286,15 +1333,15 @@ func TestAddGroupMembersAutoCreatePreservesExisting(t *testing.T) {
 	// 预先创建群组（带 MaxMembers 与 Name）
 	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{
 		GroupID:    "g-exist",
-		Namespace:  models.DefaultNamespace,
+		Namespace:  constants.DefaultNamespace,
 		Name:       "原始群名",
 		MaxMembers: 5,
 	}))
 
 	// AddGroupMembers 应复用已存在群组，不覆盖 MaxMembers/Name
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "g-exist", []string{"u1"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-exist"}).Inject(ctx), []string{"u1"}))
 
-	g, err := groupRepo.GetGroup(ctx, models.DefaultNamespace, "g-exist")
+	g, err := groupRepo.GetGroup(ctx, constants.DefaultAppID, constants.DefaultNamespace, "g-exist")
 	require.NoError(t, err)
 	assert.Equal(t, 5, g.MaxMembers, "已存在群组的 MaxMembers 不应被覆盖")
 	assert.Equal(t, "原始群名", g.Name, "已存在群组的 Name 不应被覆盖")
@@ -1326,7 +1373,7 @@ func TestMoveScenarioWithRemoveAndNotify(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// A 加入 groupB
-	require.NoError(t, hub.AddGroupMembers(ctx, "default", "groupB", []string{"u-move"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("default").WithGroupIDs([]string{"groupB"}).Inject(ctx), []string{"u-move"}))
 
 	// 收集 leave 回调
 	var leaveCalls []string
@@ -1351,9 +1398,9 @@ func TestMoveScenarioWithRemoveAndNotify(t *testing.T) {
 
 	// === move 场景：调用方自行操作 ===
 	// 1. 先加入新群 groupC
-	require.NoError(t, hub.AddGroupMembers(ctx, "default", "groupC", []string{"u-move"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("default").WithGroupIDs([]string{"groupC"}).Inject(ctx), []string{"u-move"}))
 	// 2. 从旧群 groupB 移除（触发 leave 回调）
-	require.NoError(t, hub.RemoveGroupMembers(ctx, "default", "groupB", []string{"u-move"}))
+	require.NoError(t, hub.RemoveGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("default").WithGroupIDs([]string{"groupB"}).Inject(ctx), []string{"u-move"}))
 	// 3. 更新在线连接 GroupID 与观察者索引（调用方自行调用 MoveClientGroup）
 	hub.shardedRegistry.ForEachUserClient("u-move", func(_ string, c *Client) bool {
 		hub.shardedRegistry.MoveClientGroup(c, "groupC")
@@ -1395,10 +1442,10 @@ loop:
 	assert.True(t, foundChanged, "move 后应收到群组变更通知")
 
 	// 验证成员关系：A 不在 groupB，在 groupC
-	membersB, err := hub.GetGroupMembers(ctx, "default", "groupB")
+	membersB, err := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("default").WithGroupIDs([]string{"groupB"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.NotContains(t, membersB, "u-move", "A 应已移出 groupB")
-	membersC, err := hub.GetGroupMembers(ctx, "default", "groupC")
+	membersC, err := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("default").WithGroupIDs([]string{"groupC"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Contains(t, membersC, "u-move", "A 应在 groupC")
 
@@ -1424,13 +1471,13 @@ func TestMoveScenarioOfflineUser(t *testing.T) {
 	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "groupC", Namespace: "default", OwnerID: "owner"}))
 
 	// A 加入 groupB（A 离线，不注册客户端）
-	require.NoError(t, hub.AddGroupMembers(ctx, "default", "groupB", []string{"u-offline"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("default").WithGroupIDs([]string{"groupB"}).Inject(ctx), []string{"u-offline"}))
 
 	// === move 场景：A 离线 ===
 	// 1. 先加入新群 groupC
-	require.NoError(t, hub.AddGroupMembers(ctx, "default", "groupC", []string{"u-offline"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("default").WithGroupIDs([]string{"groupC"}).Inject(ctx), []string{"u-offline"}))
 	// 2. 从旧群 groupB 移除
-	require.NoError(t, hub.RemoveGroupMembers(ctx, "default", "groupB", []string{"u-offline"}))
+	require.NoError(t, hub.RemoveGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("default").WithGroupIDs([]string{"groupB"}).Inject(ctx), []string{"u-offline"}))
 	// 3. 调用方下发 group_changed 通知（A 离线，未配置离线处理器时返回 offline 错误，属预期行为）
 	notifyMsg := NewHubMessage()
 	notifyMsg.MessageType = models.MessageTypeGroupChanged
@@ -1448,15 +1495,15 @@ func TestMoveScenarioOfflineUser(t *testing.T) {
 	assert.False(t, result.Success, "离线用户无离线处理器时发送不应成功")
 
 	// 核心验证：成员关系正确迁移（与通知投递无关）
-	membersB, err := hub.GetGroupMembers(ctx, "default", "groupB")
+	membersB, err := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("default").WithGroupIDs([]string{"groupB"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.NotContains(t, membersB, "u-offline", "A 应已移出 groupB")
-	membersC, err := hub.GetGroupMembers(ctx, "default", "groupC")
+	membersC, err := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("default").WithGroupIDs([]string{"groupC"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Contains(t, membersC, "u-offline", "A 应在 groupC")
 
 	// 验证用户群组列表只含 groupC（反向索引已更新）
-	userGroups, err := hub.GetUserGroups(ctx, "default", "u-offline")
+	userGroups, err := hub.GetUserGroups(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("default").WithGroupIDs(nil).Inject(ctx), "u-offline")
 	require.NoError(t, err)
 	assert.NotContains(t, userGroups, "groupB", "用户群组列表不应再含 groupB")
 	assert.Contains(t, userGroups, "groupC", "用户群组列表应含 groupC")
@@ -1562,11 +1609,11 @@ func TestMoveScenarioOfflineReconnect(t *testing.T) {
 
 	// === 阶段1：A 离线时 move ===
 	// A 加入 groupB（A 离线，不注册客户端）
-	require.NoError(t, hub.AddGroupMembers(ctx, "default", "groupB", []string{"u-reconnect"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("default").WithGroupIDs([]string{"groupB"}).Inject(ctx), []string{"u-reconnect"}))
 
 	// move：加入新群 + 从旧群移除
-	require.NoError(t, hub.AddGroupMembers(ctx, "default", "groupC", []string{"u-reconnect"}))
-	require.NoError(t, hub.RemoveGroupMembers(ctx, "default", "groupB", []string{"u-reconnect"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("default").WithGroupIDs([]string{"groupC"}).Inject(ctx), []string{"u-reconnect"}))
+	require.NoError(t, hub.RemoveGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("default").WithGroupIDs([]string{"groupB"}).Inject(ctx), []string{"u-reconnect"}))
 
 	// 下发 group_changed 通知（A 离线，应走离线存储）
 	notifyMsg := NewHubMessage()
@@ -1632,10 +1679,10 @@ func TestMoveScenarioOfflineReconnect(t *testing.T) {
 	assert.Equal(t, int64(0), count, "推送后离线消息应被删除")
 
 	// 验证成员关系：A 在 groupC，不在 groupB
-	membersB, err := hub.GetGroupMembers(ctx, "default", "groupB")
+	membersB, err := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("default").WithGroupIDs([]string{"groupB"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.NotContains(t, membersB, "u-reconnect", "A 应不在 groupB")
-	membersC, err := hub.GetGroupMembers(ctx, "default", "groupC")
+	membersC, err := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("default").WithGroupIDs([]string{"groupC"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Contains(t, membersC, "u-reconnect", "A 应在 groupC")
 }
@@ -1653,28 +1700,28 @@ func TestAddGroupMembersAppendToExisting(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-append", Namespace: models.DefaultNamespace, OwnerID: "o1", Name: "原始群"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "g-append", []string{"u1", "u2"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-append", Namespace: constants.DefaultNamespace, OwnerID: "o1", Name: "原始群"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-append"}).Inject(ctx), []string{"u1", "u2"}))
 
 	// 追加新成员 u3、u4，同时重复添加已存在成员 u1（幂等，集合语义）
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "g-append", []string{"u1", "u3", "u4"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-append"}).Inject(ctx), []string{"u1", "u3", "u4"}))
 
-	members, err := hub.GetGroupMembers(ctx, models.DefaultNamespace, "g-append")
+	members, err := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-append"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"u1", "u2", "u3", "u4"}, members)
 
-	cnt, err := hub.GetGroupMemberCount(ctx, models.DefaultNamespace, "g-append")
+	cnt, err := hub.GetGroupMemberCount(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-append"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Equal(t, int64(4), cnt)
 
 	// 追加后分组元信息仍存在且未被覆盖
-	g, err := hub.GetGroup(ctx, models.DefaultNamespace, "g-append")
+	g, err := hub.GetGroup(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-append"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Equal(t, "o1", g.OwnerID)
 	assert.Equal(t, "原始群", g.Name)
 
 	// 命名空间群组索引不重复（仅一个 g-append）
-	nsGroups, err := hub.GetNamespaceGroups(ctx, models.DefaultNamespace)
+	nsGroups, err := hub.GetNamespaceGroups(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(ctx))
 	require.NoError(t, err)
 	assert.Equal(t, 1, len(nsGroups))
 }
@@ -1685,13 +1732,13 @@ func TestAddGroupMembersEmptyUserIDs(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-empty-arg", Namespace: models.DefaultNamespace, OwnerID: "o1"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-empty-arg", Namespace: constants.DefaultNamespace, OwnerID: "o1"}))
 
 	// 空切片与 nil 均不应报错，也不应建立成员关系
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "g-empty-arg", []string{}))
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "g-empty-arg", nil))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-empty-arg"}).Inject(ctx), []string{}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-empty-arg"}).Inject(ctx), nil))
 
-	cnt, err := hub.GetGroupMemberCount(ctx, models.DefaultNamespace, "g-empty-arg")
+	cnt, err := hub.GetGroupMemberCount(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-empty-arg"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), cnt)
 }
@@ -1702,24 +1749,24 @@ func TestRemoveGroupMembersNonExistent(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-rm", Namespace: models.DefaultNamespace, OwnerID: "o1"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "g-rm", []string{"u1", "u2"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-rm", Namespace: constants.DefaultNamespace, OwnerID: "o1"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-rm"}).Inject(ctx), []string{"u1", "u2"}))
 
 	// 移除不存在的成员 uX、uY 不应报错（Redis SRem 对不存在元素幂等）
-	require.NoError(t, hub.RemoveGroupMembers(ctx, models.DefaultNamespace, "g-rm", []string{"uX", "uY"}))
+	require.NoError(t, hub.RemoveGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-rm"}).Inject(ctx), []string{"uX", "uY"}))
 
 	// 原成员不受影响
-	members, err := hub.GetGroupMembers(ctx, models.DefaultNamespace, "g-rm")
+	members, err := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-rm"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"u1", "u2"}, members)
 
 	// 混合移除：一个真实成员 + 一个不存在成员
-	require.NoError(t, hub.RemoveGroupMembers(ctx, models.DefaultNamespace, "g-rm", []string{"u1", "uZ"}))
-	members, err = hub.GetGroupMembers(ctx, models.DefaultNamespace, "g-rm")
+	require.NoError(t, hub.RemoveGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-rm"}).Inject(ctx), []string{"u1", "uZ"}))
+	members, err = hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-rm"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"u2"}, members)
 
-	cnt, err := hub.GetGroupMemberCount(ctx, models.DefaultNamespace, "g-rm")
+	cnt, err := hub.GetGroupMemberCount(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-rm"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), cnt)
 }
@@ -1730,14 +1777,14 @@ func TestRemoveGroupMembersEmptyUserIDs(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-rm-empty", Namespace: models.DefaultNamespace, OwnerID: "o1"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "g-rm-empty", []string{"u1"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-rm-empty", Namespace: constants.DefaultNamespace, OwnerID: "o1"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-rm-empty"}).Inject(ctx), []string{"u1"}))
 
 	// 空切片与 nil 均不应报错，成员应保留
-	require.NoError(t, hub.RemoveGroupMembers(ctx, models.DefaultNamespace, "g-rm-empty", []string{}))
-	require.NoError(t, hub.RemoveGroupMembers(ctx, models.DefaultNamespace, "g-rm-empty", nil))
+	require.NoError(t, hub.RemoveGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-rm-empty"}).Inject(ctx), []string{}))
+	require.NoError(t, hub.RemoveGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-rm-empty"}).Inject(ctx), nil))
 
-	members, err := hub.GetGroupMembers(ctx, models.DefaultNamespace, "g-rm-empty")
+	members, err := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-rm-empty"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"u1"}, members)
 }
@@ -1751,19 +1798,19 @@ func TestDisbandGroupNonExistent(t *testing.T) {
 	ctx := context.Background()
 
 	// 不存在的分组，仓库 DisbandGroup 幂等返回 nil
-	err := hub.DisbandGroup(ctx, models.DefaultNamespace, "g-not-exist")
+	err := hub.DisbandGroup(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-not-exist"}).Inject(ctx))
 	assert.NoError(t, err, "解散不存在的分组应幂等返回 nil")
 
 	// 重复解散同样不报错
-	err = hub.DisbandGroup(ctx, models.DefaultNamespace, "g-not-exist")
+	err = hub.DisbandGroup(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-not-exist"}).Inject(ctx))
 	assert.NoError(t, err)
 
 	// 解散后查询仍为不存在
-	_, err = hub.GetGroup(ctx, models.DefaultNamespace, "g-not-exist")
+	_, err = hub.GetGroup(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-not-exist"}).Inject(ctx))
 	assert.ErrorIs(t, err, ErrGroupNotFound)
 
 	// 成员列表为空
-	members, err := hub.GetGroupMembers(ctx, models.DefaultNamespace, "g-not-exist")
+	members, err := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-not-exist"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Empty(t, members)
 }
@@ -1775,21 +1822,21 @@ func TestGetGroupMembersEmptyGroup(t *testing.T) {
 	ctx := context.Background()
 
 	// 不存在的分组：GetMembers 对缺失 key 返回空切片，GetMemberCount 返回 0
-	members, err := hub.GetGroupMembers(ctx, models.DefaultNamespace, "g-no-such")
+	members, err := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-no-such"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Empty(t, members)
 
-	cnt, err := hub.GetGroupMemberCount(ctx, models.DefaultNamespace, "g-no-such")
+	cnt, err := hub.GetGroupMemberCount(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-no-such"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), cnt)
 
 	// 存在但无成员的分组同样返回空与 0
-	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-empty", Namespace: models.DefaultNamespace, OwnerID: "o1"}))
-	members, err = hub.GetGroupMembers(ctx, models.DefaultNamespace, "g-empty")
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-empty", Namespace: constants.DefaultNamespace, OwnerID: "o1"}))
+	members, err = hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-empty"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Empty(t, members)
 
-	cnt, err = hub.GetGroupMemberCount(ctx, models.DefaultNamespace, "g-empty")
+	cnt, err = hub.GetGroupMemberCount(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-empty"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), cnt)
 }
@@ -1800,7 +1847,7 @@ func TestGetUserGroupsNoMembership(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	groups, err := hub.GetUserGroups(ctx, models.DefaultNamespace, "user-no-groups")
+	groups, err := hub.GetUserGroups(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(ctx), "user-no-groups")
 	require.NoError(t, err)
 	assert.Empty(t, groups)
 }
@@ -1811,7 +1858,7 @@ func TestNamespaceGroupsEmpty(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	groups, err := hub.GetNamespaceGroups(ctx, "tenant-empty")
+	groups, err := hub.GetNamespaceGroups(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("tenant-empty").WithGroupIDs(nil).Inject(ctx))
 	require.NoError(t, err)
 	assert.Empty(t, groups)
 }
@@ -1826,39 +1873,39 @@ func TestGroupRepoNotSetBranches(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("GetGroup", func(t *testing.T) {
-		_, err := hub.GetGroup(ctx, "ns", "g")
+		_, err := hub.GetGroup(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("ns").WithGroupIDs([]string{"g"}).Inject(ctx))
 		assert.ErrorIs(t, err, ErrGroupRepoNotSet)
 	})
 	t.Run("DisbandGroup", func(t *testing.T) {
-		err := hub.DisbandGroup(ctx, "ns", "g")
+		err := hub.DisbandGroup(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("ns").WithGroupIDs([]string{"g"}).Inject(ctx))
 		assert.ErrorIs(t, err, ErrGroupRepoNotSet)
 	})
 	t.Run("AddGroupMembers", func(t *testing.T) {
-		err := hub.AddGroupMembers(ctx, "ns", "g", []string{"u1"})
+		err := hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("ns").WithGroupIDs([]string{"g"}).Inject(ctx), []string{"u1"})
 		assert.ErrorIs(t, err, ErrGroupRepoNotSet)
 	})
 	t.Run("RemoveGroupMembers", func(t *testing.T) {
-		err := hub.RemoveGroupMembers(ctx, "ns", "g", []string{"u1"})
+		err := hub.RemoveGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("ns").WithGroupIDs([]string{"g"}).Inject(ctx), []string{"u1"})
 		assert.ErrorIs(t, err, ErrGroupRepoNotSet)
 	})
 	t.Run("GetGroupMembers", func(t *testing.T) {
-		_, err := hub.GetGroupMembers(ctx, "ns", "g")
+		_, err := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("ns").WithGroupIDs([]string{"g"}).Inject(ctx))
 		assert.ErrorIs(t, err, ErrGroupRepoNotSet)
 	})
 	t.Run("GetGroupMemberCount", func(t *testing.T) {
-		_, err := hub.GetGroupMemberCount(ctx, "ns", "g")
+		_, err := hub.GetGroupMemberCount(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("ns").WithGroupIDs([]string{"g"}).Inject(ctx))
 		assert.ErrorIs(t, err, ErrGroupRepoNotSet)
 	})
 	t.Run("IsGroupMember", func(t *testing.T) {
-		_, err := hub.IsGroupMember(ctx, "ns", "g", "u1")
+		_, err := hub.IsGroupMember(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("ns").WithGroupIDs([]string{"g"}).Inject(ctx), "u1")
 		assert.ErrorIs(t, err, ErrGroupRepoNotSet)
 	})
 	t.Run("GetUserGroups", func(t *testing.T) {
-		_, err := hub.GetUserGroups(ctx, "ns", "u1")
+		_, err := hub.GetUserGroups(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("ns").WithGroupIDs(nil).Inject(ctx), "u1")
 		assert.ErrorIs(t, err, ErrGroupRepoNotSet)
 	})
 	t.Run("GetNamespaceGroups", func(t *testing.T) {
-		_, err := hub.GetNamespaceGroups(ctx, "ns")
+		_, err := hub.GetNamespaceGroups(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("ns").WithGroupIDs(nil).Inject(ctx))
 		assert.ErrorIs(t, err, ErrGroupRepoNotSet)
 	})
 }
@@ -1869,8 +1916,8 @@ func TestSendToGroupExcludeSenderTrue(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-send-excl", Namespace: models.DefaultNamespace, OwnerID: "o1"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "g-send-excl", []string{"sender", "user2"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-send-excl", Namespace: constants.DefaultNamespace, OwnerID: "o1"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-send-excl"}).Inject(ctx), []string{"sender", "user2"}))
 
 	go hub.Run()
 	defer hub.SafeShutdown()
@@ -1883,11 +1930,12 @@ func TestSendToGroupExcludeSenderTrue(t *testing.T) {
 
 	// 等待两个客户端均注册上线（确定性，race-safe）
 	require.Eventually(t, func() bool {
-		return hub.shardedRegistry.HasUser("sender") && hub.shardedRegistry.HasUser("user2")
+		return hub.shardedRegistry.HasUser("sender", "", "") && hub.shardedRegistry.HasUser("user2", "", "")
 	}, 2*time.Second, 5*time.Millisecond)
 
 	msg := makeGroupMessage("sender")
-	result := hub.SendToGroup(routing.WithNamespaceGroupIDs(ctx, models.DefaultNamespace, []string{"g-send-excl"}), msg, true)
+	msg.RequireAck = true
+	result := hub.Deliver(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-send-excl"}).Inject(ctx), msg, true)
 
 	// 总成员 2，排除发送者后仅投递给 1 个在线成员
 	assert.Equal(t, 2, result.TotalMembers)
@@ -1918,8 +1966,8 @@ func TestSendToGroupExcludeSenderFalse(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-send-all", Namespace: models.DefaultNamespace, OwnerID: "o1"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "g-send-all", []string{"sender", "user2"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-send-all", Namespace: constants.DefaultNamespace, OwnerID: "o1"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-send-all"}).Inject(ctx), []string{"sender", "user2"}))
 
 	go hub.Run()
 	defer hub.SafeShutdown()
@@ -1931,11 +1979,12 @@ func TestSendToGroupExcludeSenderFalse(t *testing.T) {
 	hub.Register(otherClient)
 
 	require.Eventually(t, func() bool {
-		return hub.shardedRegistry.HasUser("sender") && hub.shardedRegistry.HasUser("user2")
+		return hub.shardedRegistry.HasUser("sender", "", "") && hub.shardedRegistry.HasUser("user2", "", "")
 	}, 2*time.Second, 5*time.Millisecond)
 
 	msg := makeGroupMessage("sender")
-	result := hub.SendToGroup(routing.WithNamespaceGroupIDs(ctx, models.DefaultNamespace, []string{"g-send-all"}), msg, false)
+	msg.RequireAck = true
+	result := hub.Deliver(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-send-all"}).Inject(ctx), msg, false)
 
 	// 总成员 2，全员在线均被投递
 	assert.Equal(t, 2, result.TotalMembers)
@@ -1966,8 +2015,8 @@ func TestSendToGroupEmptySenderNoFilter(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-send-nofilter", Namespace: models.DefaultNamespace, OwnerID: "o1"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "g-send-nofilter", []string{"user1", "user2"}))
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-send-nofilter", Namespace: constants.DefaultNamespace, OwnerID: "o1"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-send-nofilter"}).Inject(ctx), []string{"user1", "user2"}))
 
 	go hub.Run()
 	defer hub.SafeShutdown()
@@ -1979,12 +2028,13 @@ func TestSendToGroupEmptySenderNoFilter(t *testing.T) {
 	hub.Register(client2)
 
 	require.Eventually(t, func() bool {
-		return hub.shardedRegistry.HasUser("user1") && hub.shardedRegistry.HasUser("user2")
+		return hub.shardedRegistry.HasUser("user1", "", "") && hub.shardedRegistry.HasUser("user2", "", "")
 	}, 2*time.Second, 5*time.Millisecond)
 
 	// Sender 为空 + excludeSender=true → 不过滤，全员投递
 	msg := makeGroupMessage("")
-	result := hub.SendToGroup(routing.WithNamespaceGroupIDs(ctx, models.DefaultNamespace, []string{"g-send-nofilter"}), msg, true)
+	msg.RequireAck = true
+	result := hub.Deliver(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-send-nofilter"}).Inject(ctx), msg, true)
 
 	assert.Equal(t, 2, result.TotalMembers)
 	assert.Equal(t, 2, result.OnlineMembers, "Sender 为空时不过滤，全员被投递")
@@ -2012,16 +2062,17 @@ func TestSendToGroupEmptyGroup(t *testing.T) {
 
 	// 不存在的分组：GetMembers 返回空切片，TotalMembers=0 直接返回
 	msg := makeGroupMessage("sender")
-	result := hub.SendToGroup(routing.WithNamespaceGroupIDs(ctx, models.DefaultNamespace, []string{"g-no-such-empty"}), msg, false)
+	msg.RequireAck = true
+	result := hub.Deliver(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-no-such-empty"}).Inject(ctx), msg, false)
 	assert.Equal(t, 0, result.TotalMembers)
 	assert.Equal(t, 0, result.OnlineMembers)
 	assert.Equal(t, 0, result.Sent)
 	assert.Empty(t, result.Errors)
-	assert.Equal(t, "g-no-such-empty", result.GroupID)
+	assert.Equal(t, "g-no-such-empty", result.GroupIDs[0])
 
 	// 存在但无成员的分组同样立即返回
-	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-empty-send", Namespace: models.DefaultNamespace, OwnerID: "o1"}))
-	result = hub.SendToGroup(routing.WithNamespaceGroupIDs(ctx, models.DefaultNamespace, []string{"g-empty-send"}), msg, true)
+	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-empty-send", Namespace: constants.DefaultNamespace, OwnerID: "o1"}))
+	result = hub.Deliver(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"g-empty-send"}).Inject(ctx), msg, true)
 	assert.Equal(t, 0, result.TotalMembers)
 	assert.Empty(t, result.Errors)
 }
@@ -2047,21 +2098,21 @@ func TestJoinMemberGroupOnConnectWithGroupID(t *testing.T) {
 
 	client := makeTestClient("c-mg-1", "user-mg-1")
 	client.UserType = UserTypeCustomer
-	client.Namespace = models.DefaultNamespace
+	client.Namespace = constants.DefaultNamespace
 	client.GroupID = "my-group"
 
 	hub.joinMemberGroupOnConnect(ctx, client)
 
 	// 验证用户已加入指定群组
-	members, err := hub.GetGroupMembers(ctx, models.DefaultNamespace, "my-group")
+	members, err := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"my-group"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Contains(t, members, "user-mg-1")
 
 	// 验证群组被自动创建
-	g, err := hub.GetGroup(ctx, models.DefaultNamespace, "my-group")
+	g, err := hub.GetGroup(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"my-group"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Equal(t, "my-group", g.GroupID)
-	assert.Equal(t, models.DefaultNamespace, g.GetNamespace())
+	assert.Equal(t, constants.DefaultNamespace, g.GetNamespace())
 }
 
 // TestJoinMemberGroupOnConnectDefaultGroup 验证未指定 GroupID 时自动加入默认组
@@ -2072,20 +2123,20 @@ func TestJoinMemberGroupOnConnectDefaultGroup(t *testing.T) {
 
 	client := makeTestClient("c-mg-2", "user-mg-2")
 	client.UserType = UserTypeCustomer
-	client.Namespace = models.DefaultNamespace
+	client.Namespace = constants.DefaultNamespace
 	// 不设 GroupID → GetGroupID 返回 DefaultGroupID
 
 	hub.joinMemberGroupOnConnect(ctx, client)
 
 	// 验证用户已加入默认组（DefaultGroupID 是系统组名，走 EnsureSystemGroup 路径）
-	members, err := hub.GetGroupMembers(ctx, models.DefaultNamespace, models.DefaultGroupID)
+	members, err := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{constants.DefaultGroupID}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Contains(t, members, "user-mg-2")
 
 	// 验证默认组元信息已创建
-	g, err := hub.GetGroup(ctx, models.DefaultNamespace, models.DefaultGroupID)
+	g, err := hub.GetGroup(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{constants.DefaultGroupID}).Inject(ctx))
 	require.NoError(t, err)
-	assert.Equal(t, models.DefaultGroupID, g.GroupID)
+	assert.Equal(t, constants.DefaultGroupID, g.GroupID)
 }
 
 // TestJoinMemberGroupOnConnectObserverSkipped 验证观察者不作为成员加入群组
@@ -2096,17 +2147,17 @@ func TestJoinMemberGroupOnConnectObserverSkipped(t *testing.T) {
 
 	client := makeTestClient("c-mg-obs", "observer-mg")
 	client.UserType = UserTypeObserver
-	client.Namespace = models.DefaultNamespace
+	client.Namespace = constants.DefaultNamespace
 	client.GroupID = "obs-skip-group"
 
 	hub.joinMemberGroupOnConnect(ctx, client)
 
 	// 观察者不应加入成员组（群组不应被创建）
-	members, err := hub.GetGroupMembers(ctx, models.DefaultNamespace, "obs-skip-group")
+	members, err := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"obs-skip-group"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.NotContains(t, members, "observer-mg")
 
-	_, err = hub.GetGroup(ctx, models.DefaultNamespace, "obs-skip-group")
+	_, err = hub.GetGroup(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"obs-skip-group"}).Inject(ctx))
 	assert.ErrorIs(t, err, ErrGroupNotFound, "观察者连接不应触发成员组创建")
 }
 
@@ -2118,14 +2169,14 @@ func TestJoinMemberGroupOnConnectReconnectIdempotent(t *testing.T) {
 
 	client := makeTestClient("c-mg-3", "user-mg-3")
 	client.UserType = UserTypeCustomer
-	client.Namespace = models.DefaultNamespace
+	client.Namespace = constants.DefaultNamespace
 	client.GroupID = "room-mg"
 
 	// 模拟重连：多次调用 joinMemberGroupOnConnect
 	hub.joinMemberGroupOnConnect(ctx, client)
 	hub.joinMemberGroupOnConnect(ctx, client)
 
-	members, err := hub.GetGroupMembers(ctx, models.DefaultNamespace, "room-mg")
+	members, err := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"room-mg"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Len(t, members, 1, "重连加群应幂等，不重复")
 	assert.Contains(t, members, "user-mg-3")
@@ -2145,7 +2196,7 @@ func TestJoinMemberGroupOnConnectDefaultReconnectIdempotent(t *testing.T) {
 	hub.joinMemberGroupOnConnect(ctx, client)
 	hub.joinMemberGroupOnConnect(ctx, client)
 
-	members, err := hub.GetGroupMembers(ctx, "tenantB", models.DefaultGroupID)
+	members, err := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("tenantB").WithGroupIDs([]string{constants.DefaultGroupID}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Len(t, members, 1, "默认组重连加群应幂等")
 	assert.Contains(t, members, "user-mg-4")
@@ -2165,7 +2216,7 @@ func TestJoinMemberGroupOnConnectTriggersCallback(t *testing.T) {
 	t.Run("业务组触发回调", func(t *testing.T) {
 		client := makeTestClient("c-mg-5", "user-mg-5")
 		client.UserType = UserTypeCustomer
-		client.Namespace = models.DefaultNamespace
+		client.Namespace = constants.DefaultNamespace
 		client.GroupID = "cb-group"
 
 		hub.joinMemberGroupOnConnect(ctx, client)
@@ -2181,7 +2232,7 @@ func TestJoinMemberGroupOnConnectTriggersCallback(t *testing.T) {
 	t.Run("默认组触发回调", func(t *testing.T) {
 		client := makeTestClient("c-mg-6", "user-mg-6")
 		client.UserType = UserTypeCustomer
-		client.Namespace = models.DefaultNamespace
+		client.Namespace = constants.DefaultNamespace
 		// 不设 GroupID → 默认组
 
 		hub.joinMemberGroupOnConnect(ctx, client)
@@ -2204,7 +2255,7 @@ func TestJoinMemberGroupOnConnectRepoNotSet(t *testing.T) {
 
 	client := makeTestClient("c-mg-7", "user-mg-7")
 	client.UserType = UserTypeCustomer
-	client.Namespace = models.DefaultNamespace
+	client.Namespace = constants.DefaultNamespace
 	client.GroupID = "no-repo-group"
 
 	// 不应 panic
@@ -2225,13 +2276,13 @@ func TestHandleRegisterAutoJoinMemberGroup(t *testing.T) {
 
 	client := makeTestClient("c-reg-mg", "user-reg-mg")
 	client.UserType = UserTypeCustomer
-	client.Namespace = models.DefaultNamespace
+	client.Namespace = constants.DefaultNamespace
 	client.GroupID = "reg-group"
 	hub.Register(client)
 
 	// 等待异步加群完成
 	require.Eventually(t, func() bool {
-		members, _ := hub.GetGroupMembers(ctx, models.DefaultNamespace, "reg-group")
+		members, _ := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"reg-group"}).Inject(ctx))
 		for _, m := range members {
 			if m == "user-reg-mg" {
 				return true
@@ -2241,7 +2292,7 @@ func TestHandleRegisterAutoJoinMemberGroup(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond, "handleRegister 应自动将用户加入业务组")
 
 	// 验证群组已创建
-	g, err := hub.GetGroup(ctx, models.DefaultNamespace, "reg-group")
+	g, err := hub.GetGroup(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"reg-group"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Equal(t, "reg-group", g.GroupID)
 }
@@ -2258,13 +2309,13 @@ func TestHandleRegisterAutoJoinDefaultGroup(t *testing.T) {
 
 	client := makeTestClient("c-reg-def", "user-reg-def")
 	client.UserType = UserTypeCustomer
-	client.Namespace = models.DefaultNamespace
+	client.Namespace = constants.DefaultNamespace
 	// 不设 GroupID → 自动加入默认组
 	hub.Register(client)
 
 	// 等待异步加群完成
 	require.Eventually(t, func() bool {
-		members, _ := hub.GetGroupMembers(ctx, models.DefaultNamespace, models.DefaultGroupID)
+		members, _ := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{constants.DefaultGroupID}).Inject(ctx))
 		for _, m := range members {
 			if m == "user-reg-def" {
 				return true
@@ -2286,7 +2337,7 @@ func TestHandleRegisterAutoJoinMemberGroupObserverSkipped(t *testing.T) {
 
 	client := makeTestClient("c-reg-obs", "observer-reg")
 	client.UserType = UserTypeObserver
-	client.Namespace = models.DefaultNamespace
+	client.Namespace = constants.DefaultNamespace
 	client.GroupID = "obs-should-skip"
 	hub.Register(client)
 
@@ -2294,12 +2345,12 @@ func TestHandleRegisterAutoJoinMemberGroupObserverSkipped(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	// 观察者不应加入成员组
-	members, err := hub.GetGroupMembers(ctx, models.DefaultNamespace, "obs-should-skip")
+	members, err := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"obs-should-skip"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.NotContains(t, members, "observer-reg", "观察者不应加入成员组")
 
 	// 群组不应被创建
-	_, err = hub.GetGroup(ctx, models.DefaultNamespace, "obs-should-skip")
+	_, err = hub.GetGroup(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"obs-should-skip"}).Inject(ctx))
 	assert.ErrorIs(t, err, ErrGroupNotFound, "观察者连接不应触发成员组创建")
 }
 
@@ -2339,13 +2390,13 @@ func TestSendToGroupAutoJoinedBusinessGroup(t *testing.T) {
 	// 连接时指定 GroupID，自动加入业务组 "chat-room"
 	client := makeTestClient("c-snd-1", "user-snd-1")
 	client.UserType = UserTypeCustomer
-	client.Namespace = models.DefaultNamespace
+	client.Namespace = constants.DefaultNamespace
 	client.GroupID = "chat-room"
 	hub.Register(client)
 
 	// 等待异步加群完成
 	require.Eventually(t, func() bool {
-		members, _ := hub.GetGroupMembers(ctx, models.DefaultNamespace, "chat-room")
+		members, _ := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"chat-room"}).Inject(ctx))
 		for _, m := range members {
 			if m == "user-snd-1" {
 				return true
@@ -2358,7 +2409,8 @@ func TestSendToGroupAutoJoinedBusinessGroup(t *testing.T) {
 
 	// 向自动加入的业务组发送消息
 	msg := makeGroupMessage("external-sender")
-	result := hub.SendToGroup(routing.WithNamespaceGroupIDs(ctx, models.DefaultNamespace, []string{"chat-room"}), msg, false)
+	msg.RequireAck = true
+	result := hub.Deliver(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"chat-room"}).Inject(ctx), msg, false)
 
 	assert.Equal(t, 1, result.TotalMembers, "群组应有 1 个成员")
 	assert.Equal(t, 1, result.OnlineMembers, "1 个在线成员")
@@ -2386,12 +2438,12 @@ func TestSendToGroupAutoJoinedDefaultGroup(t *testing.T) {
 	// 连接时不指定 GroupID，自动加入默认组
 	client := makeTestClient("c-snd-def", "user-snd-def")
 	client.UserType = UserTypeCustomer
-	client.Namespace = models.DefaultNamespace
+	client.Namespace = constants.DefaultNamespace
 	hub.Register(client)
 
 	// 等待异步加群完成（默认组）
 	require.Eventually(t, func() bool {
-		members, _ := hub.GetGroupMembers(ctx, models.DefaultNamespace, models.DefaultGroupID)
+		members, _ := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{constants.DefaultGroupID}).Inject(ctx))
 		for _, m := range members {
 			if m == "user-snd-def" {
 				return true
@@ -2404,7 +2456,8 @@ func TestSendToGroupAutoJoinedDefaultGroup(t *testing.T) {
 
 	// 向默认组发送消息
 	msg := makeGroupMessage("system-sender")
-	result := hub.SendToGroup(routing.WithNamespaceGroupIDs(ctx, models.DefaultNamespace, []string{models.DefaultGroupID}), msg, false)
+	msg.RequireAck = true
+	result := hub.Deliver(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{constants.DefaultGroupID}).Inject(ctx), msg, false)
 
 	assert.Equal(t, 1, result.OnlineMembers, "默认组 1 个在线成员")
 	assert.Equal(t, 1, result.Sent, "应成功投递 1 条")
@@ -2430,22 +2483,22 @@ func TestSendToGroupAutoJoinedExcludeSender(t *testing.T) {
 	// 两个客户端连接时自动加入同一业务组
 	senderClient := makeTestClient("c-snd-sender", "sender-user")
 	senderClient.UserType = UserTypeCustomer
-	senderClient.Namespace = models.DefaultNamespace
+	senderClient.Namespace = constants.DefaultNamespace
 	senderClient.GroupID = "excl-room"
 	hub.Register(senderClient)
 
 	otherClient := makeTestClient("c-snd-other", "other-user")
 	otherClient.UserType = UserTypeCustomer
-	otherClient.Namespace = models.DefaultNamespace
+	otherClient.Namespace = constants.DefaultNamespace
 	otherClient.GroupID = "excl-room"
 	hub.Register(otherClient)
 
 	// 等待两个客户端均注册并加群
 	require.Eventually(t, func() bool {
-		return hub.shardedRegistry.HasUser("sender-user") && hub.shardedRegistry.HasUser("other-user")
+		return hub.shardedRegistry.HasUser("sender-user", "", "") && hub.shardedRegistry.HasUser("other-user", "", "")
 	}, 2*time.Second, 5*time.Millisecond)
 	require.Eventually(t, func() bool {
-		members, _ := hub.GetGroupMembers(ctx, models.DefaultNamespace, "excl-room")
+		members, _ := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"excl-room"}).Inject(ctx))
 		return len(members) == 2
 	}, 2*time.Second, 5*time.Millisecond)
 
@@ -2454,7 +2507,8 @@ func TestSendToGroupAutoJoinedExcludeSender(t *testing.T) {
 
 	// excludeSender=true：发送者不收，其他成员收
 	msg := makeGroupMessage("sender-user")
-	result := hub.SendToGroup(routing.WithNamespaceGroupIDs(ctx, models.DefaultNamespace, []string{"excl-room"}), msg, true)
+	msg.RequireAck = true
+	result := hub.Deliver(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"excl-room"}).Inject(ctx), msg, true)
 
 	assert.Equal(t, 2, result.TotalMembers, "群组应有 2 个成员")
 	assert.Equal(t, 1, result.Sent, "排除发送者后仅投递 1 条")
@@ -2489,25 +2543,25 @@ func TestBroadcastToGroupMembersAutoJoined(t *testing.T) {
 	// 三个客户端连接时自动加入同一业务组
 	client1 := makeTestClient("c-bc-1", "user-bc-1")
 	client1.UserType = UserTypeCustomer
-	client1.Namespace = models.DefaultNamespace
+	client1.Namespace = constants.DefaultNamespace
 	client1.GroupID = "bc-room"
 	hub.Register(client1)
 
 	client2 := makeTestClient("c-bc-2", "user-bc-2")
 	client2.UserType = UserTypeCustomer
-	client2.Namespace = models.DefaultNamespace
+	client2.Namespace = constants.DefaultNamespace
 	client2.GroupID = "bc-room"
 	hub.Register(client2)
 
 	client3 := makeTestClient("c-bc-3", "user-bc-3")
 	client3.UserType = UserTypeCustomer
-	client3.Namespace = models.DefaultNamespace
+	client3.Namespace = constants.DefaultNamespace
 	client3.GroupID = "bc-room"
 	hub.Register(client3)
 
 	// 等待全部注册并加群
 	require.Eventually(t, func() bool {
-		members, _ := hub.GetGroupMembers(ctx, models.DefaultNamespace, "bc-room")
+		members, _ := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"bc-room"}).Inject(ctx))
 		return len(members) == 3
 	}, 2*time.Second, 5*time.Millisecond)
 
@@ -2517,7 +2571,7 @@ func TestBroadcastToGroupMembersAutoJoined(t *testing.T) {
 
 	// 广播（不排除发送者）
 	msg := makeGroupMessage("external")
-	delivered := hub.BroadcastToGroupMembers(ctx, models.DefaultNamespace, "bc-room", msg, false)
+	delivered := hub.Deliver(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"bc-room"}).Inject(ctx), msg, false).LocalDelivered
 	assert.Equal(t, 3, delivered, "应投递给 3 个在线成员")
 
 	// 三个客户端都应收到
@@ -2544,7 +2598,7 @@ func TestBroadcastToAllGroupsAutoJoinedDefault(t *testing.T) {
 	// 两个客户端连接时自动加入默认组（不同命名空间）
 	clientA := makeTestClient("c-ba-1", "user-ba-1")
 	clientA.UserType = UserTypeCustomer
-	clientA.Namespace = models.DefaultNamespace
+	clientA.Namespace = constants.DefaultNamespace
 	hub.Register(clientA)
 
 	clientB := makeTestClient("c-ba-2", "user-ba-2")
@@ -2554,8 +2608,8 @@ func TestBroadcastToAllGroupsAutoJoinedDefault(t *testing.T) {
 
 	// 等待全部加群
 	require.Eventually(t, func() bool {
-		membersA, _ := hub.GetGroupMembers(ctx, models.DefaultNamespace, models.DefaultGroupID)
-		membersB, _ := hub.GetGroupMembers(ctx, "tenantB", models.DefaultGroupID)
+		membersA, _ := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{constants.DefaultGroupID}).Inject(ctx))
+		membersB, _ := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("tenantB").WithGroupIDs([]string{constants.DefaultGroupID}).Inject(ctx))
 		return len(membersA) == 1 && len(membersB) == 1
 	}, 2*time.Second, 5*time.Millisecond)
 
@@ -2563,8 +2617,9 @@ func TestBroadcastToAllGroupsAutoJoinedDefault(t *testing.T) {
 	drainClientSendChan(clientB)
 
 	// 向 tenantA 的所有群组广播（含默认组）
+	// Deliver 无 groupIDs + namespace 非空 → 命名空间广播（等价于全群组广播去重后投递）
 	msg := makeGroupMessage("system")
-	delivered := hub.BroadcastToAllGroups(ctx, models.DefaultNamespace, msg)
+	delivered := hub.Deliver(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(ctx), msg, false).LocalDelivered
 	assert.Equal(t, 1, delivered, "tenantA 默认组 1 个在线成员")
 
 	// clientA 应收到，clientB 不应收到（不同命名空间）
@@ -2595,18 +2650,18 @@ func TestSendToGroupAutoJoinedMultipleClients(t *testing.T) {
 	// 两个客户端连接时自动加入同一业务组
 	alice := makeTestClient("c-alice", "alice")
 	alice.UserType = UserTypeCustomer
-	alice.Namespace = models.DefaultNamespace
+	alice.Namespace = constants.DefaultNamespace
 	alice.GroupID = "friends"
 	hub.Register(alice)
 
 	bob := makeTestClient("c-bob", "bob")
 	bob.UserType = UserTypeCustomer
-	bob.Namespace = models.DefaultNamespace
+	bob.Namespace = constants.DefaultNamespace
 	bob.GroupID = "friends"
 	hub.Register(bob)
 
 	require.Eventually(t, func() bool {
-		members, _ := hub.GetGroupMembers(ctx, models.DefaultNamespace, "friends")
+		members, _ := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"friends"}).Inject(ctx))
 		return len(members) == 2
 	}, 2*time.Second, 5*time.Millisecond)
 
@@ -2615,7 +2670,8 @@ func TestSendToGroupAutoJoinedMultipleClients(t *testing.T) {
 
 	// alice 发消息到群组（排除发送者，bob 收）
 	msg := makeGroupMessage("alice")
-	result := hub.SendToGroup(routing.WithNamespaceGroupIDs(ctx, models.DefaultNamespace, []string{"friends"}), msg, true)
+	msg.RequireAck = true
+	result := hub.Deliver(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"friends"}).Inject(ctx), msg, true)
 	assert.Equal(t, 1, result.Sent, "排除发送者后仅投递给 bob")
 
 	select {
@@ -2634,7 +2690,8 @@ func TestSendToGroupAutoJoinedMultipleClients(t *testing.T) {
 	// bob 回复消息（不排除发送者，全员收）
 	drainClientSendChan(bob)
 	msg2 := makeGroupMessage("bob")
-	result2 := hub.SendToGroup(routing.WithNamespaceGroupIDs(ctx, models.DefaultNamespace, []string{"friends"}), msg2, false)
+	msg2.RequireAck = true
+	result2 := hub.Deliver(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"friends"}).Inject(ctx), msg2, false)
 	assert.Equal(t, 2, result2.Sent, "不排除发送者时投递给 2 人")
 
 	// alice 和 bob 都应收到
@@ -2663,7 +2720,7 @@ func TestSendToGroupAutoJoinedCrossNamespace(t *testing.T) {
 	// 两个命名空间各一个客户端，使用相同的 GroupID（命名空间隔离）
 	clientA := makeTestClient("c-ns-a", "user-ns-a")
 	clientA.UserType = UserTypeCustomer
-	clientA.Namespace = models.DefaultNamespace
+	clientA.Namespace = constants.DefaultNamespace
 	clientA.GroupID = "shared-name"
 	hub.Register(clientA)
 
@@ -2674,8 +2731,8 @@ func TestSendToGroupAutoJoinedCrossNamespace(t *testing.T) {
 	hub.Register(clientB)
 
 	require.Eventually(t, func() bool {
-		membersA, _ := hub.GetGroupMembers(ctx, models.DefaultNamespace, "shared-name")
-		membersB, _ := hub.GetGroupMembers(ctx, "tenantB", "shared-name")
+		membersA, _ := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"shared-name"}).Inject(ctx))
+		membersB, _ := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("tenantB").WithGroupIDs([]string{"shared-name"}).Inject(ctx))
 		return len(membersA) == 1 && len(membersB) == 1
 	}, 2*time.Second, 5*time.Millisecond)
 
@@ -2684,7 +2741,8 @@ func TestSendToGroupAutoJoinedCrossNamespace(t *testing.T) {
 
 	// 向 tenantA 的 shared-name 群组发送消息
 	msg := makeGroupMessage("external")
-	resultA := hub.SendToGroup(routing.WithNamespaceGroupIDs(ctx, models.DefaultNamespace, []string{"shared-name"}), msg, false)
+	msg.RequireAck = true
+	resultA := hub.Deliver(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"shared-name"}).Inject(ctx), msg, false)
 	assert.Equal(t, 1, resultA.Sent, "tenantA 命名空间 1 个在线成员")
 
 	// clientA 应收到
@@ -2706,7 +2764,7 @@ func TestSendToGroupAutoJoinedCrossNamespace(t *testing.T) {
 
 // TestBroadcastToAllNamespacesAllGroupsAutoJoined 验证自动加群后全命名空间全群组广播
 func TestBroadcastToAllNamespacesAllGroupsAutoJoined(t *testing.T) {
-	hub, _, _, cleanup := setupGroupTestHub(t)
+	hub, groupRepo, _, cleanup := setupGroupTestHub(t)
 	defer cleanup()
 	ctx := context.Background()
 
@@ -2717,7 +2775,7 @@ func TestBroadcastToAllNamespacesAllGroupsAutoJoined(t *testing.T) {
 	// 两个命名空间各一个客户端，自动加入各自命名空间的默认组
 	clientA := makeTestClient("c-all-a", "user-all-a")
 	clientA.UserType = UserTypeCustomer
-	clientA.Namespace = models.DefaultNamespace
+	clientA.Namespace = constants.DefaultNamespace
 	hub.Register(clientA)
 
 	clientB := makeTestClient("c-all-b", "user-all-b")
@@ -2726,17 +2784,26 @@ func TestBroadcastToAllNamespacesAllGroupsAutoJoined(t *testing.T) {
 	hub.Register(clientB)
 
 	require.Eventually(t, func() bool {
-		membersA, _ := hub.GetGroupMembers(ctx, models.DefaultNamespace, models.DefaultGroupID)
-		membersB, _ := hub.GetGroupMembers(ctx, "tenantB", models.DefaultGroupID)
+		membersA, _ := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{constants.DefaultGroupID}).Inject(ctx))
+		membersB, _ := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("tenantB").WithGroupIDs([]string{constants.DefaultGroupID}).Inject(ctx))
 		return len(membersA) == 1 && len(membersB) == 1
 	}, 2*time.Second, 5*time.Millisecond)
 
 	drainClientSendChan(clientA)
 	drainClientSendChan(clientB)
 
-	// 全命名空间全群组广播
+	// 全命名空间全群组广播（Deliver 全局广播为异步无计数，改为遍历各命名空间群组累计 LocalDelivered）
 	msg := makeGroupMessage("system")
-	total := hub.BroadcastToAllNamespacesAllGroups(ctx, msg)
+	namespaces, _ := groupRepo.GetAllNamespaces(ctx, constants.DefaultAppID)
+	var total int
+	for _, ns := range namespaces {
+		gids, gErr := hub.GetNamespaceGroups(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(ns).WithGroupIDs(nil).Inject(ctx))
+		if gErr != nil || len(gids) == 0 {
+			continue
+		}
+		nsCtx := routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(ns).WithGroupIDs(gids).Inject(ctx)
+		total += hub.Deliver(nsCtx, msg, false).LocalDelivered
+	}
 	assert.Equal(t, 2, total, "应投递给 2 个在线成员（tenantA + tenantB）")
 
 	// 两个客户端都应收到
@@ -2788,13 +2855,13 @@ func TestAutoJoinThenManualAddNoDuplicateBusinessGroup(t *testing.T) {
 	// 连接时自动加入业务组 "dup-room"
 	client := makeTestClient("c-dup-bg", "user-dup-bg")
 	client.UserType = UserTypeCustomer
-	client.Namespace = models.DefaultNamespace
+	client.Namespace = constants.DefaultNamespace
 	client.GroupID = "dup-room"
 	hub.Register(client)
 
 	// 等待自动加群完成
 	require.Eventually(t, func() bool {
-		members, _ := hub.GetGroupMembers(ctx, models.DefaultNamespace, "dup-room")
+		members, _ := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"dup-room"}).Inject(ctx))
 		for _, m := range members {
 			if m == "user-dup-bg" {
 				return true
@@ -2804,15 +2871,15 @@ func TestAutoJoinThenManualAddNoDuplicateBusinessGroup(t *testing.T) {
 	}, 2*time.Second, 5*time.Millisecond)
 
 	// 验证自动加群后成员数为 1
-	members, err := hub.GetGroupMembers(ctx, models.DefaultNamespace, "dup-room")
+	members, err := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"dup-room"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Len(t, members, 1, "自动加群后成员数应为 1")
 
 	// 业务层手动再添加同一用户到同一组（幂等，不应产生重复成员）
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "dup-room", []string{"user-dup-bg"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"dup-room"}).Inject(ctx), []string{"user-dup-bg"}))
 
 	// 验证手动加群后成员数仍为 1（集合语义去重）
-	members, err = hub.GetGroupMembers(ctx, models.DefaultNamespace, "dup-room")
+	members, err = hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"dup-room"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Len(t, members, 1, "手动重复加群后成员数应仍为 1（SADD 集合语义去重）")
 	assert.Contains(t, members, "user-dup-bg")
@@ -2821,7 +2888,8 @@ func TestAutoJoinThenManualAddNoDuplicateBusinessGroup(t *testing.T) {
 
 	// 向群组发送消息
 	msg := makeGroupMessage("external")
-	result := hub.SendToGroup(routing.WithNamespaceGroupIDs(ctx, models.DefaultNamespace, []string{"dup-room"}), msg, false)
+	msg.RequireAck = true
+	result := hub.Deliver(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"dup-room"}).Inject(ctx), msg, false)
 	assert.Equal(t, 1, result.TotalMembers, "总成员数应为 1")
 	assert.Equal(t, 1, result.Sent, "应只投递 1 条")
 
@@ -2843,12 +2911,12 @@ func TestAutoJoinThenManualAddNoDuplicateDefaultGroup(t *testing.T) {
 	// 连接时不指定 GroupID，自动加入默认组
 	client := makeTestClient("c-dup-def", "user-dup-def")
 	client.UserType = UserTypeCustomer
-	client.Namespace = models.DefaultNamespace
+	client.Namespace = constants.DefaultNamespace
 	hub.Register(client)
 
 	// 等待自动加入默认组完成
 	require.Eventually(t, func() bool {
-		members, _ := hub.GetGroupMembers(ctx, models.DefaultNamespace, models.DefaultGroupID)
+		members, _ := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{constants.DefaultGroupID}).Inject(ctx))
 		for _, m := range members {
 			if m == "user-dup-def" {
 				return true
@@ -2858,15 +2926,15 @@ func TestAutoJoinThenManualAddNoDuplicateDefaultGroup(t *testing.T) {
 	}, 2*time.Second, 5*time.Millisecond)
 
 	// 验证自动加群后成员数为 1
-	members, err := hub.GetGroupMembers(ctx, models.DefaultNamespace, models.DefaultGroupID)
+	members, err := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{constants.DefaultGroupID}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Len(t, members, 1, "自动加入默认组后成员数应为 1")
 
 	// 业务层手动再添加同一用户到默认组
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, models.DefaultGroupID, []string{"user-dup-def"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{constants.DefaultGroupID}).Inject(ctx), []string{"user-dup-def"}))
 
 	// 验证成员数仍为 1
-	members, err = hub.GetGroupMembers(ctx, models.DefaultNamespace, models.DefaultGroupID)
+	members, err = hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{constants.DefaultGroupID}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Len(t, members, 1, "手动重复加群后默认组成员数应仍为 1")
 
@@ -2874,7 +2942,8 @@ func TestAutoJoinThenManualAddNoDuplicateDefaultGroup(t *testing.T) {
 
 	// 向默认组发送消息
 	msg := makeGroupMessage("system")
-	result := hub.SendToGroup(routing.WithNamespaceGroupIDs(ctx, models.DefaultNamespace, []string{models.DefaultGroupID}), msg, false)
+	msg.RequireAck = true
+	result := hub.Deliver(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{constants.DefaultGroupID}).Inject(ctx), msg, false)
 	assert.Equal(t, 1, result.Sent, "应只投递 1 条")
 
 	// 验证只收到 1 条消息
@@ -2895,21 +2964,21 @@ func TestAutoJoinThenManualAddNoDuplicateBroadcast(t *testing.T) {
 	// 连接时自动加入业务组 "dup-bc-room"
 	client := makeTestClient("c-dup-bc", "user-dup-bc")
 	client.UserType = UserTypeCustomer
-	client.Namespace = models.DefaultNamespace
+	client.Namespace = constants.DefaultNamespace
 	client.GroupID = "dup-bc-room"
 	hub.Register(client)
 
 	// 等待自动加群完成
 	require.Eventually(t, func() bool {
-		members, _ := hub.GetGroupMembers(ctx, models.DefaultNamespace, "dup-bc-room")
+		members, _ := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"dup-bc-room"}).Inject(ctx))
 		return len(members) == 1
 	}, 2*time.Second, 5*time.Millisecond)
 
 	// 手动重复加群
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "dup-bc-room", []string{"user-dup-bc"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"dup-bc-room"}).Inject(ctx), []string{"user-dup-bc"}))
 
 	// 验证成员数仍为 1
-	members, err := hub.GetGroupMembers(ctx, models.DefaultNamespace, "dup-bc-room")
+	members, err := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"dup-bc-room"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Len(t, members, 1, "手动重复加群后成员数应仍为 1")
 
@@ -2917,7 +2986,7 @@ func TestAutoJoinThenManualAddNoDuplicateBroadcast(t *testing.T) {
 
 	// 广播消息
 	msg := makeGroupMessage("external")
-	delivered := hub.BroadcastToGroupMembers(ctx, models.DefaultNamespace, "dup-bc-room", msg, false)
+	delivered := hub.Deliver(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"dup-bc-room"}).Inject(ctx), msg, false).LocalDelivered
 	assert.Equal(t, 1, delivered, "应只投递给 1 个在线成员")
 
 	// 验证只收到 1 条消息
@@ -2938,24 +3007,24 @@ func TestAutoJoinDefaultThenManualAddBusinessNoCrossDuplicate(t *testing.T) {
 	// 连接时自动加入默认组
 	client := makeTestClient("c-cross", "user-cross")
 	client.UserType = UserTypeCustomer
-	client.Namespace = models.DefaultNamespace
+	client.Namespace = constants.DefaultNamespace
 	hub.Register(client)
 
 	// 等待自动加入默认组完成
 	require.Eventually(t, func() bool {
-		members, _ := hub.GetGroupMembers(ctx, models.DefaultNamespace, models.DefaultGroupID)
+		members, _ := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{constants.DefaultGroupID}).Inject(ctx))
 		return len(members) == 1
 	}, 2*time.Second, 5*time.Millisecond)
 
 	// 业务层手动将用户加入另一个业务组 "manual-room"
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "manual-room", []string{"user-cross"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"manual-room"}).Inject(ctx), []string{"user-cross"}))
 
 	// 验证用户同时在两个组中
-	defaultMembers, err := hub.GetGroupMembers(ctx, models.DefaultNamespace, models.DefaultGroupID)
+	defaultMembers, err := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{constants.DefaultGroupID}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Contains(t, defaultMembers, "user-cross")
 
-	businessMembers, err := hub.GetGroupMembers(ctx, models.DefaultNamespace, "manual-room")
+	businessMembers, err := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"manual-room"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Contains(t, businessMembers, "user-cross")
 
@@ -2963,11 +3032,13 @@ func TestAutoJoinDefaultThenManualAddBusinessNoCrossDuplicate(t *testing.T) {
 
 	// 向默认组发消息 → 收到 1 条
 	msg1 := makeGroupMessage("sys")
-	hub.SendToGroup(routing.WithNamespaceGroupIDs(ctx, models.DefaultNamespace, []string{models.DefaultGroupID}), msg1, false)
+	msg1.RequireAck = true
+	hub.Deliver(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{constants.DefaultGroupID}).Inject(ctx), msg1, false)
 
 	// 向业务组发消息 → 收到 1 条
 	msg2 := makeGroupMessage("biz")
-	hub.SendToGroup(routing.WithNamespaceGroupIDs(ctx, models.DefaultNamespace, []string{"manual-room"}), msg2, false)
+	msg2.RequireAck = true
+	hub.Deliver(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"manual-room"}).Inject(ctx), msg2, false)
 
 	// 验证共收到 2 条消息（每组各 1 条，不重复也不遗漏）
 	count := countChanMessages(client, time.Second)
@@ -2987,23 +3058,24 @@ func TestAutoJoinThenManualAddBroadcastAllGroupsDedup(t *testing.T) {
 	// 连接时自动加入默认组
 	client := makeTestClient("c-dedup", "user-dedup")
 	client.UserType = UserTypeCustomer
-	client.Namespace = models.DefaultNamespace
+	client.Namespace = constants.DefaultNamespace
 	hub.Register(client)
 
 	// 等待自动加入默认组完成
 	require.Eventually(t, func() bool {
-		members, _ := hub.GetGroupMembers(ctx, models.DefaultNamespace, models.DefaultGroupID)
+		members, _ := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{constants.DefaultGroupID}).Inject(ctx))
 		return len(members) == 1
 	}, 2*time.Second, 5*time.Millisecond)
 
 	// 手动加入业务组（用户同时存在于默认组和业务组）
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "dedup-biz", []string{"user-dedup"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"dedup-biz"}).Inject(ctx), []string{"user-dedup"}))
 
 	drainClientSendChan(client)
 
 	// BroadcastToAllGroups 应去重：用户在两个组中，但只收到 1 条消息
+	// Deliver 无 groupIDs + namespace 非空 → 命名空间广播（天然按客户端去重，每客户端仅 1 条）
 	msg := makeGroupMessage("system")
-	delivered := hub.BroadcastToAllGroups(ctx, models.DefaultNamespace, msg)
+	delivered := hub.Deliver(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(ctx), msg, false).LocalDelivered
 	assert.Equal(t, 1, delivered, "同命名空间内用户在多组中应去重，仅投递 1 条")
 
 	// 验证只收到 1 条消息（跨组去重）
@@ -3024,27 +3096,27 @@ func TestAutoJoinThenManualAddMultiUserNoDuplicate(t *testing.T) {
 	// 用户 A：连接时自动加入 "multi-room"
 	clientA := makeTestClient("c-multi-a", "user-multi-a")
 	clientA.UserType = UserTypeCustomer
-	clientA.Namespace = models.DefaultNamespace
+	clientA.Namespace = constants.DefaultNamespace
 	clientA.GroupID = "multi-room"
 	hub.Register(clientA)
 
 	// 用户 B：不自动加入，稍后手动加入同一组
 	clientB := makeTestClient("c-multi-b", "user-multi-b")
 	clientB.UserType = UserTypeCustomer
-	clientB.Namespace = models.DefaultNamespace
+	clientB.Namespace = constants.DefaultNamespace
 	hub.Register(clientB)
 
 	// 等待用户 A 自动加群完成
 	require.Eventually(t, func() bool {
-		members, _ := hub.GetGroupMembers(ctx, models.DefaultNamespace, "multi-room")
+		members, _ := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"multi-room"}).Inject(ctx))
 		return len(members) == 1 && members[0] == "user-multi-a"
 	}, 2*time.Second, 5*time.Millisecond)
 
 	// 手动将用户 A 和用户 B 都加入 "multi-room"（A 重复加入，B 新加入）
-	require.NoError(t, hub.AddGroupMembers(ctx, models.DefaultNamespace, "multi-room", []string{"user-multi-a", "user-multi-b"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"multi-room"}).Inject(ctx), []string{"user-multi-a", "user-multi-b"}))
 
 	// 验证成员数为 2（A 幂等，B 新增）
-	members, err := hub.GetGroupMembers(ctx, models.DefaultNamespace, "multi-room")
+	members, err := hub.GetGroupMembers(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"multi-room"}).Inject(ctx))
 	require.NoError(t, err)
 	assert.Len(t, members, 2, "应共 2 个成员（A 去重 + B 新增）")
 
@@ -3053,7 +3125,8 @@ func TestAutoJoinThenManualAddMultiUserNoDuplicate(t *testing.T) {
 
 	// 发送消息
 	msg := makeGroupMessage("external")
-	result := hub.SendToGroup(routing.WithNamespaceGroupIDs(ctx, models.DefaultNamespace, []string{"multi-room"}), msg, false)
+	msg.RequireAck = true
+	result := hub.Deliver(routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace(constants.DefaultNamespace).WithGroupIDs([]string{"multi-room"}).Inject(ctx), msg, false)
 	assert.Equal(t, 2, result.TotalMembers, "总成员 2")
 	assert.Equal(t, 2, result.Sent, "应投递 2 条（A + B 各 1）")
 

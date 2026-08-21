@@ -19,7 +19,7 @@ import (
 	"time"
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
-	"github.com/kamalyes/go-wsc/models"
+	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/routing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -185,7 +185,7 @@ func TestMultiLoginWithWorkloadSync(t *testing.T) {
 
 	// 验证负载仍然保留（设计上保留 string key 以便重新上线时恢复）
 	// namespace 由 repository 内部从 ctx 提取，ctx 需注入 namespace
-	workloadCtx := routing.WithNamespaceGroupIDs(ctx, models.DefaultNamespace, nil)
+	workloadCtx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(ctx)
 	workload, err = workloadRepo.GetAgentWorkload(workloadCtx, agent.UserID)
 	require.NoError(t, err)
 	assert.Equal(t, int64(6), workload, "客服离线后负载应该保留以便重新上线时恢复")

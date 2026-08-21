@@ -18,6 +18,7 @@ import (
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-toolbox/pkg/idgen"
+	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/repository"
 	"github.com/kamalyes/go-wsc/routing"
@@ -65,17 +66,17 @@ func newTestWorkloadRepo(t *testing.T) *testWorkloadRepo {
 		repoImpl:      repoImpl,
 		client:        client,
 		db:            db,
-		ctx:           routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil),
+		ctx:           routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background()),
 		t:             t,
 		testPrefix:    testPrefix,
-		testNamespace: models.DefaultNamespace,
+		testNamespace: constants.DefaultNamespace,
 		idGenerator:   idgen.NewShortFlakeGenerator(1),
 	}
 }
 
 // checkRedisHealth 检查Redis连接健康状态，如果不健康则跳过测试
 func (tr *testWorkloadRepo) checkRedisHealth() {
-	ctx, cancel := context.WithTimeout(routing.WithNamespaceGroupIDs(context.Background(), tr.testNamespace, nil), 3*time.Second)
+	ctx, cancel := context.WithTimeout(routing.NewRoute().WithAppID("").WithNamespace(tr.testNamespace).WithGroupIDs(nil).Inject(context.Background()), 3*time.Second)
 	defer cancel()
 
 	// 尝试一个简单的操作
@@ -112,7 +113,7 @@ func (tr *testWorkloadRepo) cleanup(agentID string) {
 	now := time.Now()
 
 	// 清理所有维度的 Redis 数据
-	for _, dimension := range repository.AllWorkloadDimensions {
+	for _, dimension := range models.AllWorkloadDimensions {
 		// 清理 string key
 		key := tr.repoImpl.GetDimensionKey(tr.testNamespace, dimension, agentID, now)
 		_ = tr.client.Del(tr.ctx, key).Err()
@@ -150,7 +151,7 @@ func TestMultiDimensionStorage(t *testing.T) {
 	require.NoError(t, err)
 
 	// 验证所有维度都有数据
-	for _, dimension := range repository.AllWorkloadDimensions {
+	for _, dimension := range models.AllWorkloadDimensions {
 		workload := tr.getWorkloadFromDimension(agentID, dimension)
 		assert.Equal(t, int64(10), workload, "维度 %s 的负载应该是 10", dimension)
 	}
@@ -173,7 +174,7 @@ func TestMultiDimensionIncrement(t *testing.T) {
 	require.NoError(t, err)
 
 	// 验证所有维度都增加了
-	for _, dimension := range repository.AllWorkloadDimensions {
+	for _, dimension := range models.AllWorkloadDimensions {
 		workload := tr.getWorkloadFromDimension(agentID, dimension)
 		assert.Equal(t, int64(6), workload, "维度 %s 的负载应该是 6", dimension)
 	}
@@ -196,7 +197,7 @@ func TestMultiDimensionDecrement(t *testing.T) {
 	require.NoError(t, err)
 
 	// 验证所有维度都减少了
-	for _, dimension := range repository.AllWorkloadDimensions {
+	for _, dimension := range models.AllWorkloadDimensions {
 		workload := tr.getWorkloadFromDimension(agentID, dimension)
 		assert.Equal(t, int64(9), workload, "维度 %s 的负载应该是 9", dimension)
 	}
@@ -231,7 +232,7 @@ func TestGetLeastLoadedAgentByDimension(t *testing.T) {
 	onlineAgents := []string{agent1, agent2, agent3}
 
 	// 测试所有维度
-	for _, dimension := range repository.AllWorkloadDimensions {
+	for _, dimension := range models.AllWorkloadDimensions {
 		selectedAgent, selectedWorkload, err := tr.repo.GetLeastLoadedAgent(
 			tr.ctx,
 			onlineAgents,
@@ -262,7 +263,7 @@ func TestRemoveAgentWorkloadAllDimensions(t *testing.T) {
 	require.NoError(t, err)
 
 	// 验证所有维度都有数据
-	for _, dimension := range repository.AllWorkloadDimensions {
+	for _, dimension := range models.AllWorkloadDimensions {
 		workload := tr.getWorkloadFromDimension(agentID, dimension)
 		assert.Equal(t, int64(10), workload)
 	}
@@ -273,11 +274,11 @@ func TestRemoveAgentWorkloadAllDimensions(t *testing.T) {
 
 	// 验证各维度 ZSet 状态：realtime 移除，统计维度保留；string key 全部保留
 	now := time.Now()
-	for _, dimension := range repository.AllWorkloadDimensions {
+	for _, dimension := range models.AllWorkloadDimensions {
 		zsetKey := tr.repoImpl.GetDimensionZSetKey(tr.testNamespace, dimension, now)
 		score := tr.client.ZScore(tr.ctx, zsetKey, agentID).Val()
 
-		if dimension == repository.WorkloadDimensionRealtime {
+		if dimension == models.WorkloadDimensionRealtime {
 			// realtime 维度参与负载均衡，下线时从 ZSet 移除
 			assert.Equal(t, float64(0), score, "维度 %s 的 ZSet 应该已移除", dimension)
 		} else {
@@ -318,7 +319,7 @@ func TestReloadAgentWorkload(t *testing.T) {
 
 	// 验证所有维度的 ZSet 都已恢复
 	now := time.Now()
-	for _, dimension := range repository.AllWorkloadDimensions {
+	for _, dimension := range models.AllWorkloadDimensions {
 		zsetKey := tr.repoImpl.GetDimensionZSetKey(tr.testNamespace, dimension, now)
 		score := tr.client.ZScore(tr.ctx, zsetKey, agentID).Val()
 		assert.Equal(t, float64(15), score, "维度 %s 的 ZSet 应该已恢复", dimension)
@@ -346,7 +347,7 @@ func TestDecrementBelowZero(t *testing.T) {
 	require.NoError(t, err)
 
 	// 验证所有维度都是 0（不会变成负数）
-	for _, dimension := range repository.AllWorkloadDimensions {
+	for _, dimension := range models.AllWorkloadDimensions {
 		workload := tr.getWorkloadFromDimension(agentID, dimension)
 		assert.Equal(t, int64(0), workload, "维度 %s 的负载不应该是负数", dimension)
 	}
@@ -357,7 +358,7 @@ func TestEmptyOnlineAgents(t *testing.T) {
 	tr := newTestWorkloadRepo(t)
 	tr.checkRedisHealth()
 
-	_, _, err := tr.repo.GetLeastLoadedAgent(tr.ctx, []string{}, repository.WorkloadDimensionRealtime)
+	_, _, err := tr.repo.GetLeastLoadedAgent(tr.ctx, []string{}, models.WorkloadDimensionRealtime)
 	assert.Error(t, err, "空的在线客服列表应该返回错误")
 }
 
@@ -394,7 +395,7 @@ func TestConcurrentIncrement(t *testing.T) {
 	}
 
 	// 验证最终负载
-	for _, dimension := range repository.AllWorkloadDimensions {
+	for _, dimension := range models.AllWorkloadDimensions {
 		workload := tr.getWorkloadFromDimension(agentID, dimension)
 		assert.Equal(t, int64(concurrentCount), workload, "维度 %s 的负载应该是 %d", dimension, concurrentCount)
 	}
@@ -429,20 +430,20 @@ func TestAcquireLeastLoadedAgent_SelectsMinimum(t *testing.T) {
 	}
 
 	selected, minBefore, err := tr.repo.AcquireLeastLoadedAgent(
-		tr.ctx, []string{agentA, agentB, agentC}, repository.WorkloadDimensionRealtime,
+		tr.ctx, []string{agentA, agentB, agentC}, models.WorkloadDimensionRealtime,
 	)
 	require.NoError(t, err)
 	assert.Equal(t, agentB, selected, "应选择负载最小的 agentB")
 	assert.Equal(t, int64(2), minBefore, "返回的负载应为选中前的值 2")
 
 	// 选中客服所有维度应 +1
-	for _, dim := range repository.AllWorkloadDimensions {
+	for _, dim := range models.AllWorkloadDimensions {
 		w := tr.getWorkloadFromDimension(agentB, dim)
 		assert.Equal(t, int64(3), w, "agentB 维度 %s 负载应 +1 为 3", dim)
 	}
 	// 未选中客服维度不变
-	assert.Equal(t, int64(10), tr.getWorkloadFromDimension(agentA, repository.WorkloadDimensionRealtime))
-	assert.Equal(t, int64(8), tr.getWorkloadFromDimension(agentC, repository.WorkloadDimensionRealtime))
+	assert.Equal(t, int64(10), tr.getWorkloadFromDimension(agentA, models.WorkloadDimensionRealtime))
+	assert.Equal(t, int64(8), tr.getWorkloadFromDimension(agentC, models.WorkloadDimensionRealtime))
 }
 
 // TestAcquireLeastLoadedAgent_RandomOnTie 验证负载相等时在候选集内近似等概率随机
@@ -472,7 +473,7 @@ func TestAcquireLeastLoadedAgent_RandomOnTie(t *testing.T) {
 		for _, id := range agentIDs {
 			require.NoError(t, tr.repo.ForceSetAgentWorkload(tr.ctx, id, 0))
 		}
-		selected, _, err := tr.repo.AcquireLeastLoadedAgent(tr.ctx, agentIDs, repository.WorkloadDimensionRealtime)
+		selected, _, err := tr.repo.AcquireLeastLoadedAgent(tr.ctx, agentIDs, models.WorkloadDimensionRealtime)
 		require.NoError(t, err)
 		hits[selected]++
 	}
@@ -502,7 +503,7 @@ func TestAcquireLeastLoadedAgent_Concurrent(t *testing.T) {
 	results := make(chan string, n)
 	for range n {
 		go func() {
-			selected, _, err := tr.repo.AcquireLeastLoadedAgent(tr.ctx, []string{agentA, agentB}, repository.WorkloadDimensionRealtime)
+			selected, _, err := tr.repo.AcquireLeastLoadedAgent(tr.ctx, []string{agentA, agentB}, models.WorkloadDimensionRealtime)
 			if err != nil {
 				results <- ""
 				return
@@ -524,8 +525,8 @@ func TestAcquireLeastLoadedAgent_Concurrent(t *testing.T) {
 	assert.Equal(t, n, total, "应有 %d 次成功扣减", n)
 
 	// 负载最终分布近似均衡（差不超过 1）
-	workloadA := tr.getWorkloadFromDimension(agentA, repository.WorkloadDimensionRealtime)
-	workloadB := tr.getWorkloadFromDimension(agentB, repository.WorkloadDimensionRealtime)
+	workloadA := tr.getWorkloadFromDimension(agentA, models.WorkloadDimensionRealtime)
+	workloadB := tr.getWorkloadFromDimension(agentB, models.WorkloadDimensionRealtime)
 	assert.Equal(t, int64(n), workloadA+workloadB, "两人负载之和应等于扣减总次数")
 	diff := workloadA - workloadB
 	if diff < 0 {
@@ -539,7 +540,7 @@ func TestAcquireLeastLoadedAgent_EmptyAgents(t *testing.T) {
 	tr := newTestWorkloadRepo(t)
 	tr.checkRedisHealth()
 
-	_, _, err := tr.repo.AcquireLeastLoadedAgent(tr.ctx, []string{}, repository.WorkloadDimensionRealtime)
+	_, _, err := tr.repo.AcquireLeastLoadedAgent(tr.ctx, []string{}, models.WorkloadDimensionRealtime)
 	assert.Error(t, err, "空客服列表应报错")
 }
 
@@ -552,7 +553,7 @@ func TestAcquireLeastLoadedAgent_RejectsNonRealtimeDimension(t *testing.T) {
 	defer tr.cleanup(agentID)
 	require.NoError(t, tr.repo.ForceSetAgentWorkload(tr.ctx, agentID, 0))
 
-	_, _, err := tr.repo.AcquireLeastLoadedAgent(tr.ctx, []string{agentID}, repository.WorkloadDimensionHourly)
+	_, _, err := tr.repo.AcquireLeastLoadedAgent(tr.ctx, []string{agentID}, models.WorkloadDimensionHourly)
 	assert.Error(t, err, "非 realtime 维度应报错")
 }
 
@@ -572,17 +573,17 @@ func TestAcquireLeastLoadedAgent_FallbackToStringKey(t *testing.T) {
 	require.NoError(t, tr.repo.ForceSetAgentWorkload(tr.ctx, agentB, 3))
 
 	// 从 realtime ZSet 中移除 B，模拟 B 曾被 RemoveAgentWorkload 移出 ZSet 的情况
-	zsetKey := tr.repoImpl.GetDimensionZSetKey(tr.testNamespace, repository.WorkloadDimensionRealtime, time.Now())
+	zsetKey := tr.repoImpl.GetDimensionZSetKey(tr.testNamespace, models.WorkloadDimensionRealtime, time.Now())
 	require.NoError(t, tr.client.ZRem(tr.ctx, zsetKey, agentB).Err())
 
 	// Acquire 应仍能从 string key 读到 B 的真实负载 3 并选中 B
 	selected, minBefore, err := tr.repo.AcquireLeastLoadedAgent(
-		tr.ctx, []string{agentA, agentB}, repository.WorkloadDimensionRealtime,
+		tr.ctx, []string{agentA, agentB}, models.WorkloadDimensionRealtime,
 	)
 	require.NoError(t, err)
 	assert.Equal(t, agentB, selected, "应通过 string key 回填选中 B")
 	assert.Equal(t, int64(3), minBefore, "应读到 B 的真实负载 3")
 
 	// B 被选中后 realtime 应为 4
-	assert.Equal(t, int64(4), tr.getWorkloadFromDimension(agentB, repository.WorkloadDimensionRealtime))
+	assert.Equal(t, int64(4), tr.getWorkloadFromDimension(agentB, models.WorkloadDimensionRealtime))
 }

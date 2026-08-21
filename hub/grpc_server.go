@@ -112,7 +112,8 @@ func (s *GRPCServer) SendToUser(ctx context.Context, req *wscpb.SendToUserReques
 	userID := req.GetUserId()
 
 	// 快速检查用户是否在线（O(1)，避免无用户时序列化开销）
-	if !s.hub.HasUserClient(userID) {
+	// 按 ctx 路由信封 appID+namespace 隔离（路由来自 msg.InjectRoute 注入）
+	if !s.hub.HasUserClient(ctx, userID) {
 		return &wscpb.SendToUserResponse{
 			Success:    false,
 			Error:      "用户不在线",
@@ -126,16 +127,16 @@ func (s *GRPCServer) SendToUser(ctx context.Context, req *wscpb.SendToUserReques
 		return nil, status.Errorf(codes.Internal, "消息序列化失败: %v", err)
 	}
 
-	// 零拷贝遍历：仅对路由匹配的设备投递，避免跨 namespace 串扰
+	// 零拷贝遍历：仅对路由匹配的设备投递，避免跨 app/namespace 串扰
 	// （路由信封来自 msg 自身，跨节点 gRPC 调用链已丢失原 ctx 路由信息）
-	s.hub.shardedRegistry.ForEachUserClientFiltered(userID, msg.Namespace, msg.GroupIDs, func(_ string, client *Client) bool {
+	s.hub.shardedRegistry.ForEachUserClientFiltered(userID, msg.AppID, msg.Namespace, msg.GroupIDs, func(_ string, client *Client) bool {
 		s.hub.sendToClientSerialized(ctx, client, msg, preSerialized)
 		return true
 	})
 
 	// 🔔 通知本节点观察者（跨节点 gRPC 消息也需要通知观察者，与本地 broadcast 流程一致）
 	// 路由来源：直接从 msg 信封取（不再"猜"接收者 client 的 ns/group，跨节点场景下 user 可能本节点无 client）
-	observerCtx := routing.WithNamespaceGroupIDs(ctx, msg.Namespace, msg.GroupIDs)
+	observerCtx := routing.NewRoute().WithAppID(msg.AppID).WithNamespace(msg.Namespace).WithGroupIDs(msg.GroupIDs).Inject(ctx)
 	s.hub.notifyObservers(observerCtx, msg)
 
 	return &wscpb.SendToUserResponse{
@@ -146,10 +147,13 @@ func (s *GRPCServer) SendToUser(ctx context.Context, req *wscpb.SendToUserReques
 
 // CheckUsersOnline 批量检查用户是否在本节点在线（路由探测）
 // 使用 HasUserClient O(1) 检查，替代 GetClientsByUserID 切片分配
+// 按 ctx 路由信封 appID+namespace 隔离（路由从 gRPC metadata 恢复）
 func (s *GRPCServer) CheckUsersOnline(ctx context.Context, req *wscpb.CheckUsersOnlineRequest) (*wscpb.CheckUsersOnlineResponse, error) {
+	// 从 gRPC incoming metadata 恢复路由元数据到 ctx（跨节点链路串联）
+	ctx = routing.RestoreFromIncomingMetadata(ctx)
 	onlineUsers := make(map[string]bool, len(req.GetUserIds()))
 	for _, userID := range req.GetUserIds() {
-		onlineUsers[userID] = s.hub.HasUserClient(userID)
+		onlineUsers[userID] = s.hub.HasUserClient(ctx, userID)
 	}
 
 	return &wscpb.CheckUsersOnlineResponse{
@@ -168,7 +172,7 @@ func (s *GRPCServer) BroadcastGroup(ctx context.Context, req *wscpb.BroadcastGro
 		return &wscpb.BroadcastGroupResponse{Delivered: 0}, nil
 	}
 
-	namespace := routing.NamespaceFromContext(ctx)
+	appID, namespace := routing.NormalizeRoute(routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx))
 	groupIDs := routing.GroupIDsFromContext(ctx)
 	// BroadcastGroup RPC 语义为单群组广播（cluster_dispatch 每次传单群组），取首元素
 	groupID := ""
@@ -176,8 +180,8 @@ func (s *GRPCServer) BroadcastGroup(ctx context.Context, req *wscpb.BroadcastGro
 		groupID = groupIDs[0]
 	}
 
-	// 获取群组成员列表
-	members, err := s.hub.groupRepo.GetMembers(ctx, namespace, groupID)
+	// 获取群组成员列表（appID 隔离，跨 app 不串扰）
+	members, err := s.hub.groupRepo.GetMembers(ctx, appID, namespace, groupID)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "获取群组成员失败: %v", err)
 	}
@@ -200,9 +204,9 @@ func (s *GRPCServer) BroadcastGroup(ctx context.Context, req *wscpb.BroadcastGro
 	// ClientMatchesEnvelope 会用 msg.GroupIDs 去匹配 client 的"连接级系统组"（如 __default_gp__），
 	// 两个维度不同，强行注入会导致群成员设备全部被过滤（delivered=0）。
 	// 群组成员过滤已由 groupRepo.GetMembers + memberSet 完成，下面清除 ctx 的 groupIDs 后，
-	// 下游 broadcastToFiltered 调 InjectRoute 时只会注入 namespace（msg.GroupIDs 保持 nil），
-	// ClientMatchesEnvelope 仅做 namespace 隔离，不再触碰系统组维度。
-	ctx = routing.WithNamespaceGroupIDs(ctx, namespace, nil)
+	// 下游 broadcastToFiltered 调 InjectRoute 时只会注入 appId+namespace（msg.GroupIDs 保持 nil），
+	// ClientMatchesEnvelope 仅做 appId+namespace 隔离，不再触碰系统组维度。
+	ctx = routing.RouteFrom(ctx).WithNamespace(namespace).WithGroupIDs(nil).Inject(ctx)
 
 	// 构建成员集合用于 O(1) 过滤
 	memberSet := make(map[string]struct{}, len(members))
@@ -271,7 +275,7 @@ func (s *GRPCServer) KickUser(ctx context.Context, req *wscpb.KickUserRequest) (
 	// 从 gRPC incoming metadata 恢复 trace_id 到 ctx（跨节点链路串联）
 	ctx = logger.RestoreTraceFromIncoming(ctx)
 
-	kicked := s.hub.KickUserSimple(req.GetUserId(), req.GetReason())
+	kicked := s.hub.KickUserSimple(ctx, req.GetUserId(), req.GetReason())
 	return &wscpb.KickUserResponse{
 		Success:           true,
 		KickedConnections: int32(kicked),

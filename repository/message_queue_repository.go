@@ -18,6 +18,7 @@ import (
 
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/zipx"
+	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/redis/go-redis/v9"
 )
@@ -52,7 +53,7 @@ type RedisMessageQueueRepository struct {
 
 // NewRedisMessageQueueRepository 创建Redis消息队列仓库
 func NewRedisMessageQueueRepository(client redis.UniversalClient, prefix string, ttl time.Duration) *RedisMessageQueueRepository {
-	prefix = mathx.IF(prefix == "", DefaultQueueKeyPrefix, prefix)
+	prefix = mathx.IF(prefix == "", constants.DefaultQueueKeyPrefix, prefix)
 	ttl = mathx.IF(ttl < 0, 24*time.Hour, ttl)
 
 	return &RedisMessageQueueRepository{

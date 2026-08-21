@@ -25,6 +25,11 @@ type ConnectionRecord struct {
 	ConnectionID string `gorm:"column:connection_id;size:64;uniqueIndex;not null;comment:连接ID(唯一标识,支持多设备登录)" json:"connection_id"`
 	UserID       string `gorm:"column:user_id;size:64;not null;index;comment:用户ID(同一用户可有多条记录)" json:"user_id"`
 
+	// ========== 多租户/命名空间隔离 ==========
+	// 与 Bitmap/ZSET 在线状态层分桶维度一致，支持按 app+namespace 过滤连接
+	AppID     string `gorm:"column:app_id;size:64;index:idx_app_namespace;comment:应用ID(多租户隔离,与 Bitmap/ZSET 分桶一致)" json:"app_id"`
+	Namespace string `gorm:"column:namespace;size:64;index:idx_app_namespace;comment:命名空间(与 Bitmap/ZSET 分桶一致)" json:"namespace"`
+
 	// ========== 服务器节点信息 ==========
 	NodeID   string `gorm:"column:node_id;size:100;index;comment:服务器节点ID" json:"node_id"`
 	NodeIP   string `gorm:"column:node_ip;size:45;comment:服务器IP" json:"node_ip"`
@@ -48,22 +53,6 @@ type ConnectionRecord struct {
 	DisconnectReason  string `gorm:"column:disconnect_reason;size:50;comment:断开原因(normal/timeout/error/force_offline/network等)" json:"disconnect_reason,omitempty"`
 	DisconnectCode    int    `gorm:"column:disconnect_code;comment:断开代码" json:"disconnect_code,omitempty"`
 	DisconnectMessage string `gorm:"column:disconnect_message;type:text;comment:断开消息/错误信息" json:"disconnect_message,omitempty"`
-
-	// ========== 连接质量与性能指标 ==========
-	ReconnectCount   int     `gorm:"column:reconnect_count;default:0;comment:重连次数" json:"reconnect_count"`
-	MessagesSent     int64   `gorm:"column:messages_sent;default:0;comment:发送消息总数" json:"messages_sent"`
-	MessagesReceived int64   `gorm:"column:messages_received;default:0;comment:接收消息总数" json:"messages_received"`
-	BytesSent        int64   `gorm:"column:bytes_sent;default:0;comment:发送字节数" json:"bytes_sent"`
-	BytesReceived    int64   `gorm:"column:bytes_received;default:0;comment:接收字节数" json:"bytes_received"`
-	AveragePingMs    float64 `gorm:"column:average_ping_ms;comment:平均Ping延迟(毫秒)" json:"average_ping_ms,omitempty"`
-	MaxPingMs        float64 `gorm:"column:max_ping_ms;comment:最大Ping延迟(毫秒)" json:"max_ping_ms,omitempty"`
-	MinPingMs        float64 `gorm:"column:min_ping_ms;comment:最小Ping延迟(毫秒)" json:"min_ping_ms,omitempty"`
-	PacketLossRate   float64 `gorm:"column:packet_loss_rate;comment:丢包率(%)" json:"packet_loss_rate,omitempty"`
-
-	// ========== 错误与异常信息 ==========
-	ErrorCount  int        `gorm:"column:error_count;default:0;comment:错误次数" json:"error_count"`
-	LastError   string     `gorm:"column:last_error;type:text;comment:最后错误信息" json:"last_error,omitempty"`
-	LastErrorAt *time.Time `gorm:"column:last_error_at;comment:最后错误时间" json:"last_error_at,omitempty"`
 
 	// ========== 状态标识 ==========
 	IsActive        bool `gorm:"column:is_active;index;comment:是否活跃连接" json:"is_active"`
@@ -111,93 +100,7 @@ func (c *ConnectionRecord) MarkDisconnected(reason DisconnectReason, code int, m
 		reason != DisconnectReasonServerShutdown
 }
 
-// IncrementReconnect 增加重连次数
-func (c *ConnectionRecord) IncrementReconnect() {
-	c.ReconnectCount++
-}
-
-// AddError 添加错误记录
-func (c *ConnectionRecord) AddError(err error) {
-	if err != nil {
-		c.ErrorCount++
-		c.LastError = err.Error()
-		now := time.Now()
-		c.LastErrorAt = &now
-	}
-}
-
-// UpdateMessageStats 更新消息统计
-func (c *ConnectionRecord) UpdateMessageStats(sent, received int64) {
-	c.MessagesSent += sent
-	c.MessagesReceived += received
-}
-
-// UpdateBytesStats 更新字节统计
-func (c *ConnectionRecord) UpdateBytesStats(sent, received int64) {
-	c.BytesSent += sent
-	c.BytesReceived += received
-}
-
-// UpdatePingStats 更新Ping延迟统计
-func (c *ConnectionRecord) UpdatePingStats(pingMs float64) {
-	// 更新平均值
-	if c.AveragePingMs == 0 {
-		c.AveragePingMs = pingMs
-	} else {
-		c.AveragePingMs = (c.AveragePingMs + pingMs) / 2
-	}
-
-	// 更新最大最小值
-	if c.MaxPingMs == 0 || pingMs > c.MaxPingMs {
-		c.MaxPingMs = pingMs
-	}
-	if c.MinPingMs == 0 || pingMs < c.MinPingMs {
-		c.MinPingMs = pingMs
-	}
-}
-
 // IsOnline 判断是否在线
 func (c *ConnectionRecord) IsOnline() bool {
 	return c.IsActive && c.DisconnectedAt == nil
-}
-
-// GetConnectionQuality 获取连接质量评分 (0-100)
-func (c *ConnectionRecord) GetConnectionQuality() float64 {
-	score := 100.0
-
-	// 丢包率影响 (最多扣30分)
-	if c.PacketLossRate > 0 {
-		score -= c.PacketLossRate * 30
-	}
-
-	// 延迟影响 (最多扣30分)
-	if c.AveragePingMs > 0 {
-		if c.AveragePingMs > 500 {
-			score -= 30
-		} else if c.AveragePingMs > 200 {
-			score -= 20
-		} else if c.AveragePingMs > 100 {
-			score -= 10
-		}
-	}
-
-	// 错误率影响 (最多扣20分)
-	totalMessages := c.MessagesSent + c.MessagesReceived
-	if totalMessages > 0 {
-		errorRate := float64(c.ErrorCount) / float64(totalMessages)
-		score -= errorRate * 20
-	}
-
-	// 重连次数影响 (最多扣20分)
-	if c.ReconnectCount > 0 {
-		score -= float64(c.ReconnectCount) * 5
-		if score < 0 {
-			score = 0
-		}
-	}
-
-	if score < 0 {
-		score = 0
-	}
-	return score
 }

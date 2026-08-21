@@ -146,7 +146,9 @@ func TestHubRedisStatistics(t *testing.T) {
 	broadcastMsg := createTestHubMessage(MessageTypeSystem).
 		SetContent("Broadcast message for stats").
 		SetBroadcastType(BroadcastTypeGlobal)
-	hub.Broadcast(ctx, broadcastMsg)
+	// 广播消息无指定接收者：清空默认 Receiver，避免 Deliver 误路由到 P2P 分支（不触发广播计数）
+	broadcastMsg.Receiver = ""
+	_ = hub.Deliver(ctx, broadcastMsg, false)
 
 	time.Sleep(1 * time.Second)
 	// 手动触发统计刷写

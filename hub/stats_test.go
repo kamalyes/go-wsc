@@ -31,38 +31,38 @@ import (
 )
 
 // ============================================================================
-// 测试用 mock：ConnectionRecordRepository
+// 测试用 mock：ConnectionQualityRepository
 // 仅记录 BatchIncrementStats / BatchUpdateHeartbeats / AddError 调用，
 // 其余方法 no-op，用于验证 track* 函数的统计计数路径
 // ============================================================================
 
-type fakeConnRecordRepo struct {
+type fakeConnQualityRepo struct {
 	mu               sync.Mutex
 	incrementEntries []*repository.StatsIncrementEntry
 	heartbeatEntries []*repository.HeartbeatUpdateEntry
 	addErrorCount    atomic.Int64
 }
 
-func (f *fakeConnRecordRepo) BatchIncrementStats(_ context.Context, entries []*repository.StatsIncrementEntry) error {
+func (f *fakeConnQualityRepo) BatchIncrementStats(_ context.Context, entries []*repository.StatsIncrementEntry) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.incrementEntries = append(f.incrementEntries, entries...)
 	return nil
 }
 
-func (f *fakeConnRecordRepo) BatchUpdateHeartbeats(_ context.Context, entries []*repository.HeartbeatUpdateEntry) error {
+func (f *fakeConnQualityRepo) BatchUpdateHeartbeats(_ context.Context, entries []*repository.HeartbeatUpdateEntry) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.heartbeatEntries = append(f.heartbeatEntries, entries...)
 	return nil
 }
 
-func (f *fakeConnRecordRepo) AddError(_ context.Context, _ string, _ error) error {
+func (f *fakeConnQualityRepo) AddError(_ context.Context, _ string, _ error) error {
 	f.addErrorCount.Add(1)
 	return nil
 }
 
-func (f *fakeConnRecordRepo) getIncrementEntries() []*repository.StatsIncrementEntry {
+func (f *fakeConnQualityRepo) getIncrementEntries() []*repository.StatsIncrementEntry {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	cp := make([]*repository.StatsIncrementEntry, len(f.incrementEntries))
@@ -70,7 +70,7 @@ func (f *fakeConnRecordRepo) getIncrementEntries() []*repository.StatsIncrementE
 	return cp
 }
 
-func (f *fakeConnRecordRepo) getHeartbeatEntries() []*repository.HeartbeatUpdateEntry {
+func (f *fakeConnQualityRepo) getHeartbeatEntries() []*repository.HeartbeatUpdateEntry {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	cp := make([]*repository.HeartbeatUpdateEntry, len(f.heartbeatEntries))
@@ -79,49 +79,24 @@ func (f *fakeConnRecordRepo) getHeartbeatEntries() []*repository.HeartbeatUpdate
 }
 
 // 其余方法 no-op
-func (f *fakeConnRecordRepo) Upsert(context.Context, *ConnectionRecord) error { return nil }
-func (f *fakeConnRecordRepo) MarkDisconnected(context.Context, string, DisconnectReason, int, string) error {
+func (f *fakeConnQualityRepo) Upsert(context.Context, *ConnectionQuality) error { return nil }
+func (f *fakeConnQualityRepo) FinalizeOnDisconnect(context.Context, string) error {
 	return nil
 }
-func (f *fakeConnRecordRepo) GetByConnectionID(context.Context, string) (*ConnectionRecord, error) {
+func (f *fakeConnQualityRepo) GetByConnectionID(context.Context, string) (*ConnectionQuality, error) {
 	return nil, nil
 }
-func (f *fakeConnRecordRepo) GetByUserID(context.Context, string) ([]*ConnectionRecord, error) {
+func (f *fakeConnQualityRepo) GetByUserID(context.Context, string) ([]*ConnectionQuality, error) {
 	return nil, nil
 }
-func (f *fakeConnRecordRepo) GetActiveByUserID(context.Context, string) ([]*ConnectionRecord, error) {
+func (f *fakeConnQualityRepo) GetHighErrorRateConnections(context.Context, int, int) ([]*ConnectionQuality, error) {
 	return nil, nil
 }
-func (f *fakeConnRecordRepo) List(context.Context, *repository.ConnectionQueryOptions) ([]*ConnectionRecord, error) {
+func (f *fakeConnQualityRepo) GetFrequentReconnectConnections(context.Context, int, int) ([]*ConnectionQuality, error) {
 	return nil, nil
 }
-func (f *fakeConnRecordRepo) Count(context.Context, *repository.ConnectionQueryOptions) (int64, error) {
-	return 0, nil
-}
-func (f *fakeConnRecordRepo) GetConnectionStats(context.Context, time.Time, time.Time) (*repository.ConnectionStats, error) {
-	return nil, nil
-}
-func (f *fakeConnRecordRepo) GetConnectionStatsByID(context.Context, string) (*repository.UserConnectionStats, error) {
-	return nil, nil
-}
-func (f *fakeConnRecordRepo) GetUserConnectionStats(context.Context, string) (*repository.UserConnectionStats, error) {
-	return nil, nil
-}
-func (f *fakeConnRecordRepo) GetNodeConnectionStats(context.Context, string) (*repository.NodeConnectionStats, error) {
-	return nil, nil
-}
-func (f *fakeConnRecordRepo) GetHighErrorRateConnections(context.Context, int, int) ([]*ConnectionRecord, error) {
-	return nil, nil
-}
-func (f *fakeConnRecordRepo) GetFrequentReconnectConnections(context.Context, int, int) ([]*ConnectionRecord, error) {
-	return nil, nil
-}
-func (f *fakeConnRecordRepo) BatchUpsert(context.Context, []*ConnectionRecord) error { return nil }
-func (f *fakeConnRecordRepo) CleanupInactiveRecords(context.Context, time.Time) (int64, error) {
-	return 0, nil
-}
-func (f *fakeConnRecordRepo) WithTableName(string) ConnectionRecordRepository { return f }
-func (f *fakeConnRecordRepo) Close() error                                    { return nil }
+func (f *fakeConnQualityRepo) WithTableName(string) ConnectionQualityRepository { return f }
+func (f *fakeConnQualityRepo) Close() error                                     { return nil }
 
 // replaceBatchersForTest 用短 flush 间隔替换 Hub 的批量处理器，便于测试中快速验证 flush
 func replaceBatchersForTest(hub *Hub) {
@@ -179,8 +154,8 @@ func TestTrackSenderMessageStats(t *testing.T) {
 	t.Run("空connectionID不计数", func(t *testing.T) {
 		hub, _, _, cleanup := setupGroupTestHub(t)
 		defer cleanup()
-		fake := &fakeConnRecordRepo{}
-		hub.connectionRecordRepo = fake
+		fake := &fakeConnQualityRepo{}
+		hub.connectionQualityRepo = fake
 		replaceBatchersForTest(hub)
 		hub.trackSenderMessageStats("", UserTypeCustomer)
 		time.Sleep(150 * time.Millisecond) // 等待 flush 周期
@@ -190,8 +165,8 @@ func TestTrackSenderMessageStats(t *testing.T) {
 	t.Run("系统用户和机器人被排除", func(t *testing.T) {
 		hub, _, _, cleanup := setupGroupTestHub(t)
 		defer cleanup()
-		fake := &fakeConnRecordRepo{}
-		hub.connectionRecordRepo = fake
+		fake := &fakeConnQualityRepo{}
+		hub.connectionQualityRepo = fake
 		replaceBatchersForTest(hub)
 
 		hub.trackSenderMessageStats("conn-sys", UserTypeSystem)
@@ -204,8 +179,8 @@ func TestTrackSenderMessageStats(t *testing.T) {
 	t.Run("正常用户计数增加", func(t *testing.T) {
 		hub, _, _, cleanup := setupGroupTestHub(t)
 		defer cleanup()
-		fake := &fakeConnRecordRepo{}
-		hub.connectionRecordRepo = fake
+		fake := &fakeConnQualityRepo{}
+		hub.connectionQualityRepo = fake
 		replaceBatchersForTest(hub)
 
 		hub.trackSenderMessageStats("conn-cust", UserTypeCustomer)
@@ -234,8 +209,8 @@ func TestTrackReceiverMessageStats(t *testing.T) {
 	t.Run("系统用户被排除", func(t *testing.T) {
 		hub, _, _, cleanup := setupGroupTestHub(t)
 		defer cleanup()
-		fake := &fakeConnRecordRepo{}
-		hub.connectionRecordRepo = fake
+		fake := &fakeConnQualityRepo{}
+		hub.connectionQualityRepo = fake
 		replaceBatchersForTest(hub)
 
 		hub.trackReceiverMessageStats("conn-sys", UserTypeSystem, 100)
@@ -247,8 +222,8 @@ func TestTrackReceiverMessageStats(t *testing.T) {
 	t.Run("正常用户计数增加", func(t *testing.T) {
 		hub, _, _, cleanup := setupGroupTestHub(t)
 		defer cleanup()
-		fake := &fakeConnRecordRepo{}
-		hub.connectionRecordRepo = fake
+		fake := &fakeConnQualityRepo{}
+		hub.connectionQualityRepo = fake
 		replaceBatchersForTest(hub)
 
 		hub.trackReceiverMessageStats("conn-recv", UserTypeAgent, 256)
@@ -282,8 +257,8 @@ func TestTrackConnectionError(t *testing.T) {
 	t.Run("nil_error不计数", func(t *testing.T) {
 		hub, _, _, cleanup := setupGroupTestHub(t)
 		defer cleanup()
-		fake := &fakeConnRecordRepo{}
-		hub.connectionRecordRepo = fake
+		fake := &fakeConnQualityRepo{}
+		hub.connectionQualityRepo = fake
 
 		hub.trackConnectionError("conn-1", UserTypeCustomer, nil)
 		time.Sleep(200 * time.Millisecond)
@@ -293,8 +268,8 @@ func TestTrackConnectionError(t *testing.T) {
 	t.Run("空connectionID不计数", func(t *testing.T) {
 		hub, _, _, cleanup := setupGroupTestHub(t)
 		defer cleanup()
-		fake := &fakeConnRecordRepo{}
-		hub.connectionRecordRepo = fake
+		fake := &fakeConnQualityRepo{}
+		hub.connectionQualityRepo = fake
 
 		hub.trackConnectionError("", UserTypeCustomer, errors.New("err"))
 		time.Sleep(200 * time.Millisecond)
@@ -304,8 +279,8 @@ func TestTrackConnectionError(t *testing.T) {
 	t.Run("系统用户被排除", func(t *testing.T) {
 		hub, _, _, cleanup := setupGroupTestHub(t)
 		defer cleanup()
-		fake := &fakeConnRecordRepo{}
-		hub.connectionRecordRepo = fake
+		fake := &fakeConnQualityRepo{}
+		hub.connectionQualityRepo = fake
 
 		hub.trackConnectionError("conn-sys", UserTypeSystem, errors.New("err"))
 		hub.trackConnectionError("conn-bot", UserTypeBot, errors.New("err"))
@@ -316,8 +291,8 @@ func TestTrackConnectionError(t *testing.T) {
 	t.Run("有error正常计数", func(t *testing.T) {
 		hub, _, _, cleanup := setupGroupTestHub(t)
 		defer cleanup()
-		fake := &fakeConnRecordRepo{}
-		hub.connectionRecordRepo = fake
+		fake := &fakeConnQualityRepo{}
+		hub.connectionQualityRepo = fake
 
 		hub.trackConnectionError("conn-err", UserTypeCustomer, errors.New("connection reset"))
 		require.Eventually(t, func() bool {
@@ -345,8 +320,8 @@ func TestTrackHeartbeatStats(t *testing.T) {
 	t.Run("nil_client不panic", func(t *testing.T) {
 		hub, _, _, cleanup := setupGroupTestHub(t)
 		defer cleanup()
-		fake := &fakeConnRecordRepo{}
-		hub.connectionRecordRepo = fake
+		fake := &fakeConnQualityRepo{}
+		hub.connectionQualityRepo = fake
 		replaceBatchersForTest(hub)
 		assert.NotPanics(t, func() {
 			hub.trackHeartbeatStats(nil)
@@ -358,8 +333,8 @@ func TestTrackHeartbeatStats(t *testing.T) {
 	t.Run("系统用户被排除", func(t *testing.T) {
 		hub, _, _, cleanup := setupGroupTestHub(t)
 		defer cleanup()
-		fake := &fakeConnRecordRepo{}
-		hub.connectionRecordRepo = fake
+		fake := &fakeConnQualityRepo{}
+		hub.connectionQualityRepo = fake
 		replaceBatchersForTest(hub)
 
 		sysClient := makeTestClient("c-sys", "u-sys")
@@ -372,8 +347,8 @@ func TestTrackHeartbeatStats(t *testing.T) {
 	t.Run("零值心跳pingMs为零", func(t *testing.T) {
 		hub, _, _, cleanup := setupGroupTestHub(t)
 		defer cleanup()
-		fake := &fakeConnRecordRepo{}
-		hub.connectionRecordRepo = fake
+		fake := &fakeConnQualityRepo{}
+		hub.connectionQualityRepo = fake
 		replaceBatchersForTest(hub)
 
 		client := makeTestClient("c-hb-zero", "u-hb-zero")
@@ -392,8 +367,8 @@ func TestTrackHeartbeatStats(t *testing.T) {
 	t.Run("非零心跳pingMs大于零", func(t *testing.T) {
 		hub, _, _, cleanup := setupGroupTestHub(t)
 		defer cleanup()
-		fake := &fakeConnRecordRepo{}
-		hub.connectionRecordRepo = fake
+		fake := &fakeConnQualityRepo{}
+		hub.connectionQualityRepo = fake
 		replaceBatchersForTest(hub)
 
 		client := makeTestClient("c-hb-ok", "u-hb-ok")

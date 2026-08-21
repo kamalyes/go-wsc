@@ -39,8 +39,8 @@ func main() {
 	h := hub.NewHub(config)
 
 	// 3. 设置回调处理
-	h.OnClientConnect(func(ctx context.Context, client *models.Client) error {
-		log.Printf("👤 客户端连接: %s (类型: %s)\n", client.UserID, client.UserType)
+	h.OnClientConnect(func(ctx context.Context, client *models.Client, record *models.ConnectionRecord) error {
+		log.Printf("👤 客户端连接: %s (类型: %s, 连接ID: %s)\n", client.UserID, client.UserType, record.ConnectionID)
 		return nil
 	})
 

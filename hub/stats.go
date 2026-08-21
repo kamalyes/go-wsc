@@ -103,7 +103,7 @@ func (h *Hub) shouldTrackUserStats(userType UserType) bool {
 
 // trackSenderMessageStats 追踪发送者的消息统计
 func (h *Hub) trackSenderMessageStats(connectionID string, senderType UserType) {
-	if h.connectionRecordRepo == nil || connectionID == "" {
+	if h.connectionQualityRepo == nil || connectionID == "" {
 		return
 	}
 
@@ -123,7 +123,7 @@ func (h *Hub) trackSenderMessageStats(connectionID string, senderType UserType) 
 
 // trackReceiverMessageStats 追踪接收者的消息和字节统计
 func (h *Hub) trackReceiverMessageStats(connectionID string, receiverType UserType, dataSize int) {
-	if h.connectionRecordRepo == nil || connectionID == "" {
+	if h.connectionQualityRepo == nil || connectionID == "" {
 		return
 	}
 
@@ -144,7 +144,7 @@ func (h *Hub) trackReceiverMessageStats(connectionID string, receiverType UserTy
 
 // trackConnectionError 追踪连接错误
 func (h *Hub) trackConnectionError(connectionID string, userType UserType, err error) {
-	if h.connectionRecordRepo == nil || connectionID == "" || err == nil {
+	if h.connectionQualityRepo == nil || connectionID == "" || err == nil {
 		return
 	}
 
@@ -159,14 +159,15 @@ func (h *Hub) trackConnectionError(connectionID string, userType UserType, err e
 			h.logger.ErrorKV("记录连接错误崩溃", "panic", r, "stack", string(debug.Stack()), "connection_id", connectionID)
 		}).
 		ExecWithContext(func(ctx context.Context) error {
-			return h.connectionRecordRepo.AddError(ctx, connectionID, err)
+			return h.connectionQualityRepo.AddError(ctx, connectionID, err)
 		})
 }
 
 // trackHeartbeatStats 追踪心跳和Ping统计
 // 优化：使用批量聚合器，避免每次心跳都启动 goroutine 写数据库
+// 心跳时间戳由 batcher flush 写 connect 表，Ping 统计写 quality 表
 func (h *Hub) trackHeartbeatStats(client *Client) {
-	if h.connectionRecordRepo == nil || client == nil {
+	if (h.connectionQualityRepo == nil && h.connectionRecordRepo == nil) || client == nil {
 		return
 	}
 

@@ -80,25 +80,3 @@ var (
 	// NewGormOfflineMessageRepository 创建 Gorm 离线消息仓储
 	NewGormOfflineMessageRepository = repository.NewGormOfflineMessageRepository
 )
-
-// 消息查询角色常量
-const (
-	// MessageRoleReceiver 作为接收者查询
-	MessageRoleReceiver = repository.MessageRoleReceiver
-	// MessageRoleSender 作为发送者查询
-	MessageRoleSender = repository.MessageRoleSender
-)
-
-// 消息发送状态别名
-var (
-	// 消息发生成功
-	MessageSendStatusSuccess = models.MessageSendStatusSuccess
-	// 消息发送失败
-	MessageSendStatusFailed = models.MessageSendStatusFailed
-)
-
-// 常量别名 - 命名空间
-const (
-	// DefaultNamespace 默认命名空间ID（类似 k8s default namespace）
-	DefaultNamespace = models.DefaultNamespace
-)

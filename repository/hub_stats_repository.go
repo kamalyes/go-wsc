@@ -19,6 +19,7 @@ import (
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-toolbox/pkg/convert"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
+	"github.com/kamalyes/go-wsc/constants"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -207,7 +208,7 @@ type RedisHubStatsRepository struct {
 //   - client: Redis 客户端 (github.com/redis/go-redis/v9)
 //   - config: 统计配置对象
 func NewRedisHubStatsRepository(client redis.UniversalClient, config *wscconfig.Stats) *RedisHubStatsRepository {
-	keyPrefix := mathx.IF(config.KeyPrefix == "", DefaultStatsKeyPrefix, config.KeyPrefix)
+	keyPrefix := mathx.IF(config.KeyPrefix == "", constants.DefaultStatsKeyPrefix, config.KeyPrefix)
 	ttl := mathx.IF(config.TTL == 0, 7*24*time.Hour, config.TTL)
 
 	// 续期阈值 = TTL / 2，仅当剩余 TTL 不足一半时才续期，避免每次更新都写 EXPIRE

@@ -202,8 +202,8 @@ func TestNewRateLimiterConfigFromMessageRateLimit(t *testing.T) {
 
 		assert.Equal(t, 100, result.MaxMessagesPerMinute)
 		assert.Equal(t, 6000, result.MaxMessagesPerHour) // 100 * 60
-		assert.Equal(t, 80, result.AlertThreshold)        // 100 * 80 / 100
-		assert.Equal(t, 100, result.BlockThreshold)       // = MaxMessages
+		assert.Equal(t, 80, result.AlertThreshold)       // 100 * 80 / 100
+		assert.Equal(t, 100, result.BlockThreshold)      // = MaxMessages
 		assert.True(t, result.RedisEnabled)
 		assert.Equal(t, "myapp:rate:", result.RedisKeyPrefix)
 	})

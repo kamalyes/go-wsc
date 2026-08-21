@@ -47,8 +47,8 @@ type (
 	HubHealthInfo              = hub.HubHealthInfo
 	ObserverManagerStats       = hub.ObserverManagerStats
 	ObserverStats              = hub.ObserverStats
-	ConnectionClaims           = hub.ConnectionClaims           // 连接 Token JWT Claims（user_id/user_type/device_id 加密载体）
-	ConnectionTokenDecoder     = hub.ConnectionTokenDecoder     // 连接 Token 解码器接口
+	ConnectionClaims           = hub.ConnectionClaims       // 连接 Token JWT Claims（user_id/user_type/device_id 加密载体）
+	ConnectionTokenDecoder     = hub.ConnectionTokenDecoder // 连接 Token 解码器接口
 )
 
 // 常量导出
@@ -65,7 +65,7 @@ var (
 	NewHub                    = hub.NewHub
 	NewConnectionTokenDecoder = hub.NewConnectionTokenDecoder // 创建连接 Token 解码器
 	IssueConnectionToken      = hub.IssueConnectionToken      // 生成连接 Token（业务层调用）
-	RevokeConnectionToken    = hub.RevokeConnectionToken     // 吊销连接 Token（多节点生效）
+	RevokeConnectionToken     = hub.RevokeConnectionToken     // 吊销连接 Token（多节点生效）
 )
 
 // ============================================================================
@@ -124,6 +124,7 @@ var (
 // - GetLeastLoadedAgent(dimension WorkloadDimension) (string, int64, error): 获取负载最低的客服
 
 // SSE 相关方法：
+// - HandleSSEUpgrade(w http.ResponseWriter, r *http.Request): 处理 SSE 升级请求（网关层 /sse 路由 handler）
 // - RegisterSSE(userID string, w http.ResponseWriter, userType UserType) (*Client, error): 注册SSE客户端
 // - UnregisterSSE(clientID string): 注销SSE客户端
 // - SendToUserViaSSE(userID string, msg *HubMessage) bool: 通过SSE发送

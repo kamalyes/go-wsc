@@ -12,6 +12,7 @@
 package wsc
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -60,7 +61,7 @@ func TestIsUserOnline(t *testing.T) {
 	hub.WaitForStart()
 
 	// 用户离线
-	online, err := hub.IsUserOnline("offline-user")
+	online, err := hub.IsUserOnline(context.Background(), "offline-user")
 	require.NoError(t, err)
 	assert.False(t, online, "用户应该离线")
 
@@ -75,7 +76,7 @@ func TestIsUserOnline(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// 用户在线
-	online, err = hub.IsUserOnline("online-user")
+	online, err = hub.IsUserOnline(context.Background(), "online-user")
 	require.NoError(t, err)
 	assert.True(t, online, "用户应该在线")
 
@@ -142,7 +143,7 @@ func TestGetClientsByUserID(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// 获取客户端列表
-	clients := hub.GetClientsByUserID(userID)
+	clients := hub.GetClientsByUserID(context.Background(), userID)
 	assert.Equal(t, 2, len(clients), "应该有2个客户端")
 
 	// 清理

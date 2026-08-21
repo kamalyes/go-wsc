@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
+	"github.com/kamalyes/go-wsc/models"
+	"github.com/kamalyes/go-wsc/routing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -126,7 +128,7 @@ func TestOnGroupDisband_Triggered(t *testing.T) {
 		atomic.StoreInt32(&called, 1) // 最后写 called，确保 ns/gid 对 Load 方可见
 	})
 
-	require.NoError(t, hub.DisbandGroup(ctx, "tenantA", "g-disband"))
+	require.NoError(t, hub.DisbandGroup(routing.NewRoute().WithAppID(models.DefaultAppID).WithNamespace("tenantA").WithGroupIDs([]string{"g-disband"}).Inject(ctx)))
 
 	require.Eventually(t, func() bool { return atomic.LoadInt32(&called) == 1 }, time.Second, 10*time.Millisecond)
 	assert.Equal(t, "tenantA", ns)
@@ -140,7 +142,7 @@ func TestOnGroupMemberLeave_Triggered(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-leave", Namespace: "tenantA", OwnerID: "owner1"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, "tenantA", "g-leave", []string{"u-leave-1", "u-leave-2"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(models.DefaultAppID).WithNamespace("tenantA").WithGroupIDs([]string{"g-leave"}).Inject(ctx), []string{"u-leave-1", "u-leave-2"}))
 
 	var leaveUIDs []string
 	var called int32
@@ -149,7 +151,7 @@ func TestOnGroupMemberLeave_Triggered(t *testing.T) {
 		atomic.StoreInt32(&called, 1) // 最后写 called，确保 leaveUIDs 对 Load 方可见
 	})
 
-	require.NoError(t, hub.RemoveGroupMembers(ctx, "tenantA", "g-leave", []string{"u-leave-1"}))
+	require.NoError(t, hub.RemoveGroupMembers(routing.NewRoute().WithAppID(models.DefaultAppID).WithNamespace("tenantA").WithGroupIDs([]string{"g-leave"}).Inject(ctx), []string{"u-leave-1"}))
 
 	require.Eventually(t, func() bool { return atomic.LoadInt32(&called) == 1 }, time.Second, 10*time.Millisecond)
 	assert.Equal(t, []string{"u-leave-1"}, leaveUIDs)
@@ -167,7 +169,7 @@ func TestOnGroupMemberJoin_Triggered(t *testing.T) {
 		atomic.StoreInt32(&called, 1) // 最后写 called，确保 joinUIDs 对 Load 方可见
 	})
 
-	hub.triggerGroupMemberJoinCallback("tenantA", "g-join", []string{"u-join-1", "u-join-2"})
+	hub.triggerGroupMemberJoinCallback(context.Background(), "tenantA", "g-join", []string{"u-join-1", "u-join-2"})
 
 	require.Eventually(t, func() bool { return atomic.LoadInt32(&called) == 1 }, time.Second, 10*time.Millisecond)
 	assert.Equal(t, []string{"u-join-1", "u-join-2"}, joinUIDs)

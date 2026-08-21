@@ -55,11 +55,14 @@ func (h *Hub) UpdateClientHeartbeat(clientID string) error {
 // ============================================================================
 
 // SetClientLastHeartbeatForTest 设置客户端最后心跳时间（用于测试，线程安全）
+// 同时更新 LastSeen：checkHeartbeat 扫描 SSE 客户端时按 LastSeen 判断超时，
+// 心跳超时语义上 LastHeartbeat 与 LastSeen 都应过期（客户端既无 PING 也无任何活动）
 func (h *Hub) SetClientLastHeartbeatForTest(clientID string, lastHeartbeat time.Time) bool {
 	client, exists := h.shardedRegistry.GetClient(clientID)
 	if !exists {
 		return false
 	}
 	client.SetLastHeartbeat(lastHeartbeat)
+	client.SetLastSeen(lastHeartbeat)
 	return true
 }

@@ -147,11 +147,11 @@ func TestIsUserOnline(t *testing.T) {
 
 	hub.shardedRegistry.AddClient(makeTestClient("c-online", "u-online"))
 
-	online, err := hub.IsUserOnline("u-online")
+	online, err := hub.IsUserOnline(context.Background(), "u-online")
 	require.NoError(t, err)
 	assert.True(t, online)
 
-	offline, err := hub.IsUserOnline("u-not-exist")
+	offline, err := hub.IsUserOnline(context.Background(), "u-not-exist")
 	require.NoError(t, err)
 	assert.False(t, offline)
 }
@@ -177,9 +177,9 @@ func TestGetClientsByUserID(t *testing.T) {
 	hub.shardedRegistry.AddClient(makeTestClient("c-m1", "u-multi"))
 	hub.shardedRegistry.AddClient(makeTestClient("c-m2", "u-multi"))
 
-	clients := hub.GetClientsByUserID("u-multi")
+	clients := hub.GetClientsByUserID(context.Background(), "u-multi")
 	require.Len(t, clients, 2)
-	assert.Nil(t, hub.GetClientsByUserID("u-none"))
+	assert.Nil(t, hub.GetClientsByUserID(context.Background(), "u-none"))
 }
 
 func TestGetUserStatus(t *testing.T) {
@@ -190,8 +190,8 @@ func TestGetUserStatus(t *testing.T) {
 	c.SetStatus(UserStatusBusy)
 	hub.shardedRegistry.AddClient(c)
 
-	assert.Equal(t, UserStatusBusy, hub.GetUserStatus("u-st"))
-	assert.Equal(t, UserStatusOffline, hub.GetUserStatus("u-none"))
+	assert.Equal(t, UserStatusBusy, hub.GetUserStatus(context.Background(), "u-st"))
+	assert.Equal(t, UserStatusOffline, hub.GetUserStatus(context.Background(), "u-none"))
 }
 
 func TestGetClientIPs(t *testing.T) {
@@ -207,9 +207,9 @@ func TestGetClientIPs(t *testing.T) {
 	hub.shardedRegistry.AddClient(c1)
 	hub.shardedRegistry.AddClient(c2)
 
-	ips := hub.GetClientIPs("u-ip")
+	ips := hub.GetClientIPs(context.Background(), "u-ip")
 	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, ips)
-	assert.Nil(t, hub.GetClientIPs("u-none"))
+	assert.Nil(t, hub.GetClientIPs(context.Background(), "u-none"))
 }
 
 func TestGetClientMetadata(t *testing.T) {
@@ -368,10 +368,10 @@ func TestGetMostRecentClient(t *testing.T) {
 	hub.shardedRegistry.AddClient(c1)
 	hub.shardedRegistry.AddClient(c2)
 
-	got := hub.GetMostRecentClient("u-mr")
+	got := hub.GetMostRecentClient(context.Background(), "u-mr")
 	require.NotNil(t, got)
 	assert.Equal(t, "c-mr2", got.ID)
-	assert.Nil(t, hub.GetMostRecentClient("u-none"))
+	assert.Nil(t, hub.GetMostRecentClient(context.Background(), "u-none"))
 }
 
 func TestFindMostRecentClient(t *testing.T) {
@@ -403,8 +403,8 @@ func TestHasUserClient(t *testing.T) {
 	defer cleanup()
 
 	hub.shardedRegistry.AddClient(makeTestClient("c-hu", "u-hu"))
-	assert.True(t, hub.HasUserClient("u-hu"))
-	assert.False(t, hub.HasUserClient("nope"))
+	assert.True(t, hub.HasUserClient(context.Background(), "u-hu"))
+	assert.False(t, hub.HasUserClient(context.Background(), "nope"))
 }
 
 func TestHasSSEClient(t *testing.T) {
@@ -473,18 +473,18 @@ func TestGetClientsCopyForUser(t *testing.T) {
 	hub.shardedRegistry.AddClient(c2)
 
 	t.Run("指定clientID仅返回该客户端", func(t *testing.T) {
-		clients := hub.GetClientsCopyForUser("u-cp", "c-cp1")
+		clients := hub.GetClientsCopyForUser(context.Background(), "u-cp", "c-cp1")
 		require.Len(t, clients, 1)
 		assert.Equal(t, "c-cp1", clients[0].ID)
 	})
 	t.Run("clientID不匹配返回nil", func(t *testing.T) {
-		assert.Nil(t, hub.GetClientsCopyForUser("u-cp", "nope"))
+		assert.Nil(t, hub.GetClientsCopyForUser(context.Background(), "u-cp", "nope"))
 	})
 	t.Run("未指定clientID返回所有", func(t *testing.T) {
-		assert.Len(t, hub.GetClientsCopyForUser("u-cp", ""), 2)
+		assert.Len(t, hub.GetClientsCopyForUser(context.Background(), "u-cp", ""), 2)
 	})
 	t.Run("不存在用户返回nil", func(t *testing.T) {
-		assert.Nil(t, hub.GetClientsCopyForUser("u-none", ""))
+		assert.Nil(t, hub.GetClientsCopyForUser(context.Background(), "u-none", ""))
 	})
 }
 
@@ -495,8 +495,8 @@ func TestGetConnectionsByUserID(t *testing.T) {
 	hub.shardedRegistry.AddClient(makeTestClient("c-cb1", "u-cb"))
 	hub.shardedRegistry.AddClient(makeTestClient("c-cb2", "u-cb"))
 
-	assert.Len(t, hub.GetConnectionsByUserID("u-cb"), 2)
-	assert.Nil(t, hub.GetConnectionsByUserID("u-none"))
+	assert.Len(t, hub.GetConnectionsByUserID(context.Background(), "u-cb"), 2)
+	assert.Nil(t, hub.GetConnectionsByUserID(context.Background(), "u-none"))
 }
 
 func TestCheckUserOnline(t *testing.T) {
@@ -504,9 +504,9 @@ func TestCheckUserOnline(t *testing.T) {
 	defer cleanup()
 
 	hub.shardedRegistry.AddClient(makeTestClient("c-co", "u-co"))
-	assert.True(t, hub.checkUserOnline("u-co"))
+	assert.True(t, hub.checkUserOnline(context.Background(), "u-co"))
 	// 无 onlineStatusRepo，离线用户返回 false
-	assert.False(t, hub.checkUserOnline("u-none"))
+	assert.False(t, hub.checkUserOnline(context.Background(), "u-none"))
 }
 
 func TestGetClientByIDWithLock(t *testing.T) {

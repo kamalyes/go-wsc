@@ -585,6 +585,9 @@ func TestSyncToSenderDevices(t *testing.T) {
 
 		msg := makeGroupMessage("u-multi")
 		msg.SenderClient = "c-dev1" // dev1 为发送设备，dev2 应收到同步
+		// 与生产入口契约一致：上游 InjectRoute 注入路由信封（appID 归一化为 DefaultAppID），
+		// syncToSenderDevices 内部 ForEachUserClientFiltered 按 msg.AppID 严格匹配
+		msg.InjectRoute(hub.ctx)
 		hub.syncToSenderDevices(hub.ctx, msg)
 
 		// dev2 收到
@@ -836,7 +839,7 @@ func TestSendToUserWithRetry_PreservesExistingNamespace(t *testing.T) {
 	hub.SetOfflineMessageHandler(h)
 	defer hub.SafeShutdown()
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), "ns-custom", nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace("ns-custom").WithGroupIDs(nil).Inject(context.Background())
 	hub.SendToUserWithRetry(ctx, "u-offline-custom", makeGroupMessage("sender"))
 
 	ns, groups, count := h.snapshot()
@@ -872,7 +875,7 @@ func TestSendToUserWithAck_PreservesExistingNamespace(t *testing.T) {
 	hub.SetOfflineMessageHandler(h)
 	defer hub.SafeShutdown()
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), "ns-ack", nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace("ns-ack").WithGroupIDs(nil).Inject(context.Background())
 	hub.SendToUserWithAck(ctx, "u-offline-ack2", makeGroupMessage("sender"), time.Second, 1)
 
 	ns, _, count := h.snapshot()

@@ -118,6 +118,35 @@ func (f *fakeMessageRecordRepo) BatchUpdateStatus(_ context.Context, ids []strin
 	}
 	return f.batchUpdateErr
 }
+
+// ClaimStaleSending 模拟真实状态守卫语义：仅 queryResult（fake 的"表"）中
+// 状态仍为 sending 的记录被认领并更新，用于验证多节点并发扫描去重
+func (f *fakeMessageRecordRepo) ClaimStaleSending(_ context.Context, ids []string, newStatus models.MessageSendStatus, reason models.FailureReason, errMsg string) ([]string, error) {
+	f.batchUpdateMu.Lock()
+	defer f.batchUpdateMu.Unlock()
+	claimed := make([]string, 0, len(ids))
+	for _, id := range ids {
+		for _, record := range f.queryResult {
+			if record.MessageID == id && record.Status == models.MessageSendStatusSending {
+				record.Status = newStatus
+				record.FailureReason = reason
+				record.ErrorMessage = errMsg
+				claimed = append(claimed, id)
+				break
+			}
+		}
+	}
+	f.batchUpdateCalls = append(f.batchUpdateCalls, batchUpdateCall{
+		IDs:    claimed,
+		Status: newStatus,
+		Reason: reason,
+		ErrMsg: errMsg,
+	})
+	if f.batchUpdateBlock != nil {
+		f.batchUpdateBlock()
+	}
+	return claimed, f.batchUpdateErr
+}
 func (f *fakeMessageRecordRepo) IncrementRetry(_ context.Context, _ string, _ models.RetryAttempt) error {
 	return nil
 }

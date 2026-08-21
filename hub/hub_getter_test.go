@@ -82,40 +82,42 @@ func (f *fakeOfflineMessageHandler) UpdatePushStatus(_ context.Context, _ []stri
 type fakeGroupRepository struct{}
 
 func (f *fakeGroupRepository) CreateGroup(_ context.Context, _ *Group) error { return nil }
-func (f *fakeGroupRepository) GetGroup(_ context.Context, _, _ string) (*Group, error) {
+func (f *fakeGroupRepository) GetGroup(_ context.Context, _, _, _ string) (*Group, error) {
 	return nil, nil
 }
-func (f *fakeGroupRepository) DisbandGroup(_ context.Context, _, _ string) error { return nil }
-func (f *fakeGroupRepository) AddMembers(_ context.Context, _, _ string, _ []string) error {
+func (f *fakeGroupRepository) DisbandGroup(_ context.Context, _, _, _ string) error { return nil }
+func (f *fakeGroupRepository) AddMembers(_ context.Context, _, _, _ string, _ []string) error {
 	return nil
 }
-func (f *fakeGroupRepository) RemoveMembers(_ context.Context, _, _ string, _ []string) error {
+func (f *fakeGroupRepository) RemoveMembers(_ context.Context, _, _, _ string, _ []string) error {
 	return nil
 }
-func (f *fakeGroupRepository) GetMembers(_ context.Context, _, _ string) ([]string, error) {
+func (f *fakeGroupRepository) GetMembers(_ context.Context, _, _, _ string) ([]string, error) {
 	return nil, nil
 }
-func (f *fakeGroupRepository) GetUserGroups(_ context.Context, _, _ string) ([]string, error) {
+func (f *fakeGroupRepository) GetUserGroups(_ context.Context, _, _, _ string) ([]string, error) {
 	return nil, nil
 }
-func (f *fakeGroupRepository) IsMember(_ context.Context, _, _, _ string) (bool, error) {
+func (f *fakeGroupRepository) IsMember(_ context.Context, _, _, _, _ string) (bool, error) {
 	return false, nil
 }
-func (f *fakeGroupRepository) GetMemberCount(_ context.Context, _, _ string) (int64, error) {
+func (f *fakeGroupRepository) GetMemberCount(_ context.Context, _, _, _ string) (int64, error) {
 	return 0, nil
 }
-func (f *fakeGroupRepository) GetNamespaceGroups(_ context.Context, _ string) ([]string, error) {
+func (f *fakeGroupRepository) GetNamespaceGroups(_ context.Context, _, _ string) ([]string, error) {
 	return nil, nil
 }
-func (f *fakeGroupRepository) GetAllNamespaces(_ context.Context) ([]string, error) { return nil, nil }
-func (f *fakeGroupRepository) GetMultiGroupMembers(_ context.Context, _ string, _ []string) (map[string][]string, error) {
+func (f *fakeGroupRepository) GetAllNamespaces(_ context.Context, _ string) ([]string, error) {
 	return nil, nil
 }
-func (f *fakeGroupRepository) EnsureSystemGroup(_ context.Context, _, _ string) error { return nil }
-func (f *fakeGroupRepository) GetGroupNamespace(_ context.Context, _ string) (string, error) {
+func (f *fakeGroupRepository) GetMultiGroupMembers(_ context.Context, _, _ string, _ []string) (map[string][]string, error) {
+	return nil, nil
+}
+func (f *fakeGroupRepository) EnsureSystemGroup(_ context.Context, _, _, _ string) error { return nil }
+func (f *fakeGroupRepository) GetGroupNamespace(_ context.Context, _, _ string) (string, error) {
 	return "", nil
 }
-func (f *fakeGroupRepository) GetMultiGroupNamespaces(_ context.Context, _ []string) (map[string]string, error) {
+func (f *fakeGroupRepository) GetMultiGroupNamespaces(_ context.Context, _ string, _ []string) (map[string]string, error) {
 	return nil, nil
 }
 
@@ -150,6 +152,9 @@ func (f *fakeMessageRecordRepository) UpdateStatus(_ context.Context, _ string, 
 func (f *fakeMessageRecordRepository) BatchUpdateStatus(_ context.Context, _ []string, _ models.MessageSendStatus, _ models.FailureReason, _ string) error {
 	return nil
 }
+func (f *fakeMessageRecordRepository) ClaimStaleSending(_ context.Context, _ []string, _ models.MessageSendStatus, _ models.FailureReason, _ string) ([]string, error) {
+	return nil, nil
+}
 func (f *fakeMessageRecordRepository) IncrementRetry(_ context.Context, _ string, _ models.RetryAttempt) error {
 	return nil
 }
@@ -164,26 +169,62 @@ func (f *fakeMessageRecordRepository) Close() error    { return nil }
 
 type fakeConnectionRecordRepository struct{}
 
-func (f *fakeConnectionRecordRepository) Close() error                                                                                                 { return nil }
-func (f *fakeConnectionRecordRepository) Upsert(_ context.Context, _ *models.ConnectionRecord) error                                                 { return nil }
-func (f *fakeConnectionRecordRepository) MarkDisconnected(_ context.Context, _ string, _ models.DisconnectReason, _ int, _ string) error             { return nil }
-func (f *fakeConnectionRecordRepository) GetByConnectionID(_ context.Context, _ string) (*models.ConnectionRecord, error)                             { return nil, nil }
-func (f *fakeConnectionRecordRepository) GetByUserID(_ context.Context, _ string) ([]*models.ConnectionRecord, error)                                 { return nil, nil }
-func (f *fakeConnectionRecordRepository) GetActiveByUserID(_ context.Context, _ string) ([]*models.ConnectionRecord, error)                           { return nil, nil }
-func (f *fakeConnectionRecordRepository) AddError(_ context.Context, _ string, _ error) error                                                         { return nil }
-func (f *fakeConnectionRecordRepository) BatchUpdateHeartbeats(_ context.Context, _ []*repository.HeartbeatUpdateEntry) error                         { return nil }
-func (f *fakeConnectionRecordRepository) BatchIncrementStats(_ context.Context, _ []*repository.StatsIncrementEntry) error                            { return nil }
-func (f *fakeConnectionRecordRepository) List(_ context.Context, _ *repository.ConnectionQueryOptions) ([]*models.ConnectionRecord, error)           { return nil, nil }
-func (f *fakeConnectionRecordRepository) Count(_ context.Context, _ *repository.ConnectionQueryOptions) (int64, error)                                { return 0, nil }
-func (f *fakeConnectionRecordRepository) GetConnectionStats(_ context.Context, _, _ time.Time) (*repository.ConnectionStats, error)                   { return nil, nil }
-func (f *fakeConnectionRecordRepository) GetConnectionStatsByID(_ context.Context, _ string) (*repository.UserConnectionStats, error)                 { return nil, nil }
-func (f *fakeConnectionRecordRepository) GetUserConnectionStats(_ context.Context, _ string) (*repository.UserConnectionStats, error)                 { return nil, nil }
-func (f *fakeConnectionRecordRepository) GetNodeConnectionStats(_ context.Context, _ string) (*repository.NodeConnectionStats, error)                 { return nil, nil }
-func (f *fakeConnectionRecordRepository) GetHighErrorRateConnections(_ context.Context, _ int, _ int) ([]*models.ConnectionRecord, error)             { return nil, nil }
-func (f *fakeConnectionRecordRepository) GetFrequentReconnectConnections(_ context.Context, _ int, _ int) ([]*models.ConnectionRecord, error)         { return nil, nil }
-func (f *fakeConnectionRecordRepository) BatchUpsert(_ context.Context, _ []*models.ConnectionRecord) error                                           { return nil }
-func (f *fakeConnectionRecordRepository) CleanupInactiveRecords(_ context.Context, _ time.Time) (int64, error)                                        { return 0, nil }
-func (f *fakeConnectionRecordRepository) WithTableName(_ string) ConnectionRecordRepository                                                           { return f }
+func (f *fakeConnectionRecordRepository) Close() error { return nil }
+func (f *fakeConnectionRecordRepository) Upsert(_ context.Context, _ *models.ConnectionRecord) error {
+	return nil
+}
+func (f *fakeConnectionRecordRepository) MarkDisconnected(_ context.Context, _ string, _ models.DisconnectReason, _ int, _ string) error {
+	return nil
+}
+func (f *fakeConnectionRecordRepository) GetByConnectionID(_ context.Context, _ string) (*models.ConnectionRecord, error) {
+	return nil, nil
+}
+func (f *fakeConnectionRecordRepository) GetByUserID(_ context.Context, _ string) ([]*models.ConnectionRecord, error) {
+	return nil, nil
+}
+func (f *fakeConnectionRecordRepository) GetActiveByUserID(_ context.Context, _ string) ([]*models.ConnectionRecord, error) {
+	return nil, nil
+}
+func (f *fakeConnectionRecordRepository) AddError(_ context.Context, _ string, _ error) error {
+	return nil
+}
+func (f *fakeConnectionRecordRepository) BatchUpdateHeartbeats(_ context.Context, _ []*repository.HeartbeatUpdateEntry) error {
+	return nil
+}
+func (f *fakeConnectionRecordRepository) BatchIncrementStats(_ context.Context, _ []*repository.StatsIncrementEntry) error {
+	return nil
+}
+func (f *fakeConnectionRecordRepository) List(_ context.Context, _ *repository.ConnectionQueryOptions) ([]*models.ConnectionRecord, error) {
+	return nil, nil
+}
+func (f *fakeConnectionRecordRepository) Count(_ context.Context, _ *repository.ConnectionQueryOptions) (int64, error) {
+	return 0, nil
+}
+func (f *fakeConnectionRecordRepository) GetConnectionStats(_ context.Context, _, _ time.Time) (*repository.ConnectionStats, error) {
+	return nil, nil
+}
+func (f *fakeConnectionRecordRepository) GetConnectionStatsByID(_ context.Context, _ string) (*repository.UserConnectionStats, error) {
+	return nil, nil
+}
+func (f *fakeConnectionRecordRepository) GetUserConnectionStats(_ context.Context, _ string) (*repository.UserConnectionStats, error) {
+	return nil, nil
+}
+func (f *fakeConnectionRecordRepository) GetNodeConnectionStats(_ context.Context, _ string) (*repository.NodeConnectionStats, error) {
+	return nil, nil
+}
+func (f *fakeConnectionRecordRepository) GetHighErrorRateConnections(_ context.Context, _ int, _ int) ([]*models.ConnectionRecord, error) {
+	return nil, nil
+}
+func (f *fakeConnectionRecordRepository) GetFrequentReconnectConnections(_ context.Context, _ int, _ int) ([]*models.ConnectionRecord, error) {
+	return nil, nil
+}
+func (f *fakeConnectionRecordRepository) BatchUpsert(_ context.Context, _ []*models.ConnectionRecord) error {
+	return nil
+}
+func (f *fakeConnectionRecordRepository) CleanupInactiveRecords(_ context.Context, _ time.Time) (int64, error) {
+	return 0, nil
+}
+func (f *fakeConnectionRecordRepository) WithTableName(_ string) ConnectionRecordRepository { return f }
 
 type fakeHubStatsRepository struct {
 	nodeStats    *repository.NodeStats

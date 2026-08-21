@@ -179,9 +179,18 @@ func (h *Hub) handleTextMessage(ctx context.Context, client *Client, data []byte
 	// 均从此 ctx + msg 信封提取 (ns, group)，保证离线消息按 ns:group:userID 维度正确隔离。
 	// namespace 已在注册时归一化（handleRegister），此处直接取真实值，存储层无需兜底。
 	// 与 handleBroadcast 观察者注入范式一致，全项目统一。
-	ctx = routing.WithNamespaceGroupIDs(ctx, client.Namespace, []string{client.GetGroupIDRaw()})
+	// 老系统不传 GroupID 时 GetGroupIDRaw() 返回空串，判空避免 WithGroup("") 得到 []string{""}（非 nil）被误判为群组消息
+	route := routing.NewRoute().WithAppID(client.GetAppID()).WithNamespace(client.Namespace)
+	if gid := client.GetGroupIDRaw(); gid != "" {
+		route = route.WithGroup(gid)
+	}
+	ctx = route.Inject(ctx)
 	// 🔏 同步 ctx 路由到 msg 信封（异步队列/离线存储/跨节点投递 均可从 msg 直接恢复路由，不丢上下文）
-	msg.ContextWithRoute(ctx, client.Namespace, []string{client.GetGroupIDRaw()})
+	var msgGIDs []string
+	if gid := client.GetGroupIDRaw(); gid != "" {
+		msgGIDs = []string{gid}
+	}
+	msg.ContextWithRoute(ctx, client.GetAppID(), client.Namespace, msgGIDs)
 
 	// 🔄 自动转发可转发类型的消息（异步执行，避免阻塞）
 	// ⚠️ 必须透传 ctx：syncx.Go(ctx) 保留 trace_id + namespace，否则 handleForwardableMessage
@@ -220,7 +229,7 @@ func (h *Hub) handleForwardableMessage(ctx context.Context, msg *HubMessage) err
 	if ns == "" {
 		ns = routing.NamespaceFromContext(ctx)
 	}
-	ctx = msg.ContextWithRoute(ctx, ns, nil)
+	ctx = msg.ContextWithRoute(ctx, routing.AppIDFromContext(ctx), ns, nil)
 
 	emoji := msg.MessageType.GetEmoji()
 
@@ -307,8 +316,9 @@ func (h *Hub) normalizeMessageFields(client *Client, msg *HubMessage) {
 // 心跳检查
 // ============================================================================
 
-// checkHeartbeat 检查客户端心跳
-// 使用 ForEachClientParallel 并行遍历 + 原子读时间戳（百万级连接优化）
+// checkHeartbeat 检查 SSE 客户端心跳超时（兜底机制）
+// WebSocket 客户端由 heartbeatTimer O(1) 管理，此处仅扫描 SSE 客户端
+// SSE 客户端不发送 PING，无法通过时间轮 Refresh，需定期扫描 LastSeen 判断活跃度
 //
 // ⚠️ 死锁防御：ForEachClientParallel 持有 shard 读锁，若在 callback 中直接调用 Unregister，
 // Unregister → go handleUnregister → RemoveClient → WithShardLock，
@@ -321,7 +331,7 @@ func (h *Hub) checkHeartbeat() {
 	// 并发数快照（遍历开始时的总连接数）
 	totalClients := h.shardedRegistry.GetClientCount()
 
-	// Phase 1：并行持读锁收集超时客户端（不调用任何会获取写锁的方法）
+	// Phase 1：并行持读锁收集 SSE 超时客户端（WebSocket 由时间轮管理，跳过）
 	type timeoutClient struct {
 		client     *Client
 		lastActive time.Time
@@ -331,9 +341,13 @@ func (h *Hub) checkHeartbeat() {
 	var scanned int64
 
 	h.shardedRegistry.ForEachClientParallel(0, func(_ string, client *Client) {
+		// WebSocket 客户端由 heartbeatTimer O(1) 管理，跳过
+		if client.ConnectionType != ConnectionTypeSSE {
+			return
+		}
 		atomic.AddInt64(&scanned, 1)
 		// 原子读时间戳（并发安全，无数据竞争）
-		lastActive := mathx.IF(client.ConnectionType == ConnectionTypeSSE, client.GetLastSeen(), client.GetLastHeartbeat())
+		lastActive := client.GetLastSeen()
 
 		// 检查是否超时
 		inactiveDuration := now.Sub(lastActive)
@@ -425,7 +439,7 @@ func (h *Hub) handleBroadcast(msg *HubMessage) {
 				return true
 			})
 		}
-		observerCtx := routing.WithNamespaceGroupIDs(ctx, nsForObserver, gidsForObserver)
+		observerCtx := routing.RouteFrom(ctx).WithNamespace(nsForObserver).WithGroupIDs(gidsForObserver).Inject(ctx)
 		h.notifyObservers(observerCtx, msg)
 	}
 
@@ -443,6 +457,8 @@ func (h *Hub) handleBroadcast(msg *HubMessage) {
 //   - 未指定时走 ForEachUserClient 零拷贝遍历直接发送，避免 GetClientsCopyForUser 切片拷贝
 //   - 消息预序列化一次，多设备复用
 func (h *Hub) handleDirectMessage(ctx context.Context, msg *HubMessage) {
+	// msg 路由信封由上游入口（sendToUser/handleBroadcast）已通过 InjectRoute 注入，此处直接读 msg 过滤
+
 	// 预序列化一次（接收者多设备复用，消除循环内重复 Marshal）
 	// 序列化失败时 data=nil，由 sendToClientSerialized 内部兜底
 	data, _ := json.Marshal(msg)
@@ -458,8 +474,8 @@ func (h *Hub) handleDirectMessage(ctx context.Context, msg *HubMessage) {
 			}
 		}
 	} else {
-		// 未指定客户端：遍历用户所有设备（ForEachUserClientFiltered 内部已按 msg.Namespace 规则过滤）
-		h.shardedRegistry.ForEachUserClientFiltered(msg.Receiver, msg.Namespace, msg.GroupIDs, func(_ string, client *Client) bool {
+		// 未指定客户端：遍历用户所有设备（ForEachUserClientFiltered 内部已按 msg.AppID/msg.Namespace 规则过滤）
+		h.shardedRegistry.ForEachUserClientFiltered(msg.Receiver, msg.AppID, msg.Namespace, msg.GroupIDs, func(_ string, client *Client) bool {
 			h.sendToClientSerialized(ctx, client, msg, data)
 			sent++
 			return true
@@ -486,6 +502,10 @@ func (h *Hub) handleDirectMessage(ctx context.Context, msg *HubMessage) {
 
 // handleBroadcastMessage 处理广播消息
 func (h *Hub) handleBroadcastMessage(ctx context.Context, msg *HubMessage) {
+	// 🔏 路由信封 + trace_id 同步（与所有入口共用同一套逻辑，幂等，已有不覆盖）
+	// msg 可能来自跨节点 distMsg 未归一化，此处防御性兜底；namespace 保持原值（空=全局广播）
+	ctx = msg.InjectRoute(ctx)
+
 	start := time.Now()
 	if h.statsRepo != nil {
 		h.broadcastSentCount.Add(1)
@@ -514,7 +534,7 @@ func (h *Hub) handleBroadcastMessage(ctx context.Context, msg *HubMessage) {
 	var scanned int64
 
 	wsStart := time.Now()
-	h.shardedRegistry.ForEachClientFilteredParallel(0, msg.Namespace, msg.GroupIDs, func(_ string, client *Client) {
+	h.shardedRegistry.ForEachClientFilteredParallel(0, msg.AppID, msg.Namespace, msg.GroupIDs, func(_ string, client *Client) {
 		atomic.AddInt64(&scanned, 1)
 		if client.IsClosed() || client.ConnectionType == ConnectionTypeSSE {
 			return

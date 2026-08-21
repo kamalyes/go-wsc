@@ -235,6 +235,9 @@ func TestMessageHandlerDirectMessage(t *testing.T) {
 		msg.MessageID = "dm-all-devices"
 		msg.Receiver = "u-multi"
 		// SenderClient 为空，避免触发 syncToSenderDevices 回环
+		// 与生产入口契约一致：上游 InjectRoute 注入路由信封（appID 归一化为 DefaultAppID），
+		// handleDirectMessage 直接读 msg.AppID 做 ClientMatchesEnvelope 严格匹配
+		msg.InjectRoute(hub.ctx)
 
 		hub.handleDirectMessage(hub.ctx, msg)
 

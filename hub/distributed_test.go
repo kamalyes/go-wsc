@@ -87,7 +87,7 @@ func TestSendConditionalAlwaysFalse(t *testing.T) {
 	defer cleanup()
 	require.Greater(t, len(clients), 0, "至少有基础客户端注册")
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), "nonexistent-ns", nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace("nonexistent-ns").WithGroupIDs(nil).Inject(context.Background())
 	msg := NewHubMessage()
 	msg.Sender = "s1"
 	msg.SetContent("filtered out")
@@ -108,8 +108,13 @@ func TestSendToGroup_MissingGroupIDInCtx(t *testing.T) {
 	msg := NewHubMessage()
 	msg.Sender = "u1"
 	msg.SetContent("no groupID")
-	res := hub.SendToGroup(ctx, msg, false)
-	assert.GreaterOrEqual(t, len(res.Errors), 1, "缺少 groupID 应有错误返回")
+	msg.RequireAck = true
+	// Deliver 统一入口语义：ctx 缺少 groupIDs 时不再视为错误，
+	// 而是按决策树降级——namespace 也为空 → 全局广播分支（Mode=DeliveryModeGlobal）。
+	// RequireAck 仅在群组分支（len(groupIDs)>0）生效，缺失 groupIDs 时被忽略。
+	res := hub.Deliver(ctx, msg, false)
+	assert.Equal(t, DeliveryModeGlobal, res.Mode, "缺少 groupID+namespace 应路由到全局广播")
+	assert.Empty(t, res.Errors, "全局广播分支不应产生错误")
 }
 
 func TestSendToGroupMembers_EmptyMemberIDs(t *testing.T) {
@@ -142,10 +147,11 @@ func TestBroadcastZeroClients(t *testing.T) {
 	msg.SetContent("zero")
 
 	assert.NotPanics(t, func() {
-		hub.Broadcast(ctx, msg)
+		_ = hub.Deliver(ctx, msg, false)
 	})
 	assert.NotPanics(t, func() {
-		hub.BroadcastToNamespace(ctx, "ns-empty", msg)
+		nsCtx := routing.NewRoute().WithAppID(models.DefaultAppID).WithNamespace("ns-empty").WithGroupIDs(nil).Inject(ctx)
+		_ = hub.Deliver(nsCtx, msg, false)
 	})
 }
 
@@ -176,11 +182,11 @@ func TestSendToUserWithAck_EmptyReceiver(t *testing.T) {
 func TestRouteContextRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	ctx1 := routing.WithNamespaceGroupIDs(context.Background(), "", nil)
+	ctx1 := routing.NewRoute().WithAppID("").WithNamespace("").WithGroupIDs(nil).Inject(context.Background())
 	assert.Equal(t, "", routing.NamespaceFromContext(ctx1))
 	assert.Nil(t, routing.GroupIDsFromContext(ctx1))
 
-	ctx2 := routing.WithNamespaceGroupIDs(context.Background(), "nsX", []string{"g1", "g2"})
+	ctx2 := routing.NewRoute().WithAppID("").WithNamespace("nsX").WithGroupIDs([]string{"g1", "g2"}).Inject(context.Background())
 	assert.Equal(t, "nsX", routing.NamespaceFromContext(ctx2))
 	assert.Equal(t, []string{"g1", "g2"}, routing.GroupIDsFromContext(ctx2))
 }
@@ -237,7 +243,7 @@ func TestSendWithCallback_OfflineTriggersOnError(t *testing.T) {
 	var errCalled int32
 	done := make(chan struct{}, 1)
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(models.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 	msg := NewHubMessage()
 	msg.Sender = "u-sender"
 	msg.SetContent("cb-offline")
@@ -272,7 +278,7 @@ func TestSendWithCallback_OnlineTriggersOnSuccess(t *testing.T) {
 	var errCalled int32
 	done := make(chan struct{}, 1)
 
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), clients[0].Namespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(clients[0].Namespace).WithGroupIDs(nil).Inject(context.Background())
 	msg := NewHubMessage()
 	msg.Sender = "u-sender"
 	msg.SetContent("cb-online")
@@ -312,7 +318,9 @@ func TestBroadcastToGroup_DelegateReturnsCount(t *testing.T) {
 	msg.Sender = "sender"
 	msg.SetContent("to-group")
 	// groupID 空 + 无群组成员 repo：返回 0，不 panic
-	got := hub.BroadcastToGroup(ctx, "any-ns", "any-group", msg, false)
+	groupCtx := routing.NewRoute().WithAppID(models.DefaultAppID).WithNamespace("any-ns").WithGroupIDs([]string{"any-group"}).Inject(ctx)
+	dr := hub.Deliver(groupCtx, msg, false)
+	got := dr.LocalDelivered
 	assert.Equal(t, 0, got, "无群组成员 repo 时投递给 0 个成员")
 }
 
@@ -532,7 +540,7 @@ func TestSaveConnectionRecord_NilRepo_NoOp(t *testing.T) {
 
 	// connectionRecordRepo == nil → 直接返回，不 panic
 	assert.NotPanics(t, func() {
-		hub.saveConnectionRecord(&ConnectionRecord{ConnectionID: "c1"})
+		hub.saveConnectionRecord(context.Background(), &ConnectionRecord{ConnectionID: "c1"})
 	})
 }
 
@@ -545,7 +553,7 @@ func TestSaveConnectionRecord_WithMockRepo(t *testing.T) {
 	record := &ConnectionRecord{ConnectionID: "c-save", UserID: "u-save"}
 
 	assert.NotPanics(t, func() {
-		hub.saveConnectionRecord(record)
+		hub.saveConnectionRecord(context.Background(), record)
 	})
 	// 异步执行，等待完成
 	require.Eventually(t, func() bool {
@@ -592,14 +600,14 @@ func TestWhitelistKey_Format(t *testing.T) {
 
 func TestRevokeConnectionToken_NilCfg_NoOp(t *testing.T) {
 	t.Parallel()
-	err := RevokeConnectionToken(nil, nil, "some-token")
+	err := RevokeConnectionToken(context.Background(), nil, "", nil, "some-token")
 	assert.NoError(t, err, "cfg=nil 直接返回 nil")
 }
 
 func TestRevokeConnectionToken_RedisDisabled_NoOp(t *testing.T) {
 	t.Parallel()
 	cfg := newTestTokenCfg() // 默认不含 Redis 配置
-	err := RevokeConnectionToken(cfg, nil, "some-token")
+	err := RevokeConnectionToken(context.Background(), cfg, "", nil, "some-token")
 	assert.NoError(t, err, "Redis 未启用时直接返回 nil")
 }
 
@@ -615,12 +623,12 @@ func TestRevokeConnectionToken_WithRedis(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 
 	// 先 Issue 一个 token 写入白名单
-	token, err := IssueConnectionToken(cfg, rdb, &ConnectionClaims{UserID: "u-revoke"})
+	token, err := IssueConnectionToken(context.Background(), cfg, "", rdb, &ConnectionClaims{UserID: "u-revoke"})
 	require.NoError(t, err)
 	require.True(t, mr.Exists(whitelistKey("wsc:", token)), "token 应在白名单中")
 
 	// Revoke 后白名单中不存在
-	err = RevokeConnectionToken(cfg, rdb, token)
+	err = RevokeConnectionToken(context.Background(), cfg, "", rdb, token)
 	require.NoError(t, err)
 	assert.False(t, mr.Exists(whitelistKey("wsc:", token)), "revoke 后 token 应从白名单移除")
 }
@@ -636,9 +644,10 @@ func TestCheckWhitelist_TokenNotInWhitelist(t *testing.T) {
 	cfg.RedisKeyPrefix = "wsc:"
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	decoder := NewConnectionTokenDecoder(cfg, rdb, nil).(*jwtConnectionTokenDecoder)
+	set := decoder.sets[decoder.defaultAppID]
 
 	// 白名单中不存在该 token → 返回错误
-	err = decoder.checkWhitelist(context.Background(), "nonexistent-token")
+	err = decoder.checkWhitelist(context.Background(), set, "nonexistent-token")
 	assert.Error(t, err, "白名单中不存在的 token 应返回错误")
 	assert.Contains(t, err.Error(), "not in whitelist")
 }
@@ -655,11 +664,12 @@ func TestCheckWhitelist_TokenInWhitelist(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 
 	// Issue token 写入白名单
-	token, err := IssueConnectionToken(cfg, rdb, &ConnectionClaims{UserID: "u-wl"})
+	token, err := IssueConnectionToken(context.Background(), cfg, "", rdb, &ConnectionClaims{UserID: "u-wl"})
 	require.NoError(t, err)
 
 	decoder := NewConnectionTokenDecoder(cfg, rdb, nil).(*jwtConnectionTokenDecoder)
-	err = decoder.checkWhitelist(context.Background(), token)
+	set := decoder.sets[decoder.defaultAppID]
+	err = decoder.checkWhitelist(context.Background(), set, token)
 	assert.NoError(t, err, "白名单中存在的 token 应校验通过")
 }
 
@@ -675,9 +685,10 @@ func TestCheckWhitelist_RedisDown_DegradePass(t *testing.T) {
 	cfg.RedisKeyPrefix = "wsc:"
 	// 传入 logger 避免 Redis 故障降级时 logger.WarnKV nil panic
 	decoder := NewConnectionTokenDecoder(cfg, rdb, middleware.NewDefaultWSCLogger()).(*jwtConnectionTokenDecoder)
+	set := decoder.sets[decoder.defaultAppID]
 
 	// Redis 故障 → 降级放行（返回 nil）
-	err = decoder.checkWhitelist(context.Background(), "any-token")
+	err = decoder.checkWhitelist(context.Background(), set, "any-token")
 	assert.NoError(t, err, "Redis 故障时应降级放行")
 }
 
@@ -694,10 +705,10 @@ func TestDecode_WithRedisWhitelist_Rejected(t *testing.T) {
 	decoder := NewConnectionTokenDecoder(cfg, rdb, nil)
 
 	// 生成 token 但不写入白名单（直接签发后手动删除）
-	token, err := IssueConnectionToken(cfg, rdb, &ConnectionClaims{UserID: "u-dec"})
+	token, err := IssueConnectionToken(context.Background(), cfg, "", rdb, &ConnectionClaims{UserID: "u-dec"})
 	require.NoError(t, err)
 	// 立即 revoke 使白名单失效
-	require.NoError(t, RevokeConnectionToken(cfg, rdb, token))
+	require.NoError(t, RevokeConnectionToken(context.Background(), cfg, "", rdb, token))
 
 	req := httptest.NewRequest(http.MethodGet, "/ws?token="+token, nil)
 	_, err = decoder.Decode(req)
@@ -965,7 +976,7 @@ type distributedGroupRepo struct {
 	multiErr     error
 }
 
-func (d *distributedGroupRepo) GetMultiGroupMembers(_ context.Context, _ string, _ []string) (map[string][]string, error) {
+func (d *distributedGroupRepo) GetMultiGroupMembers(_ context.Context, _, _ string, _ []string) (map[string][]string, error) {
 	return d.multiMembers, d.multiErr
 }
 

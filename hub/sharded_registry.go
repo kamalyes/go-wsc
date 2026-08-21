@@ -294,13 +294,41 @@ func (r *ShardedRegistry) GetUserClientCount(userID string) int {
 	return count
 }
 
-// HasUser 检查用户是否在线（主存储，任意连接类型）
-func (r *ShardedRegistry) HasUser(userID string) bool {
+// hasUserAnyScope 检查用户是否在线（任意信封，仅内部 O(1) 快速路径使用）
+// 不做 appID/namespace 过滤，仅供 HasUser 内部快速判负 + 测试断言裸存在性使用
+func (r *ShardedRegistry) hasUserAnyScope(userID string) bool {
 	var exists bool
 	r.userShards.WithShardRLock(userID, func(data map[string]map[string]*Client) {
 		_, exists = data[userID]
 	})
 	return exists
+}
+
+// HasUser 检查指定路由信封(appID+namespace)下某用户是否在线（统一入口，强制 appID+namespace 隔离）
+//
+// 设计原则：appID+namespace 是隔离维度（查询/投递一律走信封），group 是广播维度（与本方法正交）
+// 路由信封来源统一为 ctx（Hub 层 routing.AppIDFromContext/NamespaceFromContext 提取后传入）
+//
+// 复用 ClientMatchesEnvelope 单一真相源：appID 严格匹配 + namespace 空值兼容全局广播
+// appID 为空时退化为不过滤（兼容无路由 ctx 的边界场景），正常路径入口已归一化为 DefaultAppID
+// 性能：先 O(1) 检查 user 是否完全不在线（避免不必要的遍历），在线时才遍历按信封过滤
+func (r *ShardedRegistry) HasUser(userID, appID, namespace string) bool {
+	if appID == "" {
+		return r.hasUserAnyScope(userID)
+	}
+	// O(1) 快速路径：user 完全不在线则直接返回 false，避免遍历开销
+	if !r.hasUserAnyScope(userID) {
+		return false
+	}
+	var hit bool
+	r.ForEachUserClient(userID, func(_ string, client *Client) bool {
+		if client != nil && ClientMatchesEnvelope(client, appID, namespace, nil) {
+			hit = true
+			return false // 命中即停
+		}
+		return true
+	})
+	return hit
 }
 
 // ForEachUserClient 遍历指定用户的所有客户端（在读锁内执行，并发安全）
@@ -589,10 +617,15 @@ func (r *ShardedRegistry) removeObserverClient(client *Client) {
 // ============================================================================
 
 // ClientMatchesEnvelope 判断某个 client 是否应该接收携带指定路由信封的消息
-// 投递匹配规则（严格但符合"没有就是没有"原则，无默认归一化兜底）：
-//  1. namespace 维度：
-//     - msgNamespace 非空（业务指定了 ns） → client.Namespace 必须严格相等才匹配
-//     - msgNamespace == ""  （全局广播/系统通知/没指定 ns）→ 跳过 ns 过滤，所有 ns client 都匹配
+//
+// 投递匹配规则：
+//  1. appId 维度（最上层隔离）：严格相等，无空值兼容（appID 无全局语义，入口层必归一化为 DefaultAppID）
+//  2. namespace 维度：msgNamespace 非空时严格相等；msgNamespace=="" 表示全局广播，跳过 ns 过滤匹配所有
+//
+// 设计说明：
+//   - appID 严格匹配：appID 是应用隔离维度，不存在"全局跨 app 广播"语义，空值在入口层归一化为 DefaultAppID
+//   - namespace 空值兼容：全局广播（跨所有命名空间的系统通知）是合法业务需求，
+//     msgNamespace=="" 表示全局广播，匹配所有 ns 的 client（与 Broadcast 全局语义一致）
 //
 // ⚠️ 不做 msgGroupIDs vs client.GroupID 匹配（与 ForEachUserClientFiltered 对称设计）：
 //   - msg.GroupIDs 存放的是"业务群组ID"（如 g-broadcast），而 client.GroupID 是"连接级系统组"
@@ -602,49 +635,56 @@ func (r *ShardedRegistry) removeObserverClient(client *Client) {
 //   - msgGroupIDs 参数仅作签名兼容，不参与匹配
 //
 // 本函数为热路径（每次投递遍历 client 都调用）：零分配、内联友好、短路优先
-func ClientMatchesEnvelope(client *models.Client, msgNamespace string, msgGroupIDs []string) bool {
+func ClientMatchesEnvelope(client *models.Client, msgAppID, msgNamespace string, msgGroupIDs []string) bool {
 	if client == nil {
 		return false
 	}
-	// namespace 匹配：非空才强制严格相等；空=全局广播不隔离
+	// appId 严格匹配（入口层已归一化为 DefaultAppID，无空值）
+	if client.AppID != msgAppID {
+		return false
+	}
+	// namespace 非空时严格匹配；空=全局广播，跳过 ns 过滤匹配所有
 	if msgNamespace != "" && client.Namespace != msgNamespace {
 		return false
 	}
 	return true
 }
 
-// ForEachUserClientFiltered 遍历指定 userID 的所有在线设备，仅对匹配路由信封的 client 调用 fn
+// ForEachUserClientFiltered 遍历指定 userID 的所有在线设备，仅对匹配路由信封(含 appId)的 client 调用 fn
 // fn 返回 false 时中止遍历（与 ForEachUserClient 语义一致）
-// 用于 P2P/群组的定向投递：即使同名 userID 跨 namespace 同时在线，也只投递给路由匹配的设备
-// ForEachUserClientFiltered 遍历指定 userID 的所有在线设备，仅对匹配 namespace 的设备调用 fn
-// 设计说明：只做 namespace 隔离（避免同名 userID 跨 ns 串扰），**不对 msgGroupIDs vs client.GroupID 做系统组匹配**
+// 用于 P2P/群组的定向投递：即使同名 userID 跨 app/namespace 同时在线，也只投递给路由匹配的设备
+//
+// appId/namespace 匹配规则（复用 ClientMatchesEnvelope，保持单一真相源）：
+//   - appId 严格相等（入口层已归一化为 DefaultAppID，无空值兼容）
+//   - namespace 非空时严格相等；msgNamespace=="" 表示全局广播，跳过 ns 过滤匹配所有
+//
+// 设计说明：只做 appId+namespace 隔离，**不对 msgGroupIDs vs client.GroupID 做系统组匹配**
 //   - 场景1（P2P 点对点）：调用方已明确指定 userID 为接收者，msg.GroupIDs=nil → 无 group 维度
 //   - 场景2（群组消息）：调用方已通过 group_repo.GetMembers() 获取业务群组成员 userIDs，
 //     msg.GroupIDs 存放的是"业务群组ID"（如 "g-broadcast"），而 client.GroupID 是"连接级系统组"
 //     （如 __default_gp__），两者完全两个维度，强行匹配导致群成员 device 全部被过滤（delivered=0）
-//
-// namespace 匹配规则（与 ClientMatchesEnvelope 一致，对称设计）：
-//   - msgNamespace 非空（业务指定 ns） → 仅投递给同 ns 的 client 设备，避免串扰
-//   - msgNamespace == ""（未指定 ns/全局）→ 跳过 ns 过滤，投递给 userID 的所有设备
-func (r *ShardedRegistry) ForEachUserClientFiltered(userID, msgNamespace string, msgGroupIDs []string, fn func(clientID string, client *models.Client) bool) {
+func (r *ShardedRegistry) ForEachUserClientFiltered(userID, msgAppID, msgNamespace string, msgGroupIDs []string, fn func(clientID string, client *models.Client) bool) {
+	// appID 为空时退化为不过滤（兼容无路由 ctx 的边界场景，与 HasUserWithEnvelope 空值语义对称）
+	// 正常路径入口层已归一化 appID 为 DefaultAppID，不会为空
+	if msgAppID == "" {
+		r.ForEachUserClient(userID, fn)
+		return
+	}
 	r.ForEachUserClient(userID, func(clientID string, client *models.Client) bool {
-		// msgNamespace 非空时强制同 ns 匹配（为空=全局不隔离，跳过 ns 检查）
+		// 复用 ClientMatchesEnvelope（appId 严格匹配 + namespace 空值兼容全局广播）
 		// msgGroupIDs 仅作签名兼容（不参与系统组 vs 业务群匹配）
-		if client == nil {
-			return true
-		}
-		if msgNamespace != "" && client.Namespace != msgNamespace {
+		if client == nil || !ClientMatchesEnvelope(client, msgAppID, msgNamespace, msgGroupIDs) {
 			return true // 不匹配，跳过继续
 		}
 		return fn(clientID, client)
 	})
 }
 
-// ForEachClientFiltered 遍历注册表所有 client，仅对匹配路由信封的 client 调用 fn
-// 用于全局广播等场景：ns1 的广播只投递给 ns1 的所有在线设备
-func (r *ShardedRegistry) ForEachClientFiltered(msgNamespace string, msgGroupIDs []string, fn func(clientID string, client *models.Client) bool) {
+// ForEachClientFiltered 遍历注册表所有 client，仅对匹配路由信封(含 appId)的 client 调用 fn
+// 用于全局广播等场景：app1/ns1 的广播只投递给 app1/ns1 的所有在线设备
+func (r *ShardedRegistry) ForEachClientFiltered(msgAppID, msgNamespace string, msgGroupIDs []string, fn func(clientID string, client *models.Client) bool) {
 	r.ForEachClient(func(clientID string, client *models.Client) bool {
-		if !ClientMatchesEnvelope(client, msgNamespace, msgGroupIDs) {
+		if !ClientMatchesEnvelope(client, msgAppID, msgNamespace, msgGroupIDs) {
 			return true
 		}
 		return fn(clientID, client)
@@ -711,16 +751,16 @@ func (r *ShardedRegistry) ForEachSSEClientParallel(workerNum int, fn func(userID
 	})
 }
 
-// ForEachClientFilteredParallel 并行遍历所有客户端，仅对匹配路由信封的 client 调用 fn
-// 用于全局广播等场景：ns1 的广播只投递给 ns1 的所有在线设备
+// ForEachClientFilteredParallel 并行遍历所有客户端，仅对匹配路由信封(含 appId)的 client 调用 fn
+// 用于全局广播等场景：app1/ns1 的广播只投递给 app1/ns1 的所有在线设备
 // 基于 userShards.RangeParallel 直接在 shard 级别并行遍历，零额外分配
 // workerNum <= 0 时使用 GOMAXPROCS；用户数低于 parallelThreshold 时退化为串行
-func (r *ShardedRegistry) ForEachClientFilteredParallel(workerNum int, msgNamespace string, msgGroupIDs []string, fn func(clientID string, client *Client)) {
+func (r *ShardedRegistry) ForEachClientFilteredParallel(workerNum int, msgAppID, msgNamespace string, msgGroupIDs []string, fn func(clientID string, client *Client)) {
 	if fn == nil {
 		return
 	}
 	if r.userShards.Len() <= parallelThreshold {
-		r.ForEachClientFiltered(msgNamespace, msgGroupIDs, func(clientID string, client *Client) bool {
+		r.ForEachClientFiltered(msgAppID, msgNamespace, msgGroupIDs, func(clientID string, client *Client) bool {
 			fn(clientID, client)
 			return true
 		})
@@ -728,7 +768,7 @@ func (r *ShardedRegistry) ForEachClientFilteredParallel(workerNum int, msgNamesp
 	}
 	r.userShards.RangeParallel(workerNum, func(_ string, userClients map[string]*Client) {
 		for clientID, client := range userClients {
-			if ClientMatchesEnvelope(client, msgNamespace, msgGroupIDs) {
+			if ClientMatchesEnvelope(client, msgAppID, msgNamespace, msgGroupIDs) {
 				fn(clientID, client)
 			}
 		}

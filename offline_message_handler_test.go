@@ -50,7 +50,7 @@ func newTestOfflineHandlerContext(t *testing.T) *testOfflineHandlerContext {
 
 	// 源头注入路由元数据：测试作为调用方需注入 namespace（与 hub handleTextMessage 源头注入一致）
 	// namespace 恒非空，避免 GORM 零值回退数据库 default 导致存储/查询维度不一致
-	ctx := routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil)
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(models.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
 
 	return &testOfflineHandlerContext{
 		t:              t,

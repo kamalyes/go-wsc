@@ -65,7 +65,7 @@ func newTestWorkloadRepo(t *testing.T) *testWorkloadRepo {
 		repoImpl:      repoImpl,
 		client:        client,
 		db:            db,
-		ctx:           routing.WithNamespaceGroupIDs(context.Background(), models.DefaultNamespace, nil),
+		ctx:           routing.NewRoute().WithAppID("").WithNamespace(models.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background()),
 		t:             t,
 		testPrefix:    testPrefix,
 		testNamespace: models.DefaultNamespace,
@@ -75,7 +75,7 @@ func newTestWorkloadRepo(t *testing.T) *testWorkloadRepo {
 
 // checkRedisHealth 检查Redis连接健康状态，如果不健康则跳过测试
 func (tr *testWorkloadRepo) checkRedisHealth() {
-	ctx, cancel := context.WithTimeout(routing.WithNamespaceGroupIDs(context.Background(), tr.testNamespace, nil), 3*time.Second)
+	ctx, cancel := context.WithTimeout(routing.NewRoute().WithAppID("").WithNamespace(tr.testNamespace).WithGroupIDs(nil).Inject(context.Background()), 3*time.Second)
 	defer cancel()
 
 	// 尝试一个简单的操作

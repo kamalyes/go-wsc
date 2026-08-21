@@ -231,7 +231,7 @@ func TestHubBatchOperations(t *testing.T) {
 
 	// 验证客户端确实在 Hub 中
 	for i := 0; i < 5; i++ {
-		IsUserOnline, _ := hub.IsUserOnline(userIDs[i])
+		IsUserOnline, _ := hub.IsUserOnline(ctx, userIDs[i])
 		require.True(t, IsUserOnline, "用户 %s 应该在线", userIDs[i])
 	}
 
@@ -333,7 +333,7 @@ func TestHubOnlineStatusQuery(t *testing.T) {
 	// 等待注册完成（异步操作）
 	time.Sleep(500 * time.Millisecond)
 
-	agentOnline, _ := hub.IsUserOnline(agentClient.UserID)
+	agentOnline, _ := hub.IsUserOnline(ctx, agentClient.UserID)
 	require.True(t, agentOnline, "Agent用户应该在线")
 
 	// 等待 Redis 状态同步
@@ -563,7 +563,7 @@ waitLoop:
 	wsClient.Close()
 	// 等待客户端关闭后清理完成（用户变为离线状态），使用 Eventually 轮询避免固定 Sleep 的时序问题
 	require.Eventually(t, func() bool {
-		online, _ := hub.IsUserOnline(testUserID)
+		online, _ := hub.IsUserOnline(ctx, testUserID)
 		return !online
 	}, 5*time.Second, 50*time.Millisecond, "用户应该在超时前变为离线状态")
 

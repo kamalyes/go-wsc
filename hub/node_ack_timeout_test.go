@@ -144,3 +144,38 @@ func TestTimeoutStaleSendingRecords_NoRepo(t *testing.T) {
 		hub.timeoutStaleSendingRecords()
 	})
 }
+
+// TestTimeoutStaleSendingRecords_MultiNodeClaimDedup
+// 多节点并发扫描同一批超时记录：ClaimStaleSending 状态守卫保证仅一个节点认领成功，
+// 未认领成功的节点不得重复转存离线（修复前 N 个 Pod 各转存一次 → 用户上线收到 N 份重复推送）
+func TestTimeoutStaleSendingRecords_MultiNodeClaimDedup(t *testing.T) {
+	t.Parallel()
+	hub1 := newMinHub()
+	defer hub1.Shutdown()
+	hub2 := newMinHub()
+	defer hub2.Shutdown()
+
+	// 两个节点共享同一 fake repo（模拟共享记录表）与同一离线处理器
+	repo := &fakeMessageRecordRepo{}
+	hub1.SetMessageRecordRepository(repo)
+	hub2.SetMessageRecordRepository(repo)
+	offline := newAckFakeOfflineHandler()
+	hub1.SetOfflineMessageHandler(offline)
+	hub2.SetOfflineMessageHandler(offline)
+
+	repo.queryResult = []*models.MessageSendRecord{
+		makeStaleSendingRecord(t, "m-claim-race", "u-claim", time.Now().Add(-time.Minute)),
+	}
+
+	// 同一轮扫描窗口内两个节点先后扫描（fake 的状态守卫模拟真实 DB 的并发 UPDATE 语义）
+	hub1.timeoutStaleSendingRecords()
+	hub2.timeoutStaleSendingRecords()
+
+	require.Eventually(t, func() bool {
+		return offline.getStoreCalled() == 1
+	}, 2*time.Second, 10*time.Millisecond, "仅认领成功的节点应转存离线一次")
+
+	// 等待异步转存窗口结束，确认第二个节点未重复转存
+	time.Sleep(200 * time.Millisecond)
+	assert.Equal(t, 1, offline.getStoreCalled(), "未认领成功的节点不得重复转存离线")
+}

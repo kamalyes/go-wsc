@@ -105,7 +105,7 @@ func TestOfflineMessageHandler_P2PAndGroupIsolation(t *testing.T) {
 	require.NoError(t, tc.handler.StoreOfflineMessage(tc.ctx, userID, p2pMsg))
 
 	// 群组消息（注入真实 group，namespace 保持 DefaultNamespace）
-	groupCtx := routing.WithNamespaceGroupIDs(tc.ctx, models.DefaultNamespace, []string{"g-real"})
+	groupCtx := routing.NewRoute().WithAppID("").WithNamespace(models.DefaultNamespace).WithGroupIDs([]string{"g-real"}).Inject(tc.ctx)
 	groupMsg := tc.createTestMessage(userID)
 	groupMsg.MessageID = tc.idGen.GenerateCorrelationID()
 	require.NoError(t, tc.handler.StoreOfflineMessage(groupCtx, userID, groupMsg))

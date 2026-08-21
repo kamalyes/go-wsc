@@ -25,8 +25,30 @@ import (
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/zipx"
 	"github.com/kamalyes/go-wsc/models"
+	"github.com/kamalyes/go-wsc/routing"
 	"github.com/redis/go-redis/v9"
 )
+
+// clientMatchesRouteEnvelope 检查客户端是否匹配 ctx 路由信封的 appID+namespace
+//
+// 语义与 hub.ClientMatchesEnvelope 保持一致（单一真相源）：
+//   - appID 严格相等（入口层已归一化为 DefaultAppID，无空值兼容）
+//   - namespace 非空时严格相等；空=全局广播，跳过 ns 过滤匹配所有
+//
+// 注意：调用方应先判断 appID != "" 再调用此函数（appID 为空时退化为不过滤，
+// 与 hub.ForEachUserClientFiltered 的空值语义对称，兼容无路由 ctx 边界场景）
+func clientMatchesRouteEnvelope(client *Client, appID, namespace string) bool {
+	if client == nil {
+		return false
+	}
+	if client.AppID != appID {
+		return false
+	}
+	if namespace != "" && client.Namespace != namespace {
+		return false
+	}
+	return true
+}
 
 const (
 	// maxBatchSize 单次 Lua 脚本处理的最大客户端数量，避免 Redis 阻塞
@@ -406,6 +428,10 @@ func (r *RedisOnlineStatusRepository) GetClient(ctx context.Context, clientID st
 }
 
 // GetUserClients 获取用户的所有在线客户端
+//
+// 路由隔离：按 ctx 路由信封的 appID+namespace 过滤，只返回匹配路由信封的客户端
+// 即使同名 userID 跨 app/namespace 同时在线，也只返回当前路由信封下的设备
+// 无路由信封（appID 为空）时退化为不过滤，返回该 userID 的全部在线设备
 func (r *RedisOnlineStatusRepository) GetUserClients(ctx context.Context, userID string) ([]*Client, error) {
 	clientIDs, err := r.client.ZRange(ctx, r.GetUserClientsKey(userID), 0, -1).Result()
 	if err != nil {
@@ -428,6 +454,8 @@ func (r *RedisOnlineStatusRepository) GetUserClients(ctx context.Context, userID
 		return nil, err
 	}
 
+	appID, ns := routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx)
+
 	clients := make([]*Client, 0, len(clientIDs))
 	for _, cmd := range cmds {
 		data, err := cmd.Result()
@@ -437,6 +465,10 @@ func (r *RedisOnlineStatusRepository) GetUserClients(ctx context.Context, userID
 
 		client, err := zipx.ZlibSmartDecompressObject[*Client]([]byte(data))
 		if err != nil {
+			continue
+		}
+		// 按路由信封 appID+namespace 过滤（空 appID 退化为不过滤，兼容无路由 ctx 边界场景）
+		if appID != "" && !clientMatchesRouteEnvelope(client, appID, ns) {
 			continue
 		}
 		clients = append(clients, client)
@@ -468,14 +500,30 @@ func (r *RedisOnlineStatusRepository) UpdateClientHeartbeat(ctx context.Context,
 // ============================================================================
 
 // IsUserOnline 检查用户是否在线（任意设备）
+//
+// 路由隔离：按 ctx 路由信封的 appID+namespace 过滤，避免跨 app/ns 误判在线：
+//   - 无路由信封（appID 为空）：退化为 ZCount 快速路径，不过滤（兼容无路由 ctx 边界场景）
+//   - 有路由信封：加载客户端数据按 appID+namespace 过滤（与本地 shardedRegistry.HasUserWithEnvelope 语义对称）
 func (r *RedisOnlineStatusRepository) IsUserOnline(ctx context.Context, userID string) (bool, error) {
-	// 使用 ZCOUNT 统计未过期的客户端（score > 当前时间）
-	currentTime := time.Now().Unix()
-	count, err := r.client.ZCount(ctx, r.GetUserClientsKey(userID), strconv.FormatInt(currentTime, 10), "+inf").Result()
+	appID := routing.AppIDFromContext(ctx)
+	// 无路由信封时保持 ZCount 快速路径（兼容无路由 ctx 边界场景）
+	if appID == "" {
+		currentTime := time.Now().Unix()
+		count, err := r.client.ZCount(ctx, r.GetUserClientsKey(userID), strconv.FormatInt(currentTime, 10), "+inf").Result()
+		if err != nil {
+			return false, err
+		}
+		return count > 0, nil
+	}
+	// 有路由信封时：加载客户端按 appID+namespace 过滤
+	clients, err := r.GetUserClients(ctx, userID)
 	if err != nil {
+		if err == ErrUserNotFound {
+			return false, nil
+		}
 		return false, err
 	}
-	return count > 0, nil
+	return len(clients) > 0, nil
 }
 
 // GetAllOnlineUsers 获取所有在线用户ID列表（使用 ZSET，自动过滤过期数据）
@@ -513,6 +561,9 @@ func (r *RedisOnlineStatusRepository) GetOnlineUsersByType(ctx context.Context, 
 // ============================================================================
 
 // GetUserNodes 获取用户所在的所有节点（支持多设备）
+//
+// 路由隔离：通过 GetUserClients 继承 appID+namespace 过滤，只返回当前路由信封下
+// 用户在线的节点（同名 userID 跨 app/ns 在不同节点在线时，不会返回其他信封的节点）
 func (r *RedisOnlineStatusRepository) GetUserNodes(ctx context.Context, userID string) ([]string, error) {
 	clients, err := r.GetUserClients(ctx, userID)
 	if err != nil {
@@ -595,6 +646,7 @@ func (r *RedisOnlineStatusRepository) BatchGetUserNodes(ctx context.Context, use
 	}
 
 	// 解析结果，按 userID 聚合去重 NodeID
+	appID, ns := routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx)
 	result := make(map[string][]string, len(userIDs))
 	userNodeSets := make([]map[string]struct{}, len(userIDs))
 	for i := range userIDs {
@@ -611,6 +663,10 @@ func (r *RedisOnlineStatusRepository) BatchGetUserNodes(ctx context.Context, use
 			continue
 		}
 		if client.NodeID == "" {
+			continue
+		}
+		// 按路由信封 appID+namespace 过滤（空 appID 退化为不过滤，兼容无路由 ctx 边界场景）
+		if appID != "" && !clientMatchesRouteEnvelope(client, appID, ns) {
 			continue
 		}
 		ref := clientRefMap[allClientIDs[i]]

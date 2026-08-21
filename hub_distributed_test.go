@@ -348,8 +348,11 @@ func TestBroadcastToAllNodes(t *testing.T) {
 	// 从 hub1 广播消息
 	msg := createTestHubMessage(MessageTypeText).
 		SetBroadcastType(BroadcastTypeGlobal)
+	// 广播消息无指定接收者：清空 createTestHubMessage 默认填充的 Receiver，
+	// 否则 Deliver 决策树会按 msg.Receiver != "" 误路由到 P2P 分支
+	msg.Receiver = ""
 
-	hub1.Broadcast(ctx, msg)
+	_ = hub1.Deliver(ctx, msg, false)
 
 	// 验证 hub2 上的客户端收到广播消息
 	select {

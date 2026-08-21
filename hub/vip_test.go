@@ -206,26 +206,26 @@ func TestUpgradeVIPLevel(t *testing.T) {
 	t.Run("有效升级", func(t *testing.T) {
 		c := makeVIPClient("c-up1", "u-up1", models.VIPLevelV2)
 		hub.shardedRegistry.AddClient(c)
-		assert.True(t, hub.UpgradeVIPLevel("u-up1", models.VIPLevelV5))
+		assert.True(t, hub.UpgradeVIPLevel(context.Background(), "u-up1", models.VIPLevelV5))
 		assert.Equal(t, models.VIPLevelV5, c.GetVIPLevel())
 	})
 	t.Run("无效等级返回false", func(t *testing.T) {
 		c := makeVIPClient("c-up2", "u-up2", models.VIPLevelV2)
 		hub.shardedRegistry.AddClient(c)
-		assert.False(t, hub.UpgradeVIPLevel("u-up2", models.VIPLevel("v99")))
+		assert.False(t, hub.UpgradeVIPLevel(context.Background(), "u-up2", models.VIPLevel("v99")))
 	})
 	t.Run("不存在用户返回false", func(t *testing.T) {
-		assert.False(t, hub.UpgradeVIPLevel("u-none", models.VIPLevelV5))
+		assert.False(t, hub.UpgradeVIPLevel(context.Background(), "u-none", models.VIPLevelV5))
 	})
 	t.Run("降级不生效返回false", func(t *testing.T) {
 		c := makeVIPClient("c-up3", "u-up3", models.VIPLevelV5)
 		hub.shardedRegistry.AddClient(c)
-		assert.False(t, hub.UpgradeVIPLevel("u-up3", models.VIPLevelV2))
+		assert.False(t, hub.UpgradeVIPLevel(context.Background(), "u-up3", models.VIPLevelV2))
 		assert.Equal(t, models.VIPLevelV5, c.GetVIPLevel(), "降级不应改变等级")
 	})
 	t.Run("同级不生效返回false", func(t *testing.T) {
 		c := makeVIPClient("c-up4", "u-up4", models.VIPLevelV5)
 		hub.shardedRegistry.AddClient(c)
-		assert.False(t, hub.UpgradeVIPLevel("u-up4", models.VIPLevelV5))
+		assert.False(t, hub.UpgradeVIPLevel(context.Background(), "u-up4", models.VIPLevelV5))
 	})
 }

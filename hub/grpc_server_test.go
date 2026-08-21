@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-wsc/models"
 	wscpb "github.com/kamalyes/go-wsc/models/pb"
 	"github.com/kamalyes/go-wsc/repository"
 	"github.com/kamalyes/go-wsc/routing"
@@ -142,7 +143,7 @@ func TestGRPCServer_BroadcastGroup_MemberFiltering(t *testing.T) {
 
 	ctx := context.Background()
 	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-srv", Namespace: "ns-srv", OwnerID: "owner"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, "ns-srv", "g-srv", []string{"u-m1", "u-m2"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(models.DefaultAppID).WithNamespace("ns-srv").WithGroupIDs([]string{"g-srv"}).Inject(ctx), []string{"u-m1", "u-m2"}))
 
 	m1 := makeTestClient("c-m1", "u-m1", "ns-srv")
 	m2 := makeTestClient("c-m2", "u-m2", "ns-srv")
@@ -158,7 +159,7 @@ func TestGRPCServer_BroadcastGroup_MemberFiltering(t *testing.T) {
 	msgData, err := wscpb.MarshalHubMessage(msg)
 	require.NoError(t, err)
 
-	routeCtx := routing.WithNamespaceGroupIDs(ctx, "ns-srv", []string{"g-srv"})
+	routeCtx := routing.NewRoute().WithAppID("").WithNamespace("ns-srv").WithGroupIDs([]string{"g-srv"}).Inject(ctx)
 	delivered, err := pool.BroadcastGroup(routeCtx, addr, msgData, false, "")
 	require.NoError(t, err)
 	assert.Equal(t, int32(2), delivered)
@@ -181,7 +182,7 @@ func TestGRPCServer_BroadcastGroup_ExcludeSender(t *testing.T) {
 
 	ctx := context.Background()
 	require.NoError(t, groupRepo.CreateGroup(ctx, &Group{GroupID: "g-exc", Namespace: "ns-exc", OwnerID: "owner"}))
-	require.NoError(t, hub.AddGroupMembers(ctx, "ns-exc", "g-exc", []string{"u-sender", "u-other"}))
+	require.NoError(t, hub.AddGroupMembers(routing.NewRoute().WithAppID(models.DefaultAppID).WithNamespace("ns-exc").WithGroupIDs([]string{"g-exc"}).Inject(ctx), []string{"u-sender", "u-other"}))
 
 	sender := makeTestClient("c-sender", "u-sender", "ns-exc")
 	other := makeTestClient("c-other", "u-other", "ns-exc")
@@ -194,7 +195,7 @@ func TestGRPCServer_BroadcastGroup_ExcludeSender(t *testing.T) {
 	msgData, err := wscpb.MarshalHubMessage(makeGroupMessage("u-sender"))
 	require.NoError(t, err)
 
-	routeCtx := routing.WithNamespaceGroupIDs(ctx, "ns-exc", []string{"g-exc"})
+	routeCtx := routing.NewRoute().WithAppID("").WithNamespace("ns-exc").WithGroupIDs([]string{"g-exc"}).Inject(ctx)
 	delivered, err := pool.BroadcastGroup(routeCtx, addr, msgData, true, "u-sender")
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), delivered)
@@ -224,7 +225,7 @@ func TestGRPCServer_NotifyObservers_GlobalObserver(t *testing.T) {
 	require.NoError(t, err)
 
 	// 全局观察者匹配任意 namespace/groupIDs
-	routeCtx := routing.WithNamespaceGroupIDs(context.Background(), "ns-any", []string{"g-any"})
+	routeCtx := routing.NewRoute().WithAppID("").WithNamespace("ns-any").WithGroupIDs([]string{"g-any"}).Inject(context.Background())
 	notified, err := pool.NotifyObservers(routeCtx, addr, msgData)
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, notified, int32(1))
@@ -261,7 +262,7 @@ func TestGRPCServer_KickUser(t *testing.T) {
 
 	// 踢出后用户从注册表移除（EventLoop 异步处理注销）
 	require.Eventually(t, func() bool {
-		return !hub.HasUserClient("u-kick")
+		return !hub.HasUserClient(context.Background(), "u-kick")
 	}, 2*time.Second, 20*time.Millisecond, "踢出后用户应从注册表移除")
 }
 

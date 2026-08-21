@@ -16,6 +16,7 @@
 package hub
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -103,7 +104,7 @@ func TestDisconnectUserRemovesAll(t *testing.T) {
 	require.Eventually(t, func() bool { return hub.HasClient("du-2") }, 2*time.Second, 10*time.Millisecond)
 	require.Equal(t, int64(2), hub.GetClientCount())
 
-	require.NoError(t, hub.DisconnectUser("du-user", "shutdown user"))
+	require.NoError(t, hub.DisconnectUser(context.Background(), "du-user", "shutdown user"))
 
 	waitForConnClosed(t, cConn1, 2*time.Second)
 	waitForConnClosed(t, cConn2, 2*time.Second)
@@ -117,7 +118,7 @@ func TestDisconnectUserNotFound(t *testing.T) {
 	hub, shutdown := startTestHub(t, newTestHubConfig())
 	defer shutdown()
 
-	err := hub.DisconnectUser("ghost-user", "reason")
+	err := hub.DisconnectUser(context.Background(), "ghost-user", "reason")
 	require.Error(t, err, "不存在的用户应返回错误")
 }
 

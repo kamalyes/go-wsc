@@ -129,7 +129,7 @@ func TestHubSendWithAckEnabled(t *testing.T) {
 	// 可靠地等待注册完成，通过检查用户是否在线
 	registered := false
 	for i := 0; i < 50; i++ { // 最多等待5秒
-		if isOnline, _ := hub.IsUserOnline(client.UserID); isOnline {
+		if isOnline, _ := hub.IsUserOnline(context.Background(), client.UserID); isOnline {
 			registered = true
 			break
 		}
@@ -205,7 +205,7 @@ func TestHubSendWithAckDisabled(t *testing.T) {
 	// 可靠地等待注册完成
 	registered := false
 	for i := 0; i < 50; i++ {
-		if isOnline, _ := hub.IsUserOnline(client.UserID); isOnline {
+		if isOnline, _ := hub.IsUserOnline(context.Background(), client.UserID); isOnline {
 			registered = true
 			break
 		}
@@ -247,7 +247,7 @@ func TestHubSendWithAckRetry(t *testing.T) {
 	// 可靠地等待注册完成 - 验证客户端在userToClients中
 	registered := false
 	for i := 0; i < 50; i++ {
-		clients := hub.GetClientsCopyForUser(client.UserID, "")
+		clients := hub.GetClientsCopyForUser(context.Background(), client.UserID, "")
 		if len(clients) > 0 {
 			registered = true
 			t.Logf("客户端已注册到userToClients映射，客户端数量: %d", len(clients))
@@ -315,7 +315,7 @@ func TestHubSendWithAckRetry(t *testing.T) {
 	msg.Content = "Test retry message"
 
 	// 发送前再次验证客户端在映射中
-	clientsBeforeSend := hub.GetClientsCopyForUser(client.UserID, "")
+	clientsBeforeSend := hub.GetClientsCopyForUser(context.Background(), client.UserID, "")
 	t.Logf("发送前验证: 客户端数量=%d", len(clientsBeforeSend))
 	assert.NotEmpty(t, clientsBeforeSend, "发送前客户端已从映射中消失")
 

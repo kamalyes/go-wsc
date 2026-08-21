@@ -24,6 +24,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	pb "github.com/kamalyes/go-wsc/models/pb"
 	"github.com/kamalyes/go-wsc/routing"
@@ -50,13 +51,30 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMe
 		return false, nil
 	}
 
-	// 1. 查询用户所在节点（优先走 routerCache 三层兜底）
+	// 1. 查询用户所在节点
 	var nodeIDs []string
 	var err error
-	if h.routerCache != nil {
+	appID := routing.AppIDFromContext(ctx)
+	// 有路由信封时跳过 routerCache（缓存 key 未含 appID/ns，跨信封会泄漏），
+	// 直接查 onlineStatusRepo（已按信封过滤）；无路由信封时走 routerCache 三层兜底（兼容边界场景）
+	if appID == "" && h.routerCache != nil {
 		nodeIDs, err = h.routerCache.GetUserNodes(ctx, userID)
-	} else {
+		if err != nil {
+			// 缓存查询失败不直接短路：降级直查 source of truth
+			nodeIDs = nil
+		}
+	}
+	// 🔥 空结果兜底直查 onlineStatus_repo（source of truth）：
+	// routerCache 负缓存（空切片按 TTL 缓存，默认 5min）叠加失效广播丢失（PubSub 至多一次投递）
+	// 会让缓存持续返回过期空列表 → 本应跨节点投递的消息只走本地（必然扑空），
+	// 实时投递丢失直到缓存 TTL 自然过期。checkUserOnline 直查 Redis 判定在线、
+	// 此处缓存判空的"双源不一致"正是跨节点漏发的根源，直查消除不一致
+	if len(nodeIDs) == 0 {
 		nodeIDs, err = h.onlineStatusRepo.GetUserNodes(ctx, userID)
+		// 回写缓存自愈过期条目：仅无路由信封时回写（有信封时 key 未含 scope，回写会跨信封污染）
+		if err == nil && appID == "" && h.routerCache != nil {
+			_ = h.routerCache.SetUserNodes(ctx, userID, nodeIDs)
+		}
 	}
 	if err != nil {
 		// 查询失败，假设用户在本节点或离线，继续本地发送流程
@@ -94,8 +112,8 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMe
 	// 4. 统一跨节点路由：gRPC 直连优先，PubSub 兜底（由 routeToCluster 集中决策）
 	opts := ClusterDispatchOptions{
 		Operation:     OperationTypeSendMessage,
-		Namespace:     "", // namespace 由 routeToCluster 从 msg 信封提取（msg.Namespace），此处留空不覆盖
-		TargetNodeID:  "", // 不再依赖单节点精确路由（老路径：nodeRegistry 自动发现，gRPC 未启用时会落空）
+		Namespace:     "",         // namespace 由 routeToCluster 从 msg 信封提取（msg.Namespace），此处留空不覆盖
+		TargetNodeID:  "",         // 不再依赖单节点精确路由（老路径：nodeRegistry 自动发现，gRPC 未启用时会落空）
 		TargetNodeIDs: otherNodes, // 已知目标节点列表，传给 routeToCluster：gRPC 未启用时优先定向 PubSub 而非广播频道
 		TargetUserID:  userID,
 	}
@@ -228,7 +246,7 @@ func (h *Hub) handleDistributedMessage(ctx context.Context, distMsg *Distributed
 	//   2. 旧节点/历史路径：仅 DistributedMessage 外层信封带路由，此处补齐 HubMessage 内部信封
 	// 下游所有本地投递过滤（broadcastToUserIDs / broadcastToFiltered / handleBroadcast）统一从 msg 取路由
 	if distMsg.Message != nil {
-		distMsg.Message.ContextWithRoute(ctx, distMsg.Namespace, distMsg.GroupIDs)
+		distMsg.Message.ContextWithRoute(ctx, distMsg.AppID, distMsg.Namespace, distMsg.GroupIDs)
 	}
 
 	h.logger.DebugContextKV(ctx, "收到分布式消息",
@@ -271,11 +289,20 @@ func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *Distrib
 		return fmt.Errorf("message data not found")
 	}
 
-	// 快速检查用户是否存在（避免无用户时序列化开销）
-	if !h.shardedRegistry.HasUser(distMsg.TargetID) {
-		h.logger.DebugContextKV(ctx, "[跨Pod] 用户不在本节点，跳过",
+	// 路由来源优先级：distMsg 外层信封 > msg 内层信封（互为兜底）；appID 空值归一化为 DefaultAppID
+	//   - 老节点未传 AppID 时归一化为 DefaultAppID，与新节点 client 默认 AppID 匹配
+	//   - namespace 保持原值（广播场景可空，严格匹配场景调用方负责归一化）
+	appID := mathx.IfEmpty(distMsg.AppID, distMsg.Message.AppID)
+	appID, _ = routing.NormalizeRoute(appID, "")
+	namespace := mathx.IfEmpty(distMsg.Namespace, distMsg.Message.Namespace)
+
+	// 快速检查用户是否存在（按 appID+namespace 信封过滤，避免跨 app/ns 误判；避免无用户时序列化开销）
+	if !h.shardedRegistry.HasUser(distMsg.TargetID, appID, namespace) {
+		h.logger.DebugContextKV(ctx, "[跨Pod] 用户不在本节点（或信封不匹配），跳过",
 			"user_id", distMsg.TargetID,
 			"message_id", distMsg.Message.MessageID,
+			"app_id", appID,
+			"namespace", namespace,
 			"from_node", distMsg.NodeID,
 			"node_id", h.nodeID,
 		)
@@ -285,6 +312,8 @@ func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *Distrib
 	h.logger.InfoContextKV(ctx, "✅ [跨Pod] 消息命中本节点，准备投递给本地客户端",
 		"user_id", distMsg.TargetID,
 		"message_id", distMsg.Message.MessageID,
+		"app_id", appID,
+		"namespace", namespace,
 		"from_node", distMsg.NodeID,
 		"node_id", h.nodeID,
 	)
@@ -295,16 +324,14 @@ func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *Distrib
 		return fmt.Errorf("marshal message failed: %w", err)
 	}
 
-	// 零拷贝遍历：ForEachUserClientFiltered 持读锁遍历 + namespace 严格匹配，TrySend 非阻塞安全
-	// ⚠️ 必须按 namespace 过滤：同一 userID 可能跨 namespace 多端登录（如 ns1 客服 + ns2 用户），
-	//    不过滤会导致跨租户消息泄露。与本地 P2P 路径 handleDirectMessage 保持一致。
-	// distMsg.Namespace 来自发送端 msg 信封（routeToCluster 从 msg.Namespace 提取），为空时退化为不隔离（兼容旧节点）
+	// 零拷贝遍历：ForEachUserClientFiltered 持读锁遍历 + appId/namespace 严格匹配，TrySend 非阻塞安全
+	// ⚠️ 必须按 appId+namespace 过滤：同一 userID 可能跨 app/ns 多端登录，不过滤会导致跨应用/租户消息泄露
 	//
 	// 复用 sendToClientSerialized（与本地/gRPC 路径对齐）：
 	// 统一状态回报（Success/Failed → wsc_message_send_records）、接收者统计、失败转存离线、SSE 客户端支持。
 	// 🔥 历史遗漏：此前裸调 client.TrySend，跨节点消息状态永远停留 sending，且 SSE 客户端收不到跨节点消息
 	successCount := 0
-	h.shardedRegistry.ForEachUserClientFiltered(distMsg.TargetID, distMsg.Namespace, nil, func(_ string, client *Client) bool {
+	h.shardedRegistry.ForEachUserClientFiltered(distMsg.TargetID, appID, namespace, nil, func(_ string, client *Client) bool {
 		if h.sendToClientSerialized(ctx, client, distMsg.Message, msgData) {
 			successCount++
 		}
@@ -332,8 +359,8 @@ func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *Distrib
 	)
 
 	// 🔔 通知观察者（跨节点消息也需要通知观察者）
-	// 点对点消息的 groupIDs 由路由信封携带（群组消息场景），观察者按 namespace+groupIDs 三级索引匹配
-	h.notifyObservers(routing.WithNamespaceGroupIDs(ctx, distMsg.Namespace, distMsg.GroupIDs), distMsg.Message)
+	// 点对点消息的 groupIDs 由路由信封携带（群组消息场景），观察者按 appId+namespace+groupIDs 三级索引匹配
+	h.notifyObservers(routing.NewRoute().WithAppID(distMsg.AppID).WithNamespace(distMsg.Namespace).WithGroupIDs(distMsg.GroupIDs).Inject(ctx), distMsg.Message)
 
 	return nil
 }
@@ -349,12 +376,19 @@ func (h *Hub) handleSendFailure(ctx context.Context, userID string, msg *HubMess
 }
 
 // handleDistributedKickUser 处理跨节点踢人
+// 注入 distMsg 的 appID+namespace 到 ctx，确保 KickUserSimple 按 appID+namespace 隔离踢人
 func (h *Hub) handleDistributedKickUser(ctx context.Context, distMsg *DistributedMessage) error {
 	select {
 	case <-ctx.Done():
 		return fmt.Errorf("context cancelled: %w", ctx.Err())
 	default:
-		h.KickUserSimple(distMsg.TargetID, distMsg.Reason)
+		// 🔏 路由信封注入：跨节点 kick 必须按 appID+namespace 隔离，避免误踢同 userID 其他 app/ns 连接
+		// kick 消息可能无 Message 体（distMsg.Message 为 nil），仅从 distMsg 外层信封取
+		appID := distMsg.AppID
+		appID, _ = routing.NormalizeRoute(appID, "")
+		namespace := distMsg.Namespace
+		ctx = routing.NewRoute().WithAppID(appID).WithNamespace(namespace).Inject(ctx)
+		h.KickUserSimple(ctx, distMsg.TargetID, distMsg.Reason)
 		return nil
 	}
 }
@@ -484,10 +518,11 @@ func (h *Hub) handleDistributedGroupsBroadcast(ctx context.Context, distMsg *Dis
 		return fmt.Errorf("groupIDs is empty in distributed message")
 	}
 
-	namespace := distMsg.Namespace
+	// appID/namespace 归一化（与源节点建群时 routeFromCtx 归一化一致，保证 Redis key 同分区，跨 app 不串扰）
+	appID, namespace := routing.NormalizeRoute(distMsg.AppID, distMsg.Namespace)
 
 	// Pipeline 批量获取所有群组成员并合并去重（用户跨群组只收一条）
-	memberSet := h.batchGetGroupMembers(ctx, namespace, groupIDs)
+	memberSet := h.batchGetGroupMembers(ctx, appID, namespace, groupIDs)
 	if len(memberSet) == 0 {
 		return nil
 	}

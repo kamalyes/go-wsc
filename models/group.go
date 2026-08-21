@@ -14,18 +14,23 @@ package models
 import (
 	"strings"
 	"time"
+
+	"github.com/kamalyes/go-wsc/constants"
 )
 
 // 系统保留组（`__` 前缀为系统组，业务组禁止使用）
 // agent 连接时自动加入 __agents__，observer 连接时自动加入 __observers__
 // 本地分片索引（agentShards/observerShards）仍保留做 O(1) 缓存，
 // Redis 系统组用于跨节点共享成员关系与显式广播
+//
+// 常量真相源在 constants 包（独立底层包，无循环依赖），models 保留公共 API 别名供外部引用
 const (
-	DefaultNamespace     = "__default_ns__" // DefaultNamespace 默认命名空间ID
-	DefaultGroupID       = "__default_gp__" // DefaultGroupID 默认群组ID
-	SystemGroupAgents    = "__agents__"     // 客服系统组（每命名空间一个，ns:__agents__）
-	SystemGroupObservers = "__observers__"  // 观察者系统组（全局 namespace="" 或命名空间级）
-	SystemGroupPrefix    = "__"             // 系统组前缀，业务组名禁止以此开头
+	DefaultAppID         = constants.DefaultAppID         // DefaultAppID 默认应用ID（最上层隔离维度）
+	DefaultNamespace     = constants.DefaultNamespace     // DefaultNamespace 默认命名空间ID
+	DefaultGroupID       = constants.DefaultGroupID       // DefaultGroupID 默认群组ID
+	SystemGroupAgents    = constants.SystemGroupAgents    // 客服系统组（每命名空间一个，ns:__agents__）
+	SystemGroupObservers = constants.SystemGroupObservers // 观察者系统组（全局 namespace="" 或命名空间级）
+	SystemGroupPrefix    = constants.SystemGroupPrefix    // 系统组前缀，业务组名禁止以此开头
 )
 
 // IsSystemGroup 判断 groupID 是否为系统保留组（`__` 前缀）
@@ -39,13 +44,22 @@ func IsSystemGroup(groupID string) bool {
 //   - 跨节点共享，任意节点均可查询/管理群组成员
 //   - 群组隶属于命名空间（Namespace），默认为 "default"，类似 k8s namespace
 type Group struct {
-	GroupID    string                 `json:"group_id"`           // 群组ID（命名空间内唯一）
+	AppID      string                 `json:"app_id"`             // 应用ID（默认 "__default_app__"）
 	Namespace  string                 `json:"namespace"`          // 命名空间ID（默认 "default"）
+	GroupID    string                 `json:"group_id"`           // 群组ID（命名空间内唯一）
 	Name       string                 `json:"name"`               // 群组名称
 	OwnerID    string                 `json:"owner_id"`           // 群主用户ID
 	MaxMembers int                    `json:"max_members"`        // 最大成员数（0 表示不限）
 	CreatedAt  time.Time              `json:"created_at"`         // 创建时间
 	Metadata   map[string]interface{} `json:"metadata,omitempty"` // 扩展元数据
+}
+
+// GetAppID 获取应用ID，空值返回默认应用ID
+func (g *Group) GetAppID() string {
+	if g.AppID == "" {
+		return DefaultAppID
+	}
+	return g.AppID
 }
 
 // GetNamespace 获取命名空间ID，空值返回默认命名空间
@@ -58,6 +72,7 @@ func (g *Group) GetNamespace() string {
 
 // GroupSendResult 群组消息投递结果
 type GroupSendResult struct {
+	AppID          string  // 应用ID
 	GroupID        string  // 群组ID
 	TotalMembers   int     // 群组总成员数
 	OnlineMembers  int     // 在线成员数（至少在一个节点有连接）

@@ -620,7 +620,8 @@ func (r *RedisOnlineStatusRepository) GetUserClients(ctx context.Context, userID
 	}
 
 	if len(clientIDs) == 0 {
-		return nil, models.ErrUserNotFound
+		// NewError(type, userID)：userID 作为注册模板 "user not found: %s" 的格式化参数
+		return nil, errorx.NewError(models.ErrTypeUserNotFound, userID)
 	}
 
 	// 批量获取客户端信息
@@ -771,7 +772,8 @@ func (r *RedisOnlineStatusRepository) IsUserOnline(ctx context.Context, userID s
 	// 有路由信封但 bitmap 未启用：加载客户端按 appID+namespace 过滤（scoped ZSET 无数据）
 	clients, err := r.GetUserClients(ctx, userID)
 	if err != nil {
-		if err == models.ErrUserNotFound {
+		// 按错误类型判定（GetUserClients 返回带 userID 的新实例，值相等比较不可靠）
+		if errorx.ClassifyError(err) == models.ErrTypeUserNotFound {
 			return false, nil
 		}
 		return false, err

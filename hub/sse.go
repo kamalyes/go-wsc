@@ -66,7 +66,7 @@ func (h *Hub) RegisterSSE(userID string, w http.ResponseWriter, userType UserTyp
 	// 异步注册（与 WS 连接一致，不经过 EventLoop channel）
 	go h.handleRegister(client)
 
-	h.logger.InfoKV("SSE连接已创建",
+	h.logger.InfoContextKV(client.Context, "SSE连接已创建",
 		"user_id", userID,
 		"client_id", client.ID,
 		"client_type", "sse",
@@ -119,7 +119,7 @@ func (h *Hub) UnregisterSSE(clientID string) {
 	client, exists := h.shardedRegistry.GetClient(clientID)
 	if exists && client.ConnectionType == ConnectionTypeSSE {
 		go h.handleUnregister(client)
-		h.logger.InfoKV("SSE连接已注销",
+		h.logger.InfoContextKV(client.Context, "SSE连接已注销",
 			"user_id", client.UserID,
 			"client_id", clientID,
 		)
@@ -319,7 +319,7 @@ func (h *Hub) writeSSEEvent(client *Client, msg *HubMessage) error {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		// 单条消息序列化失败不应杀连接，记 WARN 后跳过
-		h.logger.WarnKV("SSE消息序列化失败",
+		h.logger.WarnContextKV(msg.ContextFrom(h.ctx), "SSE消息序列化失败",
 			"client_id", client.ID,
 			"user_id", client.UserID,
 			"message_id", msg.MessageID,
@@ -368,7 +368,7 @@ func (h *Hub) writeSSEHeartbeat(client *Client) error {
 func (h *Hub) SendToUserViaSSE(userID string, msg *HubMessage) bool {
 	// 快速检查用户是否有 SSE 连接（O(1)）
 	if !h.shardedRegistry.HasSSEUser(userID) {
-		h.logger.WarnKV("SSE用户不存在",
+		h.logger.WarnContextKV(msg.ContextFrom(h.ctx), "SSE用户不存在",
 			"user_id", userID,
 			"message_id", msg.MessageID,
 			"message_type", msg.MessageType,
@@ -389,7 +389,7 @@ func (h *Hub) SendToUserViaSSE(userID string, msg *HubMessage) bool {
 		case client.SSEMessageCh <- msg:
 			client.SetLastSeen(time.Now())
 			successCount++
-			h.logger.DebugContextKV(h.ctx, "SSE消息发送",
+			h.logger.DebugContextKV(msg.ContextFrom(h.ctx), "SSE消息发送",
 				"message_id", msg.MessageID,
 				"from", msg.Sender,
 				"to", userID,
@@ -398,7 +398,7 @@ func (h *Hub) SendToUserViaSSE(userID string, msg *HubMessage) bool {
 			)
 		default:
 			// SSE消息队列满
-			h.logger.WarnKV("SSE消息队列已满",
+			h.logger.WarnContextKV(msg.ContextFrom(h.ctx), "SSE消息队列已满",
 				"user_id", userID,
 				"client_id", clientID,
 				"message_id", msg.MessageID,
@@ -409,7 +409,7 @@ func (h *Hub) SendToUserViaSSE(userID string, msg *HubMessage) bool {
 	})
 
 	if successCount > 0 {
-		h.logger.InfoKV("SSE消息发送成功",
+		h.logger.InfoContextKV(msg.ContextFrom(h.ctx), "SSE消息发送成功",
 			"user_id", userID,
 			"message_id", msg.MessageID,
 			"message_type", msg.MessageType,
@@ -446,14 +446,15 @@ func (h *Hub) broadcastToSSEClients(msg *HubMessage) {
 			atomic.AddInt64(&sent, 1)
 		default:
 			atomic.AddInt64(&skipped, 1)
-			h.logger.WarnKV("SSE客户端消息通道已满，跳过",
+			h.logger.WarnContextKV(msg.ContextFrom(h.ctx), "SSE客户端消息通道已满，跳过",
 				"user_id", userID,
 				"client_id", clientID,
+				"message_id", msg.MessageID,
 			)
 		}
 	})
 
-	h.logger.DebugKV("📡 SSE广播完成",
+	h.logger.DebugContextKV(msg.ContextFrom(h.ctx), "📡 SSE广播完成",
 		"message_id", msg.MessageID,
 		"namespace", msg.Namespace,
 		"total_sse_clients", totalSSEClients,

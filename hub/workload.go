@@ -21,9 +21,9 @@ import (
 // ============================================================================
 
 // checkWorkloadRepo 检查工作负载仓库是否已初始化
-func (h *Hub) checkWorkloadRepo(operation string) error {
+func (h *Hub) checkWorkloadRepo(ctx context.Context, operation string) error {
 	if h.workloadRepo == nil {
-		h.logger.Error("❌ WorkloadRepository未初始化,无法%s", operation)
+		h.logger.ErrorContext(ctx, "❌ WorkloadRepository未初始化,无法%s", operation)
 		return fmt.Errorf("workloadRepo is not initialized")
 	}
 	return nil
@@ -31,7 +31,7 @@ func (h *Hub) checkWorkloadRepo(operation string) error {
 
 // ForceSetAgentWorkload 强制设置客服工作负载（慎用）
 func (h *Hub) ForceSetAgentWorkload(ctx context.Context, agentID string, workload int64) error {
-	if err := h.checkWorkloadRepo("强制设置工作负载"); err != nil {
+	if err := h.checkWorkloadRepo(ctx, "强制设置工作负载"); err != nil {
 		return err
 	}
 	return h.workloadRepo.ForceSetAgentWorkload(ctx, agentID, workload)
@@ -39,7 +39,7 @@ func (h *Hub) ForceSetAgentWorkload(ctx context.Context, agentID string, workloa
 
 // GetAgentWorkload 获取客服工作负载
 func (h *Hub) GetAgentWorkload(ctx context.Context, agentID string) (int64, error) {
-	if err := h.checkWorkloadRepo("获取工作负载"); err != nil {
+	if err := h.checkWorkloadRepo(ctx, "获取工作负载"); err != nil {
 		return 0, err
 	}
 	return h.workloadRepo.GetAgentWorkload(ctx, agentID)
@@ -47,7 +47,7 @@ func (h *Hub) GetAgentWorkload(ctx context.Context, agentID string) (int64, erro
 
 // RemoveAgentWorkload 移除客服工作负载
 func (h *Hub) RemoveAgentWorkload(ctx context.Context, agentID string) error {
-	if err := h.checkWorkloadRepo("移除工作负载"); err != nil {
+	if err := h.checkWorkloadRepo(ctx, "移除工作负载"); err != nil {
 		return err
 	}
 	return h.workloadRepo.RemoveAgentWorkload(ctx, agentID)
@@ -55,7 +55,7 @@ func (h *Hub) RemoveAgentWorkload(ctx context.Context, agentID string) error {
 
 // IncrementAgentWorkload 增加客服工作负载
 func (h *Hub) IncrementAgentWorkload(ctx context.Context, agentID string) error {
-	if err := h.checkWorkloadRepo("增加工作负载"); err != nil {
+	if err := h.checkWorkloadRepo(ctx, "增加工作负载"); err != nil {
 		return err
 	}
 	return h.workloadRepo.IncrementAgentWorkload(ctx, agentID)
@@ -63,7 +63,7 @@ func (h *Hub) IncrementAgentWorkload(ctx context.Context, agentID string) error 
 
 // DecrementAgentWorkload 减少客服工作负载
 func (h *Hub) DecrementAgentWorkload(ctx context.Context, agentID string) error {
-	if err := h.checkWorkloadRepo("减少工作负载"); err != nil {
+	if err := h.checkWorkloadRepo(ctx, "减少工作负载"); err != nil {
 		return err
 	}
 	return h.workloadRepo.DecrementAgentWorkload(ctx, agentID)
@@ -71,7 +71,7 @@ func (h *Hub) DecrementAgentWorkload(ctx context.Context, agentID string) error 
 
 // GetLeastLoadedAgent 获取负载最小的在线客服
 func (h *Hub) GetLeastLoadedAgent(ctx context.Context, dimension WorkloadDimension) (string, int64, error) {
-	if err := h.checkWorkloadRepo("获取负载最小的客服"); err != nil {
+	if err := h.checkWorkloadRepo(ctx, "获取负载最小的客服"); err != nil {
 		return "", 0, err
 	}
 
@@ -98,7 +98,7 @@ func (h *Hub) GetLeastLoadedAgent(ctx context.Context, dimension WorkloadDimensi
 //
 // 业务失败回滚：调用方应在后续业务失败时显式调用 DecrementAgentWorkload 回滚此次预扣减
 func (h *Hub) AcquireLeastLoadedAgent(ctx context.Context, onlineAgents []string, dimension WorkloadDimension) (string, int64, error) {
-	if err := h.checkWorkloadRepo("原子获取并预扣减负载最小的客服"); err != nil {
+	if err := h.checkWorkloadRepo(ctx, "原子获取并预扣减负载最小的客服"); err != nil {
 		return "", 0, err
 	}
 
@@ -118,7 +118,7 @@ func (h *Hub) AcquireLeastLoadedAgent(ctx context.Context, onlineAgents []string
 
 // ReloadAgentWorkload 重新加载客服工作负载（客服上线时调用）
 func (h *Hub) ReloadAgentWorkload(ctx context.Context, agentID string) (int64, error) {
-	if err := h.checkWorkloadRepo("重新加载工作负载"); err != nil {
+	if err := h.checkWorkloadRepo(ctx, "重新加载工作负载"); err != nil {
 		return 0, err
 	}
 	return h.workloadRepo.ReloadAgentWorkload(ctx, agentID)
@@ -126,7 +126,7 @@ func (h *Hub) ReloadAgentWorkload(ctx context.Context, agentID string) (int64, e
 
 // GetAllAgentWorkloads 获取所有客服的负载信息
 func (h *Hub) GetAllAgentWorkloads(ctx context.Context, limit int64) ([]WorkloadInfo, error) {
-	if err := h.checkWorkloadRepo("获取所有客服负载"); err != nil {
+	if err := h.checkWorkloadRepo(ctx, "获取所有客服负载"); err != nil {
 		return nil, err
 	}
 	return h.workloadRepo.GetAllAgentWorkloads(ctx, limit)

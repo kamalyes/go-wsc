@@ -250,7 +250,7 @@ func TestTrackConnectionError(t *testing.T) {
 		hub, _, _, cleanup := setupGroupTestHub(t)
 		defer cleanup()
 		assert.NotPanics(t, func() {
-			hub.trackConnectionError("conn-1", UserTypeCustomer, errors.New("test"))
+			hub.trackConnectionError(context.Background(), "conn-1", UserTypeCustomer, errors.New("test"))
 		})
 	})
 
@@ -260,7 +260,7 @@ func TestTrackConnectionError(t *testing.T) {
 		fake := &fakeConnQualityRepo{}
 		hub.connectionQualityRepo = fake
 
-		hub.trackConnectionError("conn-1", UserTypeCustomer, nil)
+		hub.trackConnectionError(context.Background(),"conn-1", UserTypeCustomer, nil)
 		time.Sleep(200 * time.Millisecond)
 		assert.Equal(t, int64(0), fake.addErrorCount.Load(), "nil error 不应计数")
 	})
@@ -271,7 +271,7 @@ func TestTrackConnectionError(t *testing.T) {
 		fake := &fakeConnQualityRepo{}
 		hub.connectionQualityRepo = fake
 
-		hub.trackConnectionError("", UserTypeCustomer, errors.New("err"))
+		hub.trackConnectionError(context.Background(),"", UserTypeCustomer, errors.New("err"))
 		time.Sleep(200 * time.Millisecond)
 		assert.Equal(t, int64(0), fake.addErrorCount.Load(), "空 connectionID 不应计数")
 	})
@@ -282,8 +282,8 @@ func TestTrackConnectionError(t *testing.T) {
 		fake := &fakeConnQualityRepo{}
 		hub.connectionQualityRepo = fake
 
-		hub.trackConnectionError("conn-sys", UserTypeSystem, errors.New("err"))
-		hub.trackConnectionError("conn-bot", UserTypeBot, errors.New("err"))
+		hub.trackConnectionError(context.Background(),"conn-sys", UserTypeSystem, errors.New("err"))
+		hub.trackConnectionError(context.Background(),"conn-bot", UserTypeBot, errors.New("err"))
 		time.Sleep(200 * time.Millisecond)
 		assert.Equal(t, int64(0), fake.addErrorCount.Load(), "系统/机器人不应记录错误")
 	})
@@ -294,7 +294,7 @@ func TestTrackConnectionError(t *testing.T) {
 		fake := &fakeConnQualityRepo{}
 		hub.connectionQualityRepo = fake
 
-		hub.trackConnectionError("conn-err", UserTypeCustomer, errors.New("connection reset"))
+		hub.trackConnectionError(context.Background(), "conn-err", UserTypeCustomer, errors.New("connection reset"))
 		require.Eventually(t, func() bool {
 			return fake.addErrorCount.Load() > 0
 		}, 2*time.Second, 20*time.Millisecond, "正常用户的连接错误应被记录")

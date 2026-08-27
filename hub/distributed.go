@@ -131,7 +131,7 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMe
 // unmarshalDistributedMessage 反序列化分布式消息
 // 优先使用 protobuf（高性能、低体积），失败时降级到 JSON（兼容旧节点）
 // 三处订阅回调（节点消息/广播/观察者）共用此方法，避免逻辑重复
-func (h *Hub) unmarshalDistributedMessage(data []byte) (*DistributedMessage, error) {
+func (h *Hub) unmarshalDistributedMessage(ctx context.Context, data []byte) (*DistributedMessage, error) {
 	// 🚀 优先尝试 protobuf 反序列化
 	distMsg, pErr := pb.UnmarshalDistributedMessage(data)
 	if pErr == nil {
@@ -141,7 +141,8 @@ func (h *Hub) unmarshalDistributedMessage(data []byte) (*DistributedMessage, err
 	// 降级到 JSON（兼容旧节点或非 protobuf 消息）
 	var jsonMsg DistributedMessage
 	if jErr := json.Unmarshal(data, &jsonMsg); jErr != nil {
-		h.logger.ErrorKV("解析分布式消息失败",
+		// 消息体损坏无法提取信封 trace，使用订阅回调的 subCtx（含订阅链路 trace）
+		h.logger.ErrorContextKV(ctx, "解析分布式消息失败",
 			"protobuf_error", pErr,
 			"json_error", jErr,
 		)
@@ -152,15 +153,19 @@ func (h *Hub) unmarshalDistributedMessage(data []byte) (*DistributedMessage, err
 
 // marshalDistributedMessage 序列化分布式消息
 // 优先使用 protobuf（高性能、低体积），失败时降级到 JSON
-func (h *Hub) marshalDistributedMessage(distMsg *DistributedMessage, messageID string) []byte {
+func (h *Hub) marshalDistributedMessage(ctx context.Context, distMsg *DistributedMessage) []byte {
 	// 🚀 使用 protobuf 序列化（高性能、低体积）
 	data, mErr := pb.MarshalDistributedMessage(distMsg)
 	if mErr == nil {
 		return data
 	}
 
-	// protobuf 序列化失败，降级到 JSON
-	h.logger.WarnKV("protobuf 序列化失败，降级到 JSON",
+	// protobuf 序列化失败，降级到 JSON（message_id 仅用于日志，Message 可能为 nil）
+	messageID := ""
+	if distMsg.Message != nil {
+		messageID = distMsg.Message.GetMessageID()
+	}
+	h.logger.WarnContextKV(ctx, "protobuf 序列化失败，降级到 JSON",
 		"error", mErr,
 		"message_id", messageID,
 	)
@@ -185,7 +190,7 @@ func (h *Hub) SubscribeNodeMessages(ctx context.Context) error {
 		}).
 		Exec(func() {
 			_, err := h.pubsub.Subscribe([]string{channel}, func(subCtx context.Context, ch string, msg string) error {
-				distMsg, err := h.unmarshalDistributedMessage([]byte(msg))
+				distMsg, err := h.unmarshalDistributedMessage(subCtx, []byte(msg))
 				if err != nil {
 					return err
 				}
@@ -666,7 +671,7 @@ func (h *Hub) SubscribeBroadcastChannel(ctx context.Context) error {
 		}).
 		Exec(func() {
 			_, err := h.pubsub.Subscribe([]string{channel}, func(subCtx context.Context, ch string, msg string) error {
-				distMsg, err := h.unmarshalDistributedMessage([]byte(msg))
+				distMsg, err := h.unmarshalDistributedMessage(subCtx, []byte(msg))
 				if err != nil {
 					return err
 				}
@@ -712,7 +717,7 @@ func (h *Hub) SubscribeObserverChannel(ctx context.Context) error {
 		}).
 		Exec(func() {
 			_, err := h.pubsub.Subscribe([]string{channel}, func(subCtx context.Context, ch string, msg string) error {
-				distMsg, err := h.unmarshalDistributedMessage([]byte(msg))
+				distMsg, err := h.unmarshalDistributedMessage(subCtx, []byte(msg))
 				if err != nil {
 					return err
 				}

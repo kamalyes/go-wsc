@@ -66,7 +66,7 @@ func (h *Hub) makeAckTimeoutCallback(messageID string) func() {
 		claimed, err := h.messageRecordRepo.ClaimStaleSending(ctx, []string{messageID},
 			MessageSendStatusAckTimeout, FailureReasonAckTimeout, errNodeAckTimeout.Error())
 		if err != nil {
-			h.logger.WarnKV("ACK超时(时间轮)：认领失败",
+			h.logger.WarnContextKV(h.ctx, "ACK超时(时间轮)：认领失败",
 				"message_id", messageID, "error", err)
 			return
 		}
@@ -78,7 +78,7 @@ func (h *Hub) makeAckTimeoutCallback(messageID string) func() {
 		// 不在闭包中持有 msg 指针：避免百万级 in-flight 消息长期占用内存
 		record, rErr := h.messageRecordRepo.FindByMessageID(ctx, messageID)
 		if rErr != nil || record == nil {
-			h.logger.WarnKV("ACK超时(时间轮)：查询记录失败，无法转存离线",
+			h.logger.WarnContextKV(h.ctx, "ACK超时(时间轮)：查询记录失败，无法转存离线",
 				"message_id", messageID, "error", rErr)
 			return
 		}
@@ -87,7 +87,7 @@ func (h *Hub) makeAckTimeoutCallback(messageID string) func() {
 		}
 		msg, mErr := record.GetMessage()
 		if mErr != nil || msg == nil {
-			h.logger.WarnKV("ACK超时(时间轮)：反序列化消息失败，无法转存离线",
+			h.logger.WarnContextKV(h.ctx, "ACK超时(时间轮)：反序列化消息失败，无法转存离线",
 				"message_id", messageID, "error", mErr)
 			return
 		}

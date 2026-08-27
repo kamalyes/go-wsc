@@ -68,7 +68,7 @@ func (h *Hub) sendPongResponse(client *Client, now time.Time) error {
 		client.SetLastPong(now) // 直接更新
 		return nil
 	case <-timer.C:
-		h.logger.WarnKV("心跳 pong 响应发送超时",
+		h.logger.WarnContextKV(client.Context, "心跳 pong 响应发送超时",
 			"client_id", client.ID,
 			"user_id", client.UserID,
 		)
@@ -80,12 +80,35 @@ func (h *Hub) sendPongResponse(client *Client, now time.Time) error {
 // 心跳消息处理
 // ============================================================================
 
+// touchHeartbeat 刷新客户端心跳（协议级 PING 与应用层心跳共用同一保活路径）
+// 更新内存时间戳 + O(1) 刷新时间轮超时任务 + 异步续期 Redis 在线索引
+// 异步续期说明：单 goroutine worker 收集 channel（替代每次心跳创建独立 goroutine），
+// 周期性分块并行调用 RenewClientsOnline 轻量续期（跳过序列化/压缩/SETEX）；
+// client:<id> 键已过期/被淘汰的客户端由 repo 内部检测并走全量重建，
+// 即使 Redis 键丢失也能基于内存客户端恢复索引
+func (h *Hub) touchHeartbeat(client *Client, now time.Time) {
+	client.SetLastHeartbeat(now)
+	client.SetLastSeen(now)
+
+	// ⏰ 刷新时间轮心跳超时（O(1) 操作，取消旧任务 + 调度新任务）
+	h.RefreshHeartbeatTimeout(client)
+
+	// 异步续期 Redis 在线索引与跨节点路由（不阻塞心跳主流程）
+	if h.onlineStatusRepo != nil {
+		select {
+		case h.heartbeatRedisCh <- client:
+		default:
+			// channel 满，跳过本次 Redis 更新（心跳下次还会来）
+		}
+	}
+}
+
 // handleHeartbeatMessage 处理心跳消息
 // 流程：前置回调 → 更新心跳 → 日志 → Redis同步 → PONG响应 → 统计 → 后置回调
 func (h *Hub) handleHeartbeatMessage(client *Client) {
 	// 检查客户端是否已关闭（防止处理已断开客户端的心跳）
 	if client.IsClosed() {
-		h.logger.DebugKV("客户端已关闭，忽略心跳消息",
+		h.logger.DebugContextKV(client.Context, "客户端已关闭，忽略心跳消息",
 			"client_id", client.ID,
 			"user_id", client.UserID)
 		return
@@ -100,30 +123,14 @@ func (h *Hub) handleHeartbeatMessage(client *Client) {
 
 	// 更新心跳请求时间（内存）- 收到PING时直接更新 client 字段，避免 shardedRegistry 冗余查询
 	now := time.Now()
-	client.SetLastHeartbeat(now)
-	client.SetLastSeen(now)
-
-	// ⏰ 刷新时间轮心跳超时（O(1) 操作，取消旧任务 + 调度新任务）
-	h.RefreshHeartbeatTimeout(client)
+	h.touchHeartbeat(client, now)
 
 	// 💓 记录心跳日志
 	h.logWithClient(logger.DEBUG, "💓 收到心跳消息", client)
 
-	// 异步重建 Redis 在线索引与跨节点路由（不阻塞心跳主流程）
-	// 使用单 goroutine worker 消费 channel，替代每次心跳创建独立 goroutine
-	// 投递 *Client：worker 直接调用 SetClientOnline 无条件刷新 ZSET 分数，
-	// 即使 Redis 中 client:<id> 键已过期/被淘汰，也能基于内存客户端重建索引
-	if h.onlineStatusRepo != nil {
-		select {
-		case h.heartbeatRedisCh <- client:
-		default:
-			// channel 满，跳过本次 Redis 更新（心跳下次还会来）
-		}
-	}
-
 	// 直接发送 pong 响应（使用已获取的客户端对象，避免竞态条件）
 	if err := h.sendPongResponse(client, now); err != nil {
-		h.logger.WarnKV("心跳 pong 响应发送失败",
+		h.logger.WarnContextKV(client.Context, "心跳 pong 响应发送失败",
 			"client_id", client.ID,
 			"user_id", client.UserID,
 			"error", err,

@@ -230,7 +230,7 @@ func (d *jwtConnectionTokenDecoder) checkWhitelist(ctx context.Context, set *wsc
 		return e
 	})
 	if err != nil {
-		d.logger.WarnKV("[ConnectionToken] Redis 白名单校验失败，降级放行",
+		d.logger.WarnContextKV(ctx, "[ConnectionToken] Redis 白名单校验失败，降级放行",
 			"error", err, "key", key, "app_id", set.GetAppID())
 		return nil
 	}

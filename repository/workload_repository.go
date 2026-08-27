@@ -170,7 +170,7 @@ func (r *RedisWorkloadRepository) ReloadAgentWorkload(ctx context.Context, agent
 		existingWorkload, parseErr := convert.MustIntT[int64](workloadStr, &roundNone)
 		if parseErr != nil {
 			// Redis 中值被污染（非数字），记录告警并按 0 处理，避免后续广播错误值
-			r.logger.Warnf("⚠️ 客服 [%s]%s Redis 负载值解析失败(%q): %v，降级为 0", namespace, agentID, workloadStr, parseErr)
+			r.logger.WarnContext(ctx, "⚠️ 客服 [%s]%s Redis 负载值解析失败(%q): %v，降级为 0", namespace, agentID, workloadStr, parseErr)
 			existingWorkload = 0
 		}
 
@@ -179,7 +179,7 @@ func (r *RedisWorkloadRepository) ReloadAgentWorkload(ctx context.Context, agent
 			return 0, errorx.WrapError("failed to sync all dimensions to zset", err)
 		}
 
-		r.logger.Debugf("🔄 客服 [%s]%s 上线，从 Redis 恢复负载: %d", namespace, agentID, existingWorkload)
+		r.logger.DebugContext(ctx, "🔄 客服 [%s]%s 上线，从 Redis 恢复负载: %d", namespace, agentID, existingWorkload)
 		return existingWorkload, nil
 	}
 
@@ -203,7 +203,7 @@ func (r *RedisWorkloadRepository) ReloadAgentWorkload(ctx context.Context, agent
 				return 0, errorx.WrapError("failed to restore from db to redis", err)
 			}
 
-			r.logger.Debugf("🔄 客服 [%s]%s 上线，从 DB 恢复负载: %d", namespace, agentID, finalWorkload)
+			r.logger.DebugContext(ctx, "🔄 客服 [%s]%s 上线，从 DB 恢复负载: %d", namespace, agentID, finalWorkload)
 			return finalWorkload, nil
 		}
 		// DB 查询出错且不是"记录不存在" —— 不能当作 0 初始化，避免覆盖真实历史负载
@@ -217,7 +217,7 @@ func (r *RedisWorkloadRepository) ReloadAgentWorkload(ctx context.Context, agent
 		return 0, errorx.WrapError("failed to init agent workload", err)
 	}
 
-	r.logger.Debugf("🆕 客服 [%s]%s 上线初始化，负载: %d", namespace, agentID, finalWorkload)
+	r.logger.DebugContext(ctx, "🆕 客服 [%s]%s 上线初始化，负载: %d", namespace, agentID, finalWorkload)
 	return finalWorkload, nil
 }
 
@@ -351,7 +351,7 @@ func (r *RedisWorkloadRepository) ForceSetAgentWorkload(ctx context.Context, age
 		return errorx.WrapError("failed to force set agent workload", err)
 	}
 
-	r.logger.Debugf("✅ 已强制设置客服 [%s]%s 工作负载: %d (所有维度)", namespace, agentID, workload)
+	r.logger.DebugContext(ctx, "✅ 已强制设置客服 [%s]%s 工作负载: %d (所有维度)", namespace, agentID, workload)
 	return nil
 }
 
@@ -367,7 +367,7 @@ func (r *RedisWorkloadRepository) GetAgentWorkload(ctx context.Context, agentID 
 		roundNone := convert.RoundNone
 		workload, parseErr := convert.MustIntT[int64](workloadStr, &roundNone)
 		if parseErr != nil {
-			r.logger.Warnf("⚠️ 客服 [%s]%s Redis 负载值解析失败(%q): %v，降级为 0", namespace, agentID, workloadStr, parseErr)
+			r.logger.WarnContext(ctx, "⚠️ 客服 [%s]%s Redis 负载值解析失败(%q): %v，降级为 0", namespace, agentID, workloadStr, parseErr)
 			return 0, nil
 		}
 		return workload, nil
@@ -387,9 +387,9 @@ func (r *RedisWorkloadRepository) GetAgentWorkload(ctx context.Context, agentID 
 		if dbErr == nil {
 			// 回写到 Redis
 			if err := r.client.Set(ctx, realtimeKey, dbModel.Workload, 0).Err(); err != nil {
-				r.logger.Warnf("⚠️ 回写 Redis 失败: %v", err)
+				r.logger.WarnContext(ctx, "⚠️ 回写 Redis 失败: %v", err)
 			}
-			r.logger.Debugf("📥 从 DB 加载客服 [%s]%s 负载: %d", namespace, agentID, dbModel.Workload)
+			r.logger.DebugContext(ctx, "📥 从 DB 加载客服 [%s]%s 负载: %d", namespace, agentID, dbModel.Workload)
 			return dbModel.Workload, nil
 		}
 		// DB 查询出错且不是"记录不存在" —— 上抛，避免静默吞掉故障
@@ -503,7 +503,7 @@ func (r *RedisWorkloadRepository) incrementMultiDimension(ctx context.Context, n
 		}
 	}
 
-	r.logger.Debugf("📈 客服 [%s]%s 工作负载增加 %d (多维度)", namespace, agentID, delta)
+	r.logger.DebugContext(ctx, "📈 客服 [%s]%s 工作负载增加 %d (多维度)", namespace, agentID, delta)
 	return nil
 }
 
@@ -614,7 +614,7 @@ func (r *RedisWorkloadRepository) getLeastLoadedAgentFromRedis(ctx context.Conte
 		if resultArray, ok := result.([]any); ok && len(resultArray) == 2 {
 			agentID := resultArray[0].(string)
 			workload := r.parseWorkloadResult(resultArray[1])
-			r.logger.Debugf("🎯 选择负载最小的客服 [%s][%s]: %s (负载: %d)", namespace, dimension, agentID, workload)
+			r.logger.DebugContext(ctx, "🎯 选择负载最小的客服 [%s][%s]: %s (负载: %d)", namespace, dimension, agentID, workload)
 			return agentID, workload, nil
 		}
 	}
@@ -799,7 +799,7 @@ func (r *RedisWorkloadRepository) AcquireLeastLoadedAgent(ctx context.Context, o
 		r.asyncSyncMultiDimensionToDB(namespace, selected, dim, dim.FormatTimeKey(now), newWorkload)
 	}
 
-	r.logger.Debugf("🎯 原子选择并预扣减负载 [%s][%s]: %s (选中前负载: %d)", namespace, dimension, selected, minWorkload)
+	r.logger.DebugContext(ctx, "🎯 原子选择并预扣减负载 [%s][%s]: %s (选中前负载: %d)", namespace, dimension, selected, minWorkload)
 	return selected, minWorkload, nil
 }
 
@@ -817,11 +817,11 @@ func (r *RedisWorkloadRepository) RemoveAgentWorkload(ctx context.Context, agent
 
 	zsetKey := r.GetDimensionZSetKey(namespace, models.WorkloadDimensionRealtime, now)
 	if err := r.client.ZRem(ctx, zsetKey, agentID).Err(); err != nil {
-		r.logger.Errorf("❌ 从 ZSet [%s] 移除客服 [%s]%s 失败: %v", models.WorkloadDimensionRealtime, namespace, agentID, err)
+		r.logger.ErrorContext(ctx, "❌ 从 ZSet [%s] 移除客服 [%s]%s 失败: %v", models.WorkloadDimensionRealtime, namespace, agentID, err)
 		return errorx.WrapError("failed to remove agent from realtime zset", err)
 	}
 
-	r.logger.Debugf("👋 客服 [%s]%s 下线，已从 realtime ZSet 移除（保留 string key 及统计维度）", namespace, agentID)
+	r.logger.DebugContext(ctx, "👋 客服 [%s]%s 下线，已从 realtime ZSet 移除（保留 string key 及统计维度）", namespace, agentID)
 	return nil
 }
 

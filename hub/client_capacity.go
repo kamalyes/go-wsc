@@ -159,7 +159,7 @@ func (h *Hub) initClientSendChan(client *Client) {
 	// 从对应容量的对象池获取 channel
 	client.SendChan = h.getChan(capacity)
 
-	h.logger.DebugKV("初始化 SendChan",
+	h.logger.DebugContextKV(client.Context, "初始化 SendChan",
 		"client_id", client.ID,
 		"user_id", client.UserID,
 		"user_type", client.UserType,
@@ -179,7 +179,7 @@ func (h *Hub) releaseClientSendChan(client *Client) {
 	// 释放到对应容量的对象池
 	h.releaseChan(client.SendChan, capacity)
 
-	h.logger.DebugKV("SendChan 已释放",
+	h.logger.DebugContextKV(client.Context, "SendChan 已释放",
 		"client_id", client.ID,
 		"user_id", client.UserID,
 		"capacity", capacity,

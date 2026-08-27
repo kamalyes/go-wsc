@@ -72,7 +72,7 @@ func (h *Hub) timeoutStaleSendingRecords() {
 		Limit:  nodeAckScanLimit,
 	})
 	if err != nil {
-		h.logger.WarnKV("ACK超时扫描：查询 sending 记录失败", "error", err)
+		h.logger.WarnContextKV(h.ctx, "ACK超时扫描：查询 sending 记录失败", "error", err)
 		return
 	}
 
@@ -100,7 +100,7 @@ func (h *Hub) timeoutStaleSendingRecords() {
 	// 仅认领成功（RowsAffected=1）的节点负责该记录的后续兜底动作
 	claimed, claimErr := h.messageRecordRepo.ClaimStaleSending(ctx, staleIDs, models.MessageSendStatusAckTimeout, models.FailureReasonAckTimeout, errNodeAckTimeout.Error())
 	if claimErr != nil {
-		h.logger.WarnKV("ACK超时扫描：认领超时记录失败",
+		h.logger.WarnContextKV(h.ctx, "ACK超时扫描：认领超时记录失败",
 			"count", len(staleIDs), "claimed", len(claimed), "error", claimErr)
 	}
 	if len(claimed) == 0 {
@@ -111,7 +111,7 @@ func (h *Hub) timeoutStaleSendingRecords() {
 		claimedSet[id] = struct{}{}
 	}
 
-	h.logger.WarnKV("跨节点消息ACK超时，已标记待重试",
+	h.logger.WarnContextKV(h.ctx, "跨节点消息ACK超时，已标记待重试",
 		"count", len(claimed),
 		"timeout", nodeAckTimeout,
 		"node_id", h.nodeID,
@@ -128,10 +128,12 @@ func (h *Hub) timeoutStaleSendingRecords() {
 		}
 		msg, mErr := record.GetMessage()
 		if mErr != nil || msg == nil {
-			h.logger.WarnKV("ACK超时扫描：反序列化消息失败，无法转存离线",
+			h.logger.WarnContextKV(h.ctx, "ACK超时扫描：反序列化消息失败，无法转存离线",
 				"message_id", record.MessageID, "error", mErr)
 			continue
 		}
+		// 🔗 trace 恢复：MessageData 序列化了完整 HubMessage（含信封 trace_id），
+		// tryStoreOfflineOnDeliveryFailure 内部经 msg.ContextFrom 恢复，转存离线日志可追溯原始发送链路
 		h.tryStoreOfflineOnDeliveryFailure(msg, errNodeAckTimeout)
 	}
 }

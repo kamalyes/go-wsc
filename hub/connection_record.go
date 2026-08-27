@@ -339,7 +339,7 @@ func (h *Hub) pushAndDeleteOffline(ctx context.Context, userID string, messages 
 			failedIDs = append(failedIDs, message.MessageID)
 			// 🔥 离线推送失败 → 更新 message_record 状态为 Failed
 			// 离线消息推送失败通常因用户连接突然断开或队列满，message_record 应反映最终投递结果
-			h.updateMessageStatusAsync(message.MessageID, MessageSendStatusFailed, FailureReasonConnError, err.Error())
+			h.updateMessageStatusAsync(msgCtx, message.MessageID, MessageSendStatusFailed, FailureReasonConnError, err.Error())
 			if err := h.offlineMessageHandler.UpdatePushStatus(msgCtx, []string{message.MessageID}, err); err != nil {
 				h.logger.ErrorContextKV(msgCtx, "更新离线消息推送失败状态失败",
 					"user_id", userID, "message_id", message.MessageID, "error", err)

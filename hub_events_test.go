@@ -488,11 +488,11 @@ func TestEventsConcurrency(t *testing.T) {
 	}
 
 	wg.Wait()
-	time.Sleep(500 * time.Millisecond)
 
-	// 验证所有事件都被接收
-	count := recorder.getOnlineCount()
-	assert.Equal(t, int64(clientCount), count, "应该收到所有上线事件")
+	// 轮询等待所有上线事件到达（事件经 Redis PubSub 异步分发，满载下延迟可超 500ms）
+	assert.Eventually(t, func() bool {
+		return recorder.getOnlineCount() == int64(clientCount)
+	}, 8*time.Second, 100*time.Millisecond, "应该收到所有上线事件")
 }
 
 // ============================================================================
@@ -595,29 +595,40 @@ func TestEventContent(t *testing.T) {
 		{"Bot", UserTypeBot},
 	}
 
-	for i, tc := range testCases {
+	for _, tc := range testCases {
 		client := createTestClientWithIDGen(tc.userType)
 		hub.Register(client)
-		time.Sleep(200 * time.Millisecond)
+
+		// 轮询等待本客户端的上线事件（PubSub 异步分发，按 UserID 匹配替代固定 sleep + 按序号取值）
+		onlineEvent := &UserStatusEvent{}
+		assert.Eventually(t, func() bool {
+			for _, ev := range recorder.getOnlineEvents() {
+				if ev.UserID == client.UserID {
+					*onlineEvent = ev
+					return true
+				}
+			}
+			return false
+		}, 8*time.Second, 50*time.Millisecond, "应该收到 %s 的上线事件", tc.name)
+		assert.Equal(t, tc.userType, onlineEvent.UserType)
+		assert.Equal(t, EventTypeOnline, onlineEvent.EventType)
+		assert.NotEmpty(t, onlineEvent.NodeID)
+		assert.NotZero(t, onlineEvent.Timestamp)
+
 		hub.Unregister(client)
-		time.Sleep(200 * time.Millisecond)
 
-		// 验证上线事件
-		onlineEvents := recorder.getOnlineEvents()
-		require.Greater(t, len(onlineEvents), i, "应该收到上线事件")
-		event := onlineEvents[i]
-		assert.Equal(t, client.UserID, event.UserID)
-		assert.Equal(t, tc.userType, event.UserType)
-		assert.Equal(t, EventTypeOnline, event.EventType)
-		assert.NotEmpty(t, event.NodeID)
-		assert.NotZero(t, event.Timestamp)
-
-		// 验证下线事件
-		offlineEvents := recorder.getOfflineEvents()
-		require.Greater(t, len(offlineEvents), i, "应该收到下线事件")
-		event = offlineEvents[i]
-		assert.Equal(t, client.UserID, event.UserID)
-		assert.Equal(t, tc.userType, event.UserType)
-		assert.Equal(t, EventTypeOffline, event.EventType)
+		// 轮询等待本客户端的下线事件
+		offlineEvent := &UserStatusEvent{}
+		assert.Eventually(t, func() bool {
+			for _, ev := range recorder.getOfflineEvents() {
+				if ev.UserID == client.UserID {
+					*offlineEvent = ev
+					return true
+				}
+			}
+			return false
+		}, 8*time.Second, 50*time.Millisecond, "应该收到 %s 的下线事件", tc.name)
+		assert.Equal(t, tc.userType, offlineEvent.UserType)
+		assert.Equal(t, EventTypeOffline, offlineEvent.EventType)
 	}
 }

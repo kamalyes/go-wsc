@@ -87,9 +87,10 @@ func newTestConnectionRepoContext(t *testing.T) *testConnectionRepoContext {
 	}
 
 	// 测试结束后清理两张表（先 quality 后 connect，避免外键依赖）
+	// 用 Migrator DropTable 按方言转义表名，兼容 SQLite/MySQL/PostgreSQL
 	t.Cleanup(func() {
-		db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS \"%s\"", qualityTableName))
-		db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS \"%s\"", tableName))
+		db.Migrator().DropTable(qualityTableName)
+		db.Migrator().DropTable(tableName)
 	})
 
 	return tc

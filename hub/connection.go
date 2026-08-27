@@ -32,7 +32,7 @@ import (
 func (h *Hub) DisconnectUser(ctx context.Context, userID string, reason string) error {
 	appID, ns := routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx)
 	if !h.shardedRegistry.HasUser(userID, appID, ns) {
-		return errorx.NewError(ErrTypeUserNotFound, "user_id: %s", userID)
+		return errorx.NewError(ErrTypeUserNotFound, userID)
 	}
 
 	// 持读锁零拷贝收集匹配信封的客户端
@@ -43,7 +43,7 @@ func (h *Hub) DisconnectUser(ctx context.Context, userID string, reason string) 
 	})
 
 	if len(clients) == 0 {
-		return errorx.NewError(ErrTypeUserNotFound, "user_id: %s", userID)
+		return errorx.NewError(ErrTypeUserNotFound, userID)
 	}
 
 	// 并行断开所有客户端连接

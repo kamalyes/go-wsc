@@ -90,7 +90,7 @@ func (s *RateLimitAlertService) SendAlert(ctx context.Context, userId, userType 
 	subject := s.subjectAlert
 	body, err := s.renderTemplate(s.templateAlert, userId, userType, minuteCount, hourCount)
 	if err != nil {
-		s.logger.ErrorKV("渲染预警邮件模板失败",
+		s.logger.ErrorContextKV(ctx, "渲染预警邮件模板失败",
 			"user_id", userId,
 			"user_type", userType,
 			"error", err,
@@ -101,7 +101,7 @@ func (s *RateLimitAlertService) SendAlert(ctx context.Context, userId, userType 
 	err = s.emailSender.SendEmailWithHTML(ctx, s.alertEmails, subject, body)
 	mathx.When(err != nil).
 		Then(func() {
-			s.logger.ErrorKV("发送风控预警邮件失败",
+			s.logger.ErrorContextKV(ctx, "发送风控预警邮件失败",
 				"user_id", userId,
 				"user_type", userType,
 				"minute_count", minuteCount,
@@ -110,7 +110,7 @@ func (s *RateLimitAlertService) SendAlert(ctx context.Context, userId, userType 
 			)
 		}).
 		Else(func() {
-			s.logger.InfoKV("已发送风控预警邮件",
+			s.logger.InfoContextKV(ctx, "已发送风控预警邮件",
 				"user_id", userId,
 				"user_type", userType,
 				"minute_count", minuteCount,
@@ -129,7 +129,7 @@ func (s *RateLimitAlertService) SendBlockAlert(ctx context.Context, userId, user
 	subject := s.subjectBlock
 	body, err := s.renderTemplate(s.templateBlock, userId, userType, minuteCount, hourCount)
 	if err != nil {
-		s.logger.ErrorKV("渲染封禁邮件模板失败",
+		s.logger.ErrorContextKV(ctx, "渲染封禁邮件模板失败",
 			"user_id", userId,
 			"user_type", userType,
 			"error", err,
@@ -140,7 +140,7 @@ func (s *RateLimitAlertService) SendBlockAlert(ctx context.Context, userId, user
 	err = s.emailSender.SendEmailWithHTML(ctx, s.alertEmails, subject, body)
 	mathx.When(err != nil).
 		Then(func() {
-			s.logger.ErrorKV("发送封禁预警邮件失败",
+			s.logger.ErrorContextKV(ctx, "发送封禁预警邮件失败",
 				"user_id", userId,
 				"user_type", userType,
 				"minute_count", minuteCount,
@@ -149,7 +149,7 @@ func (s *RateLimitAlertService) SendBlockAlert(ctx context.Context, userId, user
 			)
 		}).
 		Else(func() {
-			s.logger.WarnKV("已发送封禁预警邮件",
+			s.logger.WarnContextKV(ctx, "已发送封禁预警邮件",
 				"user_id", userId,
 				"user_type", userType,
 				"minute_count", minuteCount,

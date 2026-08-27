@@ -69,7 +69,7 @@ func (w *HubWorkerPool) Stop() {
 // SubmitMessage 提交消息发送任务（阻塞式，队列满时等待）
 func (w *HubWorkerPool) SubmitMessage(ctx context.Context, task func()) {
 	if err := w.MessagePool.Submit(ctx, task); err != nil {
-		w.logger.Error("消息发送池提交失败: %v", err)
+		w.logger.ErrorContext(ctx, "消息发送池提交失败: %v", err)
 	}
 }
 
@@ -110,7 +110,7 @@ func (w *HubWorkerPool) TrySubmitCallback(task func()) bool {
 // SubmitRecord 提交数据库记录任务（阻塞式）
 func (w *HubWorkerPool) SubmitRecord(ctx context.Context, task func()) {
 	if err := w.RecordPool.Submit(ctx, task); err != nil {
-		w.logger.Error("记录池提交失败: %v", err)
+		w.logger.ErrorContext(ctx, "记录池提交失败: %v", err)
 	}
 }
 

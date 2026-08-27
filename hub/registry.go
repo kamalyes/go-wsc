@@ -375,7 +375,7 @@ func (h *Hub) KickUser(ctx context.Context, userID string, reason string, sendNo
 	// 1. 获取用户的所有连接（按 ctx 路由信封 appID+namespace 隔离，避免跨 app/ns 误踢）
 	clients := h.GetConnectionsByUserID(ctx, userID)
 	if len(clients) == 0 {
-		result.Error = errorx.NewError(ErrTypeUserNotFound, "user not online or not found: %s", userID)
+		result.Error = errorx.NewError(ErrTypeUserNotFound, userID)
 		result.Success = false
 		result.Reason = reason + " (用户不在线)"
 		h.logger.WarnContextKV(ctx, "踢出用户失败：用户不在线",

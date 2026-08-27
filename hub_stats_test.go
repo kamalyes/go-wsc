@@ -101,7 +101,8 @@ func TestHubRedisStatistics(t *testing.T) {
 	time.Sleep(400 * time.Millisecond) // 等待防抖定时器触发(100ms) + Redis写入完成 + 缓冲时间
 
 	// 使用重试机制等待活跃连接数同步到 Redis
-	maxRetries := 30
+	// 满载 -race 下防抖定时器与 Redis 写入延迟可达数秒，窗口放宽到 20s
+	maxRetries := 100
 	for retry := range maxRetries {
 		nodeStats, err = statsRepo.GetNodeStats(ctx, hub.GetNodeID())
 		require.NoError(t, err)
@@ -132,14 +133,14 @@ func TestHubRedisStatistics(t *testing.T) {
 	result := hub.SendToUserWithRetry(ctx, userIDs[1], msg)
 	require.NoError(t, result.FinalError)
 
-	time.Sleep(1 * time.Second)
-	// 手动触发统计刷写（正常运行时由 30 秒定时器自动刷写）
-	hub.FlushStats()
-
-	// 验证消息发送统计
+	// 轮询等待消息统计落库（每轮手动 FlushStats 推进刷写，替代固定 sleep + 一次刷写）
+	assert.Eventually(t, func() bool {
+		hub.FlushStats()
+		stats, err := statsRepo.GetNodeStats(ctx, hub.GetNodeID())
+		return err == nil && stats != nil && stats.MessagesSent >= 1
+	}, 10*time.Second, 100*time.Millisecond, "消息发送数应至少为1")
 	nodeStats, err = statsRepo.GetNodeStats(ctx, hub.GetNodeID())
 	require.NoError(t, err)
-	assert.GreaterOrEqual(t, nodeStats.MessagesSent, int64(1), "消息发送数应至少为1")
 	t.Logf("✅ 消息发送数: %d", nodeStats.MessagesSent)
 
 	// 8. 测试:广播消息,验证广播统计
@@ -150,14 +151,14 @@ func TestHubRedisStatistics(t *testing.T) {
 	broadcastMsg.Receiver = ""
 	_ = hub.Deliver(ctx, broadcastMsg, false)
 
-	time.Sleep(1 * time.Second)
-	// 手动触发统计刷写
-	hub.FlushStats()
-
-	// 验证广播统计
+	// 轮询等待广播统计落库（同上）
+	assert.Eventually(t, func() bool {
+		hub.FlushStats()
+		stats, err := statsRepo.GetNodeStats(ctx, hub.GetNodeID())
+		return err == nil && stats != nil && stats.BroadcastsSent >= 1
+	}, 10*time.Second, 100*time.Millisecond, "广播发送数应至少为1")
 	nodeStats, err = statsRepo.GetNodeStats(ctx, hub.GetNodeID())
 	require.NoError(t, err)
-	assert.GreaterOrEqual(t, nodeStats.BroadcastsSent, int64(1), "广播发送数应至少为1")
 	t.Logf("✅ 广播发送数: %d", nodeStats.BroadcastsSent)
 
 	// 9. 测试:注销客户端,验证活跃连接数更新
@@ -165,12 +166,15 @@ func TestHubRedisStatistics(t *testing.T) {
 	for i := range 5 {
 		hub.Unregister(clients[i])
 	}
-	time.Sleep(500 * time.Millisecond) // 等待防抖定时器触发
 
+	// 轮询等待防抖刷写后活跃连接数收敛到精确值（替代固定 sleep + 精确断言的时序竞态）
+	expectedAfterUnregister := int64(clientCount - 5)
+	assert.Eventually(t, func() bool {
+		stats, err := statsRepo.GetNodeStats(ctx, hub.GetNodeID())
+		return err == nil && stats != nil && stats.ActiveConnections == expectedAfterUnregister
+	}, 10*time.Second, 100*time.Millisecond, "活跃连接数应为%d", expectedAfterUnregister)
 	nodeStats, err = statsRepo.GetNodeStats(ctx, hub.GetNodeID())
 	require.NoError(t, err)
-	expectedAfterUnregister := int64(clientCount - 5)
-	assert.Equal(t, expectedAfterUnregister, nodeStats.ActiveConnections, "活跃连接数应为%d", expectedAfterUnregister)
 	t.Logf("✅ 注销5个客户端后活跃连接数: %d (期望: %d)", nodeStats.ActiveConnections, expectedAfterUnregister)
 
 	// 10. 测试:GetUptime 方法
@@ -273,7 +277,8 @@ func TestHubClusterStatistics(t *testing.T) {
 
 	// 6. 使用重试机制等待集群统计同步
 	time.Sleep(1 * time.Second) // 等待异步统计任务完成（避免并发竞态）
-	maxRetries := 30
+	// 满载 -race 下两节点防抖刷写与 Redis 聚合延迟可达十几秒，窗口放宽到 30s
+	maxRetries := 60
 	var clusterStats *ClusterStats
 	var err error
 	for retry := range maxRetries {

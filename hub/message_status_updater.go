@@ -86,7 +86,7 @@ func (u *MessageStatusUpdater) flush(batch []*statusUpdateItem) {
 
 	for key, ids := range groups {
 		if err := u.hub.messageRecordRepo.BatchUpdateStatus(ctx, ids, key.status, key.reason, key.errMsg); err != nil {
-			u.hub.logger.DebugKV("批量更新消息状态失败",
+			u.hub.logger.DebugContextKV(u.hub.ctx, "批量更新消息状态失败",
 				"count", len(ids),
 				"status", key.status,
 				"error", err,

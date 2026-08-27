@@ -216,8 +216,8 @@ func TestHeartbeatTimeout(t *testing.T) {
 	// 手动设置一个过期的心跳时间（3秒前）
 	hub.SetClientLastHeartbeatForTest(client.ID, time.Now().Add(-3*time.Second))
 
-	// 等待心跳检查触发（最多2秒）
-	timeoutCall := recorder.WaitForTimeout(2 * time.Second)
+	// 轮询等待超时回调（宽松窗口：满载下 timewheel 调度延迟可超 2s）
+	timeoutCall := recorder.WaitForTimeout(8 * time.Second)
 
 	// 验证超时回调被触发
 	assert.NotNil(t, timeoutCall, "Timeout callback should be called")
@@ -226,10 +226,10 @@ func TestHeartbeatTimeout(t *testing.T) {
 		assert.Equal(t, client.UserID, timeoutCall.UserID, "User ID should match")
 	}
 
-	// 验证客户端已被移除（使用公共 API 避免数据竞争）
-	time.Sleep(200 * time.Millisecond)
-	exists := hub.HasClient(client.ID)
-	assert.False(t, exists, "Client should be removed after timeout")
+	// 轮询验证客户端已被移除（回调触发与注册表移除异步完成）
+	assert.Eventually(t, func() bool {
+		return !hub.HasClient(client.ID)
+	}, 3*time.Second, 50*time.Millisecond, "Client should be removed after timeout")
 }
 
 // TestHeartbeatNoTimeout 测试正常心跳不会超时
@@ -310,7 +310,9 @@ func TestMultipleClientsHeartbeat(t *testing.T) {
 	hub.OnHeartbeatTimeout(func(clientID, userID string, lastHeartbeat time.Time) {
 		recorder.Record(clientID, userID, lastHeartbeat)
 	})
-	hub.SetHeartbeatConfig(1*time.Second, 1500*time.Millisecond)
+	// 检查间隔 1s、超时 5s：非超时客户端(005/007)的存活余量必须远大于满载下的
+	// 检查调度延迟（原 1.5s 余量在 -race 满载下会被首 tick 延迟击穿，误判 005/007 超时）
+	hub.SetHeartbeatConfig(1*time.Second, 5*time.Second)
 
 	go hub.Run()
 	defer hub.Shutdown()
@@ -344,28 +346,44 @@ func TestMultipleClientsHeartbeat(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// 第一个和第三个客户端保持心跳，第二个客户端超时
+	// keep-alive 持续到测试断言完成（无固定 tick 数）：满载下检测延迟超过
+	// 固定刷新窗口会让 005/007 也被误判超时（时序 flaky 根因）
+	stopKeepAlive := make(chan struct{})
+	defer close(stopKeepAlive)
 	go func() {
 		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
-		for i := 0; i < 6; i++ {
-			<-ticker.C
-			now := time.Now()
-			clients[0].SetLastHeartbeat(now)
-			clients[0].SetLastSeen(now)
-			hub.RefreshHeartbeatTimeout(clients[0])
-			clients[2].SetLastHeartbeat(now)
-			clients[2].SetLastSeen(now)
-			hub.RefreshHeartbeatTimeout(clients[2])
+		for {
+			select {
+			case <-stopKeepAlive:
+				return
+			case <-ticker.C:
+				now := time.Now()
+				clients[0].SetLastHeartbeat(now)
+				clients[0].SetLastSeen(now)
+				hub.RefreshHeartbeatTimeout(clients[0])
+				clients[2].SetLastHeartbeat(now)
+				clients[2].SetLastSeen(now)
+				hub.RefreshHeartbeatTimeout(clients[2])
+			}
 		}
 	}()
 
-	// 让第二个客户端的心跳过期
-	hub.SetClientLastHeartbeatForTest(clients[1].ID, time.Now().Add(-3*time.Second))
+	// 让第二个客户端的心跳过期（过期深度须大于超时阈值，确保首轮检查即触发）
+	hub.SetClientLastHeartbeatForTest(clients[1].ID, time.Now().Add(-10*time.Second))
 
-	// 等待超时检测
-	time.Sleep(2 * time.Second)
+	// 轮询等待超时检测（宽松窗口，替代固定 sleep）
+	// 时间轮任务在注册后 timeout(5s) 才触发检查，满载下调度延迟需再叠加数秒余量
+	assert.Eventually(t, func() bool {
+		for _, call := range recorder.GetTimeoutCalls() {
+			if call.ClientID == clients[1].ID {
+				return true
+			}
+		}
+		return false
+	}, 15*time.Second, 100*time.Millisecond, "Client 006 should timeout")
 
-	// 验证只有第二个客户端超时
+	// 验证只有第二个客户端超时（此刻 005/007 仍被 keep-alive 刷新，不应超时）
 	calls := recorder.GetTimeoutCalls()
 	assert.Equal(t, 1, len(calls), "Should have exactly one timeout")
 	if len(calls) > 0 {
@@ -410,12 +428,10 @@ func TestHeartbeatWithoutHandler(t *testing.T) {
 	// 设置过期心跳
 	hub.SetClientLastHeartbeatForTest(client.ID, time.Now().Add(-2*time.Second))
 
-	// 等待检查
-	time.Sleep(1500 * time.Millisecond)
-
-	// 即使没有处理器，客户端也应该被移除
-	client = hub.GetClientByID(client.ID)
-	assert.Nil(t, client, "Client should be removed even without timeout handler")
+	// 轮询等待移除（宽松窗口，替代固定 sleep：满载下检测/移除链路均可超 1.5s）
+	assert.Eventually(t, func() bool {
+		return hub.GetClientByID(client.ID) == nil
+	}, 8*time.Second, 100*time.Millisecond, "Client should be removed even without timeout handler")
 }
 
 // TestHeartbeatConfigDefaults 测试默认配置

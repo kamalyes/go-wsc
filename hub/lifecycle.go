@@ -190,7 +190,12 @@ func (h *Hub) reportPerformanceMetrics() {
 
 	stats, err := h.statsRepo.GetNodeStats(ctx, h.nodeID)
 	if err != nil {
-		h.logger.WarnKV("获取节点统计失败", "error", err)
+		h.logger.WarnKV("获取节点统计失败", "node_id", h.nodeID, "error", err)
+		// 🔥 自愈：stats key 缺失（注册失败/Redis 逐出/清空）时重注册，
+		// 下个周期即可恢复上报，避免该节点统计永久缺失
+		if regErr := h.statsRepo.RegisterNode(ctx, h.nodeID, time.Now().Unix()); regErr != nil {
+			h.logger.WarnKV("重新注册节点失败", "node_id", h.nodeID, "error", regErr)
+		}
 		return
 	}
 

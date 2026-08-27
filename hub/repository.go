@@ -265,9 +265,13 @@ func (h *Hub) SetHubStatsRepository(repo HubStatsRepository) {
 	h.logger.InfoKV("Hub统计仓库已设置", "repository_type", "redis")
 
 	// 设置启动时间到 Redis
+	// ⚠️ 此处曾吞掉错误：RegisterNode 失败（Redis 抖动/超时）后 stats key 不存在，
+	// reportPerformanceMetrics 周期性报 "node stats not found"，且无根因日志可查
 	ctx, cancel := context.WithTimeout(h.ctx, 3*time.Second)
 	defer cancel()
-	_ = repo.RegisterNode(ctx, h.nodeID, time.Now().Unix())
+	if err := repo.RegisterNode(ctx, h.nodeID, time.Now().Unix()); err != nil {
+		h.logger.ErrorKV("注册节点到Redis失败", "node_id", h.nodeID, "error", err)
+	}
 }
 
 // SetMessageExpireDuration 设置ACK消息的过期时间

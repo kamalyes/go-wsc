@@ -62,6 +62,11 @@ func TestLua_RegisterNodeAndUpdateConnection(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, members, nodeID)
 
+	// 验证 nodes set 也设置了 TTL（全集群下线后集合自动过期清空）
+	setTTL, err := client.TTL(ctx, repo.GetNodesSetKey()).Result()
+	require.NoError(t, err)
+	assert.Greater(t, setTTL.Seconds(), float64(0), "nodes set 应设置 EXPIRE")
+
 	// 验证首次创建设置了 EXPIRE
 	ttl, err := client.TTL(ctx, repo.GetNodeKey(nodeID)).Result()
 	require.NoError(t, err)
@@ -224,4 +229,29 @@ func TestLua_GetTotalStats(t *testing.T) {
 	assert.Equal(t, 2, total.TotalNodes)
 	assert.Equal(t, int64(20), total.MessagesSent, "两节点 messages_sent 汇总应为 20")
 	assert.Equal(t, int64(10), total.MessagesReceived, "两节点 messages_received 汇总应为 10")
+}
+
+// TestLua_GetAllNodesStats_LazyPrune 验证 stats key 过期后集合成员被惰性剔除
+// 场景：节点注册后 stats key 过期（节点下线且未执行优雅清理），nodes 集合成员残留
+func TestLua_GetAllNodesStats_LazyPrune(t *testing.T) {
+	repo, client := newTestStatsRepo(t)
+	ctx := context.Background()
+
+	// 注册两个节点
+	require.NoError(t, repo.RegisterNode(ctx, "node-live", time.Now().Unix()))
+	require.NoError(t, repo.RegisterNode(ctx, "node-dead", time.Now().Unix()))
+
+	// 模拟 node-dead 的 stats key 过期（节点下线/崩溃后未清理）
+	require.NoError(t, client.Del(ctx, repo.GetNodeKey("node-dead")).Err())
+
+	all, err := repo.GetAllNodesStats(ctx)
+	require.NoError(t, err)
+	assert.Len(t, all, 1, "仅存活节点应返回")
+	assert.Contains(t, all, "node-live")
+
+	// node-dead 应被惰性剔除出 nodes 集合
+	members, err := client.SMembers(ctx, repo.GetNodesSetKey()).Result()
+	require.NoError(t, err)
+	assert.Contains(t, members, "node-live")
+	assert.NotContains(t, members, "node-dead", "stats key 已过期的节点应被惰性剔除")
 }

@@ -44,6 +44,7 @@ func (h *Hub) InitNodeGRPC() {
 	h.nodeRegistry = NewNodeRegistry(redisClient, h.nodeID, grpcAddr,
 		h.config.NodeGRPC.GetNodeGRPCKey(),
 		h.config.NodeGRPC.GetNodeHeartbeatKey(),
+		h.logger,
 	)
 	h.grpcServer = NewGRPCServer(h)
 	h.grpcClientPool = NewGRPCClientPool()
@@ -111,22 +112,29 @@ func (h *Hub) stopNodeGRPC() {
 		return
 	}
 
-	// 1. 注销本节点（短超时，避免 shutdown 阻塞过久）
+	// 1. 先停止节点注册中心（终止 refreshLoop）
+	// 必须先于 Unregister：若先注销再停止，refreshLoop 的 ticker 恰好触发时会
+	// registerNode 把已注销节点重新写回 Redis，残留注册信息最长 90s（TTL），
+	// 期间其他节点 gRPC 路由持续向已下线节点发起连接
+	if h.nodeRegistry != nil {
+		h.nodeRegistry.Stop()
+	}
+
+	// 2. 注销本节点（短超时，避免 shutdown 阻塞过久）
 	if h.nodeRegistry != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		if err := h.nodeRegistry.Unregister(ctx); err != nil {
 			h.logger.WarnKV("注销节点失败", "error", err, "node_id", h.nodeID)
 		}
 		cancel()
-		h.nodeRegistry.Stop()
 	}
 
-	// 2. 停止 gRPC 服务端
+	// 3. 停止 gRPC 服务端
 	if h.grpcServer != nil {
 		h.grpcServer.Stop()
 	}
 
-	// 3. 关闭 gRPC 客户端连接池
+	// 4. 关闭 gRPC 客户端连接池
 	if h.grpcClientPool != nil {
 		h.grpcClientPool.Close()
 	}

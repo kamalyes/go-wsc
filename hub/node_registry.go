@@ -49,6 +49,7 @@ type NodeRegistry struct {
 	grpcAddr     string
 	grpcKey      string // 节点 gRPC 地址 Hash key（从配置获取）
 	heartbeatKey string // 节点心跳 Hash key（从配置获取）
+	logger       WSCLogger
 
 	// nodes 缓存所有活跃节点的 gRPC 地址（nodeID → addr）
 	nodes sync.Map
@@ -64,13 +65,14 @@ type NodeRegistry struct {
 
 // NewNodeRegistry 创建节点注册中心
 // grpcKey/heartbeatKey 来自 go-config NodeGRPC 配置，默认 "wsc:nodes:grpc" / "wsc:nodes:heartbeat"
-func NewNodeRegistry(redisClient redis.UniversalClient, nodeID, grpcAddr, grpcKey, heartbeatKey string) *NodeRegistry {
+func NewNodeRegistry(redisClient redis.UniversalClient, nodeID, grpcAddr, grpcKey, heartbeatKey string, logger WSCLogger) *NodeRegistry {
 	return &NodeRegistry{
 		redisClient:  redisClient,
 		localNodeID:  nodeID,
 		grpcAddr:     grpcAddr,
 		grpcKey:      grpcKey,
 		heartbeatKey: heartbeatKey,
+		logger:       logger,
 		stopCh:       make(chan struct{}),
 	}
 }
@@ -82,13 +84,7 @@ func (r *NodeRegistry) Register(ctx context.Context) error {
 	}
 
 	// 注册 gRPC 地址和心跳
-	pipe := r.redisClient.Pipeline()
-	pipe.HSet(ctx, r.grpcKey, r.localNodeID, r.grpcAddr)
-	pipe.HSet(ctx, r.heartbeatKey, r.localNodeID, time.Now().Unix())
-	pipe.Expire(ctx, r.grpcKey, nodeRegistryTTL)
-	pipe.Expire(ctx, r.heartbeatKey, nodeRegistryTTL)
-	_, err := pipe.Exec(ctx)
-	if err != nil {
+	if err := r.registerNode(ctx); err != nil {
 		return fmt.Errorf("注册节点失败: %w", err)
 	}
 
@@ -161,6 +157,18 @@ func (r *NodeRegistry) GetAllNodes() map[string]string {
 	return result
 }
 
+// registerNode 向 Redis 写入本节点的 gRPC 地址与心跳，并刷新 key 的 TTL
+// 注册与周期刷新共用，保证 key 被删除或过期后能自动恢复上报
+func (r *NodeRegistry) registerNode(ctx context.Context) error {
+	pipe := r.redisClient.Pipeline()
+	pipe.HSet(ctx, r.grpcKey, r.localNodeID, r.grpcAddr)
+	pipe.HSet(ctx, r.heartbeatKey, r.localNodeID, time.Now().Unix())
+	pipe.Expire(ctx, r.grpcKey, nodeRegistryTTL)
+	pipe.Expire(ctx, r.heartbeatKey, nodeRegistryTTL)
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
 // refreshLoop 定期刷新本节点心跳和全量节点列表
 func (r *NodeRegistry) refreshLoop() {
 	defer r.wg.Done()
@@ -174,10 +182,16 @@ func (r *NodeRegistry) refreshLoop() {
 			return
 		case <-ticker.C:
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			// 刷新本节点心跳
-			r.redisClient.HSet(ctx, r.heartbeatKey, r.localNodeID, time.Now().Unix())
+			// 重新注册本节点（重写 grpc 地址 + 心跳 + TTL，key 被删除后可自动恢复）
+			// 失败必须记日志：Redis 持续故障时本节点会静默从发现表消失，
+			// 其他节点 gRPC 路由全部扑空（降级 PubSub），无日志无法定位根因
+			if err := r.registerNode(ctx); err != nil && r.logger != nil {
+				r.logger.WarnKV("刷新节点注册失败", "node_id", r.localNodeID, "error", err)
+			}
 			// 刷新全量节点列表
-			r.refreshNodes(ctx)
+			if err := r.refreshNodes(ctx); err != nil && r.logger != nil {
+				r.logger.WarnKV("刷新节点列表失败", "node_id", r.localNodeID, "error", err)
+			}
 			cancel()
 		}
 	}

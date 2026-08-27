@@ -13,6 +13,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -111,10 +112,13 @@ return 1
 	// ARGV[1] = nodeID, ARGV[2] = startTime, ARGV[3] = expireSeconds
 	// HSETNX：幂等注册——周期性 touch 重注册时保留原 start_time（uptime 不被重置），
 	// 空闲节点（无连接事件触发 syncClientStats 续期）靠周期性 touch 维持 stats key 不过期
+	// nodes 集合同样设置 TTL：任一存活节点周期 touch（SADD+EXPIRE）即整体续期；
+	// 全集群下线后集合自动过期清空，避免成员永久残留
 	luaRegisterNode = `
 redis.call('HSETNX', KEYS[1], 'start_time', ARGV[2])
 redis.call('EXPIRE', KEYS[1], ARGV[3])
 redis.call('SADD', KEYS[2], ARGV[1])
+redis.call('EXPIRE', KEYS[2], ARGV[3])
 return 1
 `
 
@@ -337,6 +341,10 @@ func (r *RedisHubStatsRepository) UpdateNodeHeartbeat(ctx context.Context, nodeI
 	return r.client.Set(ctx, key, time.Now().Unix(), r.statsExpire).Err()
 }
 
+// ErrNodeStatsNotFound 节点统计不存在（stats key 已过期或节点从未注册）
+// 调用方可通过 errors.Is 区分「节点已下线」与 Redis 传输异常
+var ErrNodeStatsNotFound = errors.New("node stats not found")
+
 // GetNodeStats 获取指定节点的统计信息
 func (r *RedisHubStatsRepository) GetNodeStats(ctx context.Context, nodeID string) (*NodeStats, error) {
 	key := r.GetNodeKey(nodeID)
@@ -349,7 +357,7 @@ func (r *RedisHubStatsRepository) GetNodeStats(ctx context.Context, nodeID strin
 
 	// 检查是否找到数据
 	if stats.TotalConnections == 0 && stats.ActiveConnections == 0 && stats.StartTime == 0 {
-		return nil, fmt.Errorf("node stats not found: %s", nodeID)
+		return nil, fmt.Errorf("%w: %s", ErrNodeStatsNotFound, nodeID)
 	}
 
 	// 计算运行时间
@@ -380,6 +388,11 @@ func (r *RedisHubStatsRepository) GetAllNodesStats(ctx context.Context) (map[str
 	for _, nodeID := range nodeIDs {
 		stats, err := r.GetNodeStats(ctx, nodeID)
 		if err != nil {
+			// 节点 stats key 已过期但集合成员残留（节点下线后崩溃未清理）→ 惰性剔除，
+			// 保证 nodes 集合成员数与存活节点数一致；Redis 传输异常则仅跳过不误删
+			if errors.Is(err, ErrNodeStatsNotFound) {
+				_ = r.client.SRem(ctx, r.GetNodesSetKey(), nodeID).Err()
+			}
 			continue // 跳过获取失败的节点
 		}
 		statsMap[nodeID] = stats

@@ -1112,8 +1112,10 @@ func TestHandleDistributedSendMessage_UserNotFound(t *testing.T) {
 
 	distMsg := makeDistributedMessage(OperationTypeSendMessage, "other-node", makeGroupMessage("sender"))
 	distMsg.TargetID = "u-not-exist"
+	// 用户不在本节点是广播兜底的正常预期（其余节点扑空自动跳过），
+	// 返回 nil 避免触发 PubSub 订阅端无效重试 + ERROR 噪音
 	err := hub.handleDistributedSendMessage(context.Background(), distMsg)
-	assert.Error(t, err, "用户不存在应返回错误")
+	assert.NoError(t, err, "用户不在本节点应静默跳过（广播兜底正常路径）")
 }
 
 func TestHandleDistributedSendMessage_Success(t *testing.T) {

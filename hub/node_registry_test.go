@@ -24,7 +24,7 @@ import (
 
 // TestNodeRegistry_NilRedis 验证 redisClient 为 nil 时 Register/Unregister 返回 nil
 func TestNodeRegistry_NilRedis(t *testing.T) {
-	r := NewNodeRegistry(nil, "node1", "127.0.0.1:50051", "wsc:nodes:grpc", "wsc:nodes:heartbeat")
+	r := NewNodeRegistry(nil, "node1", "127.0.0.1:50051", "wsc:nodes:grpc", "wsc:nodes:heartbeat", nil)
 
 	require.Nil(t, r.Register(context.Background()))
 	require.Nil(t, r.Unregister(context.Background()))
@@ -38,7 +38,7 @@ func TestNodeRegistry_EmptyAddr(t *testing.T) {
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
 
-	r := NewNodeRegistry(client, "node1", "", "wsc:nodes:grpc", "wsc:nodes:heartbeat")
+	r := NewNodeRegistry(client, "node1", "", "wsc:nodes:grpc", "wsc:nodes:heartbeat", nil)
 	require.Nil(t, r.Register(context.Background()))
 	r.Stop()
 }
@@ -49,7 +49,7 @@ func newTestNodeRegistry(t *testing.T, nodeID, grpcAddr string) (*NodeRegistry, 
 	mr := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
-	r := NewNodeRegistry(client, nodeID, grpcAddr, "wsc:nodes:grpc", "wsc:nodes:heartbeat")
+	r := NewNodeRegistry(client, nodeID, grpcAddr, "wsc:nodes:grpc", "wsc:nodes:heartbeat", nil)
 	return r, client
 }
 
@@ -165,6 +165,56 @@ func TestNodeRegistry_RefreshNodes_LoadAndExpire(t *testing.T) {
 	// 过期节点应从 Redis 删除
 	_, err := client.HGet(ctx, "wsc:nodes:grpc", "nodeExpired").Result()
 	assert.Error(t, err, "过期节点应从 Redis 删除")
+}
+
+// TestNodeRegistry_ReRegisterAfterKeyDeleted 验证 Redis key 被删除后 registerNode 能重新写入注册信息
+// 回归场景：refreshLoop 周期调用 registerNode，key 被手动删除或 TTL 过期后节点可自动恢复上报
+func TestNodeRegistry_ReRegisterAfterKeyDeleted(t *testing.T) {
+	r, client := newTestNodeRegistry(t, "node-re", "127.0.0.1:50055")
+	defer r.Stop()
+	ctx := context.Background()
+
+	require.NoError(t, r.Register(ctx))
+
+	// 模拟 key 被删除
+	require.NoError(t, client.Del(ctx, "wsc:nodes:grpc").Err())
+	require.NoError(t, client.Del(ctx, "wsc:nodes:heartbeat").Err())
+
+	// 周期刷新重新注册
+	require.NoError(t, r.registerNode(ctx))
+
+	// grpc 地址与心跳均应恢复
+	addr, err := client.HGet(ctx, "wsc:nodes:grpc", "node-re").Result()
+	require.NoError(t, err)
+	assert.Equal(t, "127.0.0.1:50055", addr)
+
+	hb, err := client.HGet(ctx, "wsc:nodes:heartbeat", "node-re").Result()
+	require.NoError(t, err)
+	assert.NotEmpty(t, hb)
+}
+
+// TestNodeRegistry_RefreshTTL 验证 registerNode 刷新 key 的 TTL（防止 90s 后整体过期）
+func TestNodeRegistry_RefreshTTL(t *testing.T) {
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	r := NewNodeRegistry(client, "node-ttl", "127.0.0.1:50056", "wsc:nodes:grpc", "wsc:nodes:heartbeat", nil)
+	defer r.Stop()
+	ctx := context.Background()
+
+	require.NoError(t, r.Register(ctx))
+
+	// 模拟时间流逝 60s，TTL 剩余约 30s
+	mr.FastForward(60 * time.Second)
+	ttlBefore, err := client.TTL(ctx, "wsc:nodes:grpc").Result()
+	require.NoError(t, err)
+	require.True(t, ttlBefore > 0 && ttlBefore <= 30*time.Second)
+
+	// 重新注册应续期 TTL 至 90s
+	require.NoError(t, r.registerNode(ctx))
+	ttlAfter, err := client.TTL(ctx, "wsc:nodes:grpc").Result()
+	require.NoError(t, err)
+	assert.True(t, ttlAfter > ttlBefore, "重新注册后续期 TTL")
 }
 
 // TestNodeRegistry_RefreshNodes_RemovesStaleLocal 验证 refreshNodes 清理本地缓存中已不存在的节点

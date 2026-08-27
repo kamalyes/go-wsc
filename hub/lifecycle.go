@@ -501,13 +501,20 @@ func (h *Hub) SafeShutdown() error {
 		if h.statsRepo != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			stats, _ := h.statsRepo.GetNodeStats(ctx, h.nodeID)
-			cancel()
 
 			if stats != nil {
 				totalConnections = stats.TotalConnections
 				messagesSent = stats.MessagesSent
 				broadcastsSent = stats.BroadcastsSent
 			}
+
+			// 优雅退出时清理本节点统计（DEL stats/heartbeat + SREM nodes 集合）：
+			// 滚动发布中旧 Pod 退出后其 nodeID 立即从集群消失，保证集合成员数 = 存活 Pod 数；
+			// 崩溃场景（无法执行此处）由 GetAllNodesStats 惰性剔除兜底
+			if err := h.statsRepo.CleanupNodeStats(ctx, h.nodeID); err != nil {
+				h.logger.WarnKV("清理节点统计失败", "node_id", h.nodeID, "error", err)
+			}
+			cancel()
 		}
 
 		h.logger.InfoKV("✅ Hub 安全关闭成功",

@@ -306,7 +306,10 @@ func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *Distrib
 			"from_node", distMsg.NodeID,
 			"node_id", h.nodeID,
 		)
-		return fmt.Errorf("user not found on this node: %s", distMsg.TargetID)
+		// 返回 nil 而非 error：广播兜底消息（publishToCluster）发到所有节点，
+		// 用户不在本节点是正常预期（cluster_dispatch 注释"其余节点 HasUser 扑空自动跳过"）
+		// 若返回 error，PubSub 订阅端会重试 3 次（每次必扑空）并打 ERROR 日志，产生噪音与无效开销
+		return nil
 	}
 
 	h.logger.InfoContextKV(ctx, "✅ [跨Pod] 消息命中本节点，准备投递给本地客户端",

@@ -371,7 +371,7 @@ func (h *Hub) publishToCluster(ctx context.Context, dispatch *models.Distributed
 	}
 
 	channel := h.config.RedisRepository.PubSub.GetBroadcastChannel()
-	data := h.marshalDistributedMessage(dispatch, dispatch.Message.GetMessageID())
+	data := h.marshalDistributedMessage(ctx, dispatch)
 	h.logger.InfoContextKV(ctx, "📡 PubSub 广播频道发布",
 		"channel", channel,
 		"payload_size", len(data),
@@ -396,7 +396,7 @@ func (h *Hub) publishToTargetedNodes(ctx context.Context, dispatch *models.Distr
 	if h.pubsub == nil || len(nodeIDs) == 0 {
 		return nil
 	}
-	data := h.marshalDistributedMessage(dispatch, dispatch.Message.GetMessageID())
+	data := h.marshalDistributedMessage(ctx, dispatch)
 	prefix := h.config.RedisRepository.PubSub.GetNodeChannelPrefix()
 	h.logger.InfoContextKV(ctx, "📡 PubSub 定向发布",
 		"channel_prefix", prefix,

@@ -159,7 +159,7 @@ func (h *HybridOfflineMessageHandler) StoreOfflineMessage(ctx context.Context, u
 	}
 
 	// 过滤不需要存储的消息类型
-	if h.shouldSkipOfflineStorage(userID, msg) {
+	if h.shouldSkipOfflineStorage(ctx, userID, msg) {
 		return nil
 	}
 
@@ -189,10 +189,11 @@ func (h *HybridOfflineMessageHandler) StoreOfflineMessage(ctx context.Context, u
 }
 
 // shouldSkipOfflineStorage 判断是否应该跳过离线存储
-func (h *HybridOfflineMessageHandler) shouldSkipOfflineStorage(userID string, msg *HubMessage) bool {
+func (h *HybridOfflineMessageHandler) shouldSkipOfflineStorage(ctx context.Context, userID string, msg *HubMessage) bool {
 	// 过滤系统消息
 	if msg.MessageType.IsSystemType() {
-		h.logger.DebugKV("跳过系统消息的离线存储",
+		// 🔗 trace 恢复：以消息信封 trace_id 为准，跳过日志可关联原始发送链路
+		h.logger.DebugContextKV(msg.ContextFrom(ctx), "跳过系统消息的离线存储",
 			"user_id", userID,
 			"message_id", msg.MessageID,
 			"sender", msg.Sender,
@@ -207,9 +208,10 @@ func (h *HybridOfflineMessageHandler) shouldSkipOfflineStorage(userID string, ms
 // queueKey 构造应用+命名空间+群组隔离的 Redis 队列名：appID:ns:group:userID
 // 纯参数构造（不依赖 ctx、不做归一化），避免异步队列消费时 ctx 路由元数据丢失导致串扰
 // 调用方负责归一化：appID 经 routing.AppIDFromContext（内部 constants.NormalizeAppID）补默认；
-//                   groupID 经 constants.NormalizeGroupID 补 DefaultGroupID（P2P 空补默认组）
-//   - 完整群组消息：appID:ns:group:userID
-//   - 点对点消息：appID:ns:__default_gp__:userID（groupID 补默认组）
+//
+//	                groupID 经 constants.NormalizeGroupID 补 DefaultGroupID（P2P 空补默认组）
+//	- 完整群组消息：appID:ns:group:userID
+//	- 点对点消息：appID:ns:__default_gp__:userID（groupID 补默认组）
 func queueKey(appID, ns, groupID, userID string) string {
 	return appID + ":" + ns + ":" + groupID + ":" + userID
 }
@@ -248,7 +250,7 @@ func (h *HybridOfflineMessageHandler) storeToRedis(ctx context.Context, userID s
 	appID, ns, firstGID := resolveOfflineRoute(ctx, msg)
 	key := queueKey(appID, ns, constants.NormalizeGroupID(firstGID), userID)
 	if err := h.queueRepo.Enqueue(ctx, key, msg); err != nil {
-		h.logger.ErrorKV("存储离线消息到 Redis 失败",
+		h.logger.ErrorContextKV(msg.ContextFrom(ctx), "存储离线消息到 Redis 失败",
 			"user_id", userID,
 			"id", msg.ID,
 			"message_id", msg.MessageID,
@@ -260,7 +262,7 @@ func (h *HybridOfflineMessageHandler) storeToRedis(ctx context.Context, userID s
 		return errorx.WrapError("redis queue", err)
 	}
 
-	h.logger.DebugKV("离线消息已存储到 Redis",
+	h.logger.DebugContextKV(msg.ContextFrom(ctx), "离线消息已存储到 Redis",
 		"user_id", userID,
 		"id", msg.ID,
 		"message_id", msg.MessageID,
@@ -284,7 +286,7 @@ func (h *HybridOfflineMessageHandler) DrainOfflineQueue(ctx context.Context, use
 	if count <= 0 {
 		length, err := h.queueRepo.GetLength(ctx, key)
 		if err != nil {
-			h.logger.ErrorKV("获取离线队列长度失败",
+			h.logger.ErrorContextKV(ctx, "获取离线队列长度失败",
 				"user_id", userID,
 				"queue", key,
 				"error", err,
@@ -299,7 +301,7 @@ func (h *HybridOfflineMessageHandler) DrainOfflineQueue(ctx context.Context, use
 
 	msgs, err := h.queueRepo.DequeueBatch(ctx, key, count)
 	if err != nil {
-		h.logger.ErrorKV("排空离线队列失败",
+		h.logger.ErrorContextKV(ctx, "排空离线队列失败",
 			"user_id", userID,
 			"queue", key,
 			"count", count,
@@ -315,7 +317,7 @@ func (h *HybridOfflineMessageHandler) DrainOfflineQueue(ctx context.Context, use
 func (h *HybridOfflineMessageHandler) storeToDatabase(ctx context.Context, msg *HubMessage) error {
 	compressedData, dataSize, err := zipx.ZlibCompressObjectWithSize(msg)
 	if err != nil {
-		h.logger.ErrorKV("压缩消息失败",
+		h.logger.ErrorContextKV(msg.ContextFrom(ctx), "压缩消息失败",
 			"user_id", msg.Receiver,
 			"id", msg.ID,
 			"message_id", msg.MessageID,
@@ -349,7 +351,7 @@ func (h *HybridOfflineMessageHandler) storeToDatabase(ctx context.Context, msg *
 	}
 
 	if err := h.dbRepo.Save(ctx, record); err != nil {
-		h.logger.ErrorKV("持久化离线消息到 MySQL offline_messages 表失败",
+		h.logger.ErrorContextKV(msg.ContextFrom(ctx), "持久化离线消息到 MySQL offline_messages 表失败",
 			"user_id", msg.Receiver,
 			"id", msg.ID,
 			"message_id", msg.MessageID,
@@ -358,7 +360,7 @@ func (h *HybridOfflineMessageHandler) storeToDatabase(ctx context.Context, msg *
 		return errorx.WrapError("mysql", err)
 	}
 
-	h.logger.DebugKV("离线消息已持久化到 MySQL offline_messages 表",
+	h.logger.DebugContextKV(msg.ContextFrom(ctx), "离线消息已持久化到 MySQL offline_messages 表",
 		"user_id", msg.Receiver,
 		"id", msg.ID,
 		"message_id", msg.MessageID,
@@ -397,7 +399,7 @@ func (h *HybridOfflineMessageHandler) GetOfflineMessages(ctx context.Context, us
 		Cursor:    cursor,
 	})
 	if err != nil {
-		h.logger.ErrorKV("从 MySQL 读取离线消息失败",
+		h.logger.ErrorContextKV(ctx, "从 MySQL 读取离线消息失败",
 			"user_id", userID,
 			"app_id", appID,
 			"namespace", namespace,
@@ -411,7 +413,7 @@ func (h *HybridOfflineMessageHandler) GetOfflineMessages(ctx context.Context, us
 	for _, record := range records {
 		msg, err := zipx.ZlibDecompressObject[*HubMessage](record.CompressedData)
 		if err != nil {
-			h.logger.ErrorKV("解压离线消息失败",
+			h.logger.ErrorContextKV(ctx, "解压离线消息失败",
 				"message_id", record.MessageID,
 				"user_id", userID,
 				"error", err,
@@ -426,7 +428,7 @@ func (h *HybridOfflineMessageHandler) GetOfflineMessages(ctx context.Context, us
 		nextCursor = records[len(records)-1].MessageID
 	}
 
-	h.logger.InfoKV("从 MySQL 读取离线消息",
+	h.logger.InfoContextKV(ctx, "从 MySQL 读取离线消息",
 		"user_id", userID,
 		"app_id", appID,
 		"namespace", namespace,
@@ -451,7 +453,7 @@ func (h *HybridOfflineMessageHandler) DeleteOfflineMessages(ctx context.Context,
 	namespace := routing.NamespaceFromContext(ctx)
 
 	if err := h.dbRepo.DeleteByMessageIDs(ctx, appID, namespace, userID, messageIDs); err != nil {
-		h.logger.ErrorKV("从 MySQL offline_messages 表删除离线消息失败",
+		h.logger.ErrorContextKV(ctx, "从 MySQL offline_messages 表删除离线消息失败",
 			"user_id", userID,
 			"app_id", appID,
 			"namespace", namespace,
@@ -461,7 +463,7 @@ func (h *HybridOfflineMessageHandler) DeleteOfflineMessages(ctx context.Context,
 		return err
 	}
 
-	h.logger.DebugKV("从 MySQL offline_messages 表删除离线消息成功",
+	h.logger.DebugContextKV(ctx, "从 MySQL offline_messages 表删除离线消息成功",
 		"user_id", userID,
 		"app_id", appID,
 		"namespace", namespace,
@@ -479,7 +481,7 @@ func (h *HybridOfflineMessageHandler) GetOfflineMessageCount(ctx context.Context
 
 	count, err := h.dbRepo.GetCountByReceiver(ctx, appID, namespace, userID)
 	if err != nil {
-		h.logger.ErrorKV("从 MySQL 获取离线消息数量失败",
+		h.logger.ErrorContextKV(ctx, "从 MySQL 获取离线消息数量失败",
 			"user_id", userID,
 			"app_id", appID,
 			"namespace", namespace,
@@ -504,7 +506,7 @@ func (h *HybridOfflineMessageHandler) ClearOfflineMessages(ctx context.Context, 
 		key := queueKey(appID, namespace, constants.NormalizeGroupID(groupID), userID)
 		if err := h.queueRepo.Clear(ctx, key); err != nil {
 			errs = append(errs, errorx.WrapError("redis", err))
-			h.logger.ErrorKV("清空 Redis 离线消息队列失败",
+			h.logger.ErrorContextKV(ctx, "清空 Redis 离线消息队列失败",
 				"user_id", userID,
 				"queue", key,
 				"error", err,
@@ -515,14 +517,14 @@ func (h *HybridOfflineMessageHandler) ClearOfflineMessages(ctx context.Context, 
 	// 2. 清空 MySQL offline_messages 表（按应用+命名空间隔离，跨组一次清完）
 	if err := h.dbRepo.ClearByReceiver(ctx, appID, namespace, userID); err != nil {
 		errs = append(errs, errorx.WrapError("mysql", err))
-		h.logger.ErrorKV("清空 MySQL offline_messages 表失败",
+		h.logger.ErrorContextKV(ctx, "清空 MySQL offline_messages 表失败",
 			"user_id", userID,
 			"app_id", appID,
 			"namespace", namespace,
 			"error", err,
 		)
 	} else {
-		h.logger.DebugKV("清空 MySQL offline_messages 表成功",
+		h.logger.DebugContextKV(ctx, "清空 MySQL offline_messages 表成功",
 			"user_id", userID,
 			"app_id", appID,
 			"namespace", namespace,
@@ -554,7 +556,7 @@ func (h *HybridOfflineMessageHandler) UpdatePushStatus(ctx context.Context, mess
 	}
 
 	if err := h.dbRepo.UpdatePushStatus(ctx, messageIDs, status, errorMsg); err != nil {
-		h.logger.ErrorKV("更新离线消息推送状态失败",
+		h.logger.ErrorContextKV(ctx, "更新离线消息推送状态失败",
 			"count", len(messageIDs),
 			"status", status,
 			"error", err,
@@ -562,7 +564,7 @@ func (h *HybridOfflineMessageHandler) UpdatePushStatus(ctx context.Context, mess
 		return fmt.Errorf("update push status: %w", err)
 	}
 
-	h.logger.DebugKV("更新离线消息推送状态",
+	h.logger.DebugContextKV(ctx, "更新离线消息推送状态",
 		"count", len(messageIDs),
 		"status", status,
 	)

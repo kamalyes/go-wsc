@@ -416,11 +416,11 @@ func TestMarshalDistributedMessage(t *testing.T) {
 		Timestamp: time.Now(),
 	}
 
-	data := hub.marshalDistributedMessage(distMsg, msg.MessageID)
+	data := hub.marshalDistributedMessage(context.Background(), distMsg)
 	assert.NotEmpty(t, data, "序列化结果不应为空")
 
 	// 验证可反序列化
-	parsed, err := hub.unmarshalDistributedMessage(data)
+	parsed, err := hub.unmarshalDistributedMessage(context.Background(), data)
 	require.NoError(t, err)
 	assert.Equal(t, distMsg.Type, parsed.Type)
 	assert.Equal(t, distMsg.NodeID, parsed.NodeID)

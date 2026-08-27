@@ -23,6 +23,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -149,9 +150,9 @@ func TestHeartbeatRebuildsEvictedOnlineIndex(t *testing.T) {
 		return !online
 	}, 2*time.Second, 30*time.Millisecond, "索引淘汰后用户应不可见")
 
-	// 索引淘汰后 GetUserNodes 返回 ErrUserNotFound（跨节点路由丢失）
+	// 索引淘汰后 GetUserNodes 返回 ErrTypeUserNotFound（跨节点路由丢失，按类型判定）
 	_, err = hubB.GetOnlineStatusRepo().GetUserNodes(ctx, client.UserID)
-	assert.ErrorIs(t, err, models.ErrUserNotFound, "索引淘汰后跨节点路由应丢失")
+	assert.Equal(t, models.ErrTypeUserNotFound, errorx.ClassifyError(err), "索引淘汰后跨节点路由应丢失")
 
 	// 对照：旧路径 UpdateClientHeartbeat 在 client:<id> 缺失时静默 no-op，不会重建
 	require.NoError(t, hubA.UpdateClientHeartbeat(client.ID))

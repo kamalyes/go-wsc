@@ -550,7 +550,7 @@ func (h *Hub) broadcastToFiltered(ctx context.Context, condition func(*Client) b
 	// 消息记录状态只更新一次（同一 msgID）
 	totalSuccess := atomic.LoadInt32(&successCount)
 	if totalSuccess > 0 {
-		h.updateMessageStatusAsync(msgID, MessageSendStatusSuccess, "", "")
+		h.updateMessageStatusAsync(ctx, msgID, MessageSendStatusSuccess, "", "")
 	}
 
 	totalDuration := time.Since(start)
@@ -622,7 +622,7 @@ func (h *Hub) broadcastToUserIDs(ctx context.Context, userIDs []string, msg *Hub
 
 	totalSuccess := atomic.LoadInt32(&successCount)
 	if totalSuccess > 0 {
-		h.updateMessageStatusAsync(msgID, MessageSendStatusSuccess, "", "")
+		h.updateMessageStatusAsync(ctx, msgID, MessageSendStatusSuccess, "", "")
 	}
 
 	return int(totalSuccess)

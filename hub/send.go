@@ -208,7 +208,7 @@ func (h *Hub) SendToUserWithRetry(ctx context.Context, toUserID string, msg *Hub
 				)
 				// 🔥 离线存储失败 → 更新 message_record 状态为 Failed
 				// 离线存储失败通常因 Redis 队列满或 MySQL 写入异常，消息无法投递也无法暂存
-				h.updateMessageStatusAsync(msg.MessageID, MessageSendStatusFailed, FailureReasonQueueFull, err.Error())
+				h.updateMessageStatusAsync(ctx, msg.MessageID, MessageSendStatusFailed, FailureReasonQueueFull, err.Error())
 				result.FinalError = err
 				result.TotalDuration = time.Since(startTime)
 				h.invokeMessageSendCallback(msg, result)
@@ -257,7 +257,7 @@ func (h *Hub) SendToUserWithRetry(ctx context.Context, toUserID string, msg *Hub
 	// 且 sendToUser fire-and-forget 谎报成功时连扫描器都捞不到（状态被误报 success 的路径除外）
 	// tryStoreOfflineOnDeliveryFailure 内部：转存成功覆盖状态为 UserOffline，失败保持 Failed
 	if finalErr != nil && !result.StoredOffline {
-		h.updateMessageStatusAsync(msg.MessageID, MessageSendStatusFailed, models.FailureReasonMaxRetry, finalErr.Error())
+		h.updateMessageStatusAsync(ctx, msg.MessageID, MessageSendStatusFailed, models.FailureReasonMaxRetry, finalErr.Error())
 		h.tryStoreOfflineOnDeliveryFailure(msg, finalErr)
 	}
 
@@ -287,14 +287,14 @@ func (h *Hub) executeSendAttempt(ctx context.Context, toUserID string, msg *HubM
 
 	// 如果是重试（非首次尝试），记录重试信息到数据库
 	if attemptNumber > 1 && h.messageRecordRepo != nil {
-		h.recordRetryAttemptAsync(msg.MessageID, attemptNumber, attemptStart, duration, err)
+		h.recordRetryAttemptAsync(ctx, msg, attemptNumber, attemptStart, duration, err)
 	}
 
 	return err
 }
 
 // recordRetryAttemptAsync 异步记录重试信息到数据库
-func (h *Hub) recordRetryAttemptAsync(messageID string, attemptNumber int, timestamp time.Time, duration time.Duration, err error) {
+func (h *Hub) recordRetryAttemptAsync(ctx context.Context, msg *HubMessage, attemptNumber int, timestamp time.Time, duration time.Duration, err error) {
 	retryAttempt := RetryAttempt{
 		AttemptNumber: attemptNumber,
 		Timestamp:     timestamp,
@@ -306,16 +306,19 @@ func (h *Hub) recordRetryAttemptAsync(messageID string, attemptNumber int, times
 		retryAttempt.Error = err.Error()
 	}
 
+	// 🔗 trace 恢复：以消息信封 trace_id 为准，重试记录日志与 DB 操作可追溯原始发送链路
+	ctx = msg.ContextFrom(ctx)
 	syncx.Go().
 		OnError(func(err error) {
-			h.logger.DebugKV("更新重试记录失败",
-				"message_id", messageID,
+			h.logger.DebugContextKV(ctx, "更新重试记录失败",
+				"message_id", msg.MessageID,
 				"attempt", attemptNumber,
 				"error", err,
 			)
 		}).
 		ExecWithContext(func(execCtx context.Context) error {
-			return h.messageRecordRepo.IncrementRetry(execCtx, messageID, retryAttempt)
+			execCtx = msg.ContextFrom(execCtx)
+			return h.messageRecordRepo.IncrementRetry(execCtx, msg.MessageID, retryAttempt)
 		})
 }
 
@@ -346,7 +349,7 @@ func (h *Hub) invokeMessageSendCallback(msg *HubMessage, result *SendResult) {
 
 	syncx.Go().
 		OnPanic(func(r interface{}) {
-			h.logger.ErrorKV("消息发送回调panic",
+			h.logger.ErrorContextKV(msg.ContextFrom(h.ctx), "消息发送回调panic",
 				"message_id", msg.MessageID,
 				"panic", r,
 				"stack", string(debug.Stack()),
@@ -585,7 +588,7 @@ func (h *Hub) recordMessageToDatabase(msg *HubMessage, sendErr error) {
 }
 
 // updateMessageStatusAsync 非阻塞更新消息状态到 DB
-func (h *Hub) updateMessageStatusAsync(msgID string, status MessageSendStatus, reason FailureReason, errMsg string) {
+func (h *Hub) updateMessageStatusAsync(ctx context.Context, msgID string, status MessageSendStatus, reason FailureReason, errMsg string) {
 	if h.messageRecordRepo == nil || h.statusUpdater == nil {
 		return
 	}
@@ -599,7 +602,8 @@ func (h *Hub) updateMessageStatusAsync(msgID string, status MessageSendStatus, r
 		reason: reason,
 		errMsg: errMsg,
 	}) {
-		h.logger.DebugKV("消息状态更新队列已满，丢弃",
+		// 🔗 trace 恢复：ctx 由调用方传入（投递路径已恢复消息信封 trace_id）
+		h.logger.DebugContextKV(ctx, "消息状态更新队列已满，丢弃",
 			"message_id", msgID,
 			"status", status,
 		)
@@ -645,7 +649,7 @@ func (h *Hub) tryStoreOfflineOnDeliveryFailure(msg *HubMessage, deliveryErr erro
 				return err
 			}
 			// 转存成功 → 覆盖状态为 UserOffline（消息已暂存，等用户上线推送）
-			h.updateMessageStatusAsync(msg.MessageID, MessageSendStatusUserOffline, FailureReasonUserOffline, "")
+			h.updateMessageStatusAsync(storeCtx, msg.MessageID, MessageSendStatusUserOffline, FailureReasonUserOffline, "")
 			h.logger.InfoContextKV(storeCtx, "在线投递失败，消息已转存离线队列",
 				"message_id", msg.MessageID,
 				"user_id", msg.Receiver,
@@ -665,7 +669,7 @@ func (h *Hub) SendWithCallback(ctx context.Context, userID string, msg *HubMessa
 
 	syncx.Go().
 		OnPanic(func(r interface{}) {
-			h.logger.ErrorKV("SendWithCallback panic",
+			h.logger.ErrorContextKV(ctx, "SendWithCallback panic",
 				"user_id", userID,
 				"message_id", msg.MessageID,
 				"panic", r,
@@ -753,13 +757,13 @@ func (h *Hub) sendToClientSerialized(ctx context.Context, client *Client, msg *H
 				"node_id", h.nodeID,
 			)
 			// SSE消息成功发送，更新为成功状态
-			h.updateMessageStatusAsync(msgID, MessageSendStatusSuccess, "", "")
+			h.updateMessageStatusAsync(ctx, msgID, MessageSendStatusSuccess, "", "")
 			return true
 		}
 		sseErr := fmt.Errorf("SSE channel full or closed")
 		h.logger.WarnContextKV(ctx, "SSE客户端消息通道已满或已关闭", "client_id", client.ID, "user_id", client.UserID)
 		// SSE通道已满或已关闭，更新为失败状态
-		h.updateMessageStatusAsync(msgID, MessageSendStatusFailed, FailureReasonQueueFull, sseErr.Error())
+		h.updateMessageStatusAsync(ctx, msgID, MessageSendStatusFailed, FailureReasonQueueFull, sseErr.Error())
 		// 🔥 在线投递失败 → 异步转存离线（P2P 场景，避免循环）
 		h.tryStoreOfflineOnDeliveryFailure(msg, sseErr)
 		return false
@@ -775,7 +779,7 @@ func (h *Hub) sendToClientSerialized(ctx context.Context, client *Client, msg *H
 		if err != nil {
 			h.logger.ErrorContextKV(ctx, "消息序列化失败", "error", err)
 			// 更新为失败状态
-			h.updateMessageStatusAsync(msgID, MessageSendStatusFailed, FailureReasonUnknown, err.Error())
+			h.updateMessageStatusAsync(ctx, msgID, MessageSendStatusFailed, FailureReasonUnknown, err.Error())
 			// 序列化失败无法转存离线（msg 无法被存储），只标记 Failed
 			return false
 		}
@@ -783,7 +787,7 @@ func (h *Hub) sendToClientSerialized(ctx context.Context, client *Client, msg *H
 
 	if client.TrySend(data) {
 		// 消息成功发送到客户端通道，更新为成功状态
-		h.updateMessageStatusAsync(msgID, MessageSendStatusSuccess, "", "")
+		h.updateMessageStatusAsync(ctx, msgID, MessageSendStatusSuccess, "", "")
 
 		// 链路闭环日志：与跨 Pod 路径（distributed.go "[跨Pod] 消息已投递到本地客户端"）统一，
 		// trace_id 可从 NotifySend 入口一路串到本节点最终投递（ctx 由 msg.ContextFrom 恢复携带 trace）
@@ -802,7 +806,7 @@ func (h *Hub) sendToClientSerialized(ctx context.Context, client *Client, msg *H
 	queueErr := fmt.Errorf("client send channel full or closed")
 	h.logger.WarnContextKV(ctx, "客户端发送通道已满或已关闭", "client_id", client.ID)
 	// 发送通道已满或已关闭，更新为失败状态
-	h.updateMessageStatusAsync(msgID, MessageSendStatusFailed, FailureReasonQueueFull, queueErr.Error())
+	h.updateMessageStatusAsync(ctx, msgID, MessageSendStatusFailed, FailureReasonQueueFull, queueErr.Error())
 	// 🔥 在线投递失败 → 异步转存离线（P2P 场景，避免循环）
 	h.tryStoreOfflineOnDeliveryFailure(msg, queueErr)
 	return false

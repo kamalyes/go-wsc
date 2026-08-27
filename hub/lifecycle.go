@@ -599,7 +599,7 @@ func (h *Hub) batchCleanupOnShutdown(clients []*Client) {
 		syncx.ParallelForEachSlice(clients, func(i int, client *Client) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if err := h.connectionRecordRepo.MarkDisconnected(ctx, client.ID, DisconnectReasonServerShutdown, 1001, "server shutdown"); err != nil {
+			if err := h.connectionRecordRepo.MarkDisconnected(ctx, client.ID, DisconnectReasonServerShutdown, 1001); err != nil {
 				h.logger.DebugKV("shutdown: 更新连接断开记录失败",
 					"client_id", client.ID,
 					"user_id", client.UserID,

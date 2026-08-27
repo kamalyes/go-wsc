@@ -243,7 +243,7 @@ func TestMarkDisconnected(t *testing.T) {
 
 	// 标记断开
 	time.Sleep(100 * time.Millisecond)
-	err = tc.repo.MarkDisconnected(tc.ctx, connID, models.DisconnectReasonTimeout, 1001, "连接超时")
+	err = tc.repo.MarkDisconnected(tc.ctx, connID, models.DisconnectReasonTimeout, 1001)
 	assert.NoError(t, err)
 
 	// 验证断开信息
@@ -577,7 +577,7 @@ func TestCleanupInactiveRecords(t *testing.T) {
 	assert.NoError(t, err)
 
 	// 标记为断开
-	err = tc.repo.MarkDisconnected(tc.ctx, oldConnID, models.DisconnectReasonTimeout, 1000, "timeout")
+	err = tc.repo.MarkDisconnected(tc.ctx, oldConnID, models.DisconnectReasonTimeout, 1000)
 	assert.NoError(t, err)
 
 	// 手动更新断开时间为旧时间

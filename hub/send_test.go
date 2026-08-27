@@ -44,7 +44,7 @@ type mockConnRecordRepo struct {
 }
 
 func (m *mockConnRecordRepo) Upsert(_ context.Context, _ *ConnectionRecord) error { return nil }
-func (m *mockConnRecordRepo) MarkDisconnected(_ context.Context, _ string, _ DisconnectReason, _ int, _ string) error {
+func (m *mockConnRecordRepo) MarkDisconnected(_ context.Context, _ string, _ DisconnectReason, _ int) error {
 	return nil
 }
 func (m *mockConnRecordRepo) GetByConnectionID(_ context.Context, _ string) (*ConnectionRecord, error) {

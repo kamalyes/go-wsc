@@ -42,7 +42,7 @@ type ConnectionRecordRepository interface {
 	Upsert(ctx context.Context, record *models.ConnectionRecord) error
 
 	// MarkDisconnected 标记连接为已断开（写 duration/disconnected_at/is_abnormal 供质量终评读）
-	MarkDisconnected(ctx context.Context, connectionID string, reason models.DisconnectReason, code int, message string) error
+	MarkDisconnected(ctx context.Context, connectionID string, reason models.DisconnectReason, code int) error
 
 	// BatchUpdateHeartbeats 批量更新心跳时间戳（connect 表 last_ping_at/last_pong_at，单事务）
 	BatchUpdateHeartbeats(ctx context.Context, entries []*HeartbeatUpdateEntry) error
@@ -280,24 +280,23 @@ func (r *connectionRecordRepositoryImpl) Upsert(ctx context.Context, record *mod
 func (r *connectionRecordRepositoryImpl) updateConnectionRecord(ctx context.Context, record *models.ConnectionRecord) error {
 	now := time.Now()
 	updates := map[string]any{
-		"node_id":            record.NodeID,
-		"node_ip":            record.NodeIP,
-		"node_port":          record.NodePort,
-		"client_ip":          record.ClientIP,
-		"client_type":        record.ClientType,
-		"protocol":           record.Protocol,
-		"connected_at":       now,
-		"disconnected_at":    nil,
-		"duration":           0,
-		"last_ping_at":       nil,
-		"last_pong_at":       nil,
-		"is_active":          true,
-		"is_abnormal":        false,
-		"is_forced_offline":  false,
-		"metadata":           record.Metadata,
-		"disconnect_reason":  "",
-		"disconnect_code":    0,
-		"disconnect_message": "",
+		"node_id":           record.NodeID,
+		"node_ip":           record.NodeIP,
+		"node_port":         record.NodePort,
+		"client_ip":         record.ClientIP,
+		"client_type":       record.ClientType,
+		"protocol":          record.Protocol,
+		"connected_at":      now,
+		"disconnected_at":   nil,
+		"duration":          0,
+		"last_ping_at":      nil,
+		"last_pong_at":      nil,
+		"is_active":         true,
+		"is_abnormal":       false,
+		"is_forced_offline": false,
+		"metadata":          record.Metadata,
+		"disconnect_reason": "",
+		"disconnect_code":   0,
 	}
 
 	return r.getDB(ctx).
@@ -307,7 +306,7 @@ func (r *connectionRecordRepositoryImpl) updateConnectionRecord(ctx context.Cont
 
 // MarkDisconnected 标记连接为已断开
 // 写 duration/disconnected_at/is_abnormal 等会话终态字段，供 qualityRepo.FinalizeOnDisconnect 读 duration 算终评
-func (r *connectionRecordRepositoryImpl) MarkDisconnected(ctx context.Context, connectionID string, reason models.DisconnectReason, code int, message string) error {
+func (r *connectionRecordRepositoryImpl) MarkDisconnected(ctx context.Context, connectionID string, reason models.DisconnectReason, code int) error {
 	record, err := r.GetByConnectionID(ctx, connectionID)
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
@@ -322,13 +321,12 @@ func (r *connectionRecordRepositoryImpl) MarkDisconnected(ctx context.Context, c
 	isAbnormal := reason != models.DisconnectReasonClientRequest && reason != models.DisconnectReasonServerShutdown
 
 	updates := map[string]any{
-		"disconnected_at":    now,
-		"disconnect_reason":  string(reason),
-		"disconnect_code":    code,
-		"disconnect_message": message,
-		"duration":           duration,
-		"is_active":          false,
-		"is_abnormal":        isAbnormal,
+		"disconnected_at":   now,
+		"disconnect_reason": string(reason),
+		"disconnect_code":   code,
+		"duration":          duration,
+		"is_active":         false,
+		"is_abnormal":       isAbnormal,
 	}
 
 	return r.getDB(ctx).
@@ -595,24 +593,23 @@ func (r *connectionRecordRepositoryImpl) BatchUpsert(ctx context.Context, record
 	onConflict := clause.OnConflict{
 		Columns: []clause.Column{{Name: "connection_id"}},
 		DoUpdates: clause.Assignments(map[string]any{
-			"node_id":            gorm.Expr(dialect.UpsertColumnRef("node_id")),
-			"node_ip":            gorm.Expr(dialect.UpsertColumnRef("node_ip")),
-			"node_port":          gorm.Expr(dialect.UpsertColumnRef("node_port")),
-			"client_ip":          gorm.Expr(dialect.UpsertColumnRef("client_ip")),
-			"client_type":        gorm.Expr(dialect.UpsertColumnRef("client_type")),
-			"protocol":           gorm.Expr(dialect.UpsertColumnRef("protocol")),
-			"connected_at":       gorm.Expr("CURRENT_TIMESTAMP"),
-			"disconnected_at":    nil,
-			"duration":           0,
-			"last_ping_at":       nil,
-			"last_pong_at":       nil,
-			"is_active":          true,
-			"is_abnormal":        false,
-			"is_forced_offline":  false,
-			"metadata":           gorm.Expr(dialect.UpsertColumnRef("metadata")),
-			"disconnect_reason":  "",
-			"disconnect_code":    0,
-			"disconnect_message": "",
+			"node_id":           gorm.Expr(dialect.UpsertColumnRef("node_id")),
+			"node_ip":           gorm.Expr(dialect.UpsertColumnRef("node_ip")),
+			"node_port":         gorm.Expr(dialect.UpsertColumnRef("node_port")),
+			"client_ip":         gorm.Expr(dialect.UpsertColumnRef("client_ip")),
+			"client_type":       gorm.Expr(dialect.UpsertColumnRef("client_type")),
+			"protocol":          gorm.Expr(dialect.UpsertColumnRef("protocol")),
+			"connected_at":      gorm.Expr("CURRENT_TIMESTAMP"),
+			"disconnected_at":   nil,
+			"duration":          0,
+			"last_ping_at":      nil,
+			"last_pong_at":      nil,
+			"is_active":         true,
+			"is_abnormal":       false,
+			"is_forced_offline": false,
+			"metadata":          gorm.Expr(dialect.UpsertColumnRef("metadata")),
+			"disconnect_reason": "",
+			"disconnect_code":   0,
 		}),
 	}
 

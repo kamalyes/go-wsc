@@ -173,7 +173,7 @@ func (f *fakeConnectionRecordRepository) Close() error { return nil }
 func (f *fakeConnectionRecordRepository) Upsert(_ context.Context, _ *models.ConnectionRecord) error {
 	return nil
 }
-func (f *fakeConnectionRecordRepository) MarkDisconnected(_ context.Context, _ string, _ models.DisconnectReason, _ int, _ string) error {
+func (f *fakeConnectionRecordRepository) MarkDisconnected(_ context.Context, _ string, _ models.DisconnectReason, _ int) error {
 	return nil
 }
 func (f *fakeConnectionRecordRepository) BatchUpdateHeartbeats(_ context.Context, _ []*repository.HeartbeatUpdateEntry) error {

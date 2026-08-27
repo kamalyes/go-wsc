@@ -135,7 +135,7 @@ func (h *Hub) updateConnectionOnDisconnect(client *Client, reason DisconnectReas
 		ExecWithContext(func(ctx context.Context) error {
 			// 1. 先写 connect 表 duration/disconnected_at（终评依赖 duration）
 			if h.connectionRecordRepo != nil {
-				if err := h.connectionRecordRepo.MarkDisconnected(ctx, client.ID, reason, 1000, string(reason)); err != nil {
+				if err := h.connectionRecordRepo.MarkDisconnected(ctx, client.ID, reason, 1000); err != nil {
 					return err
 				}
 			}

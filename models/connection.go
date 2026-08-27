@@ -50,9 +50,8 @@ type ConnectionRecord struct {
 	LastPongAt     *time.Time `gorm:"column:last_pong_at;comment:最后Pong响应时间" json:"last_pong_at,omitempty"`
 
 	// ========== 断开连接信息 ==========
-	DisconnectReason  string `gorm:"column:disconnect_reason;size:50;comment:断开原因(normal/timeout/error/force_offline/network等)" json:"disconnect_reason,omitempty"`
-	DisconnectCode    int    `gorm:"column:disconnect_code;comment:断开代码" json:"disconnect_code,omitempty"`
-	DisconnectMessage string `gorm:"column:disconnect_message;type:text;comment:断开消息/错误信息" json:"disconnect_message,omitempty"`
+	DisconnectReason string `gorm:"column:disconnect_reason;size:50;comment:断开原因(normal/timeout/error/force_offline/network等)" json:"disconnect_reason,omitempty"`
+	DisconnectCode   int    `gorm:"column:disconnect_code;comment:断开代码" json:"disconnect_code,omitempty"`
 
 	// ========== 状态标识 ==========
 	IsActive        bool `gorm:"column:is_active;index;comment:是否活跃连接" json:"is_active"`
@@ -87,12 +86,11 @@ func (c *ConnectionRecord) CalculateDuration() {
 }
 
 // MarkDisconnected 标记为已断开
-func (c *ConnectionRecord) MarkDisconnected(reason DisconnectReason, code int, message string) {
+func (c *ConnectionRecord) MarkDisconnected(reason DisconnectReason, code int) {
 	now := time.Now()
 	c.DisconnectedAt = &now
 	c.DisconnectReason = string(reason)
 	c.DisconnectCode = code
-	c.DisconnectMessage = message
 	c.CalculateDuration()
 
 	// 判断是否异常断开

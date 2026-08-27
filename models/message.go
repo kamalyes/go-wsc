@@ -137,12 +137,26 @@ func (m *HubMessage) InjectContext(ctx context.Context) *HubMessage {
 
 // ContextFrom 基于消息的 trace_id 创建一个携带 trace 信息的 context
 // 用于消息流转路径中恢复 ctx（如 PubSub 消费端、回调等场景）
+// ctx 已有 trace 时不覆盖（尊重上游）
 func (m *HubMessage) ContextFrom(parent context.Context) context.Context {
 	defer m.lockRead()()
 	if m.TraceID == "" {
 		return parent
 	}
 	return logger.ContextWithTraceID(parent, m.TraceID)
+}
+
+// TraceContext 以消息信封的 trace_id 为准强制覆盖 ctx（离线回放场景专用）
+// 与 ContextFrom 的区别：ContextFrom 尊重 ctx 已有 trace 不覆盖；本方法以消息原始 trace 优先——
+// 离线消息在用户上线时推送，ctx 来自上线连接（带连接自身的 trace_id），
+// 强制覆盖为消息原始发送链路的 trace_id，保证同一条消息从 NotifySend 入口
+// → 离线暂存 → 上线推送 → 最终投递全程同一个 trace_id 可查
+func (m *HubMessage) TraceContext(parent context.Context) context.Context {
+	defer m.lockRead()()
+	if m.TraceID == "" {
+		return parent
+	}
+	return context.WithValue(parent, logger.ContextKeyTraceID, m.TraceID)
 }
 
 // SetMessageType 设置消息类型

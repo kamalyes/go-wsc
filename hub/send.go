@@ -84,6 +84,10 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 	// EnsureRouteDefaults + InjectRoute 幂等，SendToUserWithRetry 路径再调一次无副作用
 	ctx = routing.EnsureRouteDefaults(ctx)
 	ctx = msgCopy.InjectRoute(ctx)
+	// 🔗 trace 恢复：ctx 无 trace 时从消息信封恢复（如 workerPool/离线回放等异步路径 ctx 已丢失），
+	// sendToUser 是所有投递路径的漏斗点，在此恢复保证下游 sendToClientSerialized 的
+	// 投递日志与消息原始链路同一 trace_id；ctx 已有 trace 不覆盖（在线链路同源）
+	ctx = msgCopy.ContextFrom(ctx)
 
 	// 📝 write-ahead：先落 sending 记录再投递（outbox 模式）
 	// 必须先于 checkAndRouteToNode（跨节点 Publish）和 handleBroadcast（本地投递）提交：
@@ -741,7 +745,13 @@ func (h *Hub) sendToClientSerialized(ctx context.Context, client *Client, msg *H
 	if client.ConnectionType == ConnectionTypeSSE {
 		if client.TrySendSSE(msg) {
 			client.SetLastSeen(time.Now())
-			h.logger.DebugContextKV(ctx, "SSE消息发送", "message_id", msg.MessageID, "client_id", client.ID, "user_id", client.UserID)
+			h.logger.InfoContextKV(ctx, "消息已投递到本地客户端",
+				"message_id", msgID,
+				"user_id", client.UserID,
+				"client_id", client.ID,
+				"connection_type", "sse",
+				"node_id", h.nodeID,
+			)
 			// SSE消息成功发送，更新为成功状态
 			h.updateMessageStatusAsync(msgID, MessageSendStatusSuccess, "", "")
 			return true
@@ -774,6 +784,15 @@ func (h *Hub) sendToClientSerialized(ctx context.Context, client *Client, msg *H
 	if client.TrySend(data) {
 		// 消息成功发送到客户端通道，更新为成功状态
 		h.updateMessageStatusAsync(msgID, MessageSendStatusSuccess, "", "")
+
+		// 链路闭环日志：与跨 Pod 路径（distributed.go "[跨Pod] 消息已投递到本地客户端"）统一，
+		// trace_id 可从 NotifySend 入口一路串到本节点最终投递（ctx 由 msg.ContextFrom 恢复携带 trace）
+		h.logger.InfoContextKV(ctx, "消息已投递到本地客户端",
+			"message_id", msgID,
+			"user_id", client.UserID,
+			"client_id", client.ID,
+			"node_id", h.nodeID,
+		)
 
 		// 更新接收者的消息统计和字节统计
 		h.trackReceiverMessageStats(client.ID, client.UserType, len(data))

@@ -130,11 +130,18 @@ func (r *connectionQualityRepositoryImpl) Upsert(ctx context.Context, quality *m
 	}
 
 	// 冲突时递增重连次数并刷新活跃时间（与 ConnectionRecordRepository.BatchUpsert 的 reconnect_count 语义对齐）
+	// ⚠️ 自引用列必须用表名限定：PostgreSQL 的 ON CONFLICT DO UPDATE 中未限定列名会同时匹配
+	// excluded.reconnect_count 与目标表列，触发 SQLSTATE 42702（ambiguous column reference）；
+	// 表名限定写法对 MySQL/SQLite 同样兼容（支持测试自定义表名）
 	dialect := sqlbuilder.DetectDialect(r.db)
+	table := r.tableName
+	if table == "" {
+		table = models.ConnectionQuality{}.TableName()
+	}
 	onConflict := clause.OnConflict{
 		Columns: []clause.Column{{Name: "connection_id"}},
 		DoUpdates: clause.Assignments(map[string]any{
-			"reconnect_count": gorm.Expr("reconnect_count + 1"),
+			"reconnect_count": gorm.Expr(table + ".reconnect_count + 1"),
 			"user_id":         gorm.Expr(dialect.UpsertColumnRef("user_id")),
 			"last_active_at":  gorm.Expr(dialect.UpsertColumnRef("last_active_at")),
 		}),

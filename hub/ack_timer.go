@@ -74,12 +74,6 @@ func (h *Hub) makeAckTimeoutCallback(messageID string) func() {
 			return // 状态已变更（成功/失败）或已被其他节点认领
 		}
 
-		h.logger.WarnKV("跨节点消息ACK超时(时间轮)，已标记待重试",
-			"message_id", messageID,
-			"timeout", nodeAckTimeout,
-			"node_id", h.nodeID,
-		)
-
 		// 从 DB 取完整记录恢复消息体，转存离线（用户上线时推送）
 		// 不在闭包中持有 msg 指针：避免百万级 in-flight 消息长期占用内存
 		record, rErr := h.messageRecordRepo.FindByMessageID(ctx, messageID)
@@ -97,6 +91,15 @@ func (h *Hub) makeAckTimeoutCallback(messageID string) func() {
 				"message_id", messageID, "error", mErr)
 			return
 		}
+		// 🔗 trace 恢复：MessageData 序列化了完整 HubMessage（含信封 trace_id），
+		// 恢复到 ctx 后"已标记待重试"与转存离线日志可追溯原始发送链路
+		ctx = msg.ContextFrom(ctx)
+		h.logger.WarnContextKV(ctx, "跨节点消息ACK超时(时间轮)，已标记待重试",
+			"message_id", messageID,
+			"timeout", nodeAckTimeout,
+			"node_id", h.nodeID,
+			"receiver", record.Receiver,
+		)
 		h.tryStoreOfflineOnDeliveryFailure(msg, errNodeAckTimeout)
 	}
 }

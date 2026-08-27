@@ -16,7 +16,6 @@ import (
 	"runtime/debug"
 	"time"
 
-	"github.com/kamalyes/go-toolbox/pkg/contextx"
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/models"
@@ -81,8 +80,15 @@ func (h *Hub) SendToUserWithAck(ctx context.Context, toUserID string, msg *HubMe
 
 // HandleAck 处理ACK确认消息
 func (h *Hub) HandleAck(ackMsg *AckMessage) {
+	// 🔗 trace 恢复：AckMessage 协议结构不带 trace_id，从 ackManager 的 pending 消息
+	// （原始 HubMessage，信封携带 trace_id）恢复 ctx，使 ACK 确认与消息发送链路同一 trace 可查
+	ctx := h.ctx
+	if pm, ok := h.ackManager.GetPendingMessage(ackMsg.MessageID); ok && pm.Message != nil {
+		ctx = pm.Message.ContextFrom(h.ctx)
+	}
+
 	// 记录ACK消息处理
-	h.logger.InfoKV("收到ACK确认",
+	h.logger.InfoContextKV(ctx, "收到ACK确认",
 		"message_id", ackMsg.MessageID,
 		"status", ackMsg.Status,
 		"timestamp", ackMsg.Timestamp,
@@ -95,9 +101,14 @@ func (h *Hub) HandleAck(ackMsg *AckMessage) {
 		// ⏰ O(1) 取消跨节点 ACK 超时任务（状态由 sending→success，避免冗余超时检查）
 		// 与 updateMessageStatusAsync 的取消语义对齐，详见 ack_timer.go
 		h.cancelAckTimeout(ackMsg.MessageID)
-		go contextx.WithTimeoutOrBackground(h.ctx, 2*time.Second, func(ctx context.Context) error {
-			return h.messageRecordRepo.UpdateStatus(ctx, ackMsg.MessageID, models.MessageSendStatusSuccess, "", "")
-		})
+		go func() {
+			updateCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+			if err := h.messageRecordRepo.UpdateStatus(updateCtx, ackMsg.MessageID, models.MessageSendStatusSuccess, "", ""); err != nil {
+				h.logger.WarnContextKV(ctx, "ACK确认后更新消息状态失败",
+					"message_id", ackMsg.MessageID, "error", err)
+			}
+		}()
 	}
 }
 
@@ -157,7 +168,7 @@ func (h *Hub) createAckRetryFunc(ctx context.Context, toUserID string, msg *HubM
 
 		// 记录重试尝试
 		if *attemptNum > 1 && h.messageRecordRepo != nil {
-			h.recordAckRetryAttempt(msg.MessageID, *attemptNum, err)
+			h.recordAckRetryAttempt(ctx, msg, *attemptNum, err)
 		}
 
 		return err
@@ -165,7 +176,7 @@ func (h *Hub) createAckRetryFunc(ctx context.Context, toUserID string, msg *HubM
 }
 
 // recordAckRetryAttempt 记录ACK重试尝试到数据库
-func (h *Hub) recordAckRetryAttempt(messageID string, attemptNum int, err error) {
+func (h *Hub) recordAckRetryAttempt(ctx context.Context, msg *HubMessage, attemptNum int, err error) {
 	retryAttempt := RetryAttempt{
 		AttemptNumber: attemptNum,
 		Timestamp:     time.Now(),
@@ -178,9 +189,11 @@ func (h *Hub) recordAckRetryAttempt(messageID string, attemptNum int, err error)
 
 	syncx.Go().
 		OnPanic(func(r interface{}) {
-			h.logger.ErrorKV("ACK重试记录更新崩溃", "panic", r, "stack", string(debug.Stack()), "message_id", messageID)
+			h.logger.ErrorContextKV(ctx, "ACK重试记录更新崩溃",
+				"panic", r, "stack", string(debug.Stack()), "message_id", msg.MessageID)
 		}).
-		ExecWithContext(func(ctx context.Context) error {
-			return h.messageRecordRepo.IncrementRetry(ctx, messageID, retryAttempt)
+		ExecWithContext(func(retryCtx context.Context) error {
+			retryCtx = msg.ContextFrom(retryCtx)
+			return h.messageRecordRepo.IncrementRetry(retryCtx, msg.MessageID, retryAttempt)
 		})
 }

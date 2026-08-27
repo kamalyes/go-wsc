@@ -491,7 +491,8 @@ func TestRecordAckRetryAttempt_SuccessCase(t *testing.T) {
 	hub.SetMessageRecordRepository(repo)
 
 	msg := makeGroupMessage("sender-retry-ok")
-	hub.recordAckRetryAttempt(msg.MessageID, 2, nil)
+	ctx := context.Background()
+	hub.recordAckRetryAttempt(ctx, msg, 2, nil)
 
 	assert.Eventually(t, func() bool {
 		repo.incrementRetryMu.Lock()
@@ -511,7 +512,8 @@ func TestRecordAckRetryAttempt_ErrorCase(t *testing.T) {
 
 	msg := makeGroupMessage("sender-retry-err")
 	sendErr := errorx.NewError(ErrTypeUserOffline, "u1")
-	hub.recordAckRetryAttempt(msg.MessageID, 3, sendErr)
+	ctx := context.Background()
+	hub.recordAckRetryAttempt(ctx, msg, 3, sendErr)
 
 	assert.Eventually(t, func() bool {
 		repo.incrementRetryMu.Lock()
@@ -528,6 +530,7 @@ func TestRecordAckRetryAttempt_NilRepoNoPanic(t *testing.T) {
 	hub := setupAckTestHub(t, time.Second)
 	// 显式不设置 repo
 	assert.NotPanics(t, func() {
-		hub.recordAckRetryAttempt("msg-nilrepo-retry", 2, nil)
+		ctx := context.Background()
+		hub.recordAckRetryAttempt(ctx, makeGroupMessage("msg-nilrepo-retry"), 2, nil)
 	})
 }

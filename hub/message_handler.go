@@ -119,7 +119,7 @@ func (h *Hub) handleClientRead(client *Client) {
 				// 异常断开 - 记录详细信息用于排查
 				h.logWithClient(logger.WARN, "客户端异常断开", client, "close_code", closeCode, "code_desc", codeDesc, "error", errStr)
 				// 记录错误到连接记录
-				h.trackConnectionError(client.ID, client.UserType, err)
+				h.trackConnectionError(client.Context, client.ID, client.UserType, err)
 			}
 			return
 		}
@@ -262,8 +262,9 @@ func (h *Hub) handleForwardableMessage(ctx context.Context, msg *HubMessage) err
 
 // handleBinaryMessage 处理二进制消息
 func (h *Hub) handleBinaryMessage(client *Client, data []byte) {
-	h.logger.DebugKV("收到二进制消息",
+	h.logger.DebugContextKV(client.Context, "收到二进制消息",
 		"client_id", client.ID,
+		"user_id", client.UserID,
 		"size", len(data),
 	)
 }
@@ -362,7 +363,7 @@ func (h *Hub) checkHeartbeat() {
 
 	// Phase 2：锁外批量注销（Unregister 内部走 channel 异步或 default 同步均安全）
 	for _, tc := range timeouts {
-		h.logger.DebugKV("❤️ 检测到心跳超时，注销客户端",
+		h.logger.DebugContextKV(tc.client.Context, "❤️ 检测到心跳超时，注销客户端",
 			"client_id", tc.client.ID,
 			"user_id", tc.client.UserID,
 			"user_type", tc.client.UserType,
@@ -550,7 +551,7 @@ func (h *Hub) handleBroadcastMessage(ctx context.Context, msg *HubMessage) {
 
 	// 消息记录状态只更新一次（同一 msgID，无需每客户端都更新）
 	if atomic.LoadInt32(&successCount) > 0 {
-		h.updateMessageStatusAsync(msgID, MessageSendStatusSuccess, "", "")
+		h.updateMessageStatusAsync(ctx, msgID, MessageSendStatusSuccess, "", "")
 	}
 
 	if atomic.LoadInt32(&failCount) > 0 {

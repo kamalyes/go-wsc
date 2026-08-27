@@ -123,7 +123,7 @@ func (h *Hub) handleHeartbeatMessage(client *Client) {
 
 	// 直接发送 pong 响应（使用已获取的客户端对象，避免竞态条件）
 	if err := h.sendPongResponse(client, now); err != nil {
-		h.logger.WarnKV("心跳 pong 响应发送失败",
+		h.logger.WarnContextKV(client.Context, "心跳 pong 响应发送失败",
 			"client_id", client.ID,
 			"user_id", client.UserID,
 			"error", err,

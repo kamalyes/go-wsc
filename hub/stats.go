@@ -49,7 +49,7 @@ func (h *Hub) syncClientStats() {
 
 // logClientConnection 记录客户端连接日志（单行 KV，高频路径）
 func (h *Hub) logClientConnection(client *Client) {
-	h.logger.InfoKV("👤 客户端连接成功",
+	h.logger.InfoContextKV(client.Context, "👤 客户端连接成功",
 		"user_id", client.UserID,
 		"client_id", client.ID,
 		"user_type", client.UserType,
@@ -64,7 +64,12 @@ func (h *Hub) syncOnlineStatus(client *Client) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	// 连接级 ctx 优先（携带握手 trace_id），nil 兜底 Background 避免 WithTimeout panic
+	baseCtx := client.Context
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(baseCtx, 3*time.Second)
 	defer cancel()
 
 	h.logger.DebugContextKV(ctx, "开始同步在线状态到Redis",
@@ -73,7 +78,7 @@ func (h *Hub) syncOnlineStatus(client *Client) {
 	)
 
 	if err := h.onlineStatusRepo.SetClientOnline(ctx, client); err != nil {
-		h.logger.ErrorKV("同步在线状态到Redis失败",
+		h.logger.ErrorContextKV(ctx, "同步在线状态到Redis失败",
 			"user_id", client.UserID,
 			"error", err,
 		)
@@ -138,7 +143,7 @@ func (h *Hub) trackReceiverMessageStats(connectionID string, receiverType UserTy
 }
 
 // trackConnectionError 追踪连接错误
-func (h *Hub) trackConnectionError(connectionID string, userType UserType, err error) {
+func (h *Hub) trackConnectionError(ctx context.Context, connectionID string, userType UserType, err error) {
 	if h.connectionQualityRepo == nil || connectionID == "" || err == nil {
 		return
 	}
@@ -151,7 +156,7 @@ func (h *Hub) trackConnectionError(connectionID string, userType UserType, err e
 	syncx.Go().
 		WithTimeout(5 * time.Second).
 		OnPanic(func(r any) {
-			h.logger.ErrorKV("记录连接错误崩溃", "panic", r, "stack", string(debug.Stack()), "connection_id", connectionID)
+			h.logger.ErrorContextKV(ctx, "记录连接错误崩溃", "panic", r, "stack", string(debug.Stack()), "connection_id", connectionID)
 		}).
 		ExecWithContext(func(ctx context.Context) error {
 			return h.connectionQualityRepo.AddError(ctx, connectionID, err)

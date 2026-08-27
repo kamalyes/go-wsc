@@ -753,7 +753,7 @@ func TestUnmarshalDistributedMessage_InvalidData(t *testing.T) {
 	defer hub.Shutdown()
 
 	invalidData := []byte{0xff, 0xfe, 0xfd}
-	_, err := hub.unmarshalDistributedMessage(invalidData)
+	_, err := hub.unmarshalDistributedMessage(context.Background(), invalidData)
 	assert.Error(t, err, "无效数据应返回错误")
 }
 
@@ -769,7 +769,7 @@ func TestUnmarshalDistributedMessage_ValidJSON(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	distMsg, err := hub.unmarshalDistributedMessage(jsonData)
+	distMsg, err := hub.unmarshalDistributedMessage(context.Background(), jsonData)
 	if err != nil {
 		assert.Nil(t, distMsg)
 	} else {
@@ -792,7 +792,7 @@ func TestMarshalDistributedMessage_Success(t *testing.T) {
 		TargetID: "u-test",
 	}
 
-	data := hub.marshalDistributedMessage(distMsg, "msg-123")
+	data := hub.marshalDistributedMessage(context.Background(), distMsg)
 	assert.NotEmpty(t, data, "序列化结果不应为空")
 }
 

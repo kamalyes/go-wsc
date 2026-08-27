@@ -188,14 +188,18 @@ func (h *Hub) reportPerformanceMetrics() {
 		return
 	}
 
+	// 🔥 保活：周期性 touch 重注册（HSETNX 幂等，保留原 start_time；EXPIRE 刷新 TTL）
+	// 根因：stats key 续期仅由连接事件（syncClientStats）触发，空闲节点（0 连接）无事件，
+	// key 在 ttl（如 10m）后过期 → GetNodeStats 永久报 "node stats not found"。
+	// 本周期 touch（5m < ttl 10m）使活跃节点 stats key 不过期，同时自愈缺失的 key
+	if err := h.statsRepo.RegisterNode(ctx, h.nodeID, time.Now().Unix()); err != nil {
+		h.logger.WarnKV("刷新节点统计注册失败", "node_id", h.nodeID, "error", err)
+		return
+	}
+
 	stats, err := h.statsRepo.GetNodeStats(ctx, h.nodeID)
 	if err != nil {
 		h.logger.WarnKV("获取节点统计失败", "node_id", h.nodeID, "error", err)
-		// 🔥 自愈：stats key 缺失（注册失败/Redis 逐出/清空）时重注册，
-		// 下个周期即可恢复上报，避免该节点统计永久缺失
-		if regErr := h.statsRepo.RegisterNode(ctx, h.nodeID, time.Now().Unix()); regErr != nil {
-			h.logger.WarnKV("重新注册节点失败", "node_id", h.nodeID, "error", regErr)
-		}
 		return
 	}
 

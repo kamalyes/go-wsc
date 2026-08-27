@@ -106,11 +106,13 @@ redis.call('SET', KEYS[2], ARGV[4], 'EX', ARGV[3])
 return 1
 `
 
-	// luaRegisterNode 注册节点（HSET start_time + EXPIRE + SADD）
+	// luaRegisterNode 注册节点（HSETNX start_time + EXPIRE + SADD）
 	// KEYS[1] = stats key, KEYS[2] = nodes set key
 	// ARGV[1] = nodeID, ARGV[2] = startTime, ARGV[3] = expireSeconds
+	// HSETNX：幂等注册——周期性 touch 重注册时保留原 start_time（uptime 不被重置），
+	// 空闲节点（无连接事件触发 syncClientStats 续期）靠周期性 touch 维持 stats key 不过期
 	luaRegisterNode = `
-redis.call('HSET', KEYS[1], 'start_time', ARGV[2])
+redis.call('HSETNX', KEYS[1], 'start_time', ARGV[2])
 redis.call('EXPIRE', KEYS[1], ARGV[3])
 redis.call('SADD', KEYS[2], ARGV[1])
 return 1

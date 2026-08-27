@@ -148,50 +148,33 @@ func (h *Hub) InitializeRepositories(redisClient redis.UniversalClient, db *gorm
 	return nil
 }
 
-// logRepositoryInitialization 记录仓库初始化信息
+// logRepositoryInitialization 记录仓库初始化信息（一条整打的 KV 日志）
 func (h *Hub) logRepositoryInitialization() {
-	cg := h.logger.NewConsoleGroup()
-	cg.Group("✅ WebSocket Hub 仓库初始化")
-
-	// Redis 仓库配置
-	redisConfig := []map[string]interface{}{
-		{
-			"仓库类型":   "在线状态",
-			"Key前缀":  h.config.RedisRepository.OnlineStatus.KeyPrefix,
-			"TTL(秒)": h.config.RedisRepository.OnlineStatus.TTL.Seconds(),
-		},
-		{
-			"仓库类型":    "统计数据",
-			"Key前缀":   h.config.RedisRepository.Stats.KeyPrefix,
-			"TTL(小时)": h.config.RedisRepository.Stats.TTL.Hours(),
-		},
-		{
-			"仓库类型":  "工作负载",
-			"Key前缀": h.config.RedisRepository.Workload.KeyPrefix,
-		},
-	}
-	cg.Table(redisConfig)
-
-	// 离线消息配置
-	offlineConfig := map[string]interface{}{
-		"Key前缀":     h.config.RedisRepository.OfflineMessage.KeyPrefix,
-		"队列TTL(小时)": h.config.RedisRepository.OfflineMessage.QueueTTL.Hours(),
-		"自动存储":      h.config.RedisRepository.OfflineMessage.AutoStore,
-		"自动推送":      h.config.RedisRepository.OfflineMessage.AutoPush,
-		"最大消息数":     h.config.RedisRepository.OfflineMessage.MaxCount,
-	}
-	cg.Table(offlineConfig)
-
-	cg.Info("✅ MySQL 连接记录仓库已初始化")
-
+	// PubSub 可能为 nil（单机模式），提前安全取值避免 nil 解引用
+	pubsubEnabled := false
+	pubsubNamespace := ""
 	if h.config.RedisRepository.PubSub != nil && h.config.RedisRepository.PubSub.GetEnabled() {
-		cg.Info("✅ 分布式 PubSub 已初始化 (Namespace: %s)", h.config.RedisRepository.PubSub.GetNamespace())
-	} else {
-		cg.Warn("⚠️  分布式 PubSub 未启用，运行在单机模式")
+		pubsubEnabled = true
+		pubsubNamespace = h.config.RedisRepository.PubSub.GetNamespace()
 	}
 
-	cg.Info("✅ ShortFlake ID 生成器已初始化 (Hub NodeID: %s, WorkerID: %d)", h.GetNodeID(), h.GetWorkerID())
-	cg.GroupEnd()
+	h.logger.InfoKV("✅ WebSocket Hub 仓库初始化",
+		"online_status_key_prefix", h.config.RedisRepository.OnlineStatus.KeyPrefix,
+		"online_status_ttl_seconds", h.config.RedisRepository.OnlineStatus.TTL.Seconds(),
+		"stats_key_prefix", h.config.RedisRepository.Stats.KeyPrefix,
+		"stats_ttl_hours", h.config.RedisRepository.Stats.TTL.Hours(),
+		"workload_key_prefix", h.config.RedisRepository.Workload.KeyPrefix,
+		"offline_message_key_prefix", h.config.RedisRepository.OfflineMessage.KeyPrefix,
+		"offline_queue_ttl_hours", h.config.RedisRepository.OfflineMessage.QueueTTL.Hours(),
+		"offline_auto_store", h.config.RedisRepository.OfflineMessage.AutoStore,
+		"offline_auto_push", h.config.RedisRepository.OfflineMessage.AutoPush,
+		"offline_max_count", h.config.RedisRepository.OfflineMessage.MaxCount,
+		"mysql_connection_record", true,
+		"pubsub_enabled", pubsubEnabled,
+		"pubsub_namespace", pubsubNamespace,
+		"node_id", h.GetNodeID(),
+		"worker_id", h.GetWorkerID(),
+	)
 }
 
 // ============================================================================

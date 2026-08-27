@@ -25,22 +25,17 @@ func (h *Hub) Run() {
 	h.wg.Add(1)
 	defer h.wg.Done()
 
-	// 使用 Console 分组记录 Hub 启动日志
-	cg := h.logger.NewConsoleGroup()
-	cg.Group("🚀 WebSocket Hub 启动")
+	start := time.Now()
 
-	startTimer := cg.Time("Hub 启动耗时")
-
-	// 显示启动配置
-	config := map[string]interface{}{
-		"节点ID":     h.nodeID,
-		"节点IP":     h.config.NodeIP,
-		"节点端口":     h.config.NodePort,
-		"消息缓冲大小":   h.config.MessageBufferSize,
-		"心跳间隔(秒)":  h.config.HeartbeatInterval,
-		"客户端超时(秒)": h.config.ClientTimeout,
-	}
-	cg.Table(config)
+	// 显示启动配置（单行 KV，便于日志采集端结构化解析）
+	h.logger.InfoKV("🚀 WebSocket Hub 启动",
+		"node_id", h.nodeID,
+		"node_ip", h.config.NodeIP,
+		"node_port", h.config.NodePort,
+		"message_buffer_size", h.config.MessageBufferSize,
+		"heartbeat_interval", h.config.HeartbeatInterval,
+		"client_timeout", h.config.ClientTimeout,
+	)
 
 	// 设置已启动标志并通知等待的goroutine
 	// 所有后台 goroutine 必须在此保护块内启动，避免 Run() 被重复调用时
@@ -63,9 +58,10 @@ func (h *Hub) Run() {
 			})
 	}
 
-	startTimer.End()
-	cg.Info("✅ Hub 启动成功")
-	cg.GroupEnd()
+	h.logger.InfoKV("✅ Hub 启动成功",
+		"node_id", h.nodeID,
+		"startup_duration_ms", time.Since(start).Milliseconds(),
+	)
 
 	// 心跳统计批量更新器在构造时已自动启动（BatchProcessor 内部 worker）
 
@@ -203,28 +199,18 @@ func (h *Hub) reportPerformanceMetrics() {
 		return
 	}
 
-	// 使用 Console 表格展示性能指标
-	cg := h.logger.NewConsoleGroup()
-	cg.Group("📊 Hub 性能指标报告 [节点: %s]", h.nodeID)
-
-	// 连接统计
-	connectionStats := map[string]any{
-		"WebSocket 连接数": activeClients,
-		"SSE 连接数":       sseClients,
-		"历史总连接数":        stats.TotalConnections,
-	}
-	cg.Table(connectionStats)
-
-	// 消息统计
-	messageStats := map[string]any{
-		"已发送消息数":  stats.MessagesSent,
-		"已广播消息数":  stats.BroadcastsSent,
-		"运行时长(秒)": stats.Uptime,
-		"广播兜底触发数": h.broadcastFallbackCount.Swap(0), // 本周期 routeToClusterForOfflineUser 触发次数，治本后应趋近 0
-	}
-	cg.Table(messageStats)
-
-	cg.GroupEnd()
+	// 单行 KV 输出性能指标（周期性日志，便于采集端结构化解析与监控聚合）
+	h.logger.InfoKV("📊 Hub 性能指标报告",
+		"node_id", h.nodeID,
+		"websocket_connections", activeClients,
+		"sse_connections", sseClients,
+		"total_connections", stats.TotalConnections,
+		"messages_sent", stats.MessagesSent,
+		"broadcasts_sent", stats.BroadcastsSent,
+		"uptime_seconds", stats.Uptime,
+		// 本周期 routeToClusterForOfflineUser 触发次数，治本后应趋近 0
+		"broadcast_fallback_count", h.broadcastFallbackCount.Swap(0),
+	)
 }
 
 // processHeartbeatRedisUpdates 单 goroutine 处理所有客户端的心跳 Redis 更新
@@ -410,17 +396,11 @@ func (h *Hub) SafeShutdown() error {
 	// 可安全关闭 4 个子池（Message/Callback/Record/Distributed），避免 worker goroutine 泄漏
 	defer h.workerPool.Stop()
 
-	// 使用 Console 分组记录关闭流程
-	cg := h.logger.NewConsoleGroup()
-	cg.Group("🛑 WebSocket Hub 安全关闭流程")
-	shutdownTimer := cg.Time("Hub 关闭耗时")
+	shutdownStart := time.Now()
 
-	cg.Info("开始安全关闭 Hub [节点: %s]", h.nodeID)
+	h.logger.InfoKV("🛑 开始安全关闭 Hub", "node_id", h.nodeID)
 
-	// 等待异步统计任务完成（避免统计丢失）
-	cg.Info("→ 等待异步统计任务完成...")
-
-	// 停止心跳统计批量更新器，刷写剩余数据
+	// 停止心跳统计批量更新器，刷写剩余数据（Stop 内部 flush 剩余数据并等待完成）
 	if h.heartbeatBatcher != nil {
 		h.heartbeatBatcher.Stop()
 	}
@@ -457,28 +437,27 @@ func (h *Hub) SafeShutdown() error {
 
 	// 并行关闭所有客户端连接
 	allClients := h.shardedRegistry.GetAllClients()
-	cg.Info("→ 并行关闭所有客户端连接...")
+	h.logger.InfoKV("并行关闭所有客户端连接", "node_id", h.nodeID, "client_count", len(allClients))
 	h.shutdownAllClientsParallel(allClients)
 
 	// 批量清理 Redis 在线状态和 DB 连接记录
 	// 替代 removeClientUnsafe 中的逐个调用，用 worker pool 限流避免 goroutine 爆炸
-	cg.Info("→ 批量清理 Redis 在线状态和连接记录...")
+	h.logger.InfoKV("批量清理 Redis 在线状态和连接记录", "node_id", h.nodeID)
 	h.batchCleanupOnShutdown(allClients)
 
 	// 停止消息状态批量更新器，flush 剩余状态更新到 DB
 	// 在 h.cancel() 之前调用，确保 flush 时 h.ctx 仍然有效
 	if h.statusUpdater != nil {
-		cg.Info("→ flush 消息状态更新...")
+		h.logger.InfoKV("flush 消息状态更新", "node_id", h.nodeID)
 		h.statusUpdater.Stop()
 	}
 
 	// 🔗 停止节点间 gRPC 通信（注销节点、关闭服务端与客户端连接池）
 	// 在 h.cancel() 之前调用，确保注销请求的 context 仍可用
-	cg.Info("→ 停止节点 gRPC 通信...")
+	h.logger.InfoKV("停止节点 gRPC 通信", "node_id", h.nodeID)
 	h.stopNodeGRPC()
 
 	// 取消context（通知所有 goroutine 停止）
-	cg.Info("→ 取消所有上下文...")
 	h.cancel()
 
 	// 等待一小段时间让goroutine有机会响应取消信号
@@ -504,7 +483,7 @@ func (h *Hub) SafeShutdown() error {
 	)
 
 	// 等待所有goroutine完成，带超时保护
-	cg.Info("→ 等待所有协程完成...")
+	h.logger.InfoKV("等待所有协程完成", "node_id", h.nodeID, "timeout", calculatedTimeout.String())
 	done := make(chan struct{})
 	syncx.Go().
 		OnPanic(func(r any) {
@@ -518,36 +497,35 @@ func (h *Hub) SafeShutdown() error {
 	select {
 	case <-done:
 		// 正常关闭
-		finalStats := map[string]any{
-			"total_connections": int64(0),
-			"messages_sent":     int64(0),
-			"broadcasts_sent":   int64(0),
-		}
-
+		var totalConnections, messagesSent, broadcastsSent int64
 		if h.statsRepo != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			stats, _ := h.statsRepo.GetNodeStats(ctx, h.nodeID)
 			cancel()
 
 			if stats != nil {
-				finalStats["total_connections"] = stats.TotalConnections
-				finalStats["messages_sent"] = stats.MessagesSent
-				finalStats["broadcasts_sent"] = stats.BroadcastsSent
+				totalConnections = stats.TotalConnections
+				messagesSent = stats.MessagesSent
+				broadcastsSent = stats.BroadcastsSent
 			}
 		}
 
-		shutdownTimer.End()
-		cg.Info("→ 显示最终统计...")
-		cg.Table(finalStats)
-		cg.Info("✅ Hub 安全关闭成功")
-		cg.GroupEnd()
+		h.logger.InfoKV("✅ Hub 安全关闭成功",
+			"node_id", h.nodeID,
+			"shutdown_duration_ms", time.Since(shutdownStart).Milliseconds(),
+			"total_connections", totalConnections,
+			"messages_sent", messagesSent,
+			"broadcasts_sent", broadcastsSent,
+		)
 		return nil
 
 	case <-time.After(calculatedTimeout):
 		// 超时关闭
-		shutdownTimer.End()
-		cg.Info("⚠️ Hub 关闭超时（超时时间: %v）", calculatedTimeout)
-		cg.GroupEnd()
+		h.logger.ErrorKV("⚠️ Hub 关闭超时",
+			"node_id", h.nodeID,
+			"timeout", calculatedTimeout.String(),
+			"shutdown_duration_ms", time.Since(shutdownStart).Milliseconds(),
+		)
 		return ErrHubShutdownTimeout
 	}
 }

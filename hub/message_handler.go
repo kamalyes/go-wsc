@@ -380,7 +380,7 @@ func (h *Hub) checkHeartbeat() {
 	}
 
 	totalDuration := time.Since(start)
-	h.logger.InfoKV("❤️ 心跳检查完成",
+	h.logger.DebugKV("❤️ 心跳检查完成",
 		"total_clients", totalClients,
 		"scanned", atomic.LoadInt64(&scanned),
 		"timeouts", len(timeouts),

@@ -47,20 +47,15 @@ func (h *Hub) syncClientStats() {
 		})
 }
 
-// logClientConnection 记录客户端连接日志
+// logClientConnection 记录客户端连接日志（单行 KV，高频路径）
 func (h *Hub) logClientConnection(client *Client) {
-	cg := h.logger.NewConsoleGroup()
-	cg.Group("👤 客户端连接成功 [%s]", client.UserID)
-
-	clientInfo := map[string]interface{}{
-		"客户端ID": client.ID,
-		"用户ID":  client.UserID,
-		"用户类型":  client.UserType,
-		"客户端IP": client.ClientIP,
-		"活跃连接数": h.shardedRegistry.GetClientCount(),
-	}
-	cg.Table(clientInfo)
-	cg.GroupEnd()
+	h.logger.InfoKV("👤 客户端连接成功",
+		"user_id", client.UserID,
+		"client_id", client.ID,
+		"user_type", client.UserType,
+		"client_ip", client.ClientIP,
+		"active_connections", h.shardedRegistry.GetClientCount(),
+	)
 }
 
 // syncOnlineStatus 同步在线状态到 Redis

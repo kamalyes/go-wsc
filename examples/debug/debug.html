@@ -13,6 +13,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>go-wsc 调试台</title>
+<!-- xlsx 解析（SheetJS CDN，离线时 xlsx 导入不可用，CSV 不受影响） -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);padding:20px;min-height:100vh}
@@ -248,6 +250,16 @@ body{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;background:linear-g
         <button class="btn btn-success btn-sm" id="batchConnBtn" onclick="batchConnect()">批量连接</button>
         <button class="btn btn-danger btn-sm" id="batchDiscBtn" onclick="batchDisconnect()" disabled>全部断开</button>
       </div>
+    </div>
+    <div class="form-group"><label>导入用户表（xlsx / csv，表头列: namespace · group · user_id）</label>
+      <div class="form-inline">
+        <input type="file" id="userFile" accept=".xlsx,.xls,.csv" style="flex:1;min-width:0;font-size:12px" onchange="handleUserFile(this)">
+        <button class="btn btn-secondary btn-sm" onclick="clearImported()" title="清空导入">🗑</button>
+      </div>
+      <div id="importPanel" style="display:none"></div>
+    </div>
+    <div class="btn-grp">
+      <button class="btn btn-success" id="importConnBtn" onclick="importedConnect()" disabled>📥 按导入用户连接</button>
     </div>
     <div class="form-group"><label>心跳压测（主连接）</label>
       <div class="form-inline">
@@ -592,14 +604,16 @@ function stopHb(){
 /* ============================================================
  * 压测：批量连接 & 心跳压测
  * ============================================================ */
-async function issueTokenFor(uid, did){
+async function issueTokenFor(uid, did, tid, gid){
   var utp=$('tkUtp').value;
-  var tid=$('tkTid').value,gid=$('tkGid').value;
   var iss=$('tkIss').value,aud=$('tkAud').value,key=$('tkKey').value,alg=$('tkAlg').value,exp=parseInt($('tkExp').value);
   var hd={typ:'JWT',alg:alg};
   var now=Math.floor(Date.now()/1000);
   var pl={uid:uid,utp:utp};
-  if(did)pl.did=did;if(tid)pl.tid=tid;if(gid)pl.gid=gid;
+  // tid/gid 为空时回退到 Token 弹窗全局配置（随机批量连接场景）
+  var t=tid!==''&&tid!==undefined?tid:$('tkTid').value;
+  var g=gid!==''&&gid!==undefined?gid:$('tkGid').value;
+  if(did)pl.did=did;if(t)pl.tid=t;if(g)pl.gid=g;
   if(iss)pl.iss=iss;if(aud)pl.aud=aud;
   pl.iat=now;pl.exp=now+exp;
   var ha={'HS256':'SHA-256','HS384':'SHA-384','HS512':'SHA-512'}[alg];
@@ -609,20 +623,20 @@ async function issueTokenFor(uid, did){
   var sig=await crypto.subtle.sign('HMAC',ck,enc.encode(si));
   return si+'.'+b64u(new Uint8Array(sig));
 }
-async function buildBatchUrl(uid, did){
+// buildBatchUrl 按用户上下文构建连接 URL（c: {uid, did, tid, gid}）
+// tid/gid 为空时回退到连接面板全局值；group_id 仅在非空时附加
+async function buildBatchUrl(c){
   var base=$('wsUrl').value.trim().split('?')[0];
-  var mode=$('connMode').value;
-  if(mode=='token'){
-    // Token 模式：为每个连接生成独立 JWT
-    var token=await issueTokenFor(uid,did);
+  if($('connMode').value=='token'){
+    var token=await issueTokenFor(c.uid,c.did,c.tid,c.gid);
     return base+'?token='+encodeURIComponent(token);
   }
-  // 明文模式
   var p=new URLSearchParams();
-  p.set('user_id',uid);
-  p.set('device_id',did);
+  p.set('user_id',c.uid);
+  p.set('device_id',c.did);
   p.set('user_type',$('connUtp').value||'customer');
-  p.set('namespace',$('connTid').value||'default');
+  p.set('namespace',c.tid||$('connTid').value||'default');
+  if(c.gid)p.set('group_id',c.gid);
   return base+'?'+p.toString();
 }
 var batchOk=0,batchFail=0,batchSettled=0,batchTotal=0;
@@ -633,6 +647,7 @@ function checkBatchAlive(){
     $('batchConnBtn').disabled=false;
     $('batchDiscBtn').disabled=true;
     $('batchConnBtn').classList.remove('running');
+    $('importConnBtn').disabled=!importedUsers.length;
     addSystemMsg('📭 批量连接已全部断开');
   }
 }
@@ -669,22 +684,21 @@ async function batchConnect(){
     return;
   }
   addSystemMsg('🚀 开始批量创建 '+n+' 个连接 ('+mode+' 模式)...');
+  // 随机用户：tid/gid 留空，buildBatchUrl 回退到全局配置
+  var conns=[];
+  for(var i=0;i<n;i++)conns.push({uid:genId('batch'),did:genId('dev'),tid:'',gid:'',idx:i});
+  doBatchConnect(conns);
+}
+// doBatchConnect 批量建连核心（随机批量与导入用户共用）
+// conns: [{uid, did, tid, gid, idx}]，tid/gid 空时回退全局配置
+async function doBatchConnect(conns){
+  var n=conns.length;
+  var mode=$('connMode').value;
   batchOk=0;batchFail=0;batchSettled=0;batchTotal=n;
   stopAllBatchHb();
-  // 预生成所有 uid/did
-  var conns=[];
-  for(var i=0;i<n;i++)conns.push({uid:genId('batch'),did:genId('dev'),idx:i});
   // 预生成所有 URL（Token 模式并行生成 token，明文模式同步）
   addSystemMsg('⏳ 预生成 '+n+' 个连接 URL...');
-  var urls=await Promise.all(conns.map(function(c){
-    if(mode==='token')return buildBatchUrl(c.uid,c.did);
-    // 明文模式同步构建
-    var base=$('wsUrl').value;
-    return Promise.resolve(base+(base.indexOf('?')>=0?'&':'?')+
-      'user_id='+c.uid+'&device_id='+c.did+
-      '&user_type='+$('connUtp').value+
-      '&namespace='+encodeURIComponent($('connTid').value));
-  }));
+  var urls=await Promise.all(conns.map(buildBatchUrl));
   addSystemMsg('✅ URL 已就绪，开始并发创建 '+n+' 个 WebSocket 连接...');
   // 同一个 tick 内同步创建所有连接，真正并发
   for(var i=0;i<n;i++){
@@ -715,6 +729,7 @@ async function batchConnect(){
   $('batchConnBtn').disabled=true;
   $('batchDiscBtn').disabled=false;
   $('batchConnBtn').classList.add('running');
+  $('importConnBtn').disabled=true;
 }
 function checkBatchDone(){
   if(batchSettled>=batchTotal){
@@ -732,7 +747,153 @@ function batchDisconnect(){
   $('batchConnBtn').disabled=false;
   $('batchDiscBtn').disabled=true;
   $('batchConnBtn').classList.remove('running');
+  $('importConnBtn').disabled=!importedUsers.length;
   addSystemMsg('⛔ 已断开全部批量连接 ('+cnt+' 个)');
+}
+
+/* ============================================================
+ * 用户表导入压测（xlsx / csv，列: namespace · group · user_id）
+ * ============================================================ */
+var importedUsers=[]; // [{uid, tid, gid}]
+function clearImported(){
+  importedUsers=[];
+  $('userFile').value='';
+  $('importPanel').style.display='none';
+  $('importConnBtn').disabled=true;
+}
+// detectCols 表头列位置识别（支持常见别名，均小写匹配）
+// 命中 user_id 列即认为首行是表头；未命中返回 null（无表头，按固定列序 namespace, group, user_id）
+function detectCols(rows){
+  var aliases={
+    uid:['user_id','userid','uid','用户id','用户'],
+    tid:['namespace','ns','tid','租户','命名空间'],
+    gid:['group','group_id','gid','群组','群']
+  };
+  var first=(rows[0]||[]).map(function(c){return String(c==null?'':c).trim().toLowerCase()});
+  var map={};
+  ['uid','tid','gid'].forEach(function(k){
+    for(var a=0;a<aliases[k].length;a++){
+      var i=first.indexOf(aliases[k][a]);
+      if(i>=0){map[k]=i;break}
+    }
+  });
+  if(map.uid===undefined)return null;
+  return map;
+}
+// parseUserRows 行数据 → 用户列表（user_id 必填，namespace/group 可选）
+function parseUserRows(rows){
+  var det=detectCols(rows);
+  var users=[];
+  for(var i=det?1:0;i<rows.length;i++){
+    var r=rows[i];
+    if(!r||!r.length)continue;
+    var uid,tid,gid;
+    if(det){
+      uid=String(r[det.uid]==null?'':r[det.uid]).trim();
+      tid=det.tid!==undefined?String(r[det.tid]==null?'':r[det.tid]).trim():'';
+      gid=det.gid!==undefined?String(r[det.gid]==null?'':r[det.gid]).trim():'';
+    }else{
+      // 无表头：固定列序 namespace, group, user_id
+      tid=String(r[0]==null?'':r[0]).trim();
+      gid=String(r[1]==null?'':r[1]).trim();
+      uid=String(r[2]==null?'':r[2]).trim();
+    }
+    if(!uid)continue;
+    users.push({uid:uid,tid:tid,gid:gid});
+  }
+  return users;
+}
+// parseCsv 简易 CSV 解析（支持引号包裹与 "" 转义、\r\n 换行）
+function parseCsv(text){
+  var rows=[],row=[],cur='',inQ=false;
+  for(var i=0;i<text.length;i++){
+    var c=text[i];
+    if(inQ){
+      if(c=='"'){
+        if(text[i+1]=='"'){cur+='"';i++}else inQ=false;
+      }else cur+=c;
+    }else{
+      if(c=='"')inQ=true;
+      else if(c==','){row.push(cur);cur=''}
+      else if(c=='\r'){}
+      else if(c=='\n'){row.push(cur);cur='';rows.push(row);row=[]}
+      else cur+=c;
+    }
+  }
+  if(cur!==''||row.length){row.push(cur);rows.push(row)}
+  return rows;
+}
+// handleUserFile 文件选择入口：xlsx 走 SheetJS，csv 原生解析
+function handleUserFile(inp){
+  var f=inp.files&&inp.files[0];
+  if(!f)return;
+  var name=f.name.toLowerCase();
+  var isCsv=name.endsWith('.csv');
+  var reader=new FileReader();
+  reader.onload=function(e){
+    var rows;
+    if(isCsv){
+      rows=parseCsv(e.target.result);
+    }else{
+      if(typeof XLSX==='undefined'){
+        addErrorMsg('xlsx 解析库未加载（需联网加载 SheetJS CDN），请改用 CSV 导入');
+        inp.value='';
+        return;
+      }
+      try{
+        var wb=XLSX.read(new Uint8Array(e.target.result),{type:'array'});
+        var ws=wb.Sheets[wb.SheetNames[0]];
+        rows=XLSX.utils.sheet_to_json(ws,{header:1,raw:false,defval:''});
+      }catch(err){
+        addErrorMsg('xlsx 解析失败: '+err.message);
+        inp.value='';
+        return;
+      }
+    }
+    var users=parseUserRows(rows);
+    if(!users.length){
+      addErrorMsg('未解析到有效用户（表需包含 user_id 列；无表头时列序须为 namespace, group, user_id）');
+      inp.value='';
+      return;
+    }
+    if(users.length>255){
+      addSystemMsg('⚠️ 解析到 '+users.length+' 个用户，超过浏览器 WS 上限 255，仅连接前 255 个');
+      users=users.slice(0,255);
+    }
+    importedUsers=users;
+    renderImportPreview();
+    addSystemMsg('📥 已导入 '+users.length+' 个用户（'+f.name+'）');
+  };
+  if(isCsv)reader.readAsText(f,'utf-8');else reader.readAsArrayBuffer(f);
+}
+// renderImportPreview 导入结果预览（统计 + 前 5 行）
+function renderImportPreview(){
+  var ns={},gr={};
+  importedUsers.forEach(function(u){if(u.tid)ns[u.tid]=1;if(u.gid)gr[u.gid]=1});
+  var h='<div class="stress-info" style="margin:8px 0 0"><span>用户: <b>'+importedUsers.length+'</b></span>'+
+    '<span>namespace: <b>'+Object.keys(ns).length+'</b></span><span>group: <b>'+Object.keys(gr).length+'</b></span></div>';
+  h+='<table style="width:100%;font-size:11px;border-collapse:collapse;margin-top:6px">';
+  h+='<tr style="background:#f0f0f8"><th style="text-align:left;padding:3px 6px">namespace</th><th style="text-align:left;padding:3px 6px">group</th><th style="text-align:left;padding:3px 6px">user_id</th></tr>';
+  importedUsers.slice(0,5).forEach(function(u){
+    h+='<tr><td style="padding:3px 6px">'+esc(u.tid||'—')+'</td><td style="padding:3px 6px">'+esc(u.gid||'—')+'</td><td style="padding:3px 6px">'+esc(u.uid)+'</td></tr>';
+  });
+  if(importedUsers.length>5)h+='<tr><td colspan="3" style="padding:3px 6px;color:#999">… 共 '+importedUsers.length+' 行</td></tr>';
+  h+='</table>';
+  $('importPanel').innerHTML=h;
+  $('importPanel').style.display='';
+  $('importConnBtn').disabled=false;
+}
+// importedConnect 按导入用户批量连接（每用户独立 tid/gid，其余同随机批量）
+async function importedConnect(){
+  if(!importedUsers.length){addErrorMsg('请先导入用户表');return}
+  var mode=$('connMode').value;
+  if(mode=='token'&&!$('tkKey').value){
+    addErrorMsg('Token 模式需要先在 Token 弹窗中配置签名密钥');
+    return;
+  }
+  var conns=importedUsers.map(function(u,i){return {uid:u.uid,did:genId('dev'),tid:u.tid,gid:u.gid,idx:i}});
+  addSystemMsg('📥 按导入用户连接 '+conns.length+' 个 ('+mode+' 模式)...');
+  doBatchConnect(conns);
 }
 function hbStress(){
   // 收集所有活跃连接（主连接 + 批量连接）

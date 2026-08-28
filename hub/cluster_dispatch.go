@@ -33,6 +33,7 @@ import (
 	"github.com/kamalyes/go-wsc/models"
 	wscpb "github.com/kamalyes/go-wsc/models/pb"
 	"github.com/kamalyes/go-wsc/routing"
+	"github.com/redis/go-redis/v9"
 )
 
 // ============================================================================
@@ -110,7 +111,7 @@ func (h *Hub) routeToCluster(ctx context.Context, msg *HubMessage, opts ClusterD
 		groupIDs = opts.GroupIDs
 	}
 
-	h.logger.DebugContextKV(ctx, "集群路由",
+	h.logger.InfoContextKV(ctx, "📨 [投递诊断] 跨节点路由发起",
 		"operation", opts.Operation,
 		"app_id", appID,
 		"namespace", namespace,
@@ -142,9 +143,22 @@ func (h *Hub) routeToCluster(ctx context.Context, msg *HubMessage, opts ClusterD
 	// ① 尝试 gRPC 直连
 	result := h.dispatchViaGRPC(ctx, msg, opts)
 
+	// ①' gRPC 目标节点明确用户不在（user_not_found 的 gRPC 等价信号，无需经 PubSub 回告绕圈）：
+	// 触发秒级重路由决策——重查索引发现用户已迁移时向新节点定向补投（返回 rerouted=true），
+	// 后续跳过广播兜底（定向补投已覆盖，广播再投会造成同一消息重复投递）。
+	// 仅 P2P 消息投递场景（SendMessage + TargetUserID 非空）：KickUser 扑空等场景无需重路由
+	rerouted := false
+	if opts.Operation == models.OperationTypeSendMessage && opts.TargetUserID != "" && len(result.userMissNodes) > 0 {
+		for _, missNode := range result.userMissNodes {
+			if h.decideUserNotFoundReroute(ctx, msg, opts.TargetUserID, missNode, appID, namespace) {
+				rerouted = true
+			}
+		}
+	}
+
 	// ② 所有节点 gRPC 成功，无需 PubSub
 	if len(result.pubsubFallback) == 0 && result.grpcDelivered > 0 {
-		h.logger.DebugContextKV(ctx, "集群路由完成（gRPC 全覆盖）",
+		h.logger.InfoContextKV(ctx, "📨 [投递诊断] 跨节点路由完成（gRPC 全覆盖）",
 			"operation", opts.Operation,
 			"grpc_delivered", result.grpcDelivered,
 			"message_id", msg.GetMessageID(),
@@ -155,18 +169,21 @@ func (h *Hub) routeToCluster(ctx context.Context, msg *HubMessage, opts ClusterD
 	// ③ PubSub 兜底：gRPC 未覆盖的节点走 PubSub
 	if h.pubsub != nil {
 		var pubErr error
+		var deadNodes []string
 		if result.grpcDelivered > 0 || len(result.pubsubFallback) > 0 {
 			// 已知目标节点（gRPC 部分成功的剩余节点，或 gRPC 全失败的兜底节点）
 			// 定向发布到节点专属频道，避免广播频道冗余投递到无关节点
 			// 关键修复：gRPC 未启用 + opts.TargetNodeIDs 来自 Redis 在线索引（如 otherNodes=[3iy9vey]）时，
 			// 必须走定向发布到 3iy9vey 专属频道，而不是广播频道（广播频道依赖接收端订阅，且无法定向）
 			// userMissNodes 不参与定向兜底：目标节点已明确返回用户不在，定向发布必然扑空
-			pubErr = h.publishToTargetedNodes(ctx, dispatch, result.pubsubFallback)
-		} else {
+			deadNodes, pubErr = h.publishToTargetedNodes(ctx, dispatch, result.pubsubFallback)
+		} else if !rerouted {
 			// 无目标节点列表（全局广播、群组广播场景）走广播频道；
 			// 也覆盖"gRPC 目标全部明确用户不在"（userMissNodes 非空）的场景：
 			// Redis 在线索引过期时用户可能已迁移到索引未知的节点，
 			// 广播让实际持有该用户连接的节点投递（其余节点 HasUser 扑空自动跳过）
+			// rerouted=true 时跳过：重路由已定向补投到新节点，广播再投会重复投递，
+			// 索引查询失败等未决场景 rerouted=false 仍走广播兜底
 			pubErr = h.publishToCluster(ctx, dispatch)
 		}
 		if pubErr != nil {
@@ -185,11 +202,19 @@ func (h *Hub) routeToCluster(ctx context.Context, msg *HubMessage, opts ClusterD
 			return pubErr
 		}
 
-		h.logger.DebugContextKV(ctx, "集群路由完成",
+		// 🚨 死节点秒级兜底：定向频道无人订阅（Pod 挂掉/订阅断连重连中），消息未送达这些节点。
+		// P2P 场景重查在线索引：用户所有连接所在节点均失活 → 实时投递无望，立即转离线
+		// （不等 30s ACK 超时）；仍有健康节点 → 已通过 gRPC/定向 PubSub 收到，无需处理
+		if len(deadNodes) > 0 && opts.Operation == models.OperationTypeSendMessage && opts.TargetUserID != "" {
+			h.handleDeadNodesForP2P(ctx, msg, opts.TargetUserID, deadNodes)
+		}
+
+		h.logger.InfoContextKV(ctx, "📨 [投递诊断] 跨节点路由完成（PubSub 兜底）",
 			"operation", opts.Operation,
 			"grpc_delivered", result.grpcDelivered,
 			"pubsub_fallback", len(result.pubsubFallback),
 			"user_miss", len(result.userMissNodes),
+			"dead_nodes", len(deadNodes),
 			"message_id", msg.GetMessageID(),
 		)
 		return nil
@@ -199,12 +224,13 @@ func (h *Hub) routeToCluster(ctx context.Context, msg *HubMessage, opts ClusterD
 	// 走到这里说明 IsGRPCEnabled() == true 但 h.pubsub == nil，且 dispatchViaGRPC 没有任何节点投递成功
 	// （nodeRegistry 不含其他节点 / opts.TargetNodeIDs 为空 / 目标节点全部返回用户不在）
 	// 不返回 error 会让上层误判"已路由成功"→ sendToUser routed=true → 直接 return，消息丢失
-	if result.grpcDelivered == 0 {
+	// rerouted=true 例外：userMiss 已触发重路由并定向补投成功，路由未失败
+	if result.grpcDelivered == 0 && !rerouted {
 		return fmt.Errorf("跨节点路由失败：gRPC 投递 0 节点（投递 %d 个、用户不在 %d 个、兜底 %d 个），PubSub 未启用，无可用投递路径",
 			result.grpcDelivered, len(result.userMissNodes), len(result.pubsubFallback))
 	}
 
-	h.logger.DebugContextKV(ctx, "集群路由完成",
+	h.logger.InfoContextKV(ctx, "📨 [投递诊断] 跨节点路由完成（gRPC-only）",
 		"operation", opts.Operation,
 		"grpc_delivered", result.grpcDelivered,
 		"pubsub_fallback", len(result.pubsubFallback),
@@ -264,14 +290,30 @@ func (h *Hub) dispatchViaGRPC(ctx context.Context, msg *HubMessage, opts Cluster
 	grpcCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 
-	for _, nodeID := range targetNodes {
+	// 并行投递（并发上限 8，与 grpcBroadcastGroups 对齐）：
+	// 串行时单个死节点的 3s 超时会拖慢整批投递（N 节点最坏 3N 秒）；
+	// 结果按索引写入无锁竞争，汇总在 wg.Wait 后串行进行
+	outcomes := make([]grpcDispatchOutcome, len(targetNodes))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
+	for i, nodeID := range targetNodes {
 		addr, ok := h.nodeRegistry.GetNodeAddr(nodeID)
 		if !ok {
-			result.pubsubFallback = append(result.pubsubFallback, nodeID)
+			outcomes[i] = grpcOutcomeFallback // 地址未知 → PubSub 兜底
 			continue
 		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, addr string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			outcomes[i] = h.executeGRPCDispatch(grpcCtx, addr, msgData, opts)
+		}(i, addr)
+	}
+	wg.Wait()
 
-		switch h.executeGRPCDispatch(grpcCtx, addr, msgData, opts) {
+	for i, nodeID := range targetNodes {
+		switch outcomes[i] {
 		case grpcOutcomeDelivered:
 			result.grpcDelivered++
 		case grpcOutcomeUserMiss:
@@ -348,7 +390,7 @@ func (h *Hub) executeGRPCDispatch(ctx context.Context, addr string, msgData []by
 	}
 
 	if err != nil {
-		h.logger.DebugContextKV(ctx, "gRPC 投递失败，降级 PubSub",
+		h.logger.InfoContextKV(ctx, "📨 [投递诊断] gRPC 投递失败，降级 PubSub",
 			"operation", opts.Operation,
 			"target_addr", addr,
 			"error", err,
@@ -392,9 +434,14 @@ func (h *Hub) publishToCluster(ctx context.Context, dispatch *models.Distributed
 // publishToTargetedNodes 向指定节点的专属频道精准发布（避免全量广播导致 gRPC 已成功节点重复处理）
 // 用于 gRPC 部分成功的 PubSub 兜底场景：仅失败节点需要收到消息
 // 也是 gRPC 未启用 + opts.TargetNodeIDs 已知目标节点场景的定向发布主路径
-func (h *Hub) publishToTargetedNodes(ctx context.Context, dispatch *models.DistributedMessage, nodeIDs []string) error {
+//
+// 性能：Redis Pipeline 批量发布，N 个目标节点 N 次 RTT → 1 次
+// 可靠性：利用 PUBLISH 返回值（收到消息的订阅者数）秒级感知死节点——
+// 返回 deadNodes = 频道无人订阅的节点列表（Pod 挂掉/订阅断连重连中，消息未送达，
+// 原先要干等 30s ACK 超时才能发现）
+func (h *Hub) publishToTargetedNodes(ctx context.Context, dispatch *models.DistributedMessage, nodeIDs []string) ([]string, error) {
 	if h.pubsub == nil || len(nodeIDs) == 0 {
-		return nil
+		return nil, nil
 	}
 	data := h.marshalDistributedMessage(ctx, dispatch)
 	prefix := h.config.RedisRepository.PubSub.GetNodeChannelPrefix()
@@ -405,23 +452,98 @@ func (h *Hub) publishToTargetedNodes(ctx context.Context, dispatch *models.Distr
 		"payload_size", len(data),
 		"message_id", dispatch.Message.GetMessageID(),
 	)
-	var lastErr error
+
+	// 防御：过滤自身（不应出现，但避免意外循环投递）
+	targets := make([]string, 0, len(nodeIDs))
 	for _, nodeID := range nodeIDs {
-		// 防御：跳过自身（不应出现，但避免意外循环投递）
-		if nodeID == h.nodeID {
-			continue
-		}
-		if err := h.pubsub.Publish(ctx, prefix+nodeID, string(data)); err != nil {
-			lastErr = err
-			h.logger.WarnContextKV(ctx, "📡 PubSub 定向发布失败",
-				"target_node", nodeID,
-				"channel", prefix+nodeID,
-				"payload_size", len(data),
-				"error", err,
-				"message_id", dispatch.Message.GetMessageID())
+		if nodeID != h.nodeID {
+			targets = append(targets, nodeID)
 		}
 	}
-	return lastErr
+	if len(targets) == 0 {
+		return nil, nil
+	}
+
+	// Pipeline 批量发布：逐节点 cachex.Publish 是 N 次串行 RTT（内含 retry 包装开销），
+	// 且丢弃 PUBLISH 返回值无法感知死节点；直接走底层 client 等价（data 已序列化，
+	// 本项目 PubSub 未启用压缩/namespace 前缀，cachex.Publish 对 string 仅透传）
+	client := h.pubsub.GetClient()
+	pipe := client.Pipeline()
+	cmds := make([]*redis.IntCmd, len(targets))
+	for i, nodeID := range targets {
+		cmds[i] = pipe.Publish(ctx, prefix+nodeID, data)
+	}
+	_, _ = pipe.Exec(ctx) // 网络/命令错误统一在下方逐命令检查（Exec 聚合错误不区分粒度）
+
+	// PUBLISH 返回值 = 收到消息的订阅者数（节点正常 = 1 条订阅连接）；
+	// 0 或命令错误 = 频道无人订阅（死节点），消息未送达
+	var deadNodes []string
+	var lastErr error
+	for i, cmd := range cmds {
+		if err := cmd.Err(); err != nil {
+			lastErr = err
+			deadNodes = append(deadNodes, targets[i])
+			h.logger.WarnContextKV(ctx, "📡 PubSub 定向发布失败（单节点）",
+				"target_node", targets[i],
+				"channel", prefix+targets[i],
+				"error", err,
+				"message_id", dispatch.Message.GetMessageID())
+			continue
+		}
+		if cmd.Val() == 0 {
+			deadNodes = append(deadNodes, targets[i])
+		}
+	}
+	if len(deadNodes) > 0 {
+		h.logger.WarnContextKV(ctx, "📡 [死节点感知] 定向频道无人订阅，消息未送达（Pod 挂掉或订阅断连重连中）",
+			"dead_nodes", deadNodes,
+			"total_targets", len(targets),
+			"message_id", dispatch.Message.GetMessageID(),
+		)
+	}
+	return deadNodes, lastErr
+}
+
+// handleDeadNodesForP2P P2P 消息的死节点秒级兜底（publishToTargetedNodes 检测到定向频道无人订阅时调用）
+//
+// 重查在线索引：用户所有连接所在节点均失活（Pod 挂掉/订阅断连重连中）→ 实时投递无望，
+// 立即转离线（复用 tryStoreOfflineOnDeliveryFailure：含离线源防循环、状态覆盖、ACK 超时任务取消），
+// 不再干等 30s ACK 超时；仍有健康节点（已通过 gRPC/定向 PubSub 收到消息）或索引查询失败 →
+// 不处理，保留 ACK 超时兜底
+func (h *Hub) handleDeadNodesForP2P(ctx context.Context, msg *HubMessage, userID string, deadNodes []string) {
+	if h.onlineStatusRepo == nil {
+		return
+	}
+	deadSet := make(map[string]struct{}, len(deadNodes))
+	for _, n := range deadNodes {
+		deadSet[n] = struct{}{}
+	}
+
+	// 按投递信封归一化查询维度（与 decideUserNotFoundReroute 一致）
+	appID, _ := routing.NormalizeRoute(msg.AppID, "")
+	queryCtx := routing.NewRoute().WithAppID(appID).WithNamespace(msg.Namespace).Inject(ctx)
+	nodeIDs, err := h.onlineStatusRepo.GetUserNodes(queryCtx, userID)
+	if err != nil || len(nodeIDs) == 0 {
+		// 索引查询失败或用户无索引：未决场景，保留 30s ACK 超时兜底
+		return
+	}
+
+	for _, nodeID := range nodeIDs {
+		if nodeID == "" || nodeID == h.nodeID {
+			continue // 本地节点由 sendToUser 本地投递路径负责
+		}
+		if _, dead := deadSet[nodeID]; !dead {
+			// 用户仍有健康节点（该节点已收到消息），多端部分送达即成功，不转离线
+			return
+		}
+	}
+
+	h.logger.WarnContextKV(ctx, "🚨 [死节点兜底] 用户所有连接所在节点订阅均失活，立即转离线（不等 30s ACK 超时）",
+		"message_id", msg.MessageID,
+		"user_id", userID,
+		"dead_nodes", deadNodes,
+	)
+	h.tryStoreOfflineOnDeliveryFailure(msg, fmt.Errorf("目标节点 %v 订阅失活（Pod 挂掉或订阅断连），消息未送达", deadNodes))
 }
 
 // ============================================================================

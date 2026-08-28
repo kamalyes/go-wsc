@@ -54,6 +54,9 @@ func (h *Hub) cancelAckTimeout(messageID string) {
 // 超时触发时：原子认领（ClaimStaleSending 状态守卫，多节点去重）→ 标记 AckTimeout → 转存离线
 func (h *Hub) makeAckTimeoutCallback(messageID string) func() {
 	return func() {
+		// ⏰ 终态清理 user_not_found 重路由守卫条目（见 self_heal.go）
+		h.rerouteGuard.Delete(messageID)
+
 		if h.messageRecordRepo == nil {
 			return
 		}

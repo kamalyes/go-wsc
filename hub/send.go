@@ -47,6 +47,8 @@ func (h *Hub) routeToClusterForOfflineUser(ctx context.Context, userID string, m
 	// 📊 广播兜底触发计数（reportPerformanceMetrics 每 5min 上报后清零）
 	// 治本后该值应趋近 0；若持续增长说明索引写入仍有滞后（检查 syncOnlineStatus 是否同步执行、Redis 可达性）
 	h.broadcastFallbackCount.Add(1)
+	// 记录广播兜底投递目标（user_not_found 重路由守卫：广播路径离线已预存，回告全拒时不再重复转离线）
+	h.markRerouteAttempted(msg.MessageID, h.getAllClusterNodeIDs(), false)
 	opts := ClusterDispatchOptions{
 		Operation:    OperationTypeSendMessage,
 		TargetUserID: userID,
@@ -102,7 +104,7 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 	// 先快照本地在线状态：路由决策与本地投递共用，避免两次查询间的连接抖动造成判定漂移
 	// 按 ctx 路由信封(appID+namespace)过滤，避免跨 app/ns 误判在线
 	localOnline := h.shardedRegistry.HasUser(toUserID, routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx))
-	routed, err := h.checkAndRouteToNode(ctx, toUserID, msgCopy)
+	routed, routeNodes, err := h.checkAndRouteToNode(ctx, toUserID, msgCopy)
 	if err != nil {
 		// 路由失败，记录错误但继续尝试本地发送
 		// 注意：此处不将消息标记为失败，因为会 fallback 到本地发送
@@ -124,6 +126,7 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 		h.logger.DebugContextKV(ctx, "📨 [投递诊断] 用户仅在其他节点，已远程投递，本地跳过",
 			"message_id", msgCopy.MessageID,
 			"user_id", toUserID,
+			"to_nodes", routeNodes,
 		)
 		return nil
 	}
@@ -141,6 +144,7 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 		"from", msgCopy.Sender,
 		"to", msgCopy.Receiver,
 		"routed_remote", routed,
+		"to_nodes", routeNodes,
 		"type", msgCopy.MessageType,
 	)
 	return nil

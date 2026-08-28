@@ -114,6 +114,12 @@ func (s *GRPCServer) SendToUser(ctx context.Context, req *wscpb.SendToUserReques
 	// 快速检查用户是否在线（O(1)，避免无用户时序列化开销）
 	// 按 ctx 路由信封 appID+namespace 隔离（路由来自 msg.InjectRoute 注入）
 	if !s.hub.HasUserClient(ctx, userID) {
+		// 🔥 gRPC 定向投递扑空 = 在线索引死条目（用户断连未清理/已迁移到其他节点）：
+		// 异步自愈清理指向本节点的死索引（与 PubSub 定向路径行为一致，见 distributed.go）
+		// 发送方收到 Success=false 响应即触发重路由决策（routeToCluster userMiss 分支），
+		// 无需像 PubSub 路径那样经回告频道绕圈
+		appID, _ := routing.NormalizeRoute(msg.AppID, "")
+		s.hub.selfHealDeadIndexEntries(ctx, userID, appID, msg.Namespace)
 		return &wscpb.SendToUserResponse{
 			Success:    false,
 			Error:      "用户不在线",

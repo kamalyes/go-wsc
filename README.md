@@ -9,7 +9,7 @@
 [![GitHub Stars](https://img.shields.io/github/stars/kamalyes/go-wsc)](https://github.com/kamalyes/go-wsc/stargazers)
 [![codecov](https://codecov.io/gh/kamalyes/go-wsc/branch/master/graph/badge.svg)](https://codecov.io/gh/kamalyes/go-wsc)
 
-**go-wsc** 是一个企业级 Go WebSocket 框架，专注于高性能实时通信。提供智能重连、消息确认(ACK)、连接池管理等关键特性，支持百万级并发连接。
+**go-wsc** 是一个企业级 Go WebSocket 框架，专注于高性能实时通信。提供智能重连、消息确认(ACK)、连接池管理等关键特性，内置 gRPC 集群直连与四层跨节点自愈容错，支持百万级并发连接。
 
 ## 🏗️ 系统架构
 
@@ -52,7 +52,8 @@ graph TB
         end
 
         subgraph "分布式通信"
-            PubSub[Redis PubSub<br/>消息总线]
+            GRPCDirect[节点间 gRPC 直连<br/>点对点投递]
+            PubSub[Redis PubSub<br/>兜底消息总线]
             BroadcastMgr[全局广播]
         end
     end
@@ -127,8 +128,11 @@ graph TB
     MsgRouter --> CrossNodeRouter
 
     %% 分布式通信
+    CrossNodeRouter --> GRPCDirect
     CrossNodeRouter --> PubSub
     BroadcastMgr --> PubSub
+    Hub1 <-.->|gRPC 直连| Hub2
+    Hub2 <-.->|gRPC 直连| Hub3
     Hub1 <-.->|订阅/发布| PubSub
     Hub2 <-.->|订阅/发布| PubSub
     Hub3 <-.->|订阅/发布| PubSub
@@ -174,7 +178,7 @@ graph TB
     class WSC,TSC,React,Vue,Angular clientStyle
     class LB,Gateway lbStyle
     class Hub1,Hub2,Hub3,HubN hubStyle
-    class ConnRegistry,NodeDiscovery,MsgRouter,CrossNodeRouter,PubSub,BroadcastMgr coreStyle
+    class ConnRegistry,NodeDiscovery,MsgRouter,CrossNodeRouter,GRPCDirect,PubSub,BroadcastMgr coreStyle
     class ACKMgr,MsgRecord,RetryEngine,FailureRouter,OfflineHandler,QueueHandler reliabilityStyle
     class AtomicOps,WorkerPool,MetricsCol,AlertMgr,ConfigMgr,NodeConfig perfStyle
     class RedisCluster,Database,LogStore storageStyle
@@ -182,13 +186,17 @@ graph TB
 
 ### 架构特点
 
-- **分布式集群**: 多节点 Hub 集群 + Redis PubSub 消息总线 + 自动节点发现
+- **分布式集群**: 多节点 Hub 集群 + gRPC 直连 + Redis PubSub 兜底 + 自动节点发现
 - **负载均衡**: Nginx/HAProxy IP Hash 会话保持 + 智能流量分发
 - **跨节点通信**:
   - 同节点通信: 内存直达，延迟 < 1ms
-  - 跨节点通信: Redis PubSub，延迟 5-10ms
+  - 跨节点通信: gRPC 点对点直连（低延迟、强类型、并行投递）
+  - PubSub 兜底: gRPC 未启用/失败时降级 Redis PubSub，Pipeline 批量定向发布
   - 全局广播: 自动同步到所有节点
 - **高可靠性**: ACK 确认机制 + 消息记录 + 离线处理 + 智能重试
+- **跨节点自愈**: 死节点秒级感知 + user_not_found 重路由 + 死索引清理 + 幽灵连接回收
+- **全链路追踪**: trace_id 贯穿 gRPC/PubSub/离线推送全链路
+- **多租户隔离**: appID + namespace 应用级消息隔离
 - **失败处理**: 5类专业化失败处理器 + go-toolbox重试引擎
 - **配置统一**: go-config/wsc 统一管理重试参数、错误分类和节点配置
 - **高性能**: 原子操作 + 动态队列 + 协程池优化
@@ -209,8 +217,28 @@ graph TB
 
 - **高并发**：百万级连接支持
 - **消息路由**：点对点/群组/广播
-- **ACK 确认**：可靠消息传输
+- **集群投递**：gRPC 直连优先 + PubSub 兜底 + 死节点秒级感知
+- **ACK 确认**：可靠消息传输 + 跨节点 ACK 超时兜底
+- **全链路追踪**：trace_id 贯穿发送/投递/ACK/离线全链路
+- **多租户隔离**：appID + namespace 应用级消息隔离
 - **性能监控**：实时指标统计
+
+### 🛡️ 跨节点可靠性与自愈
+
+消息投递的四层容错链（逐层兜底，覆盖不同故障形态）：
+
+| 层级 | 机制 | 覆盖场景 | 响应时延 |
+| --- | --- | --- | --- |
+| ① 死节点感知 | `PUBLISH` 返回值检测频道订阅数，全失活立即转离线 | Pod 挂掉/订阅断连，消息从未送达 | 秒级 |
+| ② user_not_found 重路由 | 目标节点回告用户不在，重查索引定向补投/转离线 | 节点活着但用户已迁移（索引过期） | 秒级 |
+| ③ ACK 超时兜底 | 跨节点 ACK 时间轮扫描，超时标记并转存离线 | 投递中节点挂掉/消息丢失 | 30s |
+| ④ 幽灵连接回收 | 新节点注册时检测 clientID 漂移，通知旧节点踢掉半开连接 | 断线重连跨节点漂移 | 秒级 |
+
+配套机制：
+
+- **死索引自愈**：目标节点扑空时异步清理指向本节点的死索引条目
+- **owner 归属校验**：Lua 脚本保证索引清理不误删其他节点已接管的条目
+- **节点重注册**：周期性完整重注册（含 gRPC 地址），Redis key 被删/TTL 过期后自动恢复上报
 
 ### 🔄 失败处理与重试
 
@@ -306,9 +334,9 @@ go run server.go
 
 ### 测试覆盖
 
-- **测试用例**: 880个（2个跳过）
+- **测试用例**: 1100+个（持续增长）
 - **通过率**: 100%
-- **覆盖范围**: 单元测试 + 集成测试 + 竞态检测
+- **覆盖范围**: 单元测试 + 集成测试 + 双节点集群测试 + 竞态检测
 - **基准测试**: 性能回归保护
 
 ### 持续集成
@@ -326,8 +354,9 @@ go test -race ./...
 # 生成覆盖报告
 go test -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out
-go test -v ./... -timeout 5m 2>&1 | Select-String -Pattern "(FAIL|ERROR|panic)" -Context 1,0
-gotestsum -f testname -- ./... -race -count=1 -timeout=30m -coverprofile=coverage.txt -covermode=atomic -shuffle=on | Select-String -Pattern "(FAIL|ERROR|panic|fatal)"
+
+# 推荐全量回归（竞态 + 随机顺序 + 覆盖率，仅显示失败用例）
+gotestsum -f testname -- ./... -race -count=1 -timeout=120m -coverprofile=coverage.txt -covermode=atomic -shuffle=on | Select-String -Pattern "(FAIL|ERROR|panic|fatal)"
 ```
 
 > 📋 **测试报告**: 查看 [测试覆盖报告](./docs/Test_Coverage.md) 了解详细测试情况
@@ -344,14 +373,16 @@ gotestsum -f testname -- ./... -race -count=1 -timeout=30m -coverprofile=coverag
 ### 分布式架构
 
 - **零侵入部署**: 现有代码无需修改，自动支持分布式
-- **节点发现**: 自动服务注册、心跳检测和节点发现
+- **节点发现**: 自动服务注册、心跳检测、周期性重注册（Redis key 删除/TTL 过期自动恢复上报）
 - **智能路由**:
   - 同节点通信: 内存直达，延迟 < 1ms
-  - 跨节点通信: Redis PubSub，延迟 5-10ms
+  - 跨节点通信: gRPC 点对点直连优先（并行投递，单死节点不拖累整批），PubSub Pipeline 定向发布兜底
   - 自动路由到用户所在节点
 - **全局广播**: 自动同步到所有节点的所有客户端
+- **多租户隔离**: appID + namespace 应用级消息隔离，跨应用消息互不可见
 - **会话保持**: Nginx IP Hash 保证用户连接稳定性
-- **故障转移**: 节点故障自动检测和客户端自动重连
+- **故障转移**: 死节点秒级感知（PUBLISH 订阅数检测）+ user_not_found 秒级重路由 + 客户端自动重连
+- **跨节点自愈**: 死索引清理 + 幽灵连接回收 + owner 归属校验（防误删）
 - **水平扩展**: 无状态设计支持弹性伸缩，线性扩展并发能力
 - **高可用**: 多节点冗余 + 自动故障恢复 + 负载均衡
 

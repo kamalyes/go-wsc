@@ -727,7 +727,7 @@ func TestCheckAndRouteToNode_SingleNodeMode(t *testing.T) {
 	defer hub.Shutdown()
 
 	msg := makeGroupMessage("sender")
-	routed, err := hub.checkAndRouteToNode(context.Background(), "u-test", msg)
+	routed, _, err := hub.checkAndRouteToNode(context.Background(), "u-test", msg)
 	require.NoError(t, err)
 	assert.False(t, routed, "单机模式不应路由到其他节点")
 }
@@ -738,7 +738,7 @@ func TestCheckAndRouteToNode_NilOnlineStatusRepo(t *testing.T) {
 	defer hub.Shutdown()
 
 	msg := makeGroupMessage("sender")
-	routed, err := hub.checkAndRouteToNode(context.Background(), "u-test", msg)
+	routed, _, err := hub.checkAndRouteToNode(context.Background(), "u-test", msg)
 	require.NoError(t, err)
 	assert.False(t, routed)
 }
@@ -1101,7 +1101,7 @@ func TestHandleDistributedSendMessage_NilMessage(t *testing.T) {
 		NodeID:   "other-node",
 		TargetID: "u-test",
 	}
-	err := hub.handleDistributedSendMessage(context.Background(), distMsg)
+	err := hub.handleDistributedSendMessage(context.Background(), distMsg, true)
 	assert.Error(t, err, "Message 为 nil 应返回错误")
 }
 
@@ -1114,7 +1114,7 @@ func TestHandleDistributedSendMessage_UserNotFound(t *testing.T) {
 	distMsg.TargetID = "u-not-exist"
 	// 用户不在本节点是广播兜底的正常预期（其余节点扑空自动跳过），
 	// 返回 nil 避免触发 PubSub 订阅端无效重试 + ERROR 噪音
-	err := hub.handleDistributedSendMessage(context.Background(), distMsg)
+	err := hub.handleDistributedSendMessage(context.Background(), distMsg, false)
 	assert.NoError(t, err, "用户不在本节点应静默跳过（广播兜底正常路径）")
 }
 
@@ -1132,7 +1132,7 @@ func TestHandleDistributedSendMessage_Success(t *testing.T) {
 	distMsg.TargetID = "u-recv"
 	distMsg.Namespace = "ns-recv"
 
-	err := hub.handleDistributedSendMessage(context.Background(), distMsg)
+	err := hub.handleDistributedSendMessage(context.Background(), distMsg, true)
 	require.NoError(t, err)
 
 	select {
@@ -1160,7 +1160,7 @@ func TestHandleDistributedSendMessage_AllClientsUnavailable(t *testing.T) {
 	distMsg.TargetID = "u-full"
 	distMsg.Namespace = "ns-full"
 
-	err := hub.handleDistributedSendMessage(context.Background(), distMsg)
+	err := hub.handleDistributedSendMessage(context.Background(), distMsg, true)
 	assert.Error(t, err, "所有客户端不可用时应返回错误")
 }
 
@@ -1206,7 +1206,7 @@ func TestHandleDistributedSendMessage_ReportsStatusSuccess(t *testing.T) {
 	distMsg.TargetID = "u-x-node-ok"
 	distMsg.Namespace = "ns-x"
 
-	err := hub.handleDistributedSendMessage(context.Background(), distMsg)
+	err := hub.handleDistributedSendMessage(context.Background(), distMsg, true)
 	require.NoError(t, err)
 
 	// 状态更新经 statusUpdater 批量异步落盘
@@ -1240,7 +1240,7 @@ func TestHandleDistributedSendMessage_ChannelFullReportsFailedAndStoresOffline(t
 	distMsg.TargetID = "u-x-node-full"
 	distMsg.Namespace = "ns-y"
 
-	err := hub.handleDistributedSendMessage(context.Background(), distMsg)
+	err := hub.handleDistributedSendMessage(context.Background(), distMsg, true)
 	assert.Error(t, err, "所有客户端投递失败应返回错误")
 
 	// Failed 状态异步落盘
@@ -1274,7 +1274,7 @@ func TestHandleDistributedSendMessage_SSEClientReceivesMessage(t *testing.T) {
 	distMsg.TargetID = "u-x-node-sse"
 	distMsg.Namespace = "ns-sse"
 
-	err := hub.handleDistributedSendMessage(context.Background(), distMsg)
+	err := hub.handleDistributedSendMessage(context.Background(), distMsg, true)
 	require.NoError(t, err, "SSE 客户端应投递成功")
 
 	select {
@@ -1789,7 +1789,7 @@ func TestCheckAndRouteToNode_QueryError(t *testing.T) {
 	})
 
 	msg := makeGroupMessage("sender")
-	routed, err := hub.checkAndRouteToNode(context.Background(), "u-test", msg)
+	routed, _, err := hub.checkAndRouteToNode(context.Background(), "u-test", msg)
 	assert.Error(t, err, "查询失败应返回错误")
 	assert.False(t, routed, "查询失败不应路由")
 }
@@ -1808,9 +1808,10 @@ func TestCheckAndRouteToNode_UserOnOtherNodes(t *testing.T) {
 	})
 
 	msg := makeGroupMessage("sender")
-	routed, err := hub.checkAndRouteToNode(context.Background(), "u-test", msg)
+	routed, routeNodes, err := hub.checkAndRouteToNode(context.Background(), "u-test", msg)
 	require.NoError(t, err)
 	assert.True(t, routed, "用户在其他节点时应路由")
+	assert.Equal(t, []string{"node-other"}, routeNodes, "应返回实际投递的目标节点列表")
 }
 
 func TestCheckAndRouteToNode_UserOnlyOnLocalNode(t *testing.T) {
@@ -1827,7 +1828,7 @@ func TestCheckAndRouteToNode_UserOnlyOnLocalNode(t *testing.T) {
 	})
 
 	msg := makeGroupMessage("sender")
-	routed, err := hub.checkAndRouteToNode(context.Background(), "u-test", msg)
+	routed, _, err := hub.checkAndRouteToNode(context.Background(), "u-test", msg)
 	require.NoError(t, err)
 	assert.False(t, routed, "用户仅在本节点时不应路由")
 }
@@ -1846,7 +1847,7 @@ func TestCheckAndRouteToNode_EmptyNodeID(t *testing.T) {
 	})
 
 	msg := makeGroupMessage("sender")
-	routed, err := hub.checkAndRouteToNode(context.Background(), "u-test", msg)
+	routed, _, err := hub.checkAndRouteToNode(context.Background(), "u-test", msg)
 	require.NoError(t, err)
 	assert.False(t, routed, "过滤空 nodeID 后仅剩本节点，不应路由")
 }

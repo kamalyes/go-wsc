@@ -143,6 +143,10 @@ func (h *Hub) Run() {
 		// ACK清理定时器：定期清理过期的ACK记录
 		// 使用配置中的 AckCleanupInterval (默认1分钟)
 		OnTicker(h.config.AckCleanupInterval, h.cleanupExpiredAck).
+		// user_not_found 重路由守卫过期条目清扫（防泄漏；正常路径由 ACK 终态删除，见 self_heal.go）
+		IfTicker(h.pubsub != nil,
+			rerouteGuardSweepInterval,
+			h.sweepRerouteGuard).
 		// 在线状态清理定时器：定期清理过期的在线状态数据
 		// 使用 OnlineStatus 配置中的 StatusRefreshInterval 和 EnableAutoCleanup
 		IfTicker(h.onlineStatusRepo != nil && h.config.RedisRepository.OnlineStatus != nil && h.config.RedisRepository.OnlineStatus.EnableAutoCleanup,

@@ -518,3 +518,138 @@ func mustMarshalHubMessagePB(t *testing.T, msg *HubMessage) []byte {
 func marshalHubMessagePBForTest(msg *HubMessage) ([]byte, error) {
 	return wscpb.MarshalHubMessage(msg)
 }
+
+// ============================================================================
+// 死节点秒级兜底（publishToTargetedNodes PUBLISH 返回值检测 + handleDeadNodesForP2P）
+// ============================================================================
+
+// deadNodeTestHub 构造 PubSub-only（gRPC 未启用）节点 + 可配置在线索引 + 离线捕获
+func deadNodeTestHub(t *testing.T, userNodes []string, userNodesErr error) (*Hub, *redis.Client, *fakeOfflineHandler) {
+	t.Helper()
+	mr := miniredis.RunT(t)
+	redisClient := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+
+	hub := newMinHub()
+	hub.SetPubSub(cachex.NewPubSub(redisClient))
+	hub.SetOnlineStatusRepository(&distributedOnlineStatusRepo{
+		userNodes:    userNodes,
+		userNodesErr: userNodesErr,
+	})
+	offline := &fakeOfflineHandler{}
+	hub.SetOfflineMessageHandler(offline)
+	return hub, redisClient, offline
+}
+
+// offlineStoredCount 读取 fakeOfflineHandler 已转存数量（并发安全）
+func offlineStoredCount(f *fakeOfflineHandler) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.stored)
+}
+
+// makeP2PMessage 构造 P2P 投递消息（Receiver 非空才会触发转离线）
+func makeP2PMessage(receiver string) *HubMessage {
+	msg := makeGroupMessage("sender")
+	msg.Receiver = receiver
+	return msg
+}
+
+// TestDeadNodesAllDead_StoresOfflineImmediately
+// 用户所有连接所在节点频道均无人订阅（Pod 全挂）→ 消息秒级转离线，不等 30s ACK 超时
+func TestDeadNodesAllDead_StoresOfflineImmediately(t *testing.T) {
+	hub, redisClient, offline := deadNodeTestHub(t, []string{"node-dead"}, nil)
+	defer func() {
+		hub.Shutdown()
+		_ = redisClient.Close()
+	}()
+
+	// 无任何节点订阅 node-dead 频道 → PUBLISH 返回 0 → deadNodes 触发秒级转离线
+	err := hub.routeToCluster(context.Background(), makeP2PMessage("u-dead"), ClusterDispatchOptions{
+		Operation:     models.OperationTypeSendMessage,
+		TargetUserID:  "u-dead",
+		TargetNodeIDs: []string{"node-dead"},
+	})
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		return offlineStoredCount(offline) == 1
+	}, 2*time.Second, 10*time.Millisecond, "所有目标节点失活时应立即转存离线")
+}
+
+// TestDeadNodesPartialAlive_DoesNotStoreOffline
+// 用户多端分布：部分节点失活、部分健康（频道有订阅者）→ 已送达健康节点，不转离线
+func TestDeadNodesPartialAlive_DoesNotStoreOffline(t *testing.T) {
+	hub, redisClient, offline := deadNodeTestHub(t, []string{"node-dead", "node-alive"}, nil)
+	defer func() {
+		hub.Shutdown()
+		_ = redisClient.Close()
+	}()
+
+	// 为 node-alive 频道挂一个真实订阅者（模拟健康节点），node-dead 无订阅者
+	ctx := context.Background()
+	prefix := hub.config.RedisRepository.PubSub.GetNodeChannelPrefix()
+	aliveChannel := prefix + "node-alive"
+	sub := redisClient.Subscribe(ctx, aliveChannel)
+	defer func() { _ = sub.Close() }()
+	require.Eventually(t, func() bool {
+		subs, _ := redisClient.PubSubNumSub(ctx, aliveChannel).Result()
+		return subs[aliveChannel] == 1
+	}, 2*time.Second, 20*time.Millisecond, "node-alive 频道应完成订阅")
+
+	err := hub.routeToCluster(ctx, makeP2PMessage("u-multi"), ClusterDispatchOptions{
+		Operation:     models.OperationTypeSendMessage,
+		TargetUserID:  "u-multi",
+		TargetNodeIDs: []string{"node-dead", "node-alive"},
+	})
+	require.NoError(t, err)
+
+	// 健康节点已收到消息（PUBLISH=1），不应触发转离线；短暂等待确认无异步转存
+	time.Sleep(200 * time.Millisecond)
+	assert.Zero(t, offlineStoredCount(offline), "存在健康节点时不应转存离线")
+}
+
+// TestDeadNodesIndexQueryError_KeepsAckTimeoutFallback
+// 死节点检测后重查在线索引失败 → 未决场景不转离线，保留 30s ACK 超时兜底
+func TestDeadNodesIndexQueryError_KeepsAckTimeoutFallback(t *testing.T) {
+	hub, redisClient, offline := deadNodeTestHub(t, nil, assert.AnError)
+	defer func() {
+		hub.Shutdown()
+		_ = redisClient.Close()
+	}()
+
+	err := hub.routeToCluster(context.Background(), makeP2PMessage("u-err"), ClusterDispatchOptions{
+		Operation:     models.OperationTypeSendMessage,
+		TargetUserID:  "u-err",
+		TargetNodeIDs: []string{"node-dead"},
+	})
+	require.NoError(t, err)
+
+	time.Sleep(200 * time.Millisecond)
+	assert.Zero(t, offlineStoredCount(offline), "索引查询失败时应保留 ACK 超时兜底，不立即转离线")
+}
+
+// TestDeadNodesLocalNodeInIndex_SkipsLocal
+// 索引含本节点 + 死节点：本节点由本地投递路径负责（跳过），其余远端全死 → 仍应转离线
+func TestDeadNodesLocalNodeInIndex_SkipsLocal(t *testing.T) {
+	hub, redisClient, offline := deadNodeTestHub(t, nil, nil)
+	defer func() {
+		hub.Shutdown()
+		_ = redisClient.Close()
+	}()
+
+	// 索引 = 真实本节点（跳过，由本地 sendToUser 投递路径负责）+ 死节点
+	repo := hub.onlineStatusRepo.(*distributedOnlineStatusRepo)
+	repo.userNodes = []string{hub.GetNodeID(), "node-dead"}
+
+	err := hub.routeToCluster(context.Background(), makeP2PMessage("u-local"), ClusterDispatchOptions{
+		Operation:     models.OperationTypeSendMessage,
+		TargetUserID:  "u-local",
+		TargetNodeIDs: []string{"node-dead"},
+	})
+	require.NoError(t, err)
+
+	// 本节点跳过后剩余远端节点全死（本节点不在 TargetNodeIDs 中，本地路径未投递此消息）→ 转离线
+	require.Eventually(t, func() bool {
+		return offlineStoredCount(offline) == 1
+	}, 2*time.Second, 10*time.Millisecond, "索引中无健康远端节点时应转存离线")
+}

@@ -196,6 +196,8 @@ var (
 	OperationTypeObserverNotify  = models.OperationTypeObserverNotify
 	OperationTypeGroupBroadcast  = models.OperationTypeGroupBroadcast  // 单群组广播（跨节点 PubSub 兜底必需）
 	OperationTypeGroupsBroadcast = models.OperationTypeGroupsBroadcast // 批量群组广播
+	OperationTypeUserNotFound    = models.OperationTypeUserNotFound    // 目标节点回告：用户不在该节点（索引死条目自愈）
+	OperationTypeClientReclaim   = models.OperationTypeClientReclaim   // 新节点回收旧节点同 clientID 幽灵连接
 	MapDeviceTypeToClientType    = models.MapDeviceTypeToClientType
 )
 
@@ -346,6 +348,11 @@ type Hub struct {
 	idGenerator            IDGenerator
 	temporalHasher         *safe.TemporalHasher
 	workerID               int64
+
+	// user_not_found 重路由守卫：messageID → *rerouteGuardEntry
+	// 记录每条消息已被哪些节点拒绝，重路由时排除已拒绝节点，防止索引抖动引发 ping-pong 循环
+	// 条目懒过期（rerouteGuardTTL），ACK 超时终态时删除（见 ack_timer.go）
+	rerouteGuard sync.Map
 
 	// 📡 事件发布订阅
 	pubsub *cachex.PubSub

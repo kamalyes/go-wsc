@@ -299,6 +299,8 @@ const (
 	OperationTypeObserverNotify  OperationType = "observer_notify"  // 跨节点观察者通知
 	OperationTypeGroupBroadcast  OperationType = "group_broadcast"  // 跨节点单群组广播
 	OperationTypeGroupsBroadcast OperationType = "groups_broadcast" // 跨节点批量群组广播
+	OperationTypeUserNotFound    OperationType = "user_not_found"   // 目标节点回告发送节点：用户不在该节点（索引死条目自愈信号）
+	OperationTypeClientReclaim   OperationType = "client_reclaim"   // 新节点回收旧节点同 clientID 幽灵连接（断线重连跨节点迁移）
 )
 
 // String 实现Stringer接口

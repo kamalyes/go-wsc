@@ -72,15 +72,39 @@ func (h *Hub) Deliver(ctx context.Context, msg *HubMessage, excludeSender bool) 
 	namespace := routing.NamespaceFromContext(ctx)
 	groupIDs := routing.GroupIDsFromContext(ctx)
 
+	// 📨 入口路由决策：本条消息走哪条投递路径，全链路跟踪的广播侧起点
+	var mode models.DeliveryMode
 	switch {
 	case msg.Receiver != "":
-		return h.deliverP2P(ctx, msg, appID)
+		mode = DeliveryModeP2P
 	case len(groupIDs) > 0:
 		if msg.RequireAck {
-			return h.deliverToGroupReliable(ctx, msg, excludeSender, appID, namespace, groupIDs)
+			mode = DeliveryModeGroupReliable
+		} else {
+			mode = DeliveryModeGroupBroadcast
 		}
-		return h.deliverToGroupFireForget(ctx, msg, excludeSender, appID, namespace, groupIDs)
 	case namespace != "":
+		mode = DeliveryModeNamespace
+	default:
+		mode = DeliveryModeGlobal
+	}
+	h.logger.InfoContextKV(ctx, "📨 [投递诊断] Deliver 路由决策",
+		"message_id", msg.MessageID,
+		"mode", mode,
+		"receiver", msg.Receiver,
+		"group_ids", groupIDs,
+		"namespace", namespace,
+		"app_id", appID,
+	)
+
+	switch mode {
+	case DeliveryModeP2P:
+		return h.deliverP2P(ctx, msg, appID)
+	case DeliveryModeGroupReliable:
+		return h.deliverToGroupReliable(ctx, msg, excludeSender, appID, namespace, groupIDs)
+	case DeliveryModeGroupBroadcast:
+		return h.deliverToGroupFireForget(ctx, msg, excludeSender, appID, namespace, groupIDs)
+	case DeliveryModeNamespace:
 		return h.deliverToNamespace(ctx, msg, appID, namespace)
 	default:
 		return h.deliverGlobally(ctx, msg, appID)
@@ -554,14 +578,15 @@ func (h *Hub) broadcastToFiltered(ctx context.Context, condition func(*Client) b
 	}
 
 	totalDuration := time.Since(start)
-	h.logger.DebugContextKV(ctx, "📡 分组广播完成",
+	// 📨 广播完成统计：Info 级保证生产可见（是否发出、发到多少客户端），分段耗时定位卡点
+	h.logger.InfoContextKV(ctx, "📨 [投递诊断] 过滤广播完成",
 		"message_id", msg.MessageID,
+		"success", totalSuccess,
 		"data_bytes", dataLen,
 		"total_ws_clients", totalWSClients,
 		"total_sse_clients", totalSSEClients,
 		"ws_scanned", atomic.LoadInt64(&wsScanned),
 		"sse_scanned", atomic.LoadInt64(&sseScanned),
-		"success", totalSuccess,
 		"marshal_duration_ms", marshalDuration.Milliseconds(),
 		"ws_duration_ms", wsDuration.Milliseconds(),
 		"sse_duration_ms", sseDuration.Milliseconds(),
@@ -624,6 +649,14 @@ func (h *Hub) broadcastToUserIDs(ctx context.Context, userIDs []string, msg *Hub
 	if totalSuccess > 0 {
 		h.updateMessageStatusAsync(ctx, msgID, MessageSendStatusSuccess, "", "")
 	}
+
+	// 📨 群组广播本地投递统计：Info 级保证生产可见（成员在线但 0 投递 = 本地无连接，跨节点由 clusterBatcher 负责）
+	h.logger.InfoContextKV(ctx, "📨 [投递诊断] 群组广播本地投递完成",
+		"message_id", msg.MessageID,
+		"user_count", len(userIDs),
+		"success", totalSuccess,
+		"group_ids", msg.GroupIDs,
+	)
 
 	return int(totalSuccess)
 }

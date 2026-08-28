@@ -483,13 +483,31 @@ func (h *Hub) handleDirectMessage(ctx context.Context, msg *HubMessage) {
 		})
 	}
 
+	// 📨 本地直连投递统计：Info 级保证生产可见；sent=0 是定位消息丢失的关键信号
+	// （在线判定 true 但本地无连接：用户刚断线/连接漂移，跨节点路径未覆盖时会静默黑洞）
 	if sent > 0 {
 		// 增加消息发送统计（原子计数器，由 flushStatsCounters 定时刷写到 Redis）
 		if h.statsRepo != nil {
 			h.msgSentCount.Add(1)
 		}
+		h.logger.InfoContextKV(ctx, "📨 [投递诊断] 本地直连投递完成",
+			"message_id", msg.MessageID,
+			"receiver", msg.Receiver,
+			"delivered_clients", sent,
+			"receiver_client", msg.ReceiverClient,
+		)
 	} else if h.SendToUserViaSSE(msg.Receiver, msg) {
-		h.logger.DebugContextKV(ctx, "消息已通过SSE发送", "message_id", msg.MessageID)
+		h.logger.InfoContextKV(ctx, "📨 [投递诊断] 本地直连投递完成（SSE 通道）",
+			"message_id", msg.MessageID,
+			"receiver", msg.Receiver,
+		)
+	} else {
+		h.logger.WarnContextKV(ctx, "📨 [投递诊断] 本地直连投递 0 客户端（本地无该用户连接）",
+			"message_id", msg.MessageID,
+			"receiver", msg.Receiver,
+			"receiver_client", msg.ReceiverClient,
+			"hint", "在线判定为真但本地无连接：用户刚断线或连接在其他节点，请检查跨节点路由日志",
+		)
 	}
 
 	// 🔥 多端同步：P2P 消息同步给发送者的其他设备（排除当前发送设备）

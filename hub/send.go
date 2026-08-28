@@ -47,6 +47,8 @@ func (h *Hub) routeToClusterForOfflineUser(ctx context.Context, userID string, m
 	// 📊 广播兜底触发计数（reportPerformanceMetrics 每 5min 上报后清零）
 	// 治本后该值应趋近 0；若持续增长说明索引写入仍有滞后（检查 syncOnlineStatus 是否同步执行、Redis 可达性）
 	h.broadcastFallbackCount.Add(1)
+	// 记录广播兜底投递目标（user_not_found 重路由守卫：广播路径离线已预存，回告全拒时不再重复转离线）
+	h.markRerouteAttempted(msg.MessageID, h.getAllClusterNodeIDs(), false)
 	opts := ClusterDispatchOptions{
 		Operation:    OperationTypeSendMessage,
 		TargetUserID: userID,
@@ -102,7 +104,7 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 	// 先快照本地在线状态：路由决策与本地投递共用，避免两次查询间的连接抖动造成判定漂移
 	// 按 ctx 路由信封(appID+namespace)过滤，避免跨 app/ns 误判在线
 	localOnline := h.shardedRegistry.HasUser(toUserID, routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx))
-	routed, err := h.checkAndRouteToNode(ctx, toUserID, msgCopy)
+	routed, routeNodes, err := h.checkAndRouteToNode(ctx, toUserID, msgCopy)
 	if err != nil {
 		// 路由失败，记录错误但继续尝试本地发送
 		// 注意：此处不将消息标记为失败，因为会 fallback 到本地发送
@@ -121,9 +123,10 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 	}
 	if routed && !localOnline {
 		// 用户仅在其他节点（本地无连接），消息已路由到其他节点，本地无需处理
-		h.logger.DebugContextKV(ctx, "消息已路由到其他节点",
+		h.logger.InfoContextKV(ctx, "📨 [投递诊断] 用户仅在其他节点，已远程投递，本地跳过",
 			"message_id", msgCopy.MessageID,
 			"user_id", toUserID,
+			"to_nodes", routeNodes,
 		)
 		return nil
 	}
@@ -136,7 +139,14 @@ func (h *Hub) sendToUser(ctx context.Context, toUserID string, msg *HubMessage) 
 	// （观察者通知走 batcher 异步、数据库记录已先行提交），不会显著拖慢发送路径；
 	// 此前用 `go` 异步派发会使并发 goroutine 竞争同一接收方 sendChan 导致消息乱序
 	h.handleBroadcast(msgCopy)
-	h.logger.DebugContextKV(ctx, "消息已广播", "message_id", msgCopy.MessageID, "from", msgCopy.Sender, "to", msgCopy.Receiver, "type", msgCopy.MessageType)
+	h.logger.InfoContextKV(ctx, "📨 [投递诊断] 本地投递已发起（含多端跨节点双投递场景）",
+		"message_id", msgCopy.MessageID,
+		"from", msgCopy.Sender,
+		"to", msgCopy.Receiver,
+		"routed_remote", routed,
+		"to_nodes", routeNodes,
+		"type", msgCopy.MessageType,
+	)
 	return nil
 }
 
@@ -260,6 +270,22 @@ func (h *Hub) SendToUserWithRetry(ctx context.Context, toUserID string, msg *Hub
 		h.updateMessageStatusAsync(ctx, msg.MessageID, MessageSendStatusFailed, models.FailureReasonMaxRetry, finalErr.Error())
 		h.tryStoreOfflineOnDeliveryFailure(msg, finalErr)
 	}
+
+	// 📨 终态汇总：与入口"[投递诊断] 用户在线检查"首尾呼应，一眼判断消息是否发出/卡在哪一步
+	finalErrMsg := ""
+	if result.FinalError != nil {
+		finalErrMsg = result.FinalError.Error()
+	}
+	h.logger.InfoContextKV(ctx, "📨 [投递诊断] P2P 发送终态",
+		"message_id", msg.MessageID,
+		"user_id", toUserID,
+		"success", result.Success,
+		"attempts", len(result.Attempts),
+		"stored_offline", result.StoredOffline,
+		"total_retries", result.TotalRetries,
+		"duration_ms", result.TotalDuration.Milliseconds(),
+		"final_error", finalErrMsg,
+	)
 
 	// 调用消息发送完成回调
 	h.invokeMessageSendCallback(msg, result)

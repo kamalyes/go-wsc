@@ -196,7 +196,18 @@ func (h *Hub) handleRegister(client *Client) {
 	// 同步调用仅阻塞本 handleRegister goroutine ~1ms（一次 Redis Pipeline 往返），
 	// handleRegister 由 go h.handleRegister(client) 异步触发（registry.go:39），不阻塞 EventLoop、不影响其他连接
 	// syncOnlineStatus 内部 onlineStatusRepo==nil 时早返回；SetClientOnline 失败仅记日志不 return，行为与原异步路径一致
+	// 🔥 跨节点迁移检测：查询 clientID 旧归属节点（必须在 syncOnlineStatus 覆写 owner key 之前，
+	// 否则读到的是本节点自己）。断线重连漂移到本节点时，旧节点可能残留同 clientID 幽灵连接，
+	// 消息按索引路由到旧节点会扑空 → 检测到迁移后通知旧节点回收
+	migratedFromNode := h.detectClientMigration(ctx, client)
+
 	h.syncOnlineStatus(client) // 内部用 client.Context 保留连接级 trace_id
+
+	// 旧归属其他节点 → 通知旧节点回收幽灵连接（此时本节点 owner 已写入，
+	// 旧节点清理受 Lua 归属校验保护：仅清自身集合，不动本节点已接管的共享索引）
+	if migratedFromNode != "" && migratedFromNode != h.nodeID {
+		h.notifyClientReclaim(ctx, client, migratedFromNode)
+	}
 
 	// 系统组加入 + 成员组加入 + 离线消息推送（提交到分布式池，均不依赖在线状态索引）
 	// joinSystemGroupsOnConnect/joinMemberGroupOnConnect 写 group ZSET（wsc:group:* 命名空间）

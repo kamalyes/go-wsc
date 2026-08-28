@@ -177,6 +177,11 @@ func (h *Hub) createAckRetryFunc(ctx context.Context, toUserID string, msg *HubM
 
 // recordAckRetryAttempt 记录ACK重试尝试到数据库
 func (h *Hub) recordAckRetryAttempt(ctx context.Context, msg *HubMessage, attemptNum int, err error) {
+	// nil guard：方法允许直调（测试/外部复用），repo 未注入时静默跳过而非 goroutine 内 panic
+	if h.messageRecordRepo == nil || msg == nil {
+		return
+	}
+
 	retryAttempt := RetryAttempt{
 		AttemptNumber: attemptNum,
 		Timestamp:     time.Now(),

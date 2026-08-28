@@ -138,8 +138,9 @@ for i = 1, clientCount do
         redis.call('ZREMRANGEBYSCORE', scopedUserClientsKey, '-inf', currentTime)
         redis.call('ZREMRANGEBYSCORE', unscopedUserClientsKey, '-inf', currentTime)
 
-        -- 3. 写 client 详情
+        -- 3. 写 client 详情 + 节点归属标记（离线清理时校验，防止旧节点误删已迁移条目）
         redis.call('SETEX', clientKey, ttl, clientData)
+        redis.call('SETEX', keyPrefix .. "owner:" .. clientID, ttl, nodeID)
 
         -- 4. ZADD scoped + unscoped(dual-write)+ node + all_users + type
         redis.call('ZADD', scopedUserClientsKey, expireTime, clientID)
@@ -209,6 +210,7 @@ for i = 1, clientCount do
         if ns == "" then ns = "__default_ns__" end -- 与 constants.DefaultNamespace 保持一致（Lua 无法引用 Go 常量，硬编码字面量须与 Go 侧同值）
 
         local clientKey = keyPrefix .. "client:" .. clientID
+        local ownerKey = keyPrefix .. "owner:" .. clientID
         local scopedUserClientsKey = keyPrefix .. "user_clients:" .. appID .. ":" .. ns .. ":" .. userID
         local unscopedUserClientsKey = keyPrefix .. "user_clients:" .. userID
         local nodeClientsKey = keyPrefix .. "node_clients:" .. nodeID
@@ -217,40 +219,51 @@ for i = 1, clientCount do
         local scopedBitmapKey = keyPrefix .. "bm:" .. appID .. ":" .. ns
         local globalBitmapKey = keyPrefix .. "bm:" .. appID .. ":__global__" -- __global__ 与 constants.GlobalBitmapNS 保持一致
 
-        -- 1. 删 client 详情
-        redis.call('DEL', clientKey)
+        -- 🔒 节点归属校验：clientID 已被其他节点接管（断线重连迁移）时，
+        -- 仅清理本节点集合，不删共享索引与 bitmap（用户仍在线于新节点），避免误删新节点的条目
+        -- owner 不存在（旧版本数据，未写 owner key）视为本节点归属，保持向后兼容
+        local owner = redis.call('GET', ownerKey)
+        local migrated = (owner ~= false) and (owner ~= nodeID)
 
-        -- 2. ZREM scoped + unscoped + node
-        redis.call('ZREM', scopedUserClientsKey, clientID)
-        redis.call('ZREM', unscopedUserClientsKey, clientID)
+        -- 本节点集合总是清理（无论归属如何，node_clients:<nodeID> 只含本节点自己的条目）
         redis.call('ZREM', nodeClientsKey, clientID)
 
-        -- 3. 清理 scoped + unscoped 过期项
-        redis.call('ZREMRANGEBYSCORE', scopedUserClientsKey, '-inf', currentTime)
-        redis.call('ZREMRANGEBYSCORE', unscopedUserClientsKey, '-inf', currentTime)
+        if not migrated then
+            -- 1. 删 client 详情与归属标记
+            redis.call('DEL', clientKey)
+            redis.call('DEL', ownerKey)
 
-        -- 4. 检查 scoped 是否空,空则清理 scoped bitmap
-        local scopedRemaining = redis.call('ZCOUNT', scopedUserClientsKey, currentTime, '+inf')
-        if scopedRemaining == 0 then
-            redis.call('DEL', scopedUserClientsKey)
-            -- scoped 下线,清 scoped bitmap 该位
-            local offset = redis.call('HGET', uidMapKey, userID)
-            if offset then
-                redis.call('SETBIT', scopedBitmapKey, tonumber(offset), 0)
-            end
+            -- 2. ZREM scoped + unscoped
+            redis.call('ZREM', scopedUserClientsKey, clientID)
+            redis.call('ZREM', unscopedUserClientsKey, clientID)
 
-            -- 检查 unscoped(跨所有信封)是否也空
-            local unscopedRemaining = redis.call('ZCOUNT', unscopedUserClientsKey, currentTime, '+inf')
-            if unscopedRemaining == 0 then
-                -- 用户在所有信封下都离线,清 global bitmap + all_users/type
-                redis.call('DEL', unscopedUserClientsKey)
-                redis.call('ZREM', allUsersKey, userID)
-                redis.call('ZREM', typeKey, userID)
+            -- 3. 清理 scoped + unscoped 过期项
+            redis.call('ZREMRANGEBYSCORE', scopedUserClientsKey, '-inf', currentTime)
+            redis.call('ZREMRANGEBYSCORE', unscopedUserClientsKey, '-inf', currentTime)
+
+            -- 4. 检查 scoped 是否空,空则清理 scoped bitmap
+            local scopedRemaining = redis.call('ZCOUNT', scopedUserClientsKey, currentTime, '+inf')
+            if scopedRemaining == 0 then
+                redis.call('DEL', scopedUserClientsKey)
+                -- scoped 下线,清 scoped bitmap 该位
+                local offset = redis.call('HGET', uidMapKey, userID)
                 if offset then
-                    redis.call('SETBIT', globalBitmapKey, tonumber(offset), 0)
+                    redis.call('SETBIT', scopedBitmapKey, tonumber(offset), 0)
                 end
+
+                -- 检查 unscoped(跨所有信封)是否也空
+                local unscopedRemaining = redis.call('ZCOUNT', unscopedUserClientsKey, currentTime, '+inf')
+                if unscopedRemaining == 0 then
+                    -- 用户在所有信封下都离线,清 global bitmap + all_users/type
+                    redis.call('DEL', unscopedUserClientsKey)
+                    redis.call('ZREM', allUsersKey, userID)
+                    redis.call('ZREM', typeKey, userID)
+                    if offset then
+                        redis.call('SETBIT', globalBitmapKey, tonumber(offset), 0)
+                    end
+                end
+                -- 否则:scoped 离线但其他信封仍在线,global bitmap 保留
             end
-            -- 否则:scoped 离线但其他信封仍在线,global bitmap 保留
         end
 
         successCount = successCount + 1

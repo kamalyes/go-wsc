@@ -39,16 +39,16 @@ import (
 // 统一走 routeToCluster 入口，由其集中决策 gRPC 直连与 PubSub 兜底，
 // 消除历史上分散在各方法中的重复路由逻辑
 //
-// 返回: (是否在其他节点, 错误)
-//   - routed=true:  消息已路由到其他节点，调用方无需本地发送
-//   - routed=false: 用户在本节点或离线，调用方应本地发送
-func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMessage) (bool, error) {
+// 返回: (是否在其他节点, 实际投递的目标节点列表, 错误)
+//   - routed=true:  消息已路由到 targetNodes，调用方无需本地发送
+//   - routed=false: 用户在本节点或离线，调用方应本地发送（targetNodes 为空）
+func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMessage) (bool, []string, error) {
 	// 单机模式：无 PubSub 且无 gRPC，不跨节点
 	if h.pubsub == nil && !h.IsGRPCEnabled() {
-		return false, nil
+		return false, nil, nil
 	}
 	if h.onlineStatusRepo == nil {
-		return false, nil
+		return false, nil, nil
 	}
 
 	// 1. 查询用户所在节点
@@ -78,7 +78,7 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMe
 	}
 	if err != nil {
 		// 查询失败，假设用户在本节点或离线，继续本地发送流程
-		return false, err
+		return false, nil, err
 	}
 
 	// 2. 过滤掉本节点，只保留其他节点
@@ -97,7 +97,7 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMe
 			"node_id", h.nodeID,
 			"all_nodes", nodeIDs,
 		)
-		return false, nil
+		return false, nil, nil
 	}
 
 	h.logger.InfoContextKV(ctx, "📍 [投递诊断] 用户在其他节点，发起跨节点路由",
@@ -109,6 +109,9 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMe
 		"grpc_enabled", h.IsGRPCEnabled(),
 	)
 
+	// 记录 P2P 定向路由目标（user_not_found 重路由守卫：区分已尝试/新节点，防重复投递与漏投递）
+	h.markRerouteAttempted(msg.MessageID, otherNodes, true)
+
 	// 4. 统一跨节点路由：gRPC 直连优先，PubSub 兜底（由 routeToCluster 集中决策）
 	opts := ClusterDispatchOptions{
 		Operation:     OperationTypeSendMessage,
@@ -119,9 +122,9 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMe
 	}
 	if err := h.routeToCluster(ctx, msg, opts); err != nil {
 		// 路由失败，返回 false 让上层 fallback 到本地发送
-		return false, err
+		return false, nil, err
 	}
-	return true, nil
+	return true, otherNodes, nil
 }
 
 // ============================================================================
@@ -202,7 +205,8 @@ func (h *Hub) SubscribeNodeMessages(ctx context.Context) error {
 				}
 
 				// 使用订阅回调提供的 subCtx，而不是外层的 ctx
-				return h.handleDistributedMessage(subCtx, distMsg)
+				// targeted=true：节点专属频道消息均为定向投递（P2P 路由主路径 + user_not_found 回告）
+				return h.handleDistributedMessageTargeted(subCtx, distMsg, true)
 			})
 
 			if err != nil {
@@ -220,8 +224,16 @@ func (h *Hub) SubscribeNodeMessages(ctx context.Context) error {
 	return nil
 }
 
-// handleDistributedMessage 处理从其他节点转发来的消息
+// handleDistributedMessage 处理从其他节点转发来的消息（广播/观察者频道入口，非定向投递）
 func (h *Hub) handleDistributedMessage(ctx context.Context, distMsg *DistributedMessage) error {
+	return h.handleDistributedMessageTargeted(ctx, distMsg, false)
+}
+
+// handleDistributedMessageTargeted 处理跨节点消息
+// targeted=true 表示消息经节点专属频道定向投递到本节点（P2P 跨节点路由主路径），
+// 此时"用户不在本节点"属于索引死条目，需触发自愈与回告（见 handleDistributedSendMessage）；
+// targeted=false 表示来自广播/观察者频道，未持有用户属正常预期，静默跳过
+func (h *Hub) handleDistributedMessageTargeted(ctx context.Context, distMsg *DistributedMessage, targeted bool) error {
 	// 参数验证
 	if distMsg == nil {
 		return fmt.Errorf("distributed message is nil")
@@ -264,7 +276,15 @@ func (h *Hub) handleDistributedMessage(ctx context.Context, distMsg *Distributed
 
 	switch distMsg.Type {
 	case OperationTypeSendMessage:
-		return h.handleDistributedSendMessage(ctx, distMsg)
+		return h.handleDistributedSendMessage(ctx, distMsg, targeted)
+
+	case OperationTypeUserNotFound:
+		// 定向回告：发送节点处理"目标节点声称用户不在"（重查索引/重路由/广播兜底）
+		return h.handleDistributedUserNotFound(ctx, distMsg)
+
+	case OperationTypeClientReclaim:
+		// 旧节点回收同 clientID 幽灵连接（断线重连迁移到新节点）
+		return h.handleDistributedClientReclaim(ctx, distMsg)
 
 	case OperationTypeKickUser:
 		return h.handleDistributedKickUser(ctx, distMsg)
@@ -289,7 +309,8 @@ func (h *Hub) handleDistributedMessage(ctx context.Context, distMsg *Distributed
 
 // handleDistributedSendMessage 处理跨节点发送消息
 // 使用 ForEachUserClient 零拷贝遍历 + 预序列化，替代 CopyClientsFromMap 双重拷贝
-func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *DistributedMessage) error {
+// targeted=true 表示消息经节点专属频道定向投递（未持有用户 = 索引死条目，触发自愈+回告）
+func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *DistributedMessage, targeted bool) error {
 	if distMsg.Message == nil {
 		return fmt.Errorf("message data not found")
 	}
@@ -310,7 +331,18 @@ func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *Distrib
 			"namespace", namespace,
 			"from_node", distMsg.NodeID,
 			"node_id", h.nodeID,
+			"targeted", targeted,
 		)
+
+		// 🔥 定向投递扑空 = 在线索引死条目（用户断连未清理/已迁移到其他节点）：
+		//   1. 自愈清理指向本节点的死索引（异步，不阻塞订阅回调）
+		//   2. 回告发送节点 user_not_found，发送方秒级重查索引重路由/转离线，不再干等 30s ACK 超时
+		// 广播频道扑空属正常预期（其余节点可能持有用户），维持原静默跳过语义
+		if targeted {
+			h.selfHealDeadIndexEntries(ctx, distMsg.TargetID, appID, namespace)
+			h.replyUserNotFound(ctx, distMsg)
+		}
+
 		// 返回 nil 而非 error：广播兜底消息（publishToCluster）发到所有节点，
 		// 用户不在本节点是正常预期（cluster_dispatch 注释"其余节点 HasUser 扑空自动跳过"）
 		// 若返回 error，PubSub 订阅端会重试 3 次（每次必扑空）并打 ERROR 日志，产生噪音与无效开销

@@ -141,6 +141,8 @@ for i = 1, clientCount do
         
         -- 存储客户端信息
         redis.call('SETEX', clientKey, ttl, clientData)
+        -- 节点归属标记：离线清理时校验，防止旧节点延迟清理误删已迁移到其他节点的同名条目
+        redis.call('SETEX', keyPrefix .. "owner:" .. clientID, ttl, nodeID)
         
         -- 添加到集合（全部使用 ZADD 存储过期时间）
         redis.call('ZADD', userClientsKey, expireTime, clientID)
@@ -189,29 +191,41 @@ for i = 1, clientCount do
         
         -- 构建 keys
         local clientKey = keyPrefix .. "client:" .. clientID
+        local ownerKey = keyPrefix .. "owner:" .. clientID
         local userClientsKey = keyPrefix .. "user_clients:" .. userID
         local nodeClientsKey = keyPrefix .. "node_clients:" .. nodeID
         local allUsersKey = keyPrefix .. "all_users"
         local typeKey = keyPrefix .. "type:" .. userType
-        
-        -- 删除客户端信息
-        redis.call('DEL', clientKey)
-        
-        -- 从集合中移除（ZREM 用于 ZSET）
-        redis.call('ZREM', userClientsKey, clientID)
+
+        -- 🔒 节点归属校验：clientID 已被其他节点接管（断线重连迁移）时，
+        -- 仅清理本节点集合，不删共享索引（client/user_clients/all_users/type），避免误删新节点的条目
+        -- owner 不存在（旧版本数据，未写 owner key）视为本节点归属，保持向后兼容
+        local owner = redis.call('GET', ownerKey)
+        local migrated = (owner ~= false) and (owner ~= nodeID)
+
+        -- 本节点集合总是清理（无论归属如何，node_clients:<nodeID> 只含本节点自己的条目）
         redis.call('ZREM', nodeClientsKey, clientID)
-        
-        -- 清理该用户的过期客户端
-        redis.call('ZREMRANGEBYSCORE', userClientsKey, '-inf', currentTime)
-        
-        -- 检查用户是否还有其他未过期的客户端（使用 ZCOUNT 而不是 ZCARD）
-        local remainingCount = redis.call('ZCOUNT', userClientsKey, currentTime, '+inf')
-        if remainingCount == 0 then
-            redis.call('DEL', userClientsKey)
-            redis.call('ZREM', allUsersKey, userID)
-            redis.call('ZREM', typeKey, userID)
+
+        if not migrated then
+            -- 删除客户端信息与归属标记
+            redis.call('DEL', clientKey)
+            redis.call('DEL', ownerKey)
+
+            -- 从集合中移除（ZREM 用于 ZSET）
+            redis.call('ZREM', userClientsKey, clientID)
+
+            -- 清理该用户的过期客户端
+            redis.call('ZREMRANGEBYSCORE', userClientsKey, '-inf', currentTime)
+
+            -- 检查用户是否还有其他未过期的客户端（使用 ZCOUNT 而不是 ZCARD）
+            local remainingCount = redis.call('ZCOUNT', userClientsKey, currentTime, '+inf')
+            if remainingCount == 0 then
+                redis.call('DEL', userClientsKey)
+                redis.call('ZREM', allUsersKey, userID)
+                redis.call('ZREM', typeKey, userID)
+            end
         end
-        
+
         successCount = successCount + 1
     end
 end
@@ -266,6 +280,10 @@ type OnlineStatusRepository interface {
 
 	// GetClient 获取客户端信息
 	GetClient(ctx context.Context, clientID string) (*Client, error)
+
+	// GetClientOwner 获取 clientID 当前归属节点（上线脚本写入 owner key）
+	// 返回空串表示无归属记录（旧数据或已过期）；用于检测同 clientID 跨节点迁移
+	GetClientOwner(ctx context.Context, clientID string) (string, error)
 
 	// GetUserClients 获取用户的所有在线客户端
 	GetUserClients(ctx context.Context, userID string) ([]*Client, error)
@@ -583,6 +601,19 @@ func (r *RedisOnlineStatusRepository) GetClient(ctx context.Context, clientID st
 	}
 
 	return zipx.ZlibSmartDecompressObject[*Client]([]byte(data))
+}
+
+// GetClientOwner 获取 clientID 当前归属节点
+// owner key 由上线 Lua 脚本写入（TTL 与 client key 一致）；redis.Nil（旧数据/已过期）返回空串不报错
+func (r *RedisOnlineStatusRepository) GetClientOwner(ctx context.Context, clientID string) (string, error) {
+	val, err := r.client.Get(ctx, r.keyPrefix+"owner:"+clientID).Result()
+	if err == redis.Nil {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return val, nil
 }
 
 // GetUserClients 获取用户的所有在线客户端

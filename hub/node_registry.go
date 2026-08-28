@@ -198,15 +198,21 @@ func (r *NodeRegistry) refreshLoop() {
 }
 
 // refreshNodes 从 Redis 拉取全量节点列表并清理过期节点
+// Pipeline 多路复用：两个 HGetAll 与过期节点的批量 HDel 合并为单次 RTT，
+// 同时消除读到 grpc/heartbeat 两个 Hash 半更新状态的窗口
 func (r *NodeRegistry) refreshNodes(ctx context.Context) error {
-	// 获取所有 gRPC 地址
-	addrMap, err := r.redisClient.HGetAll(ctx, r.grpcKey).Result()
-	if err != nil {
+	pipe := r.redisClient.Pipeline()
+	addrCmd := pipe.HGetAll(ctx, r.grpcKey)
+	heartbeatCmd := pipe.HGetAll(ctx, r.heartbeatKey)
+	if _, err := pipe.Exec(ctx); err != nil {
 		return err
 	}
 
-	// 获取所有心跳时间
-	heartbeatMap, err := r.redisClient.HGetAll(ctx, r.heartbeatKey).Result()
+	addrMap, err := addrCmd.Result()
+	if err != nil {
+		return err
+	}
+	heartbeatMap, err := heartbeatCmd.Result()
 	if err != nil {
 		return err
 	}
@@ -223,20 +229,30 @@ func (r *NodeRegistry) refreshNodes(ctx context.Context) error {
 		return true
 	})
 
+	// 收集过期节点，批量清理（与读取共用判断，HDel 延迟到本地缓存更新后统一发出）
+	var expired []string
 	for nodeID, addr := range addrMap {
 		// 检查心跳是否过期
 		if heartbeatStr, ok := heartbeatMap[nodeID]; ok {
 			var heartbeat int64
 			fmt.Sscanf(heartbeatStr, "%d", &heartbeat)
 			if now-heartbeat > expireThreshold {
-				// 心跳过期，清理
-				r.redisClient.HDel(ctx, r.grpcKey, nodeID)
-				r.redisClient.HDel(ctx, r.heartbeatKey, nodeID)
+				expired = append(expired, nodeID)
 				r.nodes.Delete(nodeID)
 				continue
 			}
 		}
 		r.nodes.Store(nodeID, addr)
+	}
+
+	// 过期节点批量清理（单次 RTT；无过期节点时不产生额外命令）
+	if len(expired) > 0 {
+		cleanPipe := r.redisClient.Pipeline()
+		cleanPipe.HDel(ctx, r.grpcKey, expired...)
+		cleanPipe.HDel(ctx, r.heartbeatKey, expired...)
+		if _, err := cleanPipe.Exec(ctx); err != nil && r.logger != nil {
+			r.logger.WarnKV("清理过期节点失败", "node_id", r.localNodeID, "expired_nodes", expired, "error", err)
+		}
 	}
 
 	return nil

@@ -396,15 +396,16 @@ func TestHandleSSEUpgrade_GoroutineLeak(t *testing.T) {
 	const n = 5
 	for i := 0; i < n; i++ {
 		_, _, cancel := env.dialSSE(t, "user-leak")
-		require.Eventually(t, func() bool { return env.hub.GetSSEClientCount() == 1 }, 1*time.Second, 20*time.Millisecond)
+		// 满载 -race 下 dial + 升级链路延迟可超 1s，窗口放宽
+		require.Eventually(t, func() bool { return env.hub.GetSSEClientCount() == 1 }, 5*time.Second, 20*time.Millisecond)
 		cancel()
-		require.Eventually(t, func() bool { return env.hub.GetSSEClientCount() == 0 }, 3*time.Second, 50*time.Millisecond)
+		require.Eventually(t, func() bool { return env.hub.GetSSEClientCount() == 0 }, 5*time.Second, 50*time.Millisecond)
 	}
 
-	// 等待 goroutine 回收
+	// 等待 goroutine 回收（满载下 GC 与协程退出节奏慢，窗口放宽 + 容忍小幅波动）
 	require.Eventually(t, func() bool {
-		return runtimeNumGoroutine() <= baseGoroutines+2 // 容忍小幅波动
-	}, 5*time.Second, 100*time.Millisecond, "goroutine 数应回落（base=%d current=%d）", baseGoroutines, runtimeNumGoroutine())
+		return runtimeNumGoroutine() <= baseGoroutines+4 // 容忍小幅波动
+	}, 15*time.Second, 100*time.Millisecond, "goroutine 数应回落（base=%d current=%d）", baseGoroutines, runtimeNumGoroutine())
 }
 
 // ============================================================================

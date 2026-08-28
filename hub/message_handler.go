@@ -41,15 +41,24 @@ import (
 // 客户端读写处理
 // ============================================================================
 
+// clientWriteBatchSize 单次唤醒最多排空的积压消息数
+// （Slack 网关风格写合并：突发场景下 N 条消息共用一次 goroutine 唤醒 + 一次写超时，
+// 降低高并发下的调度与 deadline 设置开销；上限防止单连接长期独占写协程饿死其他连接）
+const clientWriteBatchSize = 64
+
+// clientWriteTimeout 单条消息写入的超时时间
+const clientWriteTimeout = 10 * time.Second
+
 // handleClientWrite 处理客户端消息写入
 func (h *Hub) handleClientWrite(client *Client) {
 	h.wg.Add(1)
 	defer h.wg.Done()
 	defer func() {
-		h.logWithClient(logger.INFO, "客户端写入协程结束", client)
+		// 每连接 4 条生命周期日志（读写协程启动/结束），千万连接下不可忽略——降为 DEBUG
+		h.logWithClient(logger.DEBUG, "客户端写入协程结束", client)
 	}()
 
-	h.logWithClient(logger.INFO, "客户端写入协程启动", client)
+	h.logWithClient(logger.DEBUG, "客户端写入协程启动", client)
 
 	for {
 		select {
@@ -59,22 +68,67 @@ func (h *Hub) handleClientWrite(client *Client) {
 				return
 			}
 
-			if client.Conn != nil {
-				client.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-				if err := client.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
-					h.logWithClient(logger.ERROR, "客户端消息写入失败", client, "error", err)
-					// 主动关闭连接，让读 goroutine 的 ReadMessage 立即报错退出
-					// 否则读 goroutine 会卡在 IO wait 直到 TCP keepalive 超时，造成半死连接泄漏
-					// （读 goroutine 退出后会触发 defer Unregister 完成清理）
-					_ = client.Conn.Close()
-					return
-				}
+			if client.Conn == nil {
+				continue
 			}
+
+			if err := h.writeClientMessages(client, message); err != nil {
+				h.logWithClient(logger.ERROR, "客户端消息写入失败", client, "error", err)
+				// 主动关闭连接，让读 goroutine 的 ReadMessage 立即报错退出
+				// 否则读 goroutine 会卡在 IO wait 直到 TCP keepalive 超时，造成半死连接泄漏
+				// （读 goroutine 退出后会触发 defer Unregister 完成清理）
+				_ = client.Conn.Close()
+				return
+			}
+		case pongData := <-client.PongCh:
+			// 协议级 PING 的 pong 响应（单写者：控制帧也统一由写泵写出，见 setupPingHandler）
+			if client.Conn == nil {
+				continue
+			}
+			// WriteControl 自带 deadline 参数，不依赖外层写超时
+			if err := client.Conn.WriteControl(websocket.PongMessage, pongData, time.Now().Add(clientWriteTimeout)); err != nil {
+				h.logWithClient(logger.ERROR, "pong 控制帧写入失败", client, "error", err)
+				_ = client.Conn.Close()
+				return
+			}
+		case <-client.DoneCh:
+			// 客户端注销（closeClientChannel）——数据通道不 close，仅靠此信号退出
+			h.logWithClient(logger.INFO, "客户端生命周期结束，写入协程退出", client)
+			return
 		case <-h.ctx.Done():
 			h.logWithClient(logger.INFO, "客户端写入协程因Hub关闭而结束", client)
 			return
 		}
 	}
+}
+
+// writeClientMessages 写入首条消息并排空积压（批量共用一次写超时）
+//
+// 性能：每批只 SetWriteDeadline 一次，突发 N 条消息时避免 N 次 goroutine 唤醒
+// 超过 clientWriteBatchSize 的剩余积压由外层循环的下一批继续处理（不丢弃、不阻塞投递方）
+func (h *Hub) writeClientMessages(client *Client, first []byte) error {
+	client.Conn.SetWriteDeadline(time.Now().Add(clientWriteTimeout))
+	if err := client.Conn.WriteMessage(websocket.TextMessage, first); err != nil {
+		return err
+	}
+
+	// 非阻塞排空积压：突发 N 条消息时避免 N 次唤醒 + N 次超时设置
+	for i := 1; i < clientWriteBatchSize; i++ {
+		select {
+		case message, ok := <-client.SendChan:
+			if !ok {
+				// 通道关闭：已写入的消息有效，交由外层循环感知关闭并退出
+				h.logWithClient(logger.INFO, "客户端发送通道关闭", client)
+				return nil
+			}
+			if err := client.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
+				return err
+			}
+		default:
+			return nil // 无积压，结束本批
+		}
+	}
+	return nil
 }
 
 // handleClientRead 处理客户端消息读取
@@ -83,10 +137,11 @@ func (h *Hub) handleClientRead(client *Client) {
 	defer h.wg.Done()
 	defer h.Unregister(client)
 	defer func() {
-		h.logWithClient(logger.INFO, "客户端读取协程结束", client)
+		// 每连接 4 条生命周期日志（读写协程启动/结束），千万连接下不可忽略——降为 DEBUG
+		h.logWithClient(logger.DEBUG, "客户端读取协程结束", client)
 	}()
 
-	h.logWithClient(logger.INFO, "客户端读取协程启动", client)
+	h.logWithClient(logger.DEBUG, "客户端读取协程启动", client)
 
 	// 使用 client.Context（从 Hub 生命周期 h.ctx 派生的连接级 ctx，Hub 关闭时自动取消）
 	reqCtx := client.Context
@@ -126,23 +181,46 @@ func (h *Hub) handleClientRead(client *Client) {
 
 		client.SetLastSeen(time.Now())
 
+		// 控制帧（ping/pong/close）由 gorilla 在 ReadMessage 内部经 handler 分发，
+		// 不会作为 messageType 返回——协议级 PING 的保活与 pong 响应见 setupPingHandler
 		switch messageType {
 		case websocket.TextMessage:
 			h.handleTextMessage(reqCtx, client, data)
 		case websocket.BinaryMessage:
 			h.handleBinaryMessage(client, data)
-		case websocket.CloseMessage:
-			return
-		case websocket.PingMessage:
-			// 设置写超时，避免恶意客户端通过频繁 Ping 阻塞写 goroutine
-			_ = client.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			_ = client.Conn.WriteMessage(websocket.PongMessage, nil)
 		}
 	}
 }
 
 // handleTextMessage 处理文本消息
 func (h *Hub) handleTextMessage(ctx context.Context, client *Client, data []byte) {
+	// 🚀 高频控制类消息快路径（心跳/ACK）：
+	// 心跳是连接层最高频消息（千万连接 × 每 30s ≈ 33 万 QPS），且处理只依赖 client
+	// 不消费 msg 字段——仅反序列化 2 个字段的轻量探测结构，命中即返回，
+	// 跳过完整 HubMessage 反序列化（全字段反射 + 时间解析 + slice 分配）。
+	// json.Unmarshal 解析小结构时自动跳过其余字段，探测成本远低于完整反序列化
+	var probe struct {
+		MessageType MessageType `json:"message_type"`
+		MessageID   string      `json:"message_id"`
+	}
+	if err := json.Unmarshal(data, &probe); err == nil {
+		switch probe.MessageType {
+		case models.MessageTypePing, models.MessageTypeHeartbeat:
+			h.handleHeartbeatMessage(client)
+			return
+		case models.MessageTypeAck:
+			if h.config.EnableAck && h.ackManager != nil {
+				ackMsg := &protocol.AckMessage{
+					MessageID: probe.MessageID,
+					Status:    protocol.AckStatusConfirmed,
+					Timestamp: time.Now(),
+				}
+				h.ackManager.ConfirmMessage(probe.MessageID, ackMsg)
+			}
+			return
+		}
+	}
+
 	var msg *HubMessage
 	if err := json.Unmarshal(data, &msg); err != nil {
 		msg = NewHubMessage().
@@ -158,7 +236,7 @@ func (h *Hub) handleTextMessage(ctx context.Context, client *Client, data []byte
 	// 根据消息类型进行特殊处理
 	switch msg.MessageType {
 	case models.MessageTypePing, models.MessageTypeHeartbeat:
-		// 处理心跳/Ping消息
+		// 处理心跳/Ping消息（快路径未命中时兜底：探测失败但完整反序列化后是心跳，如含非标字段的畸形 JSON）
 		h.handleHeartbeatMessage(client)
 		return
 	case models.MessageTypeAck:
@@ -381,7 +459,7 @@ func (h *Hub) checkHeartbeat() {
 	}
 
 	totalDuration := time.Since(start)
-	h.logger.DebugKV("❤️ 心跳检查完成",
+	h.logger.DebugContextKV(h.ctx, "❤️ 心跳检查完成",
 		"total_clients", totalClients,
 		"scanned", atomic.LoadInt64(&scanned),
 		"timeouts", len(timeouts),
@@ -483,21 +561,22 @@ func (h *Hub) handleDirectMessage(ctx context.Context, msg *HubMessage) {
 		})
 	}
 
-	// 📨 本地直连投递统计：Info 级保证生产可见；sent=0 是定位消息丢失的关键信号
-	// （在线判定 true 但本地无连接：用户刚断线/连接漂移，跨节点路径未覆盖时会静默黑洞）
+	// 📨 本地直连投递统计：sent=0 是定位消息丢失的关键信号（在线判定 true 但本地无连接：
+	// 用户刚断线/连接漂移，跨节点路径未覆盖时会静默黑洞）——异常路径保持 WARN 生产可见，
+	// 成功路径走 DEBUG（千万连接规模下逐消息 INFO 是吞吐反模式）
 	if sent > 0 {
 		// 增加消息发送统计（原子计数器，由 flushStatsCounters 定时刷写到 Redis）
 		if h.statsRepo != nil {
 			h.msgSentCount.Add(1)
 		}
-		h.logger.InfoContextKV(ctx, "📨 [投递诊断] 本地直连投递完成",
+		h.logger.DebugContextKV(ctx, "📨 [投递诊断] 本地直连投递完成",
 			"message_id", msg.MessageID,
 			"receiver", msg.Receiver,
 			"delivered_clients", sent,
 			"receiver_client", msg.ReceiverClient,
 		)
 	} else if h.SendToUserViaSSE(msg.Receiver, msg) {
-		h.logger.InfoContextKV(ctx, "📨 [投递诊断] 本地直连投递完成（SSE 通道）",
+		h.logger.DebugContextKV(ctx, "📨 [投递诊断] 本地直连投递完成（SSE 通道）",
 			"message_id", msg.MessageID,
 			"receiver", msg.Receiver,
 		)

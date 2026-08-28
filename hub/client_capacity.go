@@ -148,6 +148,20 @@ func (h *Hub) initClientSendChan(client *Client) {
 		return
 	}
 
+	// 生命周期关闭信号（closeClientChannel close 它通知写泵退出，SendChan 永不 close）
+	// 必须在 SendChan early-return 之前初始化：测试常手工构造带 SendChan 的客户端，
+	// 若跳过则 DoneCh 为 nil → 写泵收不到退出信号导致协程泄漏
+	if client.DoneCh == nil {
+		client.DoneCh = make(chan struct{})
+	}
+
+	// pong 控制帧队列（仅 WebSocket 客户端；SSE 无控制帧）
+	// 读协程收到协议级 PING 后非阻塞投递，写泵统一写出（gorilla 单写者模式，见 setupPingHandler）
+	// 容量 1 已足够：待写未取走时新 PING 直接丢弃，客户端超时会重发
+	if client.ConnectionType != ConnectionTypeSSE && client.PongCh == nil {
+		client.PongCh = make(chan []byte, 1)
+	}
+
 	// 如果 SendChan 已经初始化，不再重新初始化
 	if client.SendChan != nil {
 		return

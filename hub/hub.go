@@ -216,6 +216,14 @@ var (
 	WsCloseCodeMap = models.WsCloseCodeMap
 )
 
+// 心跳批量续期并行参数（processHeartbeatRedisUpdates 的 flush 使用）
+const (
+	// heartbeatRenewChunkSize 单个并行块的客户端数，块内按 maxBatchSize 分批走 Lua 续期
+	heartbeatRenewChunkSize = 512
+	// heartbeatRenewWorkers 并行续期的最大并发块数（对 Redis 的并发 Eval 上限）
+	heartbeatRenewWorkers = 8
+)
+
 // 错误常量
 var (
 	ErrHubShutdownTimeout           = models.ErrHubShutdownTimeout
@@ -508,12 +516,14 @@ func NewHub(config *wscconfig.WSC) *Hub {
 			Status:    NodeStatusActive,
 			LastSeen:  time.Now(),
 		},
-		nodeMessage:      make(chan *DistributedMessage, config.MessageBufferSize*4),
-		ackManager:       NewAckManager(config.AckTimeout, config.AckMaxRetries),
-		ctx:              ctx,
-		cancel:           cancel,
-		startCh:          make(chan struct{}),
-		heartbeatRedisCh: make(chan *Client, 1024),
+		nodeMessage: make(chan *DistributedMessage, config.MessageBufferSize*4),
+		ackManager:  NewAckManager(config.AckTimeout, config.AckMaxRetries),
+		ctx:         ctx,
+		cancel:      cancel,
+		startCh:     make(chan struct{}),
+		// 千万级连接缓冲：并行 flush（heartbeatRenewWorkers×chunk）消费速度决定容量下限，
+		// 8192 覆盖一个 flush 周期内的心跳突发；满时非阻塞丢弃（下次心跳补上）
+		heartbeatRedisCh: make(chan *Client, 8192),
 		config:           config,
 		logger:           InitLogger(config),
 		msgPool: sync.Pool{

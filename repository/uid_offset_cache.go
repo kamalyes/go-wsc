@@ -11,8 +11,8 @@
  * 本缓存在进程内复用 offset,首次 miss 时由 Lua 脚本分配并回填,后续命中零网络
  *
  * 设计取舍:
- *   - 容量超限时整表 Clear(而非 LRU 半清):ShardedMap 的 Clear 是 O(shard 数) 重置,
- *     比维护 LRU 链表的写入开销低;2M 容量对千万级用户系统足够,清空后由后续查询按需重建
+ *   - 容量超限时清半驱逐(每 shard 随机一半,而非 LRU):无链表维护开销,保留一半热数据,
+ *     2M 容量对千万级用户系统偏小可经环境变量调大;被驱逐项由后续查询按需重建
  *   - offset 永久复用(不 Delete):用户下线后再上线 offset 不变,避免 INCR 空洞累积
  *   - 并发安全由 ShardedMap 分片锁保证,无额外锁
  *
@@ -27,9 +27,11 @@ import (
 )
 
 const (
-	// defaultUIDCacheShardCount offset 缓存的分片数,与 shardedRegistry 对齐
-	defaultUIDCacheShardCount = 64
-	// defaultMaxCachedUIDs 缓存容量上限,超限触发整表清空
+	// defaultUIDCacheShardCount offset 缓存的分片数
+	// 实测（go-toolbox ShardSweepMixed 调优基准）：读多写少场景 256 分片相比 64 提升约 32%
+	// （42ns→29ns/op），且可反超 sync.Map；锁竞争拐点在 GOMAXPROCS×16~×32，256 覆盖主流机器
+	defaultUIDCacheShardCount = 256
+	// defaultMaxCachedUIDs 缓存容量上限,超限触发清半驱逐
 	defaultMaxCachedUIDs = 2_000_000
 )
 
@@ -48,7 +50,7 @@ const (
 type uidOffsetCache struct {
 	cache *syncx.ShardedMap[string, int64]
 
-	// maxCapacity 容量上限,Len() 超过此值时整表 Clear
+	// maxCapacity 容量上限,Len() 超过此值时触发清半驱逐(ClearHalf)
 	// 防止恶意大量 userID 导致进程内存膨胀
 	maxCapacity int
 
@@ -77,13 +79,13 @@ func (c *uidOffsetCache) Load(userID string) (int64, bool) {
 
 // Store 写入 offset
 //
-// 容量超限时整表 Clear:简单策略,清空后由后续查询按需重建。
-// 牺牲短时缓存命中率(重建窗口内多走 Lua),换取写入零链表开销。
-// 并发 Store 多次 Clear 是幂等的,无正确性问题。
+// 容量超限时清半驱逐（每 shard 随机一半）：保留一半热数据，避免整表 Clear
+// 触发缓存命中率雪崩（重建窗口内查询全部回源 HGET uid_map，千万级用户下
+// 会给已过热的 uid_map 叠加洪峰）被驱逐的 userID 下次查询走 Lua 重新解析并回填
 func (c *uidOffsetCache) Store(userID string, offset int64) {
 	c.cache.Store(userID, offset)
 	if c.cache.Len() > c.maxCapacity {
-		c.cache.Clear()
+		c.cache.ClearHalf()
 	}
 }
 
@@ -92,7 +94,7 @@ func (c *uidOffsetCache) Store(userID string, offset int64) {
 func (c *uidOffsetCache) LoadOrStore(userID string, offset int64) (int64, bool) {
 	actual, loaded := c.cache.LoadOrStore(userID, offset)
 	if !loaded && c.cache.Len() > c.maxCapacity {
-		c.cache.Clear()
+		c.cache.ClearHalf()
 	}
 	return actual, loaded
 }

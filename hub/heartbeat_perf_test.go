@@ -20,6 +20,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -137,10 +138,62 @@ func BenchmarkBatchSetClientsOnline(b *testing.B) {
 }
 
 // ============================================================================
-// 3. 旧路径对照：UpdateClientHeartbeat 逐客户端刷新（N 次 GET + Lua）
-//    每次 b.N 处理 N 个客户端，N 次 Redis 往返（逐客户端读-改-写）
-//    与 2 对比：ns/op 比值 ≈ 批量相对逐次的加速比
+// 4. 心跳消息 JSON 解析快路径（handleTextMessage 探测结构 vs 完整反序列化）
+//    对比：快路径命中（仅解析 message_type/message_id 两字段）
+//    vs   旧路径（完整 HubMessage 反序列化 + normalizeMessageFields 后才分流心跳）
+//    差值即读协程热路径每条心跳节省的 CPU（千万连接 × 每 30s ≈ 33 万 QPS）
 // ============================================================================
+
+// benchHeartbeatPayload 构造典型心跳消息 JSON（含冗余字段，模拟真实客户端报文）
+func benchHeartbeatPayload() []byte {
+	return []byte(`{"message_type":"ping","message_id":"hb-1234567890","sender":"bench-u-0","sender_type":"customer","content":"","create_at":"2026-09-01T00:00:00Z","seq_no":42,"session_id":"sess-abc","priority":"normal"}`)
+}
+
+// BenchmarkHeartbeatFastPath 快路径：探测结构命中（跳过完整反序列化 + 规范化）
+// 纯解析对比（不含 handleHeartbeatMessage：其内部日志 I/O 主导耗时，会掩盖解析差异）
+func BenchmarkHeartbeatFastPath(b *testing.B) {
+	hub := NewHub(newTestHubConfig())
+	defer hub.SafeShutdown()
+
+	data := benchHeartbeatPayload()
+	var probe struct {
+		MessageType MessageType `json:"message_type"`
+		MessageID   string      `json:"message_id"`
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if err := json.Unmarshal(data, &probe); err != nil {
+			b.Fatal(err)
+		}
+		if probe.MessageType != MessageTypePing {
+			b.Fatal("快路径应命中 ping")
+		}
+	}
+}
+
+// BenchmarkHeartbeatLegacyUnmarshal 旧路径对照：完整 HubMessage 反序列化 + 规范化
+func BenchmarkHeartbeatLegacyUnmarshal(b *testing.B) {
+	hub := NewHub(newTestHubConfig())
+	defer hub.SafeShutdown()
+
+	client := makeBenchClient("hbl-c", "hbl-u", 256)
+	data := benchHeartbeatPayload()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		var msg *HubMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			b.Fatal(err)
+		}
+		hub.normalizeMessageFields(client, msg)
+		if msg.MessageType != MessageTypePing {
+			b.Fatal("旧路径应解析出 ping")
+		}
+	}
+}
 
 func BenchmarkUpdateClientHeartbeatPerClient(b *testing.B) {
 	for _, n := range benchHeartbeatScales {

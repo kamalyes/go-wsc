@@ -4,10 +4,10 @@
  * @LastEditors: kamalyes 501893067@qq.com
  * @LastEditTime: 2026-08-07 23:20:15
  * @FilePath: \go-wsc\hub\heartbeat_distributed_test.go
- * @Description: 心跳重建 Redis 在线索引的分布式场景测试
+ * @Description: 心跳续期 Redis 在线索引的分布式场景测试
  *
- * 验证修复核心保证：心跳无条件重建在线索引与跨节点路由信息
- *   1. TestHeartbeatRebuildsEvictedOnlineIndex — 索引被淘汰后心跳重建 + 新旧路径对照
+ * 验证修复核心保证：心跳续期在线索引与跨节点路由信息，client:<id> 键被淘汰时自愈重建
+ *   1. TestHeartbeatRebuildsEvictedOnlineIndex — 索引被淘汰后续期自愈重建 + 新旧路径对照
  *   2. TestMultiDeviceMultiNodeGetUserNodes   — 多设备多节点心跳保持 + 断开收敛
  *
  * Copyright (c) 2026 by kamalyes, All Rights Reserved.
@@ -99,7 +99,7 @@ func drainSendChan(c *Client) {
 // 当 Redis 中 client:<id> 与在线索引被淘汰/过期后（旧 bug 下 UpdateClientHeartbeat
 // 因 GetClient 返回 redis.Nil 而静默 no-op，索引永不刷新 → 用户在线但查询为离线、
 // 跨节点路由 GetUserNodes 返回空），新的心跳路径（handleHeartbeatMessage → worker →
-// BatchSetClientsOnline）应无条件重建索引，恢复跨节点可见性
+// RenewClientsOnline 检测缺失后走 BatchSetClientsOnline）应自愈重建索引，恢复跨节点可见性
 //
 // 同时对照：旧的 UpdateClientHeartbeat 在 client:<id> 缺失时确为静默 no-op
 func TestHeartbeatRebuildsEvictedOnlineIndex(t *testing.T) {
@@ -162,10 +162,10 @@ func TestHeartbeatRebuildsEvictedOnlineIndex(t *testing.T) {
 	assert.Equal(t, int64(0), stillMissing,
 		"旧 UpdateClientHeartbeat 在 client:<id> 缺失时应静默 no-op（对照证明 bug 根因）")
 
-	// 修复路径：心跳触发 worker 无条件重建索引（即便 client:<id> 已不存在）
+	// 修复路径：心跳触发 worker 轻量续期，检测到 client:<id> 缺失后自愈全量重建
 	hubA.handleHeartbeatMessage(client)
 
-	// 等 worker flush（2s ticker）重建索引
+	// 等 worker flush（2s ticker）续期/重建索引
 	require.Eventually(t, func() bool {
 		online, _ := hubB.IsUserOnline(ctx, client.UserID)
 		return online

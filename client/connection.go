@@ -143,13 +143,19 @@ func (wsc *Wsc) setupHandlers() {
 		return result
 	})
 
-	// 收到 ping 回调
-	defaultPingHandler := wsc.WebSocket.Conn.PingHandler()
+	// 收到 ping 回调：pong 响应走 wsc.send（内部 sendMu 串行化所有写操作）
+	// 不用 gorilla 默认 handler——它在读协程内直接 WriteControl 写 pong，
+	// 与写协程 WriteMessage 的数据帧并发写同一连接（WriteControl 的内部锁仅
+	// 串行化控制帧之间），高负载下帧交错损坏连接
 	wsc.WebSocket.Conn.SetPingHandler(func(appData string) error {
 		if f := wsc.onPingReceived.Load(); f != nil {
 			f.(func(string))(appData)
 		}
-		return defaultPingHandler(appData)
+		err := wsc.send(websocket.PongMessage, []byte(appData))
+		if err == websocket.ErrCloseSent {
+			return nil
+		}
+		return err
 	})
 
 	// 收到 pong 回调

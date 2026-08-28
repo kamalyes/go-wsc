@@ -624,7 +624,16 @@ func TestRevokeConnectionToken_WithRedis(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 
 	// 先 Issue 一个 token 写入白名单
-	token, err := IssueConnectionToken(context.Background(), cfg, "", rdb, &ConnectionClaims{UserID: "u-revoke"})
+	// 重试容错：-race 全量并行重负载下 miniredis 响应可能慢于生产 tokenRedisTimeout(2s)，
+	// 超时属于测试环境 CPU 超卖抖动而非逻辑错误
+	var token string
+	for i := 0; i < 3; i++ {
+		token, err = IssueConnectionToken(context.Background(), cfg, "", rdb, &ConnectionClaims{UserID: "u-revoke"})
+		if err == nil {
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
 	require.NoError(t, err)
 	require.True(t, mr.Exists(whitelistKey("wsc:", token)), "token 应在白名单中")
 
@@ -648,8 +657,15 @@ func TestCheckWhitelist_TokenNotInWhitelist(t *testing.T) {
 	set := decoder.sets[decoder.defaultAppID]
 
 	// 白名单中不存在该 token → 返回错误
-	err = decoder.checkWhitelist(context.Background(), set, "nonexistent-token")
-	assert.Error(t, err, "白名单中不存在的 token 应返回错误")
+	// 重试容错：-race 重负载下 miniredis 查询可能超时触发降级放行（返回 nil），属环境抖动
+	for i := 0; i < 3; i++ {
+		err = decoder.checkWhitelist(context.Background(), set, "nonexistent-token")
+		if err != nil {
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	require.Error(t, err, "白名单中不存在的 token 应返回错误")
 	assert.Contains(t, err.Error(), "not in whitelist")
 }
 

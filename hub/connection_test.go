@@ -25,20 +25,33 @@ import (
 )
 
 // TestCloseClientChannelIdempotent 验证 closeClientChannel 幂等：多次调用不 panic、不重复关闭通道
+// 新语义：关闭的是生命周期信号 DoneCh（写泵 select 退出），SendChan 永不 close（消除 send/close 竞态）
 func TestCloseClientChannelIdempotent(t *testing.T) {
 	hub := NewHub(newTestHubConfig())
 
 	client := makeTestClient("c1", "u1")
+	client.DoneCh = make(chan struct{})
 	require.False(t, client.IsClosed())
 
 	require.NotPanics(t, func() { hub.closeClientChannel(client) })
 	assert.True(t, client.IsClosed(), "首次关闭后应标记为已关闭")
 
-	// 通道应已关闭：读取返回零值与 false
-	_, ok := <-client.SendChan
-	assert.False(t, ok, "SendChan 应已关闭")
+	// DoneCh 应已关闭：读取立即返回零值
+	select {
+	case <-client.DoneCh:
+	default:
+		t.Fatal("DoneCh 应已关闭")
+	}
 
-	// 重复关闭不应 panic、不应二次关闭
+	// SendChan 不应被关闭：非阻塞读不产生 ok=false（通道保持开放，由写泵消费后退出）
+	select {
+	case _, ok := <-client.SendChan:
+		assert.True(t, ok, "SendChan 不应被关闭（新语义：数据通道永不 close）")
+	default:
+		// 无数据且未关闭，符合预期
+	}
+
+	// 重复关闭不应 panic、不应二次 close DoneCh
 	require.NotPanics(t, func() {
 		hub.closeClientChannel(client)
 		hub.closeClientChannel(client)

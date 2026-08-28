@@ -122,7 +122,7 @@ func (h *Hub) handleRegister(client *Client) {
 			"max_connections", maxConns,
 		)
 		if client.Conn != nil {
-			// WriteControl 内部加锁且并发安全，可与读循环并发执行
+			// 此时读写协程尚未启动（handleRegister 末尾才启动），无并发写者，WriteControl 安全
 			msg := websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "节点连接数已达上限，请稍后重试")
 			_ = client.Conn.WriteControl(websocket.CloseMessage, msg, time.Now().Add(2*time.Second))
 			client.Conn.Close()
@@ -229,6 +229,9 @@ func (h *Hub) handleRegister(client *Client) {
 		h.sendWelcomeMessage(client)
 	})
 
+	// 安装协议级 PING 处理器（单写者模式，必须先于读写协程启动）
+	h.setupPingHandler(client)
+
 	// 启动客户端读写 goroutine
 	if client.Conn != nil {
 		go h.handleClientWrite(client)
@@ -239,6 +242,33 @@ func (h *Hub) handleRegister(client *Client) {
 	if h.routerCache != nil {
 		h.routerCache.InvalidateUser(ctx, client.UserID)
 	}
+}
+
+// setupPingHandler 安装协议级 PING 处理器（gorilla 单写者模式）
+//
+// 背景：gorilla 默认 ping handler 在读协程（ReadMessage 内部）直接 WriteControl 写 pong，
+// 而 WriteControl 的内部锁仅串行化控制帧之间，与写泵 WriteMessage 的数据帧写入互不同步——
+// 并发写同一 TCP 连接会导致帧交错、连接损坏（gorilla 明确要求单写者）。
+//
+// 修复：协议级 PING 与应用层心跳等效保活（touchHeartbeat 统一路径），
+// pong 响应帧经 PongCh 非阻塞投递给写泵统一写出；PongCh 容量 1，
+// 满时丢弃本次 pong（客户端 PING 超时会重发，不阻塞读协程）
+func (h *Hub) setupPingHandler(client *Client) {
+	if client == nil || client.Conn == nil {
+		return
+	}
+	client.Conn.SetPingHandler(func(appData string) error {
+		now := time.Now()
+		h.touchHeartbeat(client, now)
+		if client.PongCh != nil {
+			select {
+			case client.PongCh <- []byte(appData):
+			default:
+				// 上一个 pong 尚未被写泵写出，丢弃（客户端 PING 超时会重发）
+			}
+		}
+		return nil
+	})
 }
 
 // GetMaxConnectionsPerNode 获取节点最大连接数（0 表示不限制）
@@ -595,10 +625,13 @@ func (h *Hub) removeOnlineStatusFromRedis(client *Client) {
 }
 
 // closeClientChannel 关闭客户端发送通道
-// 仅关闭 channel 通知 handleClientWrite 退出，不回收到对象池（已关闭的 channel 无法复用）
-// 不置 nil SendChan，避免与 handleClientWrite 的 select 读产生数据竞争
+// 用 DoneCh 通知 handleClientWrite 退出，数据通道（SendChan/SSEMessageCh）永不 close：
+//  1. 消除 TrySend 的 chansend 与本函数 closechan 的数据竞态（-race 检出），
+//     TrySend 因此可无锁化（闭锁竞态源头不存在，recover 仅兜底外部直接 close 的测试场景）
+//  2. 不回收到对象池（竞态窗口内 racing sender 仍可能写入残留消息，复用会跨连接串消息）
+//  3. 不置 nil SendChan，避免与 handleClientWrite 的 select 读产生数据竞争
 func (h *Hub) closeClientChannel(client *Client) {
-	// 使用互斥锁保护关闭操作
+	// 使用互斥锁保护关闭操作（防并发调用 double close DoneCh/SSECloseCh）
 	client.CloseMu.Lock()
 	defer client.CloseMu.Unlock()
 
@@ -608,21 +641,14 @@ func (h *Hub) closeClientChannel(client *Client) {
 	}
 	client.MarkClosed()
 
-	// 关闭 WebSocket 发送通道（handleClientWrite 会读完缓冲后收到 ok=false 退出）
-	// 不调用 releaseClientSendChan：1) 已关闭的 channel 不能放回池中复用
-	//   2) 不置 nil SendChan，避免与 handleClientWrite 的 <-client.SendChan 数据竞争
-	if client.SendChan != nil {
-		close(client.SendChan)
+	// 关闭生命周期信号（handleClientWrite / handleSSEWriteLoop select 到后退出）
+	if client.DoneCh != nil {
+		close(client.DoneCh)
 	}
 
-	// SSE 客户端需要关闭专用通道
-	if client.ConnectionType == ConnectionTypeSSE {
-		if client.SSEMessageCh != nil {
-			close(client.SSEMessageCh)
-		}
-		if client.SSECloseCh != nil {
-			close(client.SSECloseCh)
-		}
+	// SSE 客户端关闭专用通道（handleSSEWriteLoop 已 select SSECloseCh，SSEMessageCh 无需 close）
+	if client.ConnectionType == ConnectionTypeSSE && client.SSECloseCh != nil {
+		close(client.SSECloseCh)
 	}
 }
 
@@ -635,7 +661,9 @@ func (h *Hub) closeClientConnection(client *Client) {
 	}
 
 	// Hub 正在关闭时，先发送 1001 GoingAway 控制帧通知客户端
-	// WriteControl 内部加锁且并发安全，可与读循环并发执行
+	// 说明：WriteControl 与写泵的 WriteMessage 并不互相同步（仅控制帧之间串行），
+	// 理论上存在极小概率的并发写窗口；但此时 closeClientChannel 已先执行（写泵即将退出），
+	// 且紧随其后 Conn.Close()，即使帧交错客户端也只是走异常断开重连，不影响正确性
 	if h.shutdown.Load() {
 		msg := websocket.FormatCloseMessage(websocket.CloseGoingAway, "server is shutting down")
 		_ = client.Conn.WriteControl(websocket.CloseMessage, msg, time.Now().Add(2*time.Second))

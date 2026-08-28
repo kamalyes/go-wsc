@@ -16,9 +16,11 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -326,4 +328,127 @@ func TestCheckHeartbeatSSEUsesLastSeen(t *testing.T) {
 
 	// SSE 客户端应仍然存在（因为 lastSeen 是最近时间）
 	assert.True(t, hub.HasClient("sse-chk"), "SSE 客户端应使用 lastSeen 判断，未超时不应被注销")
+}
+
+// ============================================================================
+// 协议级 PING 单写者路径（setupPingHandler / PongCh / 写泵 pong 写出）
+// ============================================================================
+
+// TestProtocolPingSingleWriterPong 验证协议级 PING 的单写者 pong 路径：
+// 1. PING 刷新客户端心跳（协议级 PING 与应用层心跳等效保活）
+// 2. pong 控制帧由写泵统一写出（客户端可正确收到带相同 appData 的 pong）
+func TestProtocolPingSingleWriterPong(t *testing.T) {
+	hub := NewHub(wscconfig.Default())
+	defer hub.SafeShutdown()
+	go hub.Run()
+	require.NoError(t, hub.WaitForStartWithTimeout(5*time.Second))
+
+	sConn, cConn := newWSConnPair(t)
+	client := newTestClient("ping-sw-client", "ping-sw-user", sConn)
+	hub.Register(client)
+	require.Eventually(t, func() bool {
+		return hub.HasClient(client.ID)
+	}, 2*time.Second, 20*time.Millisecond, "客户端应注册成功")
+
+	// 记录初始心跳（注册时已设置，PING 后应更新）
+	before := client.GetLastHeartbeat()
+
+	// 客户端设置 pong handler（gorilla 控制帧不会从 ReadMessage 返回，需 handler 捕获）
+	pongCh := make(chan string, 1)
+	cConn.SetPongHandler(func(appData string) error {
+		select {
+		case pongCh <- appData:
+		default:
+		}
+		return nil
+	})
+
+	// 客户端发协议级 PING
+	require.NoError(t, cConn.WriteControl(websocket.PingMessage, []byte("hb-1"), time.Now().Add(time.Second)))
+
+	// 驱动客户端读循环分发控制帧（gorilla 要求持续读才能触发 pong handler）
+	go func() {
+		for {
+			if _, _, err := cConn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+
+	// 断言收到 pong（appData 回显）
+	select {
+	case appData := <-pongCh:
+		assert.Equal(t, "hb-1", appData, "pong 应回显 PING 的 appData")
+	case <-time.After(3 * time.Second):
+		t.Fatal("未收到 pong 控制帧（单写者路径：写泵应统一写出 pong）")
+	}
+
+	// 断言心跳已刷新（协议级 PING 走 touchHeartbeat 保活路径）
+	require.Eventually(t, func() bool {
+		return client.GetLastHeartbeat().After(before)
+	}, 2*time.Second, 20*time.Millisecond, "协议级 PING 应刷新 LastHeartbeat")
+}
+
+// TestProtocolPingWithDataConcurrentWrites 数据帧与 PING 并发时连接不损坏（单写者冒烟测试）
+// 修复前：gorilla 默认 ping handler 在读协程内直接 WriteControl 写 pong，
+// 与写泵 WriteMessage 的数据帧并发写同一 TCP 连接，帧交错会导致连接损坏
+func TestProtocolPingWithDataConcurrentWrites(t *testing.T) {
+	hub := NewHub(wscconfig.Default())
+	defer hub.SafeShutdown()
+	go hub.Run()
+	require.NoError(t, hub.WaitForStartWithTimeout(5*time.Second))
+
+	sConn, cConn := newWSConnPair(t)
+	client := newTestClient("ping-sw-stress", "ping-sw-user", sConn)
+	hub.Register(client)
+	require.Eventually(t, func() bool {
+		return hub.HasClient(client.ID)
+	}, 2*time.Second, 20*time.Millisecond, "客户端应注册成功")
+
+	// 客户端持续读：分发 pong 控制帧 + 消费数据帧，统计收到的数据帧与读错误
+	var received int32
+	var readErr atomic.Value
+	go func() {
+		for {
+			mt, _, err := cConn.ReadMessage()
+			if err != nil {
+				readErr.Store(err)
+				return
+			}
+			if mt == websocket.TextMessage {
+				atomic.AddInt32(&received, 1)
+			}
+		}
+	}()
+
+	// 客户端高频发 PING（触发 pong 与数据帧的并发写窗口）
+	pingDone := make(chan struct{})
+	go func() {
+		defer close(pingDone)
+		for i := 0; i < 200; i++ {
+			_ = cConn.WriteControl(websocket.PingMessage, []byte("p"), time.Now().Add(time.Second))
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+
+	// 同时写泵持续写数据帧（TrySend 直接入队，写泵批量写出）
+	payload, err := json.Marshal(NewHubMessage().SetMessageType(MessageTypeText).SetContent("single-writer-stress"))
+	require.NoError(t, err)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		client.TrySend(payload)
+		select {
+		case <-pingDone:
+			// PING 发完即可停止数据帧写入
+		default:
+		}
+	}
+	<-pingDone
+
+	// 等待写泵排空积压
+	time.Sleep(300 * time.Millisecond)
+
+	// 无读错误（连接未损坏）且数据帧正常送达
+	assert.Nil(t, readErr.Load(), "数据帧与 pong 并发写时连接不应损坏")
+	assert.Greater(t, atomic.LoadInt32(&received), int32(0), "应收到数据帧")
 }

@@ -6,11 +6,10 @@
  * @Description: Bitmap 分层在线状态测试
  *
  * 覆盖：
- *   - IsUserOnline 命中/未命中/miss 兜底
+ *   - IsUserOnline 命中/未命中/miss 兜底（含 L1 offset 缓存回填）
  *   - 路由信封隔离（同名 userID 跨 app/ns）
  *   - offset 首次分配（INCR/HSETNX 原子性）
- *   - dual-write scoped miss 回退 unscoped
- *   - BatchIsUserOnline / BatchSetClientsOfflineWithInfo
+ *   - BatchIsUserOnline Pipeline 批量判定 / BatchSetClientsOfflineWithInfo
  *   - GetUserClients / BatchGetUserNodes 走 scoped key
  *
  * Copyright (c) 2026 by kamalyes, All Rights Reserved.
@@ -19,7 +18,6 @@ package wsc
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -27,21 +25,16 @@ import (
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-toolbox/pkg/random"
 	"github.com/kamalyes/go-wsc/routing"
-	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// newBitmapTestRepoSetup 创建启用 bitmap 的测试仓库
+// newBitmapTestRepoSetup 创建 bitmap 单一路径的测试仓库
 //
-// 与 newTestRepoSetup 的差异：通过 t.Setenv 启用 bitmap 快速路径（必须在构造 repo 前设置）。
-// 灰度阶段默认 dual-write（scoped miss 回退 unscoped，兼容存量数据）。
+// bitmap 为唯一实现路径（无开关），此处仅显式设大 TTL 避免慢 CI 机器误判。
 // 使用独立前缀避免与其他测试共享 uid_map（offset 一旦分配永久保留，跨测试复用会污染断言）。
 func newBitmapTestRepoSetup(t *testing.T, ttl time.Duration) *testRepoSetup {
 	t.Helper()
-	t.Setenv("WSC_ONLINE_ENABLE_BITMAP", "true")
-	t.Setenv("WSC_ONLINE_BITMAP_MIGRATION_PHASE", "dual-write")
-	// bitmap TTL 默认 8s，测试立即查询不会过期；显式设大避免慢 CI 机器误判
 	t.Setenv("WSC_ONLINE_BITMAP_TTL", "60s")
 
 	redisClient := GetTestRedisClientWithFlush(t)
@@ -58,7 +51,7 @@ func withRoute(ctx context.Context, appID, ns string) context.Context {
 	return routing.NewRoute().WithAppID(appID).WithNamespace(ns).Inject(ctx)
 }
 
-// newScopedTestClient 创建带指定路由信封字段的测试客户端
+// newScopedTestClient 创建带指oss定路由信封字段的测试客户端
 // client.AppID / client.Namespace 必须与 ctx 注入的路由信封一致，
 // 否则 BatchSetClientsOnline 写入的 scoped key 与 IsUserOnline 查询的 scoped key 不匹配
 func newScopedTestClient(userType UserType, appID, ns string) *Client {
@@ -172,7 +165,7 @@ func TestBitmap_OffsetFirstAllocation(t *testing.T) {
 	require.NoError(t, setup.repo.SetClientOnline(ctx, client))
 
 	redisClient := GetTestRedisClient(t)
-	uidMapKey := setup.repo.(*RedisOnlineStatusRepository).GetUIDMapKey()
+	uidMapKey := setup.repo.(*RedisOnlineStatusRepository).GetUIDMapKey(client.UserID)
 	offset, err := redisClient.HGet(setup.ctx, uidMapKey, client.UserID).Int64()
 	require.NoError(t, err, "uid_map 应包含首次分配的 offset")
 	assert.GreaterOrEqual(t, offset, int64(0))
@@ -266,32 +259,6 @@ func TestBitmap_GetUserClientsScopedKey(t *testing.T) {
 	assert.Equal(t, c2.ID, got2[0].ID)
 }
 
-// TestBitmap_BatchGetUserNodesFallbackUnscoped dual-write scoped miss 回退 unscoped
-//
-// 验证 dual-write 阶段，scoped ZSET 无数据但 unscoped ZSET 有数据时（切换前存量连接），
-// BatchGetUserNodes 回退 unscoped 命中并按信封过滤返回节点。
-func TestBitmap_BatchGetUserNodesFallbackUnscoped(t *testing.T) {
-	setup := newBitmapTestRepoSetup(t, 5*time.Minute)
-	client := newScopedTestClient(UserTypeCustomer, "app-A", "ns-1")
-	defer setup.cleanup(client)
-
-	// 直接写 unscoped ZSET（模拟切换前存量数据，scoped ZSET 无此 client）
-	redisClient := GetTestRedisClient(t)
-	repo := setup.repo.(*RedisOnlineStatusRepository)
-	expireTime := time.Now().Add(5 * time.Minute).Unix()
-	// 同时写 client:<id> key，让 BatchGetUserNodes 的 GET 能解压到 NodeID
-	clientData, mErr := json.Marshal(client)
-	require.NoError(t, mErr)
-	require.NoError(t, redisClient.Set(setup.ctx, repo.GetClientKey(client.ID), clientData, 5*time.Minute).Err())
-	require.NoError(t, redisClient.ZAdd(setup.ctx, repo.GetUserClientsKey(client.UserID), redis.Z{Score: float64(expireTime), Member: client.ID}).Err())
-
-	ctx := withRoute(setup.ctx, "app-A", "ns-1")
-	result, err := setup.repo.BatchGetUserNodes(ctx, []string{client.UserID})
-	require.NoError(t, err)
-	require.Contains(t, result, client.UserID)
-	assert.Contains(t, result[client.UserID], client.NodeID, "回退 unscoped 应按信封过滤后命中节点")
-}
-
 // TestBitmap_GetUserNodesScopedKey GetUserNodes 走 scoped key
 //
 // 验证 bitmap 启用 + 路由信封时，GetUserNodes 继承 GetUserClients 的 scoped 路径，
@@ -323,30 +290,21 @@ func TestBitmap_GetUserNodesScopedKey(t *testing.T) {
 }
 
 // ============================================================================
-// Benchmark：bitmap 快速路径 vs 旧全量过滤路径
+// Benchmark：bitmap 快速路径（L1 缓存 + GETBIT）
 //
 // 重要说明：
 //   - 测试后端是 miniredis（进程内内存模拟），无网络往返，
 //     且其 Lua 引擎为 gopher-lua（解释执行），远慢于生产 Redis 的 c-Lua。
-//   - 生产 Redis 的核心差异在"网络往返次数"：Legacy 有路由信封时走
-//     ZRANGE + N×GET + N×解压（N+1 次往返），Fast 走 1 次 Lua（GETBIT）。
-//   - 因此本 benchmark 不反映绝对性能，只反映"随客户端数 N 增长的趋势"：
-//     Legacy 分配数与耗时随 N 线性增长，Fast 与 N 无关（恒定）。
-//   - 验证方法：对比 N=1 与 N=50 两组，Fast 两组数据应基本持平，
-//     Legacy 两组应有明显倍数差异。
+//   - 生产 Redis 的核心收益在"网络往返次数"：首次查询 1 次 Lua（HGET+GETBIT），
+//     L1 回填后仅 1 次 GETBIT，与该用户的客户端数 N 无关（恒定）。
+//   - 验证方法：对比 N=1 与 N=50 两组，两组数据应基本持平（bitmap 只记 1 位）。
 // ============================================================================
 
 // setupBitmapBenchmark 准备 benchmark 数据
-// enableBitmap=true 启用 bitmap，clientCount 为同 userID+信封下的客户端数（模拟多设备）
-func setupBitmapBenchmark(b *testing.B, enableBitmap bool, clientCount int) (OnlineStatusRepository, context.Context, string) {
+// clientCount 为同 userID+信封下的客户端数（模拟多设备）
+func setupBitmapBenchmark(b *testing.B, clientCount int) (OnlineStatusRepository, context.Context, string) {
 	b.Helper()
-	if enableBitmap {
-		b.Setenv("WSC_ONLINE_ENABLE_BITMAP", "true")
-		b.Setenv("WSC_ONLINE_BITMAP_MIGRATION_PHASE", "dual-write")
-		b.Setenv("WSC_ONLINE_BITMAP_TTL", "60s")
-	} else {
-		b.Setenv("WSC_ONLINE_ENABLE_BITMAP", "false")
-	}
+	b.Setenv("WSC_ONLINE_BITMAP_TTL", "60s")
 	redisClient := GetTestRedisClientWithFlush(b)
 	prefix := getTestIDGenerator().GenerateRequestID()
 	repo := NewRedisOnlineStatusRepository(redisClient, &wscconfig.OnlineStatus{
@@ -374,33 +332,9 @@ func setupBitmapBenchmark(b *testing.B, enableBitmap bool, clientCount int) (Onl
 	return repo, ctx, c1.UserID
 }
 
-// BenchmarkIsUserOnline_Legacy_1Client bitmap 禁用 + 1 客户端（基线）
-// 有路由信封时走 GetUserClients：ZRANGE + 1×GET + 1×解压
-func BenchmarkIsUserOnline_Legacy_1Client(b *testing.B) {
-	repo, ctx, userID := setupBitmapBenchmark(b, false, 1)
-	for i := 0; i < b.N; i++ {
-		if _, err := repo.IsUserOnline(ctx, userID); err != nil {
-			b.Fatalf("IsUserOnline failed: %v", err)
-		}
-	}
-}
-
-// BenchmarkIsUserOnline_Legacy_50Clients bitmap 禁用 + 50 客户端（多设备）
-// 走 GetUserClients 全量加载：ZRANGE + 50×GET + 50×解压 + 逐客户端过滤
-// 预期：分配数和耗时约为 1Client 的 50 倍（线性增长）
-func BenchmarkIsUserOnline_Legacy_50Clients(b *testing.B) {
-	repo, ctx, userID := setupBitmapBenchmark(b, false, 50)
-	for i := 0; i < b.N; i++ {
-		if _, err := repo.IsUserOnline(ctx, userID); err != nil {
-			b.Fatalf("IsUserOnline failed: %v", err)
-		}
-	}
-}
-
-// BenchmarkIsUserOnline_1Client bitmap 启用 + 1 客户端
-// 走 HGET uid_map → GETBIT 单次 Lua 往返，与客户端数无关
+// BenchmarkIsUserOnline_1Client 1 客户端（首次查询走 Lua 回填 L1，后续 L1 命中直接 GETBIT）
 func BenchmarkIsUserOnline_1Client(b *testing.B) {
-	repo, ctx, userID := setupBitmapBenchmark(b, true, 1)
+	repo, ctx, userID := setupBitmapBenchmark(b, 1)
 	for i := 0; i < b.N; i++ {
 		if _, err := repo.IsUserOnline(ctx, userID); err != nil {
 			b.Fatalf("IsUserOnline failed: %v", err)
@@ -408,11 +342,11 @@ func BenchmarkIsUserOnline_1Client(b *testing.B) {
 	}
 }
 
-// BenchmarkIsUserOnline_50Clients bitmap 启用 + 50 客户端
-// 仍走 HGET uid_map → GETBIT 单次 Lua 往返（bitmap 只记 1 位，与客户端数无关）
+// BenchmarkIsUserOnline_50Clients 50 客户端（同 userID 多设备）
+// L1 命中后仅 1 次 GETBIT（bitmap 只记 1 位，与客户端数无关）
 // 预期：与 1Client 组基本持平（恒定开销）
 func BenchmarkIsUserOnline_50Clients(b *testing.B) {
-	repo, ctx, userID := setupBitmapBenchmark(b, true, 50)
+	repo, ctx, userID := setupBitmapBenchmark(b, 50)
 	for i := 0; i < b.N; i++ {
 		if _, err := repo.IsUserOnline(ctx, userID); err != nil {
 			b.Fatalf("IsUserOnline failed: %v", err)
@@ -421,10 +355,8 @@ func BenchmarkIsUserOnline_50Clients(b *testing.B) {
 }
 
 // BenchmarkBatchIsUserOnline_50Users 批量快速判定 50 用户
-// 验证批量场景的吞吐（当前实现逐个调用，后续可优化为 Pipeline）
+// Pipeline 实现：L1 命中零网络（稳态 1 次 GETBIT 往返覆盖 50 用户）
 func BenchmarkBatchIsUserOnline_50Users(b *testing.B) {
-	b.Setenv("WSC_ONLINE_ENABLE_BITMAP", "true")
-	b.Setenv("WSC_ONLINE_BITMAP_MIGRATION_PHASE", "dual-write")
 	b.Setenv("WSC_ONLINE_BITMAP_TTL", "60s")
 	redisClient := GetTestRedisClientWithFlush(b)
 	prefix := getTestIDGenerator().GenerateRequestID()

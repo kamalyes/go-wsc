@@ -14,6 +14,7 @@ package hub
 import (
 	"context"
 	"runtime/debug"
+	"sync"
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
@@ -217,14 +218,14 @@ func (h *Hub) reportPerformanceMetrics() {
 	)
 }
 
-// processHeartbeatRedisUpdates 单 goroutine 处理所有客户端的心跳 Redis 更新
+// processHeartbeatRedisUpdates 单 goroutine 收集所有客户端的心跳 Redis 更新
 // 替代每次心跳创建独立 goroutine 的模式，大幅减少 goroutine 创建/GC 压力
 //
-// 关键设计：投递 *Client，flush 时直接调用 BatchSetClientsOnline 无条件重建
-// 在线索引（SETEX client:<id> + ZADD user_clients/node_clients/all_users/type，
-// 全部以最新 expireTime 刷新 score）。这样即使 Redis 中 client:<id> 键已过期或
-// 被 maxmemory 淘汰，心跳仍能重建索引，避免「用户实际在线但查询为离线」、
-// 跨节点路由 GetUserNodes 返回空的问题
+// 关键设计：投递 *Client，flush 时分块并行调用 RenewClientsOnline 轻量续期
+// （EXPIRE client:<id> + ZADD user_clients/node_clients/all_users/type 刷新 score + SETBIT 续期，
+// 跳过 JSON 序列化/压缩/SETEX 全量重写）。client:<id> 键已过期或被淘汰的客户端
+// 由 repo 内部检测后走全量重建，保留自愈语义——即使 Redis 键丢失，
+// 心跳仍能重建索引，避免「用户实际在线但查询为离线」、跨节点路由 GetUserNodes 返回空的问题
 //
 // 断开竞态保护：removeClientUnsafe 中 closeClientChannel(MarkClosed) 先于
 // removeOnlineStatusFromRedis(SetClientOffline) 执行，故 flush 时用 IsClosed()
@@ -235,9 +236,10 @@ func (h *Hub) processHeartbeatRedisUpdates() {
 
 	// 按 clientID 去重收集客户端（同一客户端多次心跳只保留最新指针）
 	batch := make(map[string]*Client, 256)
-	// 心跳批量重建在线索引的 flush 间隔：从 OnlineStatus.HeartbeatRefreshInterval 读取（默认 2s）
-	// 可配置以应对不同负载场景（高并发可调小到 500ms 缩短索引重建窗口；该间隔仅影响兜底重建，
-	// 首次注册的索引写入由 handleRegister 的 syncOnlineStatus 同步完成，不依赖此 ticker）
+	// 心跳批量续期在线索引的 flush 间隔：从 OnlineStatus.HeartbeatRefreshInterval 读取（默认 2s）
+	// 可配置以应对不同负载场景（高并发可调小到 500ms 缩短索引续期窗口；该间隔仅影响续期与
+	// 键缺失时的自愈重建，首次注册的索引写入由 handleRegister 的 syncOnlineStatus 同步完成，
+	// 不依赖此 ticker）
 	heartbeatRefreshInterval := 2 * time.Second
 	if h.config != nil && h.config.RedisRepository != nil && h.config.RedisRepository.OnlineStatus != nil {
 		heartbeatRefreshInterval = mathx.IfNotZero(h.config.RedisRepository.OnlineStatus.HeartbeatRefreshInterval, 2*time.Second)
@@ -262,14 +264,35 @@ func (h *Hub) processHeartbeatRedisUpdates() {
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
+		// 并行续期：分块 + 固定 worker，千万级连接下单 goroutine 串行 Eval 必然积压
+		// （500 万客户端/2s 周期 ÷ 100/批 = 5 万次 Eval，串行不可行）
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, heartbeatRenewWorkers)
+		for start := 0; start < len(liveClients); start += heartbeatRenewChunkSize {
+			end := start + heartbeatRenewChunkSize
+			if end > len(liveClients) {
+				end = len(liveClients)
+			}
+			chunk := liveClients[start:end]
 
-		// 无条件重建在线索引与跨节点路由信息（刷新所有 ZSET score + client:<id> 键）
-		if err := h.onlineStatusRepo.BatchSetClientsOnline(ctx, liveClients); err != nil {
-			h.logger.DebugKV("重建 Redis 在线状态失败",
-				"count", len(liveClients), "error", err)
+			wg.Add(1)
+			sem <- struct{}{}
+			go func() {
+				defer wg.Done()
+				defer func() { <-sem }()
+
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+
+				// 轻量续期：跳过 JSON 序列化/压缩/SETEX，仅刷新 TTL 与 ZSET score；
+				// client:<id> 键缺失的由 repo 内部走全量重建（保留原自愈语义）
+				if err := h.onlineStatusRepo.RenewClientsOnline(ctx, chunk); err != nil {
+					h.logger.DebugKV("心跳续期 Redis 在线状态失败",
+						"count", len(chunk), "error", err)
+				}
+			}()
 		}
+		wg.Wait()
 	}
 
 	for {
@@ -596,7 +619,7 @@ func (h *Hub) batchCleanupOnShutdown(clients []*Client) {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			if err := h.onlineStatusRepo.SetClientOffline(ctx, client); err != nil {
-				h.logger.DebugKV("shutdown: 清理 Redis 在线状态失败",
+				h.logger.DebugContextKV(client.Context, "shutdown: 清理 Redis 在线状态失败",
 					"client_id", client.ID,
 					"user_id", client.UserID,
 					"error", err,
@@ -611,7 +634,7 @@ func (h *Hub) batchCleanupOnShutdown(clients []*Client) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			if err := h.connectionRecordRepo.MarkDisconnected(ctx, client.ID, DisconnectReasonServerShutdown, 1001); err != nil {
-				h.logger.DebugKV("shutdown: 更新连接断开记录失败",
+				h.logger.DebugContextKV(client.Context, "shutdown: 更新连接断开记录失败",
 					"client_id", client.ID,
 					"user_id", client.UserID,
 					"error", err,
@@ -626,7 +649,7 @@ func (h *Hub) batchCleanupOnShutdown(clients []*Client) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			if err := h.connectionQualityRepo.FinalizeOnDisconnect(ctx, client.ID); err != nil {
-				h.logger.DebugKV("shutdown: 质量终评失败",
+				h.logger.DebugContextKV(client.Context, "shutdown: 质量终评失败",
 					"client_id", client.ID,
 					"user_id", client.UserID,
 					"error", err,

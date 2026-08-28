@@ -53,6 +53,8 @@ type Client struct {
 	ConnectionType ConnectionType         `json:"connection_type"`     // 连接类型（websocket/sse）
 	Metadata       map[string]interface{} `json:"metadata"`            // 元数据
 	SendChan       chan []byte            `json:"-"`                   // 发送通道（不序列化，仅WS使用）
+	PongCh         chan []byte            `json:"-"`                   // pong 控制帧队列（不序列化，cap 1；读协程收到协议级 PING 后非阻塞投递，写泵统一写出——gorilla 单写者模式）
+	DoneCh         chan struct{}          `json:"-"`                   // 生命周期关闭信号（注销时 close，写泵 select 退出；数据通道永不 close，消除 send/close 竞态）
 	Context        context.Context        `json:"-"`                   // 上下文（不序列化）
 	closed         atomic.Bool            `json:"-"`                   // channel关闭标志（不序列化）
 	CloseMu        sync.Mutex             `json:"-"`                   // 保护channel关闭的互斥锁（不序列化）
@@ -99,6 +101,7 @@ func NewClient(id, userID string, userType UserType) *Client {
 		LastPong:      now,
 		Status:        UserStatusOnline,
 		Metadata:      make(map[string]interface{}),
+		DoneCh:        make(chan struct{}), // 生命周期关闭信号（注册时 SendChan 由对象池分配，DoneCh 统一在此创建）
 		Context:       context.Background(),
 	}
 	c.lastHeartbeatUnix.Store(unix)
@@ -596,19 +599,21 @@ func (c *Client) MarkClosed() {
 }
 
 // TrySend 尝试向客户端发送数据（WebSocket），如果已关闭或失败则返回false
-func (c *Client) TrySend(data []byte) bool {
-	c.CloseMu.Lock()
-	defer c.CloseMu.Unlock()
-
+//
+// 性能：无锁热路径——发送是全库最热操作（广播扇出时每客户端一次），
+// closeClientChannel 持 CloseMu 先 MarkClosed 再 close(channel)，此处不抢锁：
+// 闭锁竞态窗口内的 send panic 由 recover 兜住并标记关闭，语义与持锁版一致
+// （消息要么在 close 前入队被写泵排空，要么被丢弃返回 false，永不外泄 panic）
+func (c *Client) TrySend(data []byte) (sent bool) {
 	if c.IsClosed() || c.SendChan == nil {
 		return false
 	}
 
-	// 使用 defer recover 捕获可能的 send on closed channel panic
+	// 捕获闭锁竞态窗口内的 send on closed channel panic
 	defer func() {
 		if r := recover(); r != nil {
-			// Channel 已关闭，标记为已关闭状态
 			c.closed.Store(true)
+			sent = false
 		}
 	}()
 
@@ -621,19 +626,16 @@ func (c *Client) TrySend(data []byte) bool {
 }
 
 // TrySendSSE 尝试向SSE客户端发送消息，如果已关闭或失败则返回false
-func (c *Client) TrySendSSE(msg *HubMessage) bool {
-	c.CloseMu.Lock()
-	defer c.CloseMu.Unlock()
-
+// 无锁热路径，闭锁竞态处理同 TrySend
+func (c *Client) TrySendSSE(msg *HubMessage) (sent bool) {
 	if c.IsClosed() || c.SSEMessageCh == nil {
 		return false
 	}
 
-	// 使用 defer recover 捕获可能的 send on closed channel panic
 	defer func() {
 		if r := recover(); r != nil {
-			// Channel 已关闭，标记为已关闭状态
 			c.closed.Store(true)
+			sent = false
 		}
 	}()
 

@@ -43,13 +43,14 @@ type HubWorkerPool struct {
 
 // NewHubWorkerPool 创建 Hub 工作池集合
 // syncx.NewWorkerPool 在构造时自动启动 worker goroutine
+// 弹性策略：构造仅启动保底数量，积压按需扩容至上限，空闲超过 cfg.IdleTimeout 自动回收
 func NewHubWorkerPool(cfg *wscconfig.WorkerPoolConfig, log WSCLogger) *HubWorkerPool {
 	return &HubWorkerPool{
 		// NewWorkerPool 构造时自动启动 workers，无需调 Start
-		MessagePool:     syncx.NewWorkerPool(cfg.MessageWorkers, cfg.MessageQueueSize),
-		CallbackPool:    syncx.NewWorkerPool(cfg.CallbackWorkers, cfg.CallbackQueueSize),
-		RecordPool:      syncx.NewWorkerPool(cfg.RecordWorkers, cfg.RecordQueueSize),
-		DistributedPool: syncx.NewWorkerPool(cfg.DistributedWorkers, cfg.DistributedQueueSize),
+		MessagePool:     syncx.NewWorkerPool(cfg.MessageWorkers, cfg.MessageQueueSize, syncx.WithPoolIdleTimeout(cfg.IdleTimeout)),
+		CallbackPool:    syncx.NewWorkerPool(cfg.CallbackWorkers, cfg.CallbackQueueSize, syncx.WithPoolIdleTimeout(cfg.IdleTimeout)),
+		RecordPool:      syncx.NewWorkerPool(cfg.RecordWorkers, cfg.RecordQueueSize, syncx.WithPoolIdleTimeout(cfg.IdleTimeout)),
+		DistributedPool: syncx.NewWorkerPool(cfg.DistributedWorkers, cfg.DistributedQueueSize, syncx.WithPoolIdleTimeout(cfg.IdleTimeout)),
 		logger:          log,
 	}
 }

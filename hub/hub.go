@@ -471,6 +471,7 @@ func NewHub(config *wscconfig.WSC) *Hub {
 	config.ClientAttributes = mathx.IfEmpty(config.ClientAttributes, wscconfig.DefaultClientAttributes())
 	config.TemporalHasher = mathx.IfEmpty(config.TemporalHasher, wscconfig.DefaultTemporalHasher())
 	config.CapacityEstimation = mathx.IfEmpty(config.CapacityEstimation, wscconfig.DefaultCapacityEstimation())
+	config.Timer = mathx.IfEmpty(config.Timer, wscconfig.DefaultTimerConfig())
 
 	// 初始化时间窗口哈希生成器（用于生成 ClientID）
 	thConfig := config.TemporalHasher
@@ -578,9 +579,9 @@ func NewHub(config *wscconfig.WSC) *Hub {
 
 	// ⏰ 构造期初始化心跳时间轮（替代 checkHeartbeat 的 O(N) 全量扫描）
 	// 必须在 NewHub 完成初始化，确保 Register/Refresh/Cancel 在任何 goroutine 启动前读到非 nil 值，
-	// 避免与 Run() 的延迟初始化产生数据竞争。用默认 1ms tick（极致精度）：
-	// 短超时场景（测试用 200ms）不会被向上取整，百万连接下 64 分片 rounds-- 开销 <1% CPU，可接受
-	hub.heartbeatTimer = syncx.NewHashedWheelTimer()
+	// 避免与 Run() 的延迟初始化产生数据竞争
+	// tick 精度与分片数由 config.Timer 控制（NewHub 已兜底默认 10ms × 16 分片，秒级超时语义足够）
+	hub.heartbeatTimer = syncx.NewHashedWheelTimer(config.Timer.GetTimerOptions()...)
 
 	return hub
 }

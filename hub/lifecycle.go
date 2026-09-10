@@ -71,9 +71,10 @@ func (h *Hub) Run() {
 	// ⏰ 初始化跨节点 ACK 超时时间轮（替代 timeoutStaleSendingRecords 的 30s 全量 DB 扫描主路径）
 	// recordMessageToDatabase 创建 sending 记录时调度 per-message 超时任务，
 	// updateMessageStatusAsync 状态变更时 O(1) 取消；详见 ack_timer.go
+	// 与心跳时间轮共用 config.Timer 配置（NewHub 已兜底，GetTimerOptions 对 nil 配置安全）
 	// 依赖 messageRecordRepo / pubsub（由 InitializeRepositories / SetPubSub 在 Run 前注入）
 	if h.messageRecordRepo != nil && h.pubsub != nil {
-		h.ackTimeoutTimer = syncx.NewHashedWheelTimer()
+		h.ackTimeoutTimer = syncx.NewHashedWheelTimer(h.config.Timer.GetTimerOptions()...)
 	}
 
 	// 启动心跳 Redis 更新 worker（单 goroutine 处理所有客户端的心跳 Redis 更新）

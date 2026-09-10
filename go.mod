@@ -9,12 +9,12 @@ require (
 	github.com/gorilla/websocket v1.4.2
 	github.com/jpillora/backoff v1.0.0
 	github.com/kamalyes/go-argus v0.3.1
-	github.com/kamalyes/go-cachex v0.3.6
-	github.com/kamalyes/go-config v0.21.17-0.20260827170651-7a12acb63e9a
-	github.com/kamalyes/go-logger v0.6.0
+	github.com/kamalyes/go-cachex v0.3.7
+	github.com/kamalyes/go-config v0.21.17
+	github.com/kamalyes/go-logger v0.6.1
 	github.com/kamalyes/go-pbmo v0.2.0
 	github.com/kamalyes/go-sqlbuilder v0.6.5
-	github.com/kamalyes/go-toolbox v0.16.2
+	github.com/kamalyes/go-toolbox v0.16.3
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/stretchr/testify v1.11.1
 	google.golang.org/grpc v1.83.1

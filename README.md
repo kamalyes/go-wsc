@@ -9,7 +9,7 @@
 [![GitHub Stars](https://img.shields.io/github/stars/kamalyes/go-wsc)](https://github.com/kamalyes/go-wsc/stargazers)
 [![codecov](https://codecov.io/gh/kamalyes/go-wsc/branch/master/graph/badge.svg)](https://codecov.io/gh/kamalyes/go-wsc)
 
-**go-wsc** 是一个企业级 Go WebSocket 框架，专注于高性能实时通信。提供智能重连、消息确认(ACK)、连接池管理等关键特性，内置 gRPC 集群直连与四层跨节点自愈容错，支持百万级并发连接。
+**go-wsc** 是一个企业级 Go WebSocket 框架，专注于高性能实时通信。提供智能重连、消息确认(ACK)、连接池管理等关键特性，内置削峰填谷与消息分级送达（必达/普通/高频三级语义）、慢消费者治理、writev 合帧批量写，内置 gRPC 集群直连与四层跨节点自愈容错，支持百万级并发连接。
 
 ## 🏗️ 系统架构
 
@@ -51,6 +51,15 @@ graph TB
             CrossNodeRouter[跨节点路由]
         end
 
+        subgraph "过载保护（削峰填谷）"
+            AdmissionGate[准入闸门<br/>水位线 + AIMD 升降级]
+            TokenBucket[GCRA 令牌桶<br/>广播出向整形]
+            Coalescer[高频消息合并器<br/>latest-wins]
+            DelayQueue[延迟队列<br/>低谷补投填谷]
+            SlowGov[慢消费者治理<br/>记录 → 告警 → 驱逐]
+            CtrlLane[控制通道双 lane<br/>必达级独立投递]
+        end
+
         subgraph "分布式通信"
             GRPCDirect[节点间 gRPC 直连<br/>点对点投递]
             PubSub[Redis PubSub<br/>兜底消息总线]
@@ -83,6 +92,8 @@ graph TB
         subgraph "性能优化"
             AtomicOps[原子操作]
             WorkerPool[协程池]
+            FrameBatcher[writev 合帧<br/>批量写优化]
+            JsonEngine[JSON 引擎收口<br/>sonic JIT 可选]
         end
 
         subgraph "监控告警"
@@ -127,6 +138,16 @@ graph TB
     NodeDiscovery --> MsgRouter
     MsgRouter --> CrossNodeRouter
 
+    %% 过载保护（削峰填谷）
+    MsgRouter --> AdmissionGate
+    AdmissionGate --> TokenBucket
+    TokenBucket --> BroadcastMgr
+    AdmissionGate --> DelayQueue
+    DelayQueue -.->|低谷补投| BroadcastMgr
+    AdmissionGate --> SlowGov
+    MsgRouter --> Coalescer
+    MsgRouter --> CtrlLane
+
     %% 分布式通信
     CrossNodeRouter --> GRPCDirect
     CrossNodeRouter --> PubSub
@@ -149,6 +170,8 @@ graph TB
     %% 性能与监控
     MsgRouter --> AtomicOps
     MsgRouter --> WorkerPool
+    MsgRouter --> FrameBatcher
+    MsgRouter --> JsonEngine
     Hub1 --> MetricsCol
     Hub2 --> MetricsCol
     Hub3 --> MetricsCol
@@ -172,15 +195,17 @@ graph TB
     classDef hubStyle fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
     classDef coreStyle fill:#e8eaf6,stroke:#283593,stroke-width:2px
     classDef reliabilityStyle fill:#ffebee,stroke:#c62828,stroke-width:2px
-    classDef perfStyle fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    classDef perfStyle fill:#e0f7fa,stroke:#006064,stroke-width:2px
+    classDef overloadStyle fill:#fce4ec,stroke:#880e4f,stroke-width:2px
     classDef storageStyle fill:#e8f5e8,stroke:#1b5e20,stroke-width:2px
 
     class WSC,TSC,React,Vue,Angular clientStyle
     class LB,Gateway lbStyle
     class Hub1,Hub2,Hub3,HubN hubStyle
     class ConnRegistry,NodeDiscovery,MsgRouter,CrossNodeRouter,GRPCDirect,PubSub,BroadcastMgr coreStyle
+    class AdmissionGate,TokenBucket,Coalescer,DelayQueue,SlowGov,CtrlLane overloadStyle
     class ACKMgr,MsgRecord,RetryEngine,FailureRouter,OfflineHandler,QueueHandler reliabilityStyle
-    class AtomicOps,WorkerPool,MetricsCol,AlertMgr,ConfigMgr,NodeConfig perfStyle
+    class AtomicOps,WorkerPool,FrameBatcher,JsonEngine,MetricsCol,AlertMgr,ConfigMgr,NodeConfig perfStyle
     class RedisCluster,Database,LogStore storageStyle
 ```
 
@@ -194,6 +219,10 @@ graph TB
   - PubSub 兜底: gRPC 未启用/失败时降级 Redis PubSub，Pipeline 批量定向发布
   - 全局广播: 自动同步到所有节点
 - **高可靠性**: ACK 确认机制 + 消息记录 + 离线处理 + 智能重试
+- **削峰填谷**: 准入闸门（水位线 + AIMD 升降级）+ GCRA 令牌桶广播整形 + 延迟队列低谷补投
+- **消息分级送达**: 必达/普通/高频三级语义，洪峰下分级保护（必达走控制通道，高频 latest-wins 合并）
+- **慢消费者治理**: 三段式渐进处置（记录 → 告警 → 驱逐），驱逐前排空积压移交 ACK 链路兜底
+- **高性能写路径**: writev 合帧批量写（突发 N 条 → 2 次 syscall）+ JSON 引擎收口（构建标签启用 sonic JIT，大消息场景数倍提速）
 - **跨节点自愈**: 死节点秒级感知 + user_not_found 重路由 + 死索引清理 + 幽灵连接回收
 - **全链路追踪**: trace_id 贯穿 gRPC/PubSub/离线推送全链路
 - **多租户隔离**: appID + namespace 应用级消息隔离
@@ -218,6 +247,9 @@ graph TB
 - **高并发**：百万级连接支持
 - **消息路由**：点对点/群组/广播
 - **集群投递**：gRPC 直连优先 + PubSub 兜底 + 死节点秒级感知
+- **削峰填谷**：准入闸门 + 令牌桶整形 + 延迟队列填谷，洪峰不丢必达消息
+- **消息分级**：必达/普通/高频三级送达语义，差异化路由与兜底
+- **慢消费者治理**：背压保护 + 三段式渐进处置，防止单连接拖垮全局
 - **ACK 确认**：可靠消息传输 + 跨节点 ACK 超时兜底
 - **全链路追踪**：trace_id 贯穿发送/投递/ACK/离线全链路
 - **多租户隔离**：appID + namespace 应用级消息隔离
@@ -239,6 +271,43 @@ graph TB
 - **死索引自愈**：目标节点扑空时异步清理指向本节点的死索引条目
 - **owner 归属校验**：Lua 脚本保证索引清理不误删其他节点已接管的条目
 - **节点重注册**：周期性完整重注册（含 gRPC 地址），Redis key 被删/TTL 过期后自动恢复上报
+
+### 🌊 削峰填谷与消息分级送达
+
+消息洪峰下的过载保护体系——分级裁决 + 削峰整形 + 填谷补投，拒绝不等于丢弃：
+
+| 级别 | 语义 | 路由路径 | 洪峰行为 | 兜底链路 |
+| --- | --- | --- | --- | --- |
+| 必达 Guaranteed | 不可丢失（支付/踢出/强制下线） | 控制通道双 lane（独立缓冲） | 恒放行，不受水位裁决 | ACK 重试 + 离线存储双保险 |
+| 普通 Standard | 尽力送达（聊天/通知） | 数据 lane | 极端水位转离线补发 | 离线上线推送 + ACK 超时兜底 |
+| 高频 Ephemeral | 最新值即全量（输入状态/行情） | 合并器（latest-wins） | 同 key 只保最新，覆盖即削峰 | 容量满语义丢弃（新值即真相） |
+
+配套组件（轻量组装：零值即关闭，热路径 nil 检查零开销）：
+
+- **准入闸门**：在途积压量水位（written - delivered）+ AIMD 升降级（L0 正常→L1 告警→L2 延迟→L3 仅关键→L4 只读），升级快降级慢防抖动，三态裁决（放行/延迟/离线）
+- **GCRA 令牌桶**：广播出向整形，平滑突发速率，防止广播风暴击穿出口带宽
+- **延迟队列**：高水位时广播消息入队缓写，低谷周期 drain 补投（填谷）
+- **高频合并器**：同用户同类型只保最新值（latest-wins），50ms 周期批量投递
+- **慢消费者治理**：三段式渐进处置（记录 → 告警 → 驱逐），驱逐前排空积压移交 ACK 链路兜底，防止单连接拖垮全局
+- **运行期热替换**：`SetOverloadPolicy` 基于 atomic.Pointer 安全发布，组件可运行期替换不停服
+
+启用示例：
+
+```go
+hub := hub.NewHub(cfg)
+
+// 削峰填谷三件套：准入闸门 + 广播整形 + 高频合并（均轻量组装，按需传 nil 跳过）
+hub.SetOverloadPolicy(
+    hub.NewAdmissionGate(10_000, 3_000, time.Second), // 高/低水位 + 评估周期
+    hub.NewShaper(50_000),                             // 广播出向 5w msg/s
+    hub.NewCoalescer(8_192),                           // 高频合并容量
+)
+
+// 洪峰漏斗指标 + pprof 快照（/debug/overload、/debug/pprof/...）
+http.Handle("/debug/", hub.DebugHandler())
+```
+
+> 消息分级通过 `HubMessage` 的 `Guarantee` 字段声明（`models.GuaranteeGuaranteed` / `GuaranteeStandard` / `GuaranteeEphemeral`），未声明时按决策树推导：消息类型默认表 → 分类评分 → 关键优先级 → 兜底普通档。
 
 ### 🔄 失败处理与重试
 
@@ -326,6 +395,8 @@ go run server.go
 - **吞吐量**: 720万条消息/秒
 - **客户端注册**: ~2,430 ns/op
 - **消息发送**: ~138 ns/op
+- **序列化引擎**: sonic JIT（`-tags sonic`）大消息场景 ~4x 提速，默认标准库零依赖
+- **批量写**: writev 合帧，突发 N 条消息从 N 次 syscall 降为 2 次
 - **并发连接**: 百万级支持
 
 > 📊 **详细分析**: 查看 [性能优化指南](./docs/Performance_Guide.md) 获取调优建议

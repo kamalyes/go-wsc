@@ -19,6 +19,7 @@ import (
 
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
+	"github.com/kamalyes/go-wsc/constants"
 )
 
 // Run 启动Hub
@@ -68,7 +69,7 @@ func (h *Hub) Run() {
 
 	// ⏰ 心跳时间轮已在 NewHub() 构造期初始化（避免与并发 Register 产生数据竞争）
 
-	// ⏰ 初始化跨节点 ACK 超时时间轮（替代 timeoutStaleSendingRecords 的 30s 全量 DB 扫描主路径）
+	// ⏰ 跨节点 ACK 超时时间轮（替代 timeoutStaleSendingRecords 的 30s 全量 DB 扫描主路径）
 	// recordMessageToDatabase 创建 sending 记录时调度 per-message 超时任务，
 	// updateMessageStatusAsync 状态变更时 O(1) 取消；详见 ack_timer.go
 	// 与心跳时间轮共用 config.Timer 配置（NewHub 已兜底，GetTimerOptions 对 nil 配置安全）
@@ -76,6 +77,35 @@ func (h *Hub) Run() {
 	if h.messageRecordRepo != nil && h.pubsub != nil {
 		h.ackTimeoutTimer = syncx.NewHashedWheelTimer(h.config.Timer.GetTimerOptions()...)
 	}
+
+	// 🚦 启动准入闸门水位评估循环（AIMD 升降级；NewHub 构造期已初始化默认水位）
+	if gate := h.admission.Load(); gate != nil {
+		gate.Start()
+		h.logger.InfoKV("准入闸门已启动",
+			"eval_interval", constants.DefaultAdmissionEvalInterval,
+			"high_watermark", constants.DefaultAdmissionHighWatermark,
+			"low_watermark", constants.DefaultAdmissionLowWatermark,
+		)
+	}
+
+	// 🌊 启动广播延迟队列 drain 循环（填谷重投：按整形速率节拍投递，AIMD 提速联动）
+	if h.broadcastDelayQueue != nil {
+		syncx.Go(h.ctx).
+			OnPanic(func(r any) {
+				h.logger.ErrorKV("广播延迟队列 drain panic", "panic", r, "stack", string(debug.Stack()), "node_id", h.nodeID)
+			}).
+			Exec(func() {
+				h.broadcastDelayQueue.drainLoop(h.ctx)
+			})
+	}
+
+	// 🧹 启动高频合并器 drain ticker（latest-wins 快照周期投递）
+	if h.ephemeralCoalescer.Load() != nil {
+		h.startCoalescerDrain()
+	}
+
+	// 🐌 启动慢消费者扫描器（三级递进治理：记录 → 告警 → 驱逐；驱逐前消息保全）
+	h.startSlowConsumerScanner()
 
 	// 启动心跳 Redis 更新 worker（单 goroutine 处理所有客户端的心跳 Redis 更新）
 	if h.onlineStatusRepo != nil {
@@ -456,6 +486,11 @@ func (h *Hub) SafeShutdown() error {
 	// 停止跨节点分发批量处理器，flush 剩余分发
 	if h.clusterBatcher != nil {
 		h.clusterBatcher.Stop()
+	}
+
+	// 停止准入闸门水位评估循环（写泵/投递埋点为 atomic add，无需 flush）
+	if gate := h.admission.Load(); gate != nil {
+		gate.Stop()
 	}
 
 	// 刷写消息/广播原子计数器到 Redis，避免关闭时统计丢失

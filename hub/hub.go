@@ -454,6 +454,21 @@ type Hub struct {
 	chanPools       map[int]*sync.Pool // 多级 channel 对象池，key 为容量
 	rateLimiter     *RateLimiter
 	poolManager     PoolManager
+
+	// ========== 削峰填谷与分级送达体系（轻量组装：零值/nil 即关闭，热路径 nil 检查跳过） ==========
+	// 三个组件均为 atomic.Pointer：SetOverloadPolicy 运行期热替换与后台循环
+	// （水位评估/慢消费者扫描/延迟队列 drain/合并器 drain）的并发读写需要安全发布
+	// atomic.Pointer 存取本身建立 happens-before，组件字段无需额外同步
+	// admission 准入闸门（水位线 + AIMD 升降级 + 分级裁决）；nil 时全放行
+	admission atomic.Pointer[AdmissionGate]
+	// broadcastShaper 广播出向整形（GCRA 令牌桶）；nil 时不整形
+	broadcastShaper atomic.Pointer[Shaper]
+	// ephemeralCoalescer 高频消息合并器（latest-wins）；nil 时不合并
+	ephemeralCoalescer atomic.Pointer[Coalescer]
+	// broadcastDelayQueue 广播延迟队列（整形/准入拒绝的填谷重投；有界，满走分级兜底）
+	broadcastDelayQueue *broadcastDelayQueue
+	// overloadMetrics 送达漏斗与过载指标（零值可用，全 atomic 无锁，无需配置）
+	overloadMetrics OverloadMetrics
 }
 
 // NewHub 创建新的Hub
@@ -583,6 +598,16 @@ func NewHub(config *wscconfig.WSC) *Hub {
 	// tick 精度与分片数由 config.Timer 控制（NewHub 已兜底默认 10ms × 16 分片，秒级超时语义足够）
 	hub.heartbeatTimer = syncx.NewHashedWheelTimer(config.Timer.GetTimerOptions()...)
 
+	// 🚦 削峰填谷组件默认启用（开箱即用；SetOverloadPolicy 可覆盖/关闭）
+	// 准入闸门：默认水位（constants），Run() 时启动评估循环
+	hub.admission.Store(NewAdmissionGate(0, 0, 0))
+	// 广播出向整形：默认速率（GCRA 令牌桶，洪峰平滑扇出）
+	hub.broadcastShaper.Store(NewShaper(0))
+	// 高频消息合并器：默认容量（latest-wins）
+	hub.ephemeralCoalescer.Store(NewCoalescer(0))
+	// 广播延迟队列：填谷重投（Run() 时启动 drain 循环）
+	hub.broadcastDelayQueue = newBroadcastDelayQueue(hub)
+
 	return hub
 }
 
@@ -624,6 +649,58 @@ func (h *Hub) SetWelcomeProvider(provider WelcomeMessageProvider) {
 
 func (h *Hub) SetRateLimiter(limiter *RateLimiter) {
 	h.rateLimiter = limiter
+}
+
+// SetOverloadPolicy 链式配置过载保护策略（同 SetRateLimiter 注入模式，不动 go-config）
+//
+// 零值字段用默认值（水位/速率见 constants）；nil gate 时完全关闭准入（不推荐——
+// 送达兜底路由仍生效，但失去水位驱动的削峰能力）
+// 已 Start 的 Hub 调用时：闸门自动重启评估循环（覆盖旧实例并停旧循环）
+func (h *Hub) SetOverloadPolicy(gate *AdmissionGate, shaper *Shaper, coalescer *Coalescer) *Hub {
+	if gate != nil {
+		if old := h.admission.Load(); old != nil {
+			old.Stop()
+		}
+		h.admission.Store(gate) // atomic 发布：后台循环并发 Load 读到完整初始化的实例
+		gate.Start()
+	}
+	if shaper != nil {
+		h.broadcastShaper.Store(shaper)
+	}
+	if coalescer != nil {
+		h.ephemeralCoalescer.Store(coalescer)
+	}
+	return h
+}
+
+// onWriteBatch 写泵批埋点转发（nil-safe：闸门未启用时仅记漏斗计数）
+func (h *Hub) onWriteBatch(n int) {
+	h.overloadMetrics.recordWriteBatch(n)
+	if gate := h.admission.Load(); gate != nil {
+		gate.onWriteBatch(n)
+	}
+}
+
+// admissionOnDelivered 投递埋点转发（nil-safe）
+func (h *Hub) admissionOnDelivered() {
+	if gate := h.admission.Load(); gate != nil {
+		gate.OnDelivered()
+	}
+}
+
+// admitMessage 消息级准入裁决（nil-safe：闸门未启用时全放行 + 漏斗计数）
+//
+// 热路径契约：零分配（枚举返回）；isBroadcast 标识广播路径（L2 阶梯差异化）
+func (h *Hub) admitMessage(msg *models.HubMessage, isBroadcast bool) AdmitVerdict {
+	guarantee := msg.ResolveGuarantee()
+	h.overloadMetrics.recordAdmitted(guarantee)
+	gate := h.admission.Load()
+	if gate == nil {
+		return VerdictAdmit
+	}
+	verdict := gate.Admit(msg, isBroadcast)
+	h.overloadMetrics.recordAdmissionVerdict(verdict)
+	return verdict
 }
 
 func (h *Hub) SetPoolManager(manager PoolManager) {

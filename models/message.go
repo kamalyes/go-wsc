@@ -22,9 +22,10 @@ import (
 
 // Data 字段的常量 key
 const (
-	DataKeyContentExtra = "content_extra" // 扩展内容
-	DataKeyMetadata     = "metadata"      // 元数据
-	DataKeyMediaInfo    = "media_info"    // 媒体信息
+	DataKeyContentExtra   = "content_extra"  // 扩展内容
+	DataKeyMetadata       = "metadata"       // 元数据
+	DataKeyMediaInfo      = "media_info"     // 媒体信息
+	DataKeyClassification = "classification" // 消息综合分类（ResolveGuarantee 消费其评分）
 )
 
 // HubMessage Hub消息结构
@@ -92,10 +93,11 @@ type HubMessage struct {
 	// 置于布尔区之前，保持 3 个 bool 集中在结构体末尾（对齐优化）
 	mu *sync.RWMutex `json:"-"`
 
-	// ========== 布尔标志（1 字节对齐，集中置于末尾避免 padding） ==========
-	RequireAck          bool `json:"require_ack,omitempty"`           // 是否需要ACK确认
-	SkipDatabaseStorage bool `json:"skip_database_storage,omitempty"` // 是否跳过主数据库存储
-	SkipSendToClient    bool `json:"skip_send_to_client,omitempty"`   // 是否跳过发送到客户端
+	// ========== 标志区（1 字节对齐字段集中末尾，零 padding） ==========
+	DeliveryGuarantee   DeliveryGuarantee `json:"delivery_guarantee,omitempty"`    // 送达分级（必达/普通/高频流式；零值走决策树推导，详见 delivery_guarantee.go）
+	RequireAck          bool              `json:"require_ack,omitempty"`           // 是否需要ACK确认
+	SkipDatabaseStorage bool              `json:"skip_database_storage,omitempty"` // 是否跳过主数据库存储
+	SkipSendToClient    bool              `json:"skip_send_to_client,omitempty"`   // 是否跳过发送到客户端
 }
 
 // lockWrite 获取写锁并返回解锁函数；mu 为 nil 时返回 no-op（兼容直接构造的零值消息）
@@ -388,6 +390,32 @@ func (m *HubMessage) GetOption(key string) (interface{}, bool) {
 	}
 	value, exists := m.Data[key]
 	return value, exists
+}
+
+// WithClassification 设置消息综合分类（链式）
+// 分类评分会被 ResolveGuarantee 消费（≥90 提升为必达级），也保留在 Data 中随消息序列化
+func (m *HubMessage) WithClassification(classification *MessageClassification) *HubMessage {
+	if classification == nil {
+		return m
+	}
+	defer m.lockWrite()()
+	if m.Data == nil {
+		m.Data = make(map[string]interface{})
+	}
+	m.Data[DataKeyClassification] = classification
+	return m
+}
+
+// GetClassification 获取消息综合分类（nil 安全）
+func (m *HubMessage) GetClassification() *MessageClassification {
+	defer m.lockRead()()
+	if m.Data == nil {
+		return nil
+	}
+	if classification, ok := m.Data[DataKeyClassification].(*MessageClassification); ok {
+		return classification
+	}
+	return nil
 }
 
 // WithContentExtra 设置单个 content_extra 字段

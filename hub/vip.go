@@ -100,11 +100,8 @@ func (h *Hub) SendToUserWithClassification(ctx context.Context, userID string, m
 			msg.Priority = PriorityLow
 		}
 
-		// 添加分类信息到消息数据中
-		if msg.Data == nil {
-			msg.Data = make(map[string]interface{})
-		}
-		msg.Data["classification"] = classification
+		// 添加分类信息到消息数据中（WithClassification 统一处理 nil Data map）
+		msg.WithClassification(classification)
 		msg.Data["priority_score"] = finalScore
 		msg.Data["is_critical"] = classification.IsCriticalMessage()
 	}

@@ -725,8 +725,11 @@ func (h *Hub) kickOldestConnection(userID string) {
 
 // kickClientWithNotification 踢掉客户端并发送通知（公共方法）
 // 已有 client 参数，内部用 client.Context 保留连接级 trace_id
+//
+// 🚦 强制下线通知走控制通道（CtrlCh）：SendChan 被业务洪峰填满时通知仍必达
+// （原 sendToClient 路径满即丢，客户端不知为何被断——语义缺陷已修复）
 func (h *Hub) kickClientWithNotification(client *Client, reason DisconnectReason, message string) {
-	// 发送强制下线通知
+	// 发送强制下线通知（控制通道：KickOut/ForceOffline 必达级）
 	if client.Conn != nil {
 		forceOfflineMsg := models.NewHubMessage().
 			SetMessageType(models.MessageTypeForceOffline).
@@ -738,9 +741,8 @@ func (h *Hub) kickClientWithNotification(client *Client, reason DisconnectReason
 			WithContentExtra("reason", reason)
 
 		// 用 client.Context 保留连接级 trace_id，强制下线消息日志可全链路追踪
-		h.sendToClient(client.Context, client, forceOfflineMsg)
-		// 不再使用 time.Sleep 阻塞等待，sendToClient 已将消息写入 SendChan，
-		// handleClientWrite 会异步发送 Unregister 后通道关闭前消息仍会被消费
+		// 控制通道满时降级：断链类消息直接 Conn.Close()（断链本就是目的）
+		h.SendControlMessage(client, forceOfflineMsg)
 	}
 	h.Unregister(client)
 }
@@ -765,6 +767,8 @@ func (h *Hub) createKickNotification(userID, reason, customMsg string, kickedAt 
 // sendKickNotificationToClients 发送踢人通知到客户端
 // 预序列化一次消息，所有客户端复用，消除逐客户端 json.Marshal 开销
 // 批量操作：循环内每个 client 用各自 client.Context 保留连接级 trace_id
+//
+// 🚦 踢人通知走控制通道（KickOut 必达级）：业务 SendChan 洪峰下仍必达
 func (h *Hub) sendKickNotificationToClients(clients []*Client, msg *HubMessage) bool {
 	if len(clients) == 0 {
 		return false
@@ -773,11 +777,14 @@ func (h *Hub) sendKickNotificationToClients(clients []*Client, msg *HubMessage) 
 	// 预序列化一次（所有客户端复用）
 	preSerialized, _ := json.Marshal(msg)
 
-	// 每个 client 用自己的 client.Context，使踢人通知投递日志携带各自 trace_id
+	delivered := false
 	for _, client := range clients {
-		h.sendToClientSerialized(client.Context, client, msg, preSerialized)
+		// KickOut 为断链类控制消息：CtrlCh 满时 SendControl 内部降级直接断链（语义达成）
+		if h.SendControl(client, preSerialized, msg) {
+			delivered = true
+		}
 	}
-	return true
+	return delivered
 }
 
 // CloseAllClientsInMap 关闭用户的所有客户端连接(并发)

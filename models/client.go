@@ -53,6 +53,7 @@ type Client struct {
 	ConnectionType ConnectionType         `json:"connection_type"`     // 连接类型（websocket/sse）
 	Metadata       map[string]interface{} `json:"metadata"`            // 元数据
 	SendChan       chan []byte            `json:"-"`                   // 发送通道（不序列化，仅WS使用）
+	CtrlCh         chan []byte            `json:"-"`                   // 控制通道（必达级：KickOut/ForceOffline/Ack 等；写泵 select 前优先排空，容量见 constants.CtrlChanCapacity）
 	PongCh         chan []byte            `json:"-"`                   // pong 控制帧队列（不序列化，cap 1；读协程收到协议级 PING 后非阻塞投递，写泵统一写出——gorilla 单写者模式）
 	DoneCh         chan struct{}          `json:"-"`                   // 生命周期关闭信号（注销时 close，写泵 select 退出；数据通道永不 close，消除 send/close 竞态）
 	Context        context.Context        `json:"-"`                   // 上下文（不序列化）
@@ -70,6 +71,10 @@ type Client struct {
 
 	// Status 的原子镜像（消除 ResetClientStatus 并发写与 GetUserStatus 并发读的数据竞争）
 	statusVal atomic.Int32 `json:"-"`
+
+	// backlogRatio SendChan 利用率的原子镜像（写泵单写者 store，慢消费者扫描器无锁读）
+	//万分比整数（0-10000），避免浮点原子操作；BacklogRatio() 转浮点返回
+	backlogRatio atomic.Int32 `json:"-"`
 
 	// 客户端可变字段读写锁：保护 Metadata 及所有“注册后仍可能被 With*/Set* 并发写入、
 	// 且 MarshalJSON 会反射读取”的非原子字段（GroupID/Namespace/Role/ClientIP/Department/
@@ -623,6 +628,53 @@ func (c *Client) TrySend(data []byte) (sent bool) {
 	default:
 		return false
 	}
+}
+
+// TrySendControl 尝试向控制通道发送必达级数据（KickOut/ForceOffline/Ack 等）
+//
+// 双 lane 单写者模型（Slack async_priority 模式）：控制通道与数据通道分离，
+// 数据 SendChan 满时控制消息仍可入 CtrlCh；写泵在 select 前先非阻塞排空 CtrlCh，
+// 保证控制帧严格优先于数据帧。无锁热路径 + recover 闭锁竞态防护，风格同 TrySend
+//
+// 返回 false：通道满或已关闭，调用方（SendControl）走降级语义（断链/ACK 重试）
+func (c *Client) TrySendControl(data []byte) (sent bool) {
+	if c.IsClosed() || c.CtrlCh == nil {
+		return false
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			c.closed.Store(true)
+			sent = false
+		}
+	}()
+
+	select {
+	case c.CtrlCh <- data:
+		return true
+	default:
+		return false
+	}
+}
+
+// SetBacklogRatio 写泵单写者更新 SendChan 利用率（万分比整数原子 store，无锁）
+// 写泵每批 drain 后调用；慢消费者扫描器经 BacklogRatio 无锁读取
+func (c *Client) SetBacklogRatio(used, capacity int) {
+	if capacity <= 0 {
+		return
+	}
+	ratio := used * 10000 / capacity
+	if ratio < 0 {
+		ratio = 0
+	} else if ratio > 10000 {
+		ratio = 10000
+	}
+	c.backlogRatio.Store(int32(ratio))
+}
+
+// BacklogRatio 读取 SendChan 利用率（0.0-1.0，无锁；扫描器/治理逻辑用）
+func (c *Client) BacklogRatio() float64 {
+	return float64(c.backlogRatio.Load()) / 10000.0
 }
 
 // TrySendSSE 尝试向SSE客户端发送消息，如果已关闭或失败则返回false

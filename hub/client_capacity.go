@@ -15,6 +15,7 @@ import (
 	"sync"
 
 	"github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-wsc/constants"
 )
 
 // 默认客户端 SendChan 缓冲区容量（当配置不存在时使用）
@@ -162,6 +163,13 @@ func (h *Hub) initClientSendChan(client *Client) {
 		client.PongCh = make(chan []byte, 1)
 	}
 
+	// 🚦 控制通道（必达级消息独立 lane；仅 WebSocket 客户端）
+	// 写泵 select 前优先排空 CtrlCh，KickOut/ForceOffline/Ack 不被业务 SendChan 洪峰淹没；
+	// 容量固定（constants.CtrlChanCapacity，控制消息量级低），走 chanPools 复用
+	if client.ConnectionType != ConnectionTypeSSE && client.CtrlCh == nil {
+		client.CtrlCh = h.getChan(constants.CtrlChanCapacity)
+	}
+
 	// 如果 SendChan 已经初始化，不再重新初始化
 	if client.SendChan != nil {
 		return
@@ -181,10 +189,22 @@ func (h *Hub) initClientSendChan(client *Client) {
 	)
 }
 
-// releaseClientSendChan 释放客户端的 SendChan 回对象池
+// releaseClientSendChan 释放客户端的 SendChan/CtrlCh 回对象池
 // 在客户端断开连接时调用，复用 channel 减少内存分配
 func (h *Hub) releaseClientSendChan(client *Client) {
-	if client == nil || client.SendChan == nil {
+	if client == nil {
+		return
+	}
+
+	// 🚦 控制通道回收（与 SendChan 同池复用；closeClientChannel 不 close 数据/控制通道，此处置 nil）
+	if client.CtrlCh != nil {
+		if client.ConnectionType != ConnectionTypeSSE {
+			h.releaseChan(client.CtrlCh, constants.CtrlChanCapacity)
+		}
+		client.CtrlCh = nil
+	}
+
+	if client.SendChan == nil {
 		return
 	}
 

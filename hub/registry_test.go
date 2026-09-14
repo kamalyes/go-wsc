@@ -29,7 +29,8 @@ import (
 
 // newWSConnPair 建立一对真实 WebSocket 连接（服务端 + 客户端），用于测试
 // 返回的 serverConn 通常作为 Client.Conn；clientConn 用于验证连接行为（如关闭）
-func newWSConnPair(t *testing.T) (serverConn, clientConn *websocket.Conn) {
+// 接受 testing.TB：测试与基准共用（testing.T / testing.B 均满足）
+func newWSConnPair(t testing.TB) (serverConn, clientConn *websocket.Conn) {
 	t.Helper()
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	serverConnCh := make(chan *websocket.Conn, 1)
@@ -504,9 +505,11 @@ func TestKickUserWithMessageOnlineReturnsNil(t *testing.T) {
 	err := hub.KickUserWithMessage(context.Background(), "msg-user", "by msg", "you are kicked")
 	require.NoError(t, err, "在线用户踢出应返回 nil")
 
-	// 应向 SendChan 投递 kick_out 通知（通知在 Unregister 关闭通道前同步投递，缓冲消息可读取）
+	// 应向控制通道投递 kick_out 通知（KickOut 必达级走 CtrlCh，不受 SendChan 洪峰影响；
+	// 通知在 Unregister 关闭通道前同步投递，缓冲消息可读取）
+	require.NotNil(t, client.CtrlCh, "注册后 CtrlCh 应已初始化")
 	select {
-	case data := <-client.SendChan:
+	case data := <-client.CtrlCh:
 		assert.Contains(t, string(data), "kick_out", "应收到 kick_out 通知消息")
 	case <-time.After(2 * time.Second):
 		t.Fatal("未收到踢出通知消息")

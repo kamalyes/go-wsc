@@ -61,6 +61,32 @@ func (h *Hub) handleClientWrite(client *Client) {
 	h.logWithClient(logger.DEBUG, "客户端写入协程启动", client)
 
 	for {
+		// 🚦 控制帧严格优先（双 lane 单写者）：select 前先非阻塞排空 CtrlCh，
+		// 消除 select 伪随机调度导致控制帧（KickOut/ForceOffline/Ack）被数据帧插队的可能；
+		// CtrlCh 为 nil（SSE/手工构造）时跳过，天然安全
+		// 控制消息以 TextMessage 写出（序列化后的业务级控制消息，非 WS 协议控制帧）
+		if client.CtrlCh != nil {
+			for {
+				select {
+				case data, ok := <-client.CtrlCh:
+					if !ok {
+						return
+					}
+					if client.Conn == nil {
+						continue
+					}
+					if err := h.writeClientMessages(client, data); err != nil {
+						h.logWithClient(logger.ERROR, "控制帧写入失败", client, "error", err)
+						// 主动关闭连接，让读 goroutine 的 ReadMessage 立即报错退出（语义同数据写失败）
+						_ = client.Conn.Close()
+						return
+					}
+				default:
+					goto drained
+				}
+			}
+		}
+	drained:
 		select {
 		case message, ok := <-client.SendChan:
 			if !ok {
@@ -72,11 +98,28 @@ func (h *Hub) handleClientWrite(client *Client) {
 				continue
 			}
 
-			if err := h.writeClientMessages(client, message); err != nil {
+			// ⚡ 首条直写 + 积压 writev 合帧（突发 N 条：N 次 syscall → 2 次；见 frame_writer.go）
+			if err := h.writeClientMessagesBatch(client, message); err != nil {
 				h.logWithClient(logger.ERROR, "客户端消息写入失败", client, "error", err)
 				// 主动关闭连接，让读 goroutine 的 ReadMessage 立即报错退出
 				// 否则读 goroutine 会卡在 IO wait 直到 TCP keepalive 超时，造成半死连接泄漏
 				// （读 goroutine 退出后会触发 defer Unregister 完成清理）
+				_ = client.Conn.Close()
+				return
+			}
+		case data, ok := <-client.CtrlCh:
+			// 空闲唤醒：数据 lane 静默期（SendChan 空、无 pong）控制消息仍需及时写出，
+			// 否则 KickOut/ForceOffline/Ack 会在 CtrlCh 滞留到下一次数据帧/pong 才被捎带处理；
+			// 严格优先仍由循环顶部的非阻塞排空保证（本 case 仅兜底唤醒）
+			// CtrlCh 为 nil（SSE/手工构造）时该 case 永不就绪，天然安全
+			if !ok {
+				return
+			}
+			if client.Conn == nil {
+				continue
+			}
+			if err := h.writeClientMessages(client, data); err != nil {
+				h.logWithClient(logger.ERROR, "控制帧写入失败", client, "error", err)
 				_ = client.Conn.Close()
 				return
 			}
@@ -106,6 +149,7 @@ func (h *Hub) handleClientWrite(client *Client) {
 //
 // 性能：每批只 SetWriteDeadline 一次，突发 N 条消息时避免 N 次 goroutine 唤醒
 // 超过 clientWriteBatchSize 的剩余积压由外层循环的下一批继续处理（不丢弃、不阻塞投递方）
+// 批末以单写者 atomic store 更新 SendChan 利用率（慢消费者治理的采样源，扫描器无锁读）
 func (h *Hub) writeClientMessages(client *Client, first []byte) error {
 	client.Conn.SetWriteDeadline(time.Now().Add(clientWriteTimeout))
 	if err := client.Conn.WriteMessage(websocket.TextMessage, first); err != nil {
@@ -113,6 +157,7 @@ func (h *Hub) writeClientMessages(client *Client, first []byte) error {
 	}
 
 	// 非阻塞排空积压：突发 N 条消息时避免 N 次唤醒 + N 次超时设置
+	batch := 1
 	for i := 1; i < clientWriteBatchSize; i++ {
 		select {
 		case message, ok := <-client.SendChan:
@@ -124,10 +169,18 @@ func (h *Hub) writeClientMessages(client *Client, first []byte) error {
 			if err := client.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
 				return err
 			}
+			batch++
 		default:
+			// 写泵单写者：len(SendChan) 只被本 goroutine 消费变化 + 投递方增加，
+			// 原子语义近似准确（写入侧无并发），治理采样足够
+			client.SetBacklogRatio(len(client.SendChan), cap(client.SendChan))
+			// 📊 准入闸门埋点：每批 1 次 atomic add（在途量 backlog = written - delivered）
+			h.onWriteBatch(batch)
 			return nil // 无积压，结束本批
 		}
 	}
+	client.SetBacklogRatio(len(client.SendChan), cap(client.SendChan))
+	h.onWriteBatch(batch)
 	return nil
 }
 
@@ -599,17 +652,46 @@ func (h *Hub) handleDirectMessage(ctx context.Context, msg *HubMessage) {
 }
 
 // handleBroadcastMessage 处理广播消息
+//
+// 🚦 削峰填谷接线（与 broadcastToFiltered 同一套基座）：
+//   - 准入闸门（分级×水位）：拒绝 → 延迟队列重投（填谷）/ 转离线，拒绝≠丢弃
+//   - 出向整形（GCRA）：洪峰平滑扇出，被拒 → 延迟队列；必达级跳过
+//   - 重投目标 doBroadcastMessage 不重复准入（防死循环，与 broadcastToFilteredNow 同语义）
 func (h *Hub) handleBroadcastMessage(ctx context.Context, msg *HubMessage) {
 	// 🔏 路由信封 + trace_id 同步（与所有入口共用同一套逻辑，幂等，已有不覆盖）
 	// msg 可能来自跨节点 distMsg 未归一化，此处防御性兜底；namespace 保持原值（空=全局广播）
 	ctx = msg.InjectRoute(ctx)
 
+	// 🚦 准入闸门：分级×水位裁决（必达级恒放行；普通/高频过载时延迟/离线路由——拒绝≠丢弃）
+	if verdict := h.admitMessage(msg, true); verdict != VerdictAdmit {
+		h.deferBroadcast(ctx, msg, func(c context.Context, m *HubMessage) {
+			h.doBroadcastMessage(c, m)
+		})
+		return
+	}
+
+	// ⏱️ 出向整形：每条广播 1 令牌平滑扇出（必达级跳过——控制面不受数据面整形影响）
+	if shaper := h.broadcastShaper.Load(); shaper != nil &&
+		msg.ResolveGuarantee() != models.GuaranteeGuaranteed &&
+		!shaper.Allow() {
+		h.overloadMetrics.recordShaperDenied()
+		h.deferBroadcast(ctx, msg, func(c context.Context, m *HubMessage) {
+			h.doBroadcastMessage(c, m)
+		})
+		return
+	}
+
+	h.doBroadcastMessage(ctx, msg)
+}
+
+// doBroadcastMessage 广播扇出（准入/整形裁决后的执行体，延迟队列重投的目标函数）
+func (h *Hub) doBroadcastMessage(ctx context.Context, msg *HubMessage) {
 	start := time.Now()
 	if h.statsRepo != nil {
 		h.broadcastSentCount.Add(1)
 	}
 
-	// 预序列化消息（仅一次）
+	// 预序列化消息（仅一次，所有客户端复用）
 	data, err := json.Marshal(msg)
 	if err != nil {
 		h.logger.ErrorContextKV(ctx, "广播消息序列化失败", "error", err)
@@ -637,7 +719,8 @@ func (h *Hub) handleBroadcastMessage(ctx context.Context, msg *HubMessage) {
 		if client.IsClosed() || client.ConnectionType == ConnectionTypeSSE {
 			return
 		}
-		if client.TrySend(data) {
+		// 🛡️ 分级兜底投递：TrySend 失败按分级路由（普通/必达转离线，高频语义丢弃——拒绝≠丢弃）
+		if h.TrySendWithFallback(client, data, msg) {
 			atomic.AddInt32(&successCount, 1)
 			h.trackReceiverMessageStats(client.ID, client.UserType, dataLen)
 		} else {

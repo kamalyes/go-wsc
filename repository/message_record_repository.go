@@ -12,7 +12,6 @@ package repository
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"runtime/debug"
 	"time"
@@ -20,6 +19,7 @@ import (
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-logger"
 	sqlbuilder "github.com/kamalyes/go-sqlbuilder/repository"
+	"github.com/kamalyes/go-toolbox/pkg/json"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/models"

@@ -14,11 +14,11 @@
 package hub
 
 import (
-	"encoding/json"
 	"time"
 
 	"github.com/kamalyes/go-logger"
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
+	"github.com/kamalyes/go-toolbox/pkg/json"
 )
 
 // sendPongResponse 发送 pong 响应（心跳热路径专用）

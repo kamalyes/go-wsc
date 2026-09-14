@@ -13,13 +13,13 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"runtime/debug"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/kamalyes/go-toolbox/pkg/contextx"
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
+	"github.com/kamalyes/go-toolbox/pkg/json"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/constants"

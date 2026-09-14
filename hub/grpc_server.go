@@ -16,11 +16,11 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
 
 	"github.com/kamalyes/go-logger"
+	"github.com/kamalyes/go-toolbox/pkg/json"
 	"github.com/kamalyes/go-toolbox/pkg/netx"
 	wscpb "github.com/kamalyes/go-wsc/models/pb"
 	"github.com/kamalyes/go-wsc/routing"

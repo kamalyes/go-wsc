@@ -11,10 +11,10 @@
 package models
 
 import (
-	"encoding/json"
 	"time"
 
 	"github.com/kamalyes/go-sqlbuilder"
+	"github.com/kamalyes/go-toolbox/pkg/json"
 	"gorm.io/gorm"
 )
 

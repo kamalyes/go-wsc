@@ -12,11 +12,11 @@
 package hub
 
 import (
-	"encoding/json"
 	"net/http"
 	"time"
 
 	gccommon "github.com/kamalyes/go-config/pkg/common"
+	"github.com/kamalyes/go-toolbox/pkg/json"
 )
 
 // HandleValidateConnection 验证 WebSocket 连接参数

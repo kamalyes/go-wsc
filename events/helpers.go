@@ -13,10 +13,10 @@ package events
 
 import (
 	"context"
-	"encoding/json"
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/convert"
+	"github.com/kamalyes/go-toolbox/pkg/json"
 )
 
 // publishEventHelper 通用的事件发布辅助函数

@@ -24,7 +24,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -38,6 +37,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/kamalyes/go-cachex"
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-toolbox/pkg/json"
 	"github.com/kamalyes/go-wsc/hub"
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/repository"

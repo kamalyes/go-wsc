@@ -21,11 +21,11 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"runtime/debug"
 	"sync/atomic"
 	"time"
 
+	"github.com/kamalyes/go-toolbox/pkg/json"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/routing"

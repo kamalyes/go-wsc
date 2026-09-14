@@ -12,7 +12,6 @@ package models
 
 import (
 	"context"
-	"encoding/json"
 	"net"
 	"net/http"
 	"strings"
@@ -21,6 +20,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/kamalyes/go-toolbox/pkg/json"
 	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/routing"
 )

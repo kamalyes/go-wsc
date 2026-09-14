@@ -13,8 +13,9 @@ package events
 
 import (
 	"context"
-	"encoding/json"
 	"time"
+
+	"github.com/kamalyes/go-toolbox/pkg/json"
 )
 
 // PublishEvent 发布自定义事件（通用方法）

@@ -18,12 +18,12 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"runtime/debug"
 	"sync/atomic"
 	"time"
 
+	"github.com/kamalyes/go-toolbox/pkg/json"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	pb "github.com/kamalyes/go-wsc/models/pb"

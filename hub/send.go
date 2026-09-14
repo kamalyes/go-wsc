@@ -13,12 +13,12 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"runtime/debug"
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
+	"github.com/kamalyes/go-toolbox/pkg/json"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/retry"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"

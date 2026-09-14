@@ -18,7 +18,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"runtime/debug"
@@ -28,6 +27,7 @@ import (
 	"time"
 
 	"github.com/kamalyes/go-logger"
+	"github.com/kamalyes/go-toolbox/pkg/json"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 )
 

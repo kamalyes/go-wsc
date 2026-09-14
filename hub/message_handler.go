@@ -22,7 +22,6 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
@@ -30,6 +29,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/kamalyes/go-logger"
+	"github.com/kamalyes/go-toolbox/pkg/json"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/models"

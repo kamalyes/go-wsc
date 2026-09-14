@@ -12,11 +12,11 @@ package models
 
 import (
 	"context"
-	"encoding/json"
 	"sync"
 	"time"
 
 	"github.com/kamalyes/go-logger"
+	"github.com/kamalyes/go-toolbox/pkg/json"
 	"github.com/kamalyes/go-wsc/routing"
 )
 

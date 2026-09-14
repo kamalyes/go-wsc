@@ -765,6 +765,11 @@ func (h *Hub) sendToClient(ctx context.Context, client *Client, msg *HubMessage)
 // preSerialized 为预序列化的 []byte，为 nil 时内部序列化
 // SSE 客户端忽略 preSerialized，直接发送 msg 对象
 // 返回是否成功投递到客户端通道（跨节点 PubSub 路径据此统计投递成败）
+//
+// 🚦 分级投递接线：
+//   - 高频级（Ephemeral）→ Coalescer latest-wins 合并（50ms 周期投递最新值）
+//   - Admit 拒绝（Delay/Offline，P2P 场景仅极端水位触发）→ 转离线补发 + 上层重试兜底
+//   - 实时路径零改动（TrySend 成功路径）
 func (h *Hub) sendToClientSerialized(ctx context.Context, client *Client, msg *HubMessage, preSerialized []byte) bool {
 	// 检查客户端是否已关闭
 	if client.IsClosed() {
@@ -773,6 +778,38 @@ func (h *Hub) sendToClientSerialized(ctx context.Context, client *Client, msg *H
 
 	// 🔥 如果 MessageID 为空，使用 HubID
 	msgID := mathx.IfNotEmpty(msg.MessageID, msg.ID)
+
+	// 🧹 高频级：latest-wins 合并（同用户同类型只保最新；50ms drain 周期投递）
+	if coalescer := h.ephemeralCoalescer.Load(); coalescer != nil &&
+		msg.ResolveGuarantee() == models.GuaranteeEphemeral &&
+		client.ConnectionType != ConnectionTypeSSE {
+		h.overloadMetrics.recordAdmitted(models.GuaranteeEphemeral)
+		if accepted, merged := coalescer.Offer(ephemeralKey(client, msg), msg); accepted {
+			if merged {
+				// 覆盖同 key 旧消息：latest-wins 合并削峰埋点（漏斗 merged 轨道）
+				h.overloadMetrics.recordEphemeralMerged()
+			}
+			return true // 已并入最新值（将投递）
+		}
+		// 合并器容量满：语义丢弃（latest-wins 尽头的容量保护）
+		h.overloadMetrics.recordEphemeralDrop()
+		h.updateMessageStatusAsync(ctx, msgID, MessageSendStatusFailed, FailureReasonQueueFull, "coalescer full")
+		return false
+	}
+
+	// 🚦 准入闸门（P2P 场景：L3/L4 极端水位才拒绝；必达级恒放行）
+	if verdict := h.admitMessage(msg, false); verdict != VerdictAdmit {
+		// 非 Admit 裁决隐含闸门非 nil；防御性 nil 回退（热替换窗口）
+		level := LevelNormal
+		if gate := h.admission.Load(); gate != nil {
+			level = gate.Level()
+		}
+		rejectErr := fmt.Errorf("admission rejected at %s", level)
+		h.updateMessageStatusAsync(ctx, msgID, MessageSendStatusFailed, FailureReasonQueueFull, rejectErr.Error())
+		// 转离线补发（P2P 离线上线推送 + SendToUserWithRetry/ACK 重试双保险）
+		h.tryStoreOfflineOnDeliveryFailure(msg, rejectErr)
+		return false
+	}
 
 	// SSE 客户端使用专用的消息通道
 	if client.ConnectionType == ConnectionTypeSSE {
@@ -818,6 +855,9 @@ func (h *Hub) sendToClientSerialized(ctx context.Context, client *Client, msg *H
 	if client.TrySend(data) {
 		// 消息成功发送到客户端通道，更新为成功状态
 		h.updateMessageStatusAsync(ctx, msgID, MessageSendStatusSuccess, "", "")
+		// 📊 送达漏斗埋点：实时送达 + 在途量出队
+		h.overloadMetrics.recordRealtime(msg.ResolveGuarantee())
+		h.admissionOnDelivered()
 
 		// 链路闭环日志：与跨 Pod 路径（distributed.go "[跨Pod] 消息已投递到本地客户端"）统一，
 		// trace_id 可从 NotifySend 入口一路串到本节点最终投递（ctx 由 msg.ContextFrom 恢复携带 trace）

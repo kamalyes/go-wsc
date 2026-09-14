@@ -510,13 +510,41 @@ func (h *Hub) batchGetGroupMembers(ctx context.Context, appID, namespace string,
 //   - 消息只 json.Marshal 1 次（原方案每客户端 1 次）
 //   - 不走 SendToUserWithRetry（原方案每客户端 Clone×2 + 在线检查 + 入队 + DB 记录）
 //   - 零拷贝遍历（原方案 GetClientsCopy + FilterSlice 双重拷贝）
+//
+// 🚦 削峰填谷接线（分级准入 + 出向整形）：
+//   - Admit 拒绝（VerdictDelay/Offline）→ 延迟队列（填谷重投），队列满走分级兜底
+//   - shaper 拒绝（洪峰整形）→ 延迟队列；必达级跳过整形（与 Admit 矩阵的"必达恒放行"一致）
 func (h *Hub) broadcastToFiltered(ctx context.Context, condition func(*Client) bool, msg *HubMessage) int {
-	start := time.Now()
 	// 🔏 路由信封 + trace_id 同步（与所有入口共用同一套逻辑，幂等，已有不覆盖）
-	// 覆盖所有上层入口：SendConditional / BroadcastByUserType / BroadcastToRole / BroadcastToClientType / Deliver 等
 	ctx = msg.InjectRoute(ctx)
 
-	// 预序列化 WebSocket 消息（仅一次）
+	// 🚦 准入闸门：分级×水位裁决（必达级恒放行；普通/高频过载时延迟/离线路由——拒绝≠丢弃）
+	if verdict := h.admitMessage(msg, true); verdict != VerdictAdmit {
+		h.deferBroadcast(ctx, msg, func(c context.Context, m *HubMessage) {
+			h.broadcastToFilteredNow(c, condition, m)
+		})
+		return 0 // 本轮不扇出（延迟重投；返回实时成功数 0）
+	}
+
+	// ⏱️ 出向整形：每条广播 1 令牌平滑扇出（必达级跳过——控制面不受数据面整形影响）
+	if shaper := h.broadcastShaper.Load(); shaper != nil &&
+		msg.ResolveGuarantee() != models.GuaranteeGuaranteed &&
+		!shaper.Allow() {
+		h.overloadMetrics.recordShaperDenied()
+		h.deferBroadcast(ctx, msg, func(c context.Context, m *HubMessage) {
+			h.broadcastToFilteredNow(c, condition, m)
+		})
+		return 0
+	}
+
+	return h.broadcastToFilteredNow(ctx, condition, msg)
+}
+
+// broadcastToFilteredNow 预序列化 + 扇出（延迟队列重投的目标函数，不重复准入）
+func (h *Hub) broadcastToFilteredNow(ctx context.Context, condition func(*Client) bool, msg *HubMessage) int {
+	start := time.Now()
+
+	// 预序列化 WebSocket 消息（仅一次，所有客户端复用同一份）
 	data, err := json.Marshal(msg)
 	if err != nil {
 		h.logger.ErrorContextKV(ctx, "分组广播消息序列化失败", "error", err)
@@ -554,6 +582,9 @@ func (h *Hub) broadcastToFiltered(ctx context.Context, condition func(*Client) b
 		if client.TrySend(data) {
 			atomic.AddInt32(&successCount, 1)
 			h.trackReceiverMessageStats(client.ID, client.UserType, dataLen)
+		} else {
+			// 🛟 成员级分级兜底（修复广播丢弃彻底丢失）：普通/必达转离线，高频语义丢弃
+			h.routeDeliveryFallback(msg, client, client.UserID)
 		}
 	})
 	wsDuration := time.Since(wsStart)
@@ -600,16 +631,43 @@ func (h *Hub) broadcastToFiltered(ctx context.Context, condition func(*Client) b
 // O(m) 复杂度（m=用户数），按成员ID反查 shardedRegistry，仅锁定相关 shard
 // 相比 broadcastToFiltered 的 O(n)（n=总连接数），群组广播场景大幅减少遍历与锁范围
 // 适用于已知目标用户ID列表的场景（群组广播、多群组广播）
+//
+// 🚦 削峰填谷接线：同 broadcastToFiltered（分级准入 + 出向整形 + 延迟队列路由）
 func (h *Hub) broadcastToUserIDs(ctx context.Context, userIDs []string, msg *HubMessage) int {
-	if len(userIDs) == 0 {
-		return 0
-	}
 	// 🔏 路由信封同步：从 ctx 恢复路由到 msg 信封（幂等）
 	// 上游 deliverToGroupFireForget 已注入，此处作为二次兜底
 	// InjectRoute 同时回写 ctx，保证下游 ctx 与信封一致
 	ctx = msg.InjectRoute(ctx)
 
-	// 预序列化 WebSocket 消息（仅一次）
+	// 🚦 准入闸门（必达恒放行；普通/高频过载时延迟路由）
+	if verdict := h.admitMessage(msg, true); verdict != VerdictAdmit {
+		h.deferBroadcast(ctx, msg, func(c context.Context, m *HubMessage) {
+			h.broadcastToUserIDsNow(c, userIDs, m)
+		})
+		return 0
+	}
+
+	// ⏱️ 出向整形（必达级跳过）
+	if shaper := h.broadcastShaper.Load(); shaper != nil &&
+		msg.ResolveGuarantee() != models.GuaranteeGuaranteed &&
+		!shaper.Allow() {
+		h.overloadMetrics.recordShaperDenied()
+		h.deferBroadcast(ctx, msg, func(c context.Context, m *HubMessage) {
+			h.broadcastToUserIDsNow(c, userIDs, m)
+		})
+		return 0
+	}
+
+	return h.broadcastToUserIDsNow(ctx, userIDs, msg)
+}
+
+// broadcastToUserIDsNow 预序列化 + 按 userIDs 扇出（延迟队列重投目标，不重复准入）
+func (h *Hub) broadcastToUserIDsNow(ctx context.Context, userIDs []string, msg *HubMessage) int {
+	if len(userIDs) == 0 {
+		return 0
+	}
+
+	// 预序列化 WebSocket 消息（仅一次；引擎由 go-toolbox/pkg/json 构建标签决定）
 	data, err := json.Marshal(msg)
 	if err != nil {
 		h.logger.ErrorContextKV(ctx, "群组广播消息序列化失败", "error", err)
@@ -618,6 +676,7 @@ func (h *Hub) broadcastToUserIDs(ctx context.Context, userIDs []string, msg *Hub
 
 	msgID := mathx.IfNotEmpty(msg.MessageID, msg.ID)
 	dataLen := len(data)
+
 	var successCount int32
 
 	// 按用户ID查找客户端（O(m)，仅锁定相关 shard，不遍历全部连接）
@@ -639,6 +698,9 @@ func (h *Hub) broadcastToUserIDs(ctx context.Context, userIDs []string, msg *Hub
 				if client.TrySend(data) {
 					atomic.AddInt32(&successCount, 1)
 					h.trackReceiverMessageStats(client.ID, client.UserType, dataLen)
+				} else {
+					// 🛟 成员级分级兜底：普通/必达转离线（用户下次上线/重连时补发），高频语义丢弃
+					h.routeDeliveryFallback(msg, client, userID)
 				}
 			}
 			return true

@@ -226,7 +226,9 @@ func (h *Hub) deliverToGroupReliable(ctx context.Context, msg *HubMessage, exclu
 		errMu         sync.Mutex
 	)
 
-	syncx.NewParallelSliceExecutor[string, *SendResult](filteredMembers).
+	ctx, collector := withOfflineBroadcastCollector(ctx)
+	defer h.flushOfflineBroadcasts(ctx, collector)
+	newFanoutExecutor(filteredMembers, h.fanoutConcurrency()).
 		Execute(func(idx int, uid string) (*SendResult, error) {
 			sendResult := h.SendToUserWithRetry(ctx, uid, msg)
 

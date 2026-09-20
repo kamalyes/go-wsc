@@ -22,4 +22,10 @@ type ContextKey string
 const (
 	ContextKeyUserID   ContextKey = "user_id"   // 用户ID
 	ContextKeySenderID ContextKey = "sender_id" // 发送者ID
+	// ContextKeyOfflineBroadcastCollector 批量扇出路径的离线广播聚合器
+	// 群组成员可达数万，扇出 goroutine 内逐人同步广播会造成 N 倍集群流量放大与
+	// Redis 连接池耗尽（OOM 教训）；但完全跳过又会丢失"索引滞后但实际在线"用户的实时投递。
+	// 折中：扇出期间仅聚合收集未命中用户，扇出结束后统一逐人跨节点推送（真的推送），
+	// 真正离线的用户由离线存储 + 重连上线拉取兜底
+	ContextKeyOfflineBroadcastCollector ContextKey = "offline_broadcast_collector"
 )

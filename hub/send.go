@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 	"runtime/debug"
+	"sync"
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
@@ -44,6 +45,16 @@ func (h *Hub) routeToClusterForOfflineUser(ctx context.Context, userID string, m
 	if h.pubsub == nil && !h.IsGRPCEnabled() {
 		return // 单机模式，无需跨节点
 	}
+	// 批量扇出路径（群广播/批量发送）：不立即广播，聚合到 collector，由扇出入口在 Execute 完成后统一 flush 推送（避免扇出 goroutine 阻塞在 Redis 连接池）
+	if collector, ok := ctx.Value(ContextKeyOfflineBroadcastCollector).(*offlineBroadcastCollector); ok && collector != nil {
+		collector.add(userID, msg)
+		return
+	}
+	h.doOfflineBroadcast(ctx, userID, msg)
+}
+
+// doOfflineBroadcast 执行跨节点离线广播兜底（不经 collector 聚合，flush 与单发路径共用）
+func (h *Hub) doOfflineBroadcast(ctx context.Context, userID string, msg *HubMessage) {
 	// 📊 广播兜底触发计数（reportPerformanceMetrics 每 5min 上报后清零）
 	// 治本后该值应趋近 0；若持续增长说明索引写入仍有滞后（检查 syncOnlineStatus 是否同步执行、Redis 可达性）
 	h.broadcastFallbackCount.Add(1)
@@ -403,6 +414,72 @@ func (h *Hub) isRetryableError(err error) bool {
 // 批量发送方法
 // ============================================================================
 
+// fanoutConcurrency 解析扇出并发上限
+// 复用 WorkerPool.MessageWorkers（默认 64），成员数可达数万的群广播无界扇出会
+// 瞬时打爆 Redis 连接池并滞留大量消息副本（OOM 教训），必须限制在途 goroutine 数
+func (h *Hub) fanoutConcurrency() int {
+	if h.config != nil && h.config.WorkerPool != nil && h.config.WorkerPool.MessageWorkers > 0 {
+		return h.config.WorkerPool.MessageWorkers
+	}
+	return 64
+}
+
+// newFanoutExecutor 创建有界并发的扇出执行器（所有 per-user 批量投递统一入口）
+func newFanoutExecutor[T any](items []T, concurrency int) *syncx.ParallelSliceExecutor[T, *SendResult] {
+	return syncx.NewParallelSliceExecutor[T, *SendResult](items).WithConcurrency(concurrency)
+}
+
+// offlineBroadcastEntry 聚合收集的离线广播条目
+type offlineBroadcastEntry struct {
+	userID string
+	msg    *HubMessage
+}
+
+// offlineBroadcastCollector 批量扇出路径的离线广播聚合器
+// 扇出 goroutine 内仅收集（O(1) 追加，不碰 Redis），扇出结束后统一 flush 推送：
+//   - 索引滞后但实际在线的用户仍能实时收到消息（不跳过、真推送）
+//   - 真正离线的用户由离线存储 + 重连上线拉取兜底
+//   - 广播移出扇出关键路径，消除 goroutine 阻塞堆积（OOM 根因）
+type offlineBroadcastCollector struct {
+	mu      sync.Mutex
+	entries []offlineBroadcastEntry
+}
+
+// add 收集一条离线广播条目（扇出 goroutine 并发调用安全）
+func (c *offlineBroadcastCollector) add(userID string, msg *HubMessage) {
+	c.mu.Lock()
+	c.entries = append(c.entries, offlineBroadcastEntry{userID: userID, msg: msg})
+	c.mu.Unlock()
+}
+
+// withOfflineBroadcastCollector 为批量扇出路径注入聚合器，返回新上下文与聚合器
+func withOfflineBroadcastCollector(ctx context.Context) (context.Context, *offlineBroadcastCollector) {
+	collector := &offlineBroadcastCollector{}
+	return context.WithValue(ctx, ContextKeyOfflineBroadcastCollector, collector), collector
+}
+
+// flushOfflineBroadcasts 扇出结束后统一跨节点推送收集到的未命中用户（有界并发，复用扇出并发度）
+func (h *Hub) flushOfflineBroadcasts(ctx context.Context, collector *offlineBroadcastCollector) {
+	collector.mu.Lock()
+	entries := collector.entries
+	collector.entries = nil
+	collector.mu.Unlock()
+
+	if len(entries) == 0 {
+		return
+	}
+	h.logger.InfoContextKV(ctx, "📡 [跨Pod] 批量扇出完成，统一推送聚合的离线兜底广播",
+		"pending_count", len(entries),
+		"node_id", h.nodeID,
+	)
+	newFanoutExecutor(entries, h.fanoutConcurrency()).
+		Execute(func(idx int, entry offlineBroadcastEntry) (*SendResult, error) {
+			// 直接走底层广播（绕过 collector 检查，避免重新收集造成死循环）
+			h.doOfflineBroadcast(ctx, entry.userID, entry.msg)
+			return nil, nil
+		})
+}
+
 // SendToMultipleUsers 并发发送消息给多个用户
 // 使用 ParallelSliceExecutor 并行投递 + 预分配 slice + 索引写入，消除 mutex 竞争
 func (h *Hub) SendToMultipleUsers(ctx context.Context, userIDs []string, msg *HubMessage) map[string]error {
@@ -414,7 +491,9 @@ func (h *Hub) SendToMultipleUsers(ctx context.Context, userIDs []string, msg *Hu
 	// 预分配结果 slice，每个 goroutine 只写自己的索引（无数据竞争）
 	errList := make([]error, len(userIDs))
 
-	syncx.NewParallelSliceExecutor[string, *SendResult](userIDs).
+	ctx, collector := withOfflineBroadcastCollector(ctx)
+	defer h.flushOfflineBroadcasts(ctx, collector)
+	newFanoutExecutor(userIDs, h.fanoutConcurrency()).
 		Execute(func(idx int, userID string) (*SendResult, error) {
 			result := h.SendToUserWithRetry(ctx, userID, msg)
 			if result.FinalError != nil {
@@ -474,7 +553,9 @@ func (h *Hub) SendToGroupMembers(ctx context.Context, memberIDs []string, msg *H
 		FailedIDs:  make([]string, 0),
 	}
 
-	syncx.NewParallelSliceExecutor[string, *SendResult](filteredIDs).
+	ctx, collector := withOfflineBroadcastCollector(ctx)
+	defer h.flushOfflineBroadcasts(ctx, collector)
+	newFanoutExecutor(filteredIDs, h.fanoutConcurrency()).
 		OnComplete(func(results []*SendResult, errors []error) {
 			for i, sendResult := range results {
 				// 优先判失败（FinalError != nil 即为失败）
@@ -532,7 +613,9 @@ func (h *Hub) SendToClientsWithRetry(ctx context.Context, clients []*Client, msg
 	// 预分配结果 slice，每个 goroutine 只写自己的索引（无数据竞争）
 	resultsSlice := make([]*SendResult, len(clients))
 
-	syncx.NewParallelSliceExecutor[*Client, *SendResult](clients).
+	ctx, collector := withOfflineBroadcastCollector(ctx)
+	defer h.flushOfflineBroadcasts(ctx, collector)
+	newFanoutExecutor(clients, h.fanoutConcurrency()).
 		OnSuccess(func(idx int, client *Client, result *SendResult) {
 			resultsSlice[idx] = result // 各 goroutine 写不同索引，无需锁
 		}).

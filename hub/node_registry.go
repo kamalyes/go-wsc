@@ -132,6 +132,19 @@ func (r *NodeRegistry) Stop() {
 	r.wg.Wait()
 }
 
+// IsNodeAlive 交叉验证节点心跳是否新鲜（TTL 窗口内）
+// 用途：定向 PubSub 返回 0（订阅失活）时区分"真死"与"订阅重连窗口"，心跳正常的节点不应立即判死转离线
+func (r *NodeRegistry) IsNodeAlive(ctx context.Context, nodeID string) bool {
+	if r.redisClient == nil || nodeID == "" {
+		return false
+	}
+	ts, err := r.redisClient.HGet(ctx, r.heartbeatKey, nodeID).Int64()
+	if err != nil {
+		return false // 无心跳记录或查询失败，视为不新鲜
+	}
+	return time.Now().Unix()-ts <= int64(nodeRegistryTTL/time.Second)
+}
+
 // GetNodeAddr 获取指定节点的 gRPC 地址
 func (r *NodeRegistry) GetNodeAddr(nodeID string) (string, bool) {
 	if nodeID == r.localNodeID {

@@ -75,6 +75,10 @@ const (
 	grpcOutcomeUserMiss                             // 目标节点明确用户不在 → 不对该节点兜底（PubSub 定向发布同样会扑空）
 )
 
+// deadNodeProbeRetryDelay 定向发布返回 0 且节点心跳正常时的重试等待
+// 覆盖订阅断连重连窗口（秒级），避免订阅抖动误判死节点导致消息批量误转离线
+const deadNodeProbeRetryDelay = 300 * time.Millisecond
+
 // ============================================================================
 // 统一路由入口
 // ============================================================================
@@ -491,6 +495,18 @@ func (h *Hub) publishToTargetedNodes(ctx context.Context, dispatch *models.Distr
 			continue
 		}
 		if cmd.Val() == 0 {
+			// 订阅失活 ≠ 节点死亡：订阅断连重连窗口（秒级）内 PUBLISH 同样返回 0。
+			// 交叉验证节点心跳：心跳正常 → 等待重连窗口后重试一次，仍无人订阅才判死，
+			// 避免订阅抖动导致消息被批量误转离线
+			if h.nodeRegistry != nil && h.nodeRegistry.IsNodeAlive(ctx, targets[i]) {
+				time.Sleep(deadNodeProbeRetryDelay)
+				if retry, rerr := client.Publish(ctx, prefix+targets[i], data).Result(); rerr == nil && retry > 0 {
+					h.logger.InfoContextKV(ctx, "📡 [死节点探测] 心跳正常+订阅恢复，重试投递成功",
+						"target_node", targets[i],
+						"message_id", dispatch.Message.GetMessageID())
+					continue
+				}
+			}
 			deadNodes = append(deadNodes, targets[i])
 		}
 	}

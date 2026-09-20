@@ -232,3 +232,30 @@ func TestNodeRegistry_RefreshNodes_RemovesStaleLocal(t *testing.T) {
 	_, ok := r.GetNodeAddr("ghostNode")
 	assert.False(t, ok, "Redis 中不存在的节点应从本地缓存清理")
 }
+
+// TestNodeRegistry_IsNodeAlive 验证心跳交叉验证：新鲜/过期/无记录/空 ID/nil 客户端
+func TestNodeRegistry_IsNodeAlive(t *testing.T) {
+	r, client := newTestNodeRegistry(t, "node-local", "127.0.0.1:50051")
+	defer r.Stop()
+	ctx := context.Background()
+	now := time.Now().Unix()
+
+	// 新鲜心跳 → true
+	require.NoError(t, client.HSet(ctx, "wsc:nodes:heartbeat", "node-fresh", now).Err())
+	assert.True(t, r.IsNodeAlive(ctx, "node-fresh"))
+
+	// 过期心跳（超过 90s TTL）→ false
+	expired := now - int64(nodeRegistryTTL/time.Second) - 10
+	require.NoError(t, client.HSet(ctx, "wsc:nodes:heartbeat", "node-expired", expired).Err())
+	assert.False(t, r.IsNodeAlive(ctx, "node-expired"))
+
+	// 无心跳记录 → false
+	assert.False(t, r.IsNodeAlive(ctx, "node-ghost"))
+
+	// 空 nodeID → false
+	assert.False(t, r.IsNodeAlive(ctx, ""))
+
+	// nil redisClient → false（不 panic）
+	nilReg := NewNodeRegistry(nil, "node-nil", "127.0.0.1:50051", "wsc:nodes:grpc", "wsc:nodes:heartbeat", nil)
+	assert.False(t, nilReg.IsNodeAlive(ctx, "node-fresh"))
+}

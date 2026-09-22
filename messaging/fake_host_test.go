@@ -52,6 +52,7 @@ type fakeHost struct {
 	messageSink          spi.MessageSink
 	groupRepo            spi.GroupStore
 	messageStatusUpdater *batcher.MessageStatusUpdater
+	messageRecordOutbox  *batcher.MessageRecordOutbox
 
 	// 接收方统计记账（TrackReceiverMessageStats 经 Host 端口上报，编排层转 stats 域）
 	statMu       sync.Mutex
@@ -116,14 +117,16 @@ func (f *fakeHost) HasPubsub() bool { return false }
 // IsGRPCEnabled 单机模式：与 HasPubsub 共同构成跨节点通道开关
 func (f *fakeHost) IsGRPCEnabled() bool { return false }
 
-// CheckUserOnline 本地注册表查询（镜像真实编排层：先查本节点注册表；Redis 全局索引由集成测试覆盖）
-func (f *fakeHost) CheckUserOnline(_ context.Context, userID string) bool {
-	_, online := f.registry.GetUserClients(userID)
-	return online
+// GetMessageRecordOutbox 默认 nil（recordMessageToDatabase 据此降级 workerPool 单条 Create 路径）
+func (f *fakeHost) GetMessageRecordOutbox() *batcher.MessageRecordOutbox {
+	return f.messageRecordOutbox
 }
 
+// GetUserNodes 单机模式无路由索引，返回 nil（本地 miss 即判定离线）
+func (f *fakeHost) GetUserNodes(_ context.Context, _ string) []string { return nil }
+
 // CheckAndRouteToNode 单机模式无跨节点路由（sendToUser 的分布式分支据此走本地投递）
-func (f *fakeHost) CheckAndRouteToNode(_ context.Context, _ string, _ *models.HubMessage) (bool, []string, error) {
+func (f *fakeHost) CheckAndRouteToNode(_ context.Context, _ string, _ *models.HubMessage, _ []string) (bool, []string, error) {
 	return false, nil, nil
 }
 
@@ -516,7 +519,12 @@ func newStatusRecordingManager() (*Manager, *fakeHost, *fakeMessageRecordRepo, f
 	updater := batcher.NewMessageStatusUpdater(statusUpdateWriter{host: host, repo: repo}, 64, 8, 20*time.Millisecond)
 	host.messageStatusUpdater = updater
 
+	// outbox 恒注入（与编排层对齐）：write-ahead 记录经攒批批量落库
+	outbox := batcher.NewMessageRecordOutbox(host, 64, 8, 5*time.Millisecond)
+	host.messageRecordOutbox = outbox
+
 	cleanup := func() {
+		outbox.Stop()
 		updater.Stop()
 		wp.Stop()
 		m.Stop()

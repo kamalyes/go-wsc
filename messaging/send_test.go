@@ -742,26 +742,29 @@ func TestSendToUser_WriteAheadRecordCreatedBeforeDelivery(t *testing.T) {
 	msg.MessageID = "m-wa-local"
 	msg.Receiver = "u-wa-local"
 
-	err := m.sendToUser(context.Background(), "u-wa-local", msg)
+	err := m.sendToUser(context.Background(), "u-wa-local", msg, nil)
 	require.NoError(t, err)
 
-	// 记录被异步创建，初始状态 sending
+	// 记录被 outbox 攒批创建（恰好一条）
 	require.Eventually(t, func() bool {
 		repo.batchUpdateMu.Lock()
 		defer repo.batchUpdateMu.Unlock()
 		return len(repo.createdRecords) == 1
-	}, 2*time.Second, 10*time.Millisecond, "write-ahead 记录应被异步创建")
+	}, 2*time.Second, 10*time.Millisecond, "write-ahead 记录应被攒批创建")
 
-	repo.batchUpdateMu.Lock()
-	created := repo.createdRecords[0]
-	repo.batchUpdateMu.Unlock()
-	assert.Equal(t, "m-wa-local", created.MessageID)
-	assert.Equal(t, models.MessageSendStatusSending, created.Status, "初始记录状态应为 sending")
-
-	// 本地投递成功后状态回报覆盖为 success（UPDATE 命中已落库的记录）
+	// 投递成功后终态可达 success，两条路径均为合法：
+	//   a) outbox 合并：投递回报先于 flush，INSERT 直接带 success 终态（攒批竞态消除）
+	//   b) statusUpdater 回报：flush 先于投递完成，UPDATE 命中已落库的 sending 记录
 	require.Eventually(t, func() bool {
-		return hasBatchUpdate(repo, "m-wa-local", models.MessageSendStatusSuccess)
-	}, 2*time.Second, 10*time.Millisecond, "本地投递成功应回报 success 状态")
+		repo.batchUpdateMu.Lock()
+		mergedSuccess := len(repo.createdRecords) == 1 &&
+			repo.createdRecords[0].Status == models.MessageSendStatusSuccess
+		repo.batchUpdateMu.Unlock()
+		if mergedSuccess {
+			return true // 路径 a：合并终态
+		}
+		return hasBatchUpdate(repo, "m-wa-local", models.MessageSendStatusSuccess) // 路径 b：UPDATE 回报
+	}, 2*time.Second, 10*time.Millisecond, "本地投递成功应使记录终态为 success")
 }
 
 // TestSendToUser_WriteAheadRecordCreatedForRoutedMessage
@@ -781,7 +784,7 @@ func TestSendToUser_WriteAheadRecordCreatedForRoutedMessage(t *testing.T) {
 	msg.Receiver = "u-wa-route"
 
 	// 单机无 pubsub：checkAndRouteToNode 不跨节点路由，走本地投递
-	err := m.sendToUser(context.Background(), "u-wa-route", msg)
+	err := m.sendToUser(context.Background(), "u-wa-route", msg, nil)
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {

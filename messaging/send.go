@@ -88,23 +88,24 @@ func (m *Manager) doOfflineBroadcast(ctx context.Context, userID string, msg *mo
 
 // sendToUser 发送消息给指定用户（内部方法）
 // 自动支持分布式：如果用户在其他节点，会自动路由过去
-func (m *Manager) sendToUser(ctx context.Context, toUserID string, msg *models.HubMessage) error {
-	// 深拷贝消息（Clone 持 RLock 与 Set*/With* 互斥；Data map 独立，避免与原 msg 并发写 fatal）
-	// （ack 重试 goroutine 写 CreateAt 与 EventLoop 序列化读 CreateAt 并发）
-	msgCopy := msg.Clone()
-	msgCopy.ReceiverNode = mathx.IfEmpty(msgCopy.ReceiverNode, m.host.GetNodeID())
-	msgCopy.Receiver = mathx.IfEmpty(msgCopy.Receiver, toUserID) // 确保 Receiver 非空（离线消息反序列化后可能丢失）
-	msgCopy.CreateAt = mathx.IfNotZero(msgCopy.CreateAt, time.Now())
+//
+// msg 必须为调用方私有副本（入口 SendToUserWithRetry 已 Clone / 测试构造局部 msg），
+// 本方法内直接补默认字段（历史双 Clone 冗余：热路径为 ack 重试小众路径买单）
+// presetNodes 非空时跳过 Redis 节点查询（SendToUserWithRetry 本地 miss 时已预取，单次往返）
+func (m *Manager) sendToUser(ctx context.Context, toUserID string, msg *models.HubMessage, presetNodes []string) error {
+	msg.ReceiverNode = mathx.IfEmpty(msg.ReceiverNode, m.host.GetNodeID())
+	msg.Receiver = mathx.IfEmpty(msg.Receiver, toUserID) // 确保 Receiver 非空（离线消息反序列化后可能丢失）
+	msg.CreateAt = mathx.IfNotZero(msg.CreateAt, time.Now())
 
 	// P2P 严格场景：EnsureRouteDefaults 归一化 namespace + InjectRoute 注入信封（防御性，与入口一致）
 	// sendToUser 可被 ack 重试/离线推送等路径直接调用，msg 可能未经过入口归一化；
 	// EnsureRouteDefaults + InjectRoute 幂等，SendToUserWithRetry 路径再调一次无副作用
 	ctx = routing.EnsureRouteDefaults(ctx)
-	ctx = msgCopy.InjectRoute(ctx)
+	ctx = msg.InjectRoute(ctx)
 	// trace 恢复：ctx 无 trace 时从消息信封恢复（如 workerPool/离线回放等异步路径 ctx 已丢失），
 	// sendToUser 是所有投递路径的漏斗点，在此恢复保证下游 SendToClientSerialized 的
 	// 投递日志与消息原始链路同一 trace_id；ctx 已有 trace 不覆盖（在线链路同源）
-	ctx = msgCopy.ContextFrom(ctx)
+	ctx = msg.ContextFrom(ctx)
 
 	// write-ahead：先落 sending 记录再投递（outbox 模式）
 	// 必须先于 checkAndRouteToNode（跨节点 Publish）和 handleBroadcast（本地投递）提交：
@@ -113,20 +114,20 @@ func (m *Manager) sendToUser(ctx context.Context, toUserID string, msg *models.H
 	// → 状态永久停留 sending → 被 ACK 超时兜底误标 ack_timeout 并重复转存离线
 	// （用户实际已收到，上线后重复推送）先提交 INSERT 任务使其在投递链路上花费的
 	// Publish RTT + 目标节点处理 + statusUpdater flush 间隔内完成落库
-	m.recordMessageToDatabase(msgCopy, nil)
+	m.recordMessageToDatabase(msg, nil)
 
 	// 分布式路由：检查用户是否在其他节点
 	// 先快照本地在线状态：路由决策与本地投递共用，避免两次查询间的连接抖动造成判定漂移
 	// 按 ctx 路由信封(appID+namespace)过滤，避免跨 app/ns 误判在线
 	localOnline := m.host.GetShardedRegistry().HasUser(toUserID, routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx))
-	routed, routeNodes, err := m.host.CheckAndRouteToNode(ctx, toUserID, msgCopy)
+	routed, routeNodes, err := m.host.CheckAndRouteToNode(ctx, toUserID, msg, presetNodes)
 	if err != nil {
 		// 路由失败，记录错误但继续尝试本地发送
 		// 注意：此处不将消息标记为失败，因为会 fallback 到本地发送
 		// 如果本地发送也失败，下游的 default 分支会标记为 QueueFull 失败
 		m.host.GetLogger().WarnContextKV(ctx, "跨节点路由失败，尝试本地发送",
 			"user_id", toUserID,
-			"message_id", msgCopy.MessageID,
+			"message_id", msg.MessageID,
 			"error", err,
 		)
 		// 本地无连接且跨节点路由失败：本地投递必然扑空，返回错误让上层
@@ -139,7 +140,7 @@ func (m *Manager) sendToUser(ctx context.Context, toUserID string, msg *models.H
 	if routed && !localOnline {
 		// 用户仅在其他节点（本地无连接），消息已路由到其他节点，本地无需处理
 		m.host.GetLogger().DebugContextKV(ctx, "[投递诊断] 用户仅在其他节点，已远程投递，本地跳过",
-			"message_id", msgCopy.MessageID,
+			"message_id", msg.MessageID,
 			"user_id", toUserID,
 			"to_nodes", routeNodes,
 		)
@@ -153,14 +154,14 @@ func (m *Manager) sendToUser(ctx context.Context, toUserID string, msg *models.H
 	// SendToUserWithRetry 本身为阻塞调用，handleBroadcast 内仅做非阻塞的 TrySend
 	// （观察者通知走 batcher 异步、数据库记录已先行提交），不会显著拖慢发送路径；
 	// 此前用 `go` 异步派发会使并发 goroutine 竞争同一接收方 sendChan 导致消息乱序
-	m.handleBroadcast(msgCopy)
+	m.handleBroadcast(msg)
 	m.host.GetLogger().DebugContextKV(ctx, "[投递诊断] 本地投递已发起（含多端跨节点双投递场景）",
-		"message_id", msgCopy.MessageID,
-		"from", msgCopy.Sender,
-		"to", msgCopy.Receiver,
+		"message_id", msg.MessageID,
+		"from", msg.Sender,
+		"to", msg.Receiver,
 		"routed_remote", routed,
 		"to_nodes", routeNodes,
-		"type", msgCopy.MessageType,
+		"type", msg.MessageType,
 	)
 	return nil
 }
@@ -207,8 +208,17 @@ func (m *Manager) SendToUserWithRetry(ctx context.Context, toUserID string, msg 
 	// 若业务消息ID为空，则使用Hub生成的ID
 	msg.MessageID = mathx.IfNotEmpty(msg.MessageID, snowflakeId)
 
-	// 检查用户是否在线（按 ctx 路由信封 appID+namespace 隔离，避免跨 app/ns 误判在线）
-	isOnline := m.host.CheckUserOnline(ctx, toUserID)
+	// 在线判定与路由合并为单次 Redis 往返（热路径优化，消 CheckUserOnline 的 bitmap 查询）：
+	// 本地 registry 命中 → 在线，节点列表由 sendToUser 自查（多端跨节点仍需一次查询）；
+	// 本地 miss → 一次 GetUserNodes 同时得到在线判定（len>0）与跨节点路由目标
+	// （原路径：IsUserOnline bitmap + checkAndRouteToNode GetUserNodes = 2 次往返）
+	var presetNodes []string
+	localOnline := m.host.GetShardedRegistry().HasUser(toUserID, routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx))
+	isOnline := localOnline
+	if !localOnline {
+		presetNodes = m.host.GetUserNodes(ctx, toUserID)
+		isOnline = len(presetNodes) > 0
+	}
 	// 逐消息成功路径日志走 DEBUG（千万连接规模下逐消息 INFO 是吞吐反模式，
 	// 异常路径——离线存储失败/投递 0 客户端/终态失败——保持 INFO/WARN 生产可见）
 	m.host.GetLogger().DebugContextKV(ctx, "[投递诊断] 用户在线检查",
@@ -271,9 +281,13 @@ func (m *Manager) SendToUserWithRetry(ctx context.Context, toUserID string, msg 
 		SetJitterPercent(m.host.GetConfig().RetryPolicy.JitterPercent).     // 抖动百分比
 		SetConditionFunc(m.isRetryableError)                                // 重试条件判断
 
-	// 执行带详细记录的重试逻辑
+	// 执行带详细记录的重试逻辑（presetNodes 仅首次有效：重试时用户可能已迁移节点，传 nil 重新查询）
 	finalErr := retryInstance.Do(func() error {
-		return m.executeSendAttempt(ctx, toUserID, msg, result)
+		var nodes []string
+		if len(result.Attempts) == 0 {
+			nodes = presetNodes
+		}
+		return m.executeSendAttempt(ctx, toUserID, msg, nodes, result)
 	})
 
 	// 设置最终结果
@@ -312,11 +326,11 @@ func (m *Manager) SendToUserWithRetry(ctx context.Context, toUserID string, msg 
 }
 
 // executeSendAttempt 执行单次发送尝试并记录结果
-func (m *Manager) executeSendAttempt(ctx context.Context, toUserID string, msg *models.HubMessage, result *models.SendResult) error {
+func (m *Manager) executeSendAttempt(ctx context.Context, toUserID string, msg *models.HubMessage, presetNodes []string, result *models.SendResult) error {
 	attemptStart := time.Now()
 	attemptNumber := len(result.Attempts) + 1
 
-	err := m.sendToUser(ctx, toUserID, msg)
+	err := m.sendToUser(ctx, toUserID, msg, presetNodes)
 	duration := time.Since(attemptStart)
 
 	// 记录每次尝试
@@ -641,66 +655,58 @@ func (m *Manager) SendToClientsWithRetry(ctx context.Context, clients []*models.
 // 辅助方法
 // ============================================================================
 
-// recordMessageToDatabase 记录消息到数据库
+// recordMessageToDatabase 记录消息到数据库（write-ahead：先落 sending 记录再投递）
+//
+// 攒批化：经 MessageRecordOutbox 批量 INSERT（满批/50ms flush，高吞吐下写放大
+// 降低 2 个数量级）；ACK 超时注册延后到 flush 成功时（ScheduleAckTimeouts 回调）。
+// outbox 未注入时降级原 workerPool 单条 Create 路径（本地测试/轻量嵌入场景）
 func (m *Manager) recordMessageToDatabase(msg *models.HubMessage, sendErr error) {
 	if m.host.GetMessageSink() == nil {
 		return
 	}
 
-	m.workerPool.TrySubmitRecord(func() {
-		ctx, cancel := context.WithTimeout(m.host.Context(), 3*time.Second)
-		defer cancel()
-		// 从消息体恢复 trace_id（SendToUserWithRetry 已注入）
-		ctx = msg.ContextFrom(ctx)
+	now := time.Now()
 
-		now := time.Now()
+	// 计算过期时间
+	expiresAt := now.Add(mathx.IfNotZero(m.host.GetConfig().MessageRecordTTL, 24*time.Hour))
 
-		// 计算过期时间
-		expiresAt := now.Add(mathx.IfNotZero(m.host.GetConfig().MessageRecordTTL, 24*time.Hour))
+	// 完整记录所有字段
+	record := &models.MessageSendRecord{
+		SessionID:    msg.SessionID,
+		MessageID:    msg.MessageID,
+		HubID:        msg.ID,
+		Sender:       msg.Sender,
+		Receiver:     msg.Receiver,
+		MessageType:  msg.MessageType,
+		Source:       msg.Source,
+		NodeIP:       m.host.GetNodeID(),
+		CreateTime:   msg.CreateAt,
+		Status:       models.MessageSendStatusSending, // 消息已入队,标记为sending
+		RetryCount:   0,
+		MaxRetry:     m.host.GetConfig().RetryPolicy.MaxRetries,
+		RetryHistory: []models.RetryAttempt{},
+		ExpiresAt:    &expiresAt,
+	}
 
-		// 完整记录所有字段
-		record := &models.MessageSendRecord{
-			SessionID:    msg.SessionID,
-			MessageID:    msg.MessageID,
-			HubID:        msg.ID,
-			Sender:       msg.Sender,
-			Receiver:     msg.Receiver,
-			MessageType:  msg.MessageType,
-			Source:       msg.Source,
-			NodeIP:       m.host.GetNodeID(),
-			CreateTime:   msg.CreateAt,
-			Status:       models.MessageSendStatusSending, // 消息已入队,标记为sending
-			RetryCount:   0,
-			MaxRetry:     m.host.GetConfig().RetryPolicy.MaxRetries,
-			RetryHistory: []models.RetryAttempt{},
-			ExpiresAt:    &expiresAt,
-		}
+	// SetMessage 序列化消息体并同步 Namespace/GroupID 等路由信封字段到 record
+	if err := record.SetMessage(msg); err != nil {
+		m.host.GetLogger().WarnContextKV(msg.ContextFrom(m.host.Context()), "序列化消息数据失败",
+			"message_id", msg.MessageID, "error", err)
+	}
 
-		// SetMessage 序列化消息体并同步 Namespace/GroupID 等路由信封字段到 record
-		if err := record.SetMessage(msg); err != nil {
-			m.host.GetLogger().WarnContextKV(ctx, "序列化消息数据失败",
-				"message_id", msg.MessageID, "error", err)
-		}
+	if sendErr != nil {
+		record.Status = models.MessageSendStatusFailed
+		record.ErrorMessage = sendErr.Error()
+		record.FailureReason = models.FailureReason(sendErr.Error())
+		record.FirstSendTime = &now
+		record.LastSendTime = &now
+	}
 
-		if sendErr != nil {
-			record.Status = models.MessageSendStatusFailed
-			record.ErrorMessage = sendErr.Error()
-			record.FailureReason = models.FailureReason(sendErr.Error())
-			record.FirstSendTime = &now
-			record.LastSendTime = &now
-		}
-
-		if err := m.host.GetMessageSink().Create(ctx, record); err != nil {
-			m.host.GetLogger().DebugContextKV(ctx, "记录消息到数据库失败",
-				"message_id", msg.MessageID,
-				"error", err,
-			)
-		} else if record.Status == models.MessageSendStatusSending {
-			// ⏰ 在时间轮上调度跨节点 ACK 超时任务（per-message，+nodeAckTimeout 触发兜底）
-			// 状态由 sending 变更时由 updateMessageStatusAsync O(1) 取消；详见 ack_timer.go
-			m.scheduleAckTimeout(models.MessageRecordKey{MessageID: record.MessageID, Receiver: record.Receiver})
-		}
-	})
+	// 攒批落库唯一路径：outbox 满批/定时批量 INSERT（发送 goroutine 零阻塞，Submit 仅内存入队）
+	// 编排层恒注入 outbox；未注入（测试桩）时跳过落库
+	if outbox := m.host.GetMessageRecordOutbox(); outbox != nil {
+		outbox.Submit(record)
+	}
 }
 
 // updateMessageStatusAsync 非阻塞更新消息状态到 DB
@@ -714,6 +720,12 @@ func (m *Manager) updateMessageStatusAsync(ctx context.Context, msgID, receiver 
 	// ⏰ 状态由 sending 变更时 O(1) 取消跨节点 ACK 超时任务（本地投递即时取消，跨节点目标取消为 no-op）
 	// 本节点持有的 timer 被取消后不再触发冗余 ClaimStaleSending 检查；详见 ack_timer.go
 	m.cancelAckTimeout(models.MessageRecordKey{MessageID: msgID, Receiver: receiver})
+	// 攒批竞态消除：记录仍在 outbox 未落库时直接合并状态（INSERT 时带终态），
+	// 跳过 statusUpdater 的 UPDATE —— 否则 UPDATE 可能先于 INSERT 到库而扑空
+	if outbox := m.host.GetMessageRecordOutbox(); outbox != nil &&
+		outbox.UpdateStatusIfPending(models.MessageRecordKey{MessageID: msgID, Receiver: receiver}, status, reason, errMsg) {
+		return
+	}
 	if !m.host.GetMessageStatusUpdater().Submit(&batcher.StatusUpdateItem{
 		MessageID: msgID,
 		Receiver:  receiver,

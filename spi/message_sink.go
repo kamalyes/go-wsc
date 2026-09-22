@@ -33,11 +33,8 @@ import (
 type MessageSink interface {
 	// ========== 消息发送记录（MessageRecord） ==========
 
-	// Create 创建消息发送记录
-	Create(ctx context.Context, record *models.MessageSendRecord) error
-
-	// Update 更新消息发送记录
-	Update(ctx context.Context, record *models.MessageSendRecord) error
+	// CreateBatch 批量创建消息发送记录（outbox 攒批 flush 用，一条 SQL 写整批；
+	CreateBatch(ctx context.Context, records []*models.MessageSendRecord) error
 
 	// FindByID 根据自增ID查找
 	FindByID(ctx context.Context, id uint) (*models.MessageSendRecord, error)
@@ -60,10 +57,8 @@ type MessageSink interface {
 	// DeleteByMessageID 根据消息ID删除
 	DeleteByMessageID(ctx context.Context, messageID string) error
 
-	// UpdateStatus 更新状态（按 message_id + receiver 复合键精确定位，多 receiver 记录互不影响）
-	UpdateStatus(ctx context.Context, key models.MessageRecordKey, status models.MessageSendStatus, reason models.FailureReason, errorMsg string) error
-
-	// BatchUpdateStatus 批量更新消息状态（按复合键批量定位；相同 status/reason/errorMsg 用一条 SQL）
+	// BatchUpdateStatus 批量更新消息状态（按复合键批量定位；相同 status/reason/errorMsg 用一条 SQL；
+	// 状态更新唯一路径，经 MessageStatusUpdater 攒批调用，单条 UpdateStatus 已移除）
 	BatchUpdateStatus(ctx context.Context, keys []models.MessageRecordKey, status models.MessageSendStatus, reason models.FailureReason, errorMsg string) error
 
 	// ClaimStaleSending 原子认领超时的 sending 记录（仅当状态仍为 sending 时按复合键更新）

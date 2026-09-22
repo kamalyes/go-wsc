@@ -36,15 +36,46 @@ import (
 // 用户消息跨节点路由
 // ============================================================================
 
+// queryUserNodes 查询用户所在节点（routerCache 三层兜底 + 自愈回写）
+// 有路由信封时跳过 routerCache（缓存 key 未含 appID/ns，跨信封会泄漏），
+// 直接查 onlineStatusRepo（已按信封过滤）；无路由信封时走 routerCache 兜底
+//
+// 🔥 空结果兜底直查 onlineStatus_repo（source of truth）：
+// routerCache 负缓存（空切片按 TTL 缓存，默认 5min）叠加失效广播丢失（PubSub 至多一次投递）
+// 会让缓存持续返回过期空列表 → 本应跨节点投递的消息只走本地（必然扑空），
+// 实时投递丢失直到缓存 TTL 自然过期。直查消除缓存与 Redis 的"双源不一致"（跨节点漏发根源）
+func (h *Hub) queryUserNodes(ctx context.Context, userID string) ([]string, error) {
+	var nodeIDs []string
+	var err error
+	appID := routing.AppIDFromContext(ctx)
+	if appID == "" && h.routerCache != nil {
+		nodeIDs, err = h.routerCache.GetUserNodes(ctx, userID)
+		if err != nil {
+			// 缓存查询失败不直接短路：降级直查 source of truth
+			nodeIDs = nil
+		}
+	}
+	if len(nodeIDs) == 0 {
+		nodeIDs, err = h.onlineStatusRepo.GetUserNodes(ctx, userID)
+		// 回写缓存自愈过期条目：仅无路由信封时回写（有信封时 key 未含 scope，回写会跨信封污染）
+		if err == nil && appID == "" && h.routerCache != nil {
+			_ = h.routerCache.SetUserNodes(ctx, userID, nodeIDs)
+		}
+	}
+	return nodeIDs, err
+}
+
 // checkAndRouteToNode 检查用户是否在其他节点，如果是则路由过去
 //
 // 统一走 routeToCluster 入口，由其集中决策 gRPC 直连与 PubSub 兜底，
 // 消除历史上分散在各方法中的重复路由逻辑
 //
+// presetNodes 非空时跳过节点查询（SendToUserWithRetry 本地 miss 时已预取，单次 Redis 往返）
+//
 // 返回: (是否在其他节点, 实际投递的目标节点列表, 错误)
 //   - routed=true:  消息已路由到 targetNodes，调用方无需本地发送
 //   - routed=false: 用户在本节点或离线，调用方应本地发送（targetNodes 为空）
-func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *models.HubMessage) (bool, []string, error) {
+func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *models.HubMessage, presetNodes []string) (bool, []string, error) {
 	// 单机模式：无 PubSub 且无 gRPC，不跨节点
 	if h.pubsub == nil && !h.IsGRPCEnabled() {
 		return false, nil, nil
@@ -56,27 +87,11 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *model
 	// 1. 查询用户所在节点
 	var nodeIDs []string
 	var err error
-	appID := routing.AppIDFromContext(ctx)
-	// 有路由信封时跳过 routerCache（缓存 key 未含 appID/ns，跨信封会泄漏），
-	// 直接查 onlineStatusRepo（已按信封过滤）；无路由信封时走 routerCache 三层兜底（兼容边界场景）
-	if appID == "" && h.routerCache != nil {
-		nodeIDs, err = h.routerCache.GetUserNodes(ctx, userID)
-		if err != nil {
-			// 缓存查询失败不直接短路：降级直查 source of truth
-			nodeIDs = nil
-		}
-	}
-	// 🔥 空结果兜底直查 onlineStatus_repo（source of truth）：
-	// routerCache 负缓存（空切片按 TTL 缓存，默认 5min）叠加失效广播丢失（PubSub 至多一次投递）
-	// 会让缓存持续返回过期空列表 → 本应跨节点投递的消息只走本地（必然扑空），
-	// 实时投递丢失直到缓存 TTL 自然过期。checkUserOnline 直查 Redis 判定在线、
-	// 此处缓存判空的"双源不一致"正是跨节点漏发的根源，直查消除不一致
-	if len(nodeIDs) == 0 {
-		nodeIDs, err = h.onlineStatusRepo.GetUserNodes(ctx, userID)
-		// 回写缓存自愈过期条目：仅无路由信封时回写（有信封时 key 未含 scope，回写会跨信封污染）
-		if err == nil && appID == "" && h.routerCache != nil {
-			_ = h.routerCache.SetUserNodes(ctx, userID, nodeIDs)
-		}
+	if presetNodes != nil {
+		// 调用方已预取（SendToUserWithRetry 入口单次往返共享结果）
+		nodeIDs = presetNodes
+	} else {
+		nodeIDs, err = h.queryUserNodes(ctx, userID)
 	}
 	if err != nil {
 		// 查询失败，假设用户在本节点或离线，继续本地发送流程
@@ -224,11 +239,6 @@ func (h *Hub) SubscribeNodeMessages(ctx context.Context) error {
 		})
 
 	return nil
-}
-
-// handleDistributedMessage 处理从其他节点转发来的消息（广播/观察者频道入口，非定向投递）
-func (h *Hub) handleDistributedMessage(ctx context.Context, distMsg *models.DistributedMessage) error {
-	return h.handleDistributedMessageTargeted(ctx, distMsg, false)
 }
 
 // handleDistributedMessageTargeted 处理跨节点消息
@@ -734,7 +744,7 @@ func (h *Hub) SubscribeBroadcastChannel(ctx context.Context) error {
 				}
 
 				// 使用订阅回调提供的 subCtx，而不是外层的 ctx
-				return h.handleDistributedMessage(subCtx, distMsg)
+				return h.handleDistributedMessageTargeted(subCtx, distMsg, false)
 			})
 
 			if err != nil {
@@ -775,7 +785,7 @@ func (h *Hub) SubscribeObserverChannel(ctx context.Context) error {
 				}
 
 				// 使用订阅回调提供的 subCtx，而不是外层的 ctx
-				return h.handleDistributedMessage(subCtx, distMsg)
+				return h.handleDistributedMessageTargeted(subCtx, distMsg, false)
 			})
 
 			if err != nil {

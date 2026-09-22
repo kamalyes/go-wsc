@@ -538,6 +538,12 @@ func (h *Hub) SafeShutdown() error {
 	h.logger.InfoKV("批量清理 Redis 在线状态和连接记录", "node_id", h.nodeID)
 	h.batchCleanupOnShutdown(allClients)
 
+	// 停止消息记录攒批 outbox，flush 剩余记录到 DB（先于状态更新器 Stop，保 INSERT→UPDATE 落库顺序）
+	if h.messageRecordOutbox != nil {
+		h.logger.InfoKV("flush 消息记录 outbox", "node_id", h.nodeID)
+		h.messageRecordOutbox.Stop()
+	}
+
 	// 停止消息状态批量更新器，flush 剩余状态更新到 DB
 	// 在 h.cancel() 之前调用，确保 flush 时 h.ctx 仍然有效
 	if h.statusUpdater != nil {

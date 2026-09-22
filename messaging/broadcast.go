@@ -30,6 +30,7 @@ package messaging
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -667,7 +668,16 @@ func (m *Manager) BroadcastToUserIDs(ctx context.Context, userIDs []string, msg 
 	return m.broadcastToUserIDsNow(ctx, userIDs, msg)
 }
 
+// broadcastShardParallelUsers 用户数超过该阈值时启用分片并行扇出（低于则串行，省 goroutine 开销）
+const broadcastShardParallelUsers = 512
+
 // broadcastToUserIDsNow 预序列化 + 按 userIDs 扇出（延迟队列重投目标，不重复准入）
+//
+// 顺序保证（10w 级成员扇出的核心约束）：
+//   - 按 userID 均匀分片并行，同一 userID 的全部连接固定落在同一分片内串行投递，
+//     配合 client.sendChan 的 FIFO 语义 → 每个用户收到的消息顺序 = 广播调用顺序
+//   - 入口同步（WaitGroup 等全部 worker 完成）→ 调用方顺序调用两次广播，
+//     各用户 sendChan 的写入顺序与调用顺序一致
 func (m *Manager) broadcastToUserIDsNow(ctx context.Context, userIDs []string, msg *models.HubMessage) int {
 	if len(userIDs) == 0 {
 		return 0
@@ -680,43 +690,65 @@ func (m *Manager) broadcastToUserIDsNow(ctx context.Context, userIDs []string, m
 		return 0
 	}
 
-	msgID := mathx.IfNotEmpty(msg.MessageID, msg.ID)
 	dataLen := len(data)
-
 	var successCount int32
 
-	// 按用户ID查找客户端（O(m)，仅锁定相关 shard，不遍历全部连接）
-	// 使用 ForEachUserClientFiltered 叠加路由信封(appId+namespace)匹配：
-	//   - 群组消息：client 必须同 app/ns 且 client.groupID 在 msg.GroupIDs 中
-	//   - 避免新加入群的成员通过"旧 userIDs 列表"收到不匹配其 group 的历史消息（与项目约束一致）
-	for _, userID := range userIDs {
-		m.host.GetShardedRegistry().ForEachUserClientFiltered(userID, msg.AppID, msg.Namespace, msg.GroupIDs, func(_ string, client *models.Client) bool {
-			if client.IsClosed() {
-				return true
-			}
-			if client.ConnectionType == models.ConnectionTypeSSE {
-				// SSE 客户端发送 msg 对象
-				if client.TrySendSSE(msg) {
-					atomic.AddInt32(&successCount, 1)
+	// 分片扇出闭包（单分片内串行按 userID 投递，保用户内顺序）
+	fanout := func(ids []string) {
+		// 按用户ID查找客户端（O(m)，仅锁定相关 shard，不遍历全部连接）
+		// 使用 ForEachUserClientFiltered 叠加路由信封(appId+namespace)匹配：
+		//   - 群组消息：client 必须同 app/ns 且 client.groupID 在 msg.GroupIDs 中
+		//   - 避免新加入群的成员通过"旧 userIDs 列表"收到不匹配其 group 的历史消息（与项目约束一致）
+		for _, userID := range ids {
+			m.host.GetShardedRegistry().ForEachUserClientFiltered(userID, msg.AppID, msg.Namespace, msg.GroupIDs, func(_ string, client *models.Client) bool {
+				if client.IsClosed() {
+					return true
 				}
-			} else {
-				// WebSocket 客户端发送预序列化数据
-				if client.TrySend(data) {
-					atomic.AddInt32(&successCount, 1)
-					m.host.TrackReceiverMessageStats(client.ID, client.UserType, dataLen)
+				if client.ConnectionType == models.ConnectionTypeSSE {
+					// SSE 客户端发送 msg 对象
+					if client.TrySendSSE(msg) {
+						atomic.AddInt32(&successCount, 1)
+					}
 				} else {
-					// 成员级分级兜底：普通/必达转离线（用户下次上线/重连时补发），高频语义丢弃
-					m.routeDeliveryFallback(msg, client, userID)
+					// WebSocket 客户端发送预序列化数据
+					if client.TrySend(data) {
+						atomic.AddInt32(&successCount, 1)
+						m.host.TrackReceiverMessageStats(client.ID, client.UserType, dataLen)
+					} else {
+						// 成员级分级兜底：普通/必达转离线（用户下次上线/重连时补发），高频语义丢弃
+						m.routeDeliveryFallback(msg, client, userID)
+					}
 				}
+				return true
+			})
+		}
+	}
+
+	// 大群分片并行（10w 成员级扇出）；同一 userID 固定在同一分片，用户内顺序不破
+	if len(userIDs) >= broadcastShardParallelUsers {
+		workers := runtime.NumCPU()
+		if workers > len(userIDs) {
+			workers = len(userIDs)
+		}
+		chunk := (len(userIDs) + workers - 1) / workers
+		var wg sync.WaitGroup
+		for i := 0; i < len(userIDs); i += chunk {
+			end := i + chunk
+			if end > len(userIDs) {
+				end = len(userIDs)
 			}
-			return true
-		})
+			wg.Add(1)
+			go func(ids []string) {
+				defer wg.Done()
+				fanout(ids)
+			}(userIDs[i:end])
+		}
+		wg.Wait()
+	} else {
+		fanout(userIDs)
 	}
 
 	totalSuccess := atomic.LoadInt32(&successCount)
-	if totalSuccess > 0 {
-		m.updateMessageStatusAsync(ctx, msgID, "", models.MessageSendStatusSuccess, "", "")
-	}
 
 	// 群组广播本地投递统计：Info 级保证生产可见（成员在线但 0 投递 = 本地无连接，跨节点由 clusterBatcher 负责）
 	m.host.GetLogger().InfoContextKV(ctx, "[投递诊断] 群组广播本地投递完成",

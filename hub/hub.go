@@ -116,6 +116,7 @@ type Hub struct {
 	overloadMetrics     overload.OverloadMetrics
 
 	// ========== 批处理器（攒批落库/通知抑制写放大） ==========
+	messageRecordOutbox *batcher.MessageRecordOutbox
 	statusUpdater       *batcher.MessageStatusUpdater
 	heartbeatBatcher    *batcher.HeartbeatStatsUpdater
 	messageStatsBatcher *batcher.MessageStatsBatcher
@@ -296,6 +297,11 @@ func NewHub(config *wscconfig.WSC) *Hub {
 	// 消息状态批量更新器
 	msgStatus := batcherCfg.GetMessageStatusParams()
 	hub.statusUpdater = batcher.NewMessageStatusUpdater(hub, msgStatus.QueueSize, msgStatus.BatchSize, msgStatus.FlushInterval)
+
+	// 消息记录攒批 outbox（write-ahead INSERT 攒批化，复用状态更新器的批参数）
+	// flush 成功后把 sending 记录交给消息域注册 ACK 超时（注册延后 50ms 量级，秒级超时语义无损）
+	hub.messageRecordOutbox = batcher.NewMessageRecordOutbox(hub, msgStatus.QueueSize, msgStatus.BatchSize, msgStatus.FlushInterval)
+	hub.messageRecordOutbox.OnFlushed(hub.messagingMgr.ScheduleAckTimeouts)
 
 	// 心跳统计批量更新器
 	hbStats := batcherCfg.GetHeartbeatStatsParams()

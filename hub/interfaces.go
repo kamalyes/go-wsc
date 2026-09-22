@@ -176,10 +176,23 @@ func (h *Hub) RouteToCluster(ctx context.Context, msg *models.HubMessage, opts c
 	return h.routeToCluster(ctx, msg, opts)
 }
 
+// GetUserNodes 查询用户所在的全部节点（路由索引，供消息域在线判定与路由共享单次往返）
+func (h *Hub) GetUserNodes(ctx context.Context, userID string) []string {
+	if h.onlineStatusRepo == nil {
+		return nil
+	}
+	nodes, err := h.queryUserNodes(ctx, userID)
+	if err != nil {
+		return nil
+	}
+	return nodes
+}
+
 // CheckAndRouteToNode 检查用户在线节点并按需跨节点投递
+// presetNodes 非空时跳过节点查询（调用方已预取）
 // 返回：是否命中跨节点路由、目标节点列表、错误
-func (h *Hub) CheckAndRouteToNode(ctx context.Context, userID string, msg *models.HubMessage) (bool, []string, error) {
-	return h.checkAndRouteToNode(ctx, userID, msg)
+func (h *Hub) CheckAndRouteToNode(ctx context.Context, userID string, msg *models.HubMessage, presetNodes []string) (bool, []string, error) {
+	return h.checkAndRouteToNode(ctx, userID, msg, presetNodes)
 }
 
 // GetAllClusterNodeIDs 获取集群全部节点 ID
@@ -213,7 +226,11 @@ func (h *Hub) SubmitClusterDispatch(msg *models.HubMessage, opts cluster.Cluster
 // 统计域服务（messaging.Host）
 // ============================================================================
 
-// CheckUserOnline 检查用户是否在线（跨节点汇总判定）
+// GetMessageRecordOutbox 消息记录攒批 outbox（write-ahead INSERT 攒批化）
+func (h *Hub) GetMessageRecordOutbox() *batcher.MessageRecordOutbox { return h.messageRecordOutbox }
+
+// CheckUserOnline 检查用户是否在线（跨节点汇总判定；对外诊断 API，
+// 消息发送热路径已合并为 GetUserNodes 单次往返，不再走此方法）
 func (h *Hub) CheckUserOnline(ctx context.Context, userID string) bool {
 	return h.statsMgr.CheckUserOnline(ctx, userID)
 }

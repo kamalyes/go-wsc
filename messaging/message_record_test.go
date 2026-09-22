@@ -60,15 +60,12 @@ type batchUpdateCall struct {
 	ErrMsg string
 }
 
-func (f *fakeMessageRecordRepo) Create(_ context.Context, record *models.MessageSendRecord) error {
+// CreateBatch 批量创建（outbox flush 唯一写路径）
+func (f *fakeMessageRecordRepo) CreateBatch(_ context.Context, records []*models.MessageSendRecord) error {
 	f.batchUpdateMu.Lock()
 	defer f.batchUpdateMu.Unlock()
-	f.createdRecords = append(f.createdRecords, record)
+	f.createdRecords = append(f.createdRecords, records...)
 	return nil
-}
-func (f *fakeMessageRecordRepo) Update(_ context.Context, record *models.MessageSendRecord) error {
-	f.lastUpdateRecord = record
-	return f.updateErr
 }
 func (f *fakeMessageRecordRepo) FindByID(_ context.Context, _ uint) (*models.MessageSendRecord, error) {
 	return nil, nil
@@ -94,13 +91,6 @@ func (f *fakeMessageRecordRepo) Delete(_ context.Context, id uint) error {
 func (f *fakeMessageRecordRepo) DeleteByMessageID(_ context.Context, messageID string) error {
 	f.lastDeletedMessage = messageID
 	return f.deleteByMessageIDErr
-}
-func (f *fakeMessageRecordRepo) UpdateStatus(_ context.Context, key models.MessageRecordKey, status models.MessageSendStatus, _ models.FailureReason, _ string) error {
-	f.batchUpdateMu.Lock()
-	f.lastUpdateStatusID = key.MessageID
-	f.lastUpdateStatus = status
-	f.batchUpdateMu.Unlock()
-	return f.updateStatusErr
 }
 func (f *fakeMessageRecordRepo) BatchUpdateStatus(_ context.Context, keys []models.MessageRecordKey, status models.MessageSendStatus, reason models.FailureReason, errMsg string) error {
 	f.batchUpdateMu.Lock()
@@ -191,14 +181,6 @@ func TestMessageRecord_NoRepo(t *testing.T) {
 	})
 	t.Run("QueryRetryableMessageRecords", func(t *testing.T) {
 		_, err := m.QueryRetryableMessageRecords(ctx, 10)
-		assert.Equal(t, models.ErrRecordRepositoryNotSet, err)
-	})
-	t.Run("UpdateMessageRecordStatus", func(t *testing.T) {
-		err := m.UpdateMessageRecordStatus(ctx, "m1", "", models.MessageSendStatusSuccess, models.FailureReasonUnknown, "")
-		assert.Equal(t, models.ErrRecordRepositoryNotSet, err)
-	})
-	t.Run("UpdateMessageRecord", func(t *testing.T) {
-		err := m.UpdateMessageRecord(ctx, &models.MessageSendRecord{})
 		assert.Equal(t, models.ErrRecordRepositoryNotSet, err)
 	})
 	t.Run("DeleteMessageRecord", func(t *testing.T) {
@@ -316,34 +298,6 @@ func TestQueryRetryableMessageRecords_WithRepo(t *testing.T) {
 	assert.Equal(t, 7, repo.lastRetryableLimit)
 }
 
-// TestUpdateMessageRecordStatus_WithRepo 验证更新消息状态
-func TestUpdateMessageRecordStatus_WithRepo(t *testing.T) {
-	m, host := newTestManager()
-	ctx := context.Background()
-
-	repo := &fakeMessageRecordRepo{}
-	host.messageSink = repo
-
-	err := m.UpdateMessageRecordStatus(ctx, "m1", "", models.MessageSendStatusSuccess, models.FailureReasonUnknown, "")
-	require.NoError(t, err)
-	assert.Equal(t, "m1", repo.lastUpdateStatusID)
-	assert.Equal(t, models.MessageSendStatusSuccess, repo.lastUpdateStatus)
-}
-
-// TestUpdateMessageRecord_WithRepo 验证更新消息记录
-func TestUpdateMessageRecord_WithRepo(t *testing.T) {
-	m, host := newTestManager()
-	ctx := context.Background()
-
-	repo := &fakeMessageRecordRepo{}
-	host.messageSink = repo
-
-	record := &models.MessageSendRecord{MessageID: "m1"}
-	err := m.UpdateMessageRecord(ctx, record)
-	require.NoError(t, err)
-	assert.Same(t, record, repo.lastUpdateRecord)
-}
-
 // TestDeleteMessageRecord_WithRepo 验证删除消息记录
 func TestDeleteMessageRecord_WithRepo(t *testing.T) {
 	m, host := newTestManager()
@@ -380,8 +334,6 @@ func TestMessageRecord_RepoError(t *testing.T) {
 		findByMessageIDErr:   customErr,
 		queryErr:             customErr,
 		retryableErr:         customErr,
-		updateStatusErr:      customErr,
-		updateErr:            customErr,
 		deleteErr:            customErr,
 		deleteByMessageIDErr: customErr,
 	}
@@ -392,10 +344,6 @@ func TestMessageRecord_RepoError(t *testing.T) {
 	_, err = m.QueryMessageRecordsBySender(ctx, "s1", 1)
 	assert.Equal(t, customErr, err)
 	_, err = m.QueryRetryableMessageRecords(ctx, 1)
-	assert.Equal(t, customErr, err)
-	err = m.UpdateMessageRecordStatus(ctx, "m1", "", models.MessageSendStatusSuccess, models.FailureReasonUnknown, "")
-	assert.Equal(t, customErr, err)
-	err = m.UpdateMessageRecord(ctx, &models.MessageSendRecord{})
 	assert.Equal(t, customErr, err)
 	err = m.DeleteMessageRecord(ctx, 1)
 	assert.Equal(t, customErr, err)

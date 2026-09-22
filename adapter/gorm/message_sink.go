@@ -59,14 +59,13 @@ func NewMessageSink(db *gorm.DB, config *wscconfig.MessageRecord, log logger.ILo
 	return repo
 }
 
-// Create 创建记录
-func (r *MessageSink) Create(ctx context.Context, record *models.MessageSendRecord) error {
-	return r.db.WithContext(ctx).Create(record).Error
-}
-
-// Update 更新记录
-func (r *MessageSink) Update(ctx context.Context, record *models.MessageSendRecord) error {
-	return r.db.WithContext(ctx).Save(record).Error
+// CreateBatch 批量创建消息发送记录（outbox 攒批 flush，一条 INSERT 写整批）
+// 唯一写入路径：单条 Create 已随攒批化移除，写入一律经 MessageRecordOutbox
+func (r *MessageSink) CreateBatch(ctx context.Context, records []*models.MessageSendRecord) error {
+	if len(records) == 0 {
+		return nil
+	}
+	return r.db.WithContext(ctx).CreateInBatches(records, len(records)).Error
 }
 
 // FindByID 根据ID查找
@@ -168,45 +167,8 @@ func (r *MessageSink) DeleteByMessageID(ctx context.Context, messageID string) e
 	return r.db.WithContext(ctx).Where(models.QueryMessageIDWhere, messageID).Delete(&models.MessageSendRecord{}).Error
 }
 
-// UpdateStatus 更新状态（按 message_id + receiver 精确定位，多 receiver 记录互不影响）
-//
-// 优化说明：原先通过两次 UPDATE 完成 first_send_time 的条件更新，在高并发 ACK 确认场景下
-// 会产生瞬时双倍磁盘写入 I/O现合并为单条 UPDATE，使用 CASE WHEN 表达式在数据库侧
-// 完成「仅在 first_send_time 为 NULL 时才写入」的条件更新，I/O 开销减半
-func (r *MessageSink) UpdateStatus(ctx context.Context, key models.MessageRecordKey, status models.MessageSendStatus, reason models.FailureReason, errorMsg string) error {
-	now := time.Now()
-
-	updates := map[string]interface{}{
-		"status":         status,
-		"last_send_time": &now,
-		// 使用 CASE WHEN 条件更新：仅在 first_send_time 为 NULL 时设置为当前时间，
-		// 否则保持原值不变避免额外的 UPDATE 查询带来的磁盘 I/O 开销
-		"first_send_time": gorm.Expr("CASE WHEN first_send_time IS NULL THEN ? ELSE first_send_time END", now),
-	}
-
-	// 设置失败原因和错误信息
-	if reason != "" {
-		updates["failure_reason"] = reason
-	}
-	if errorMsg != "" {
-		updates["error_message"] = errorMsg
-	}
-
-	// 如果发送成功,设置成功时间
-	if status == models.MessageSendStatusSuccess {
-		updates["success_time"] = &now
-	}
-
-	// 单次 UPDATE 完成所有字段更新（含 first_send_time 的条件更新）
-	// CRDB Serializable 下与 ACK 超时认领等并发事务冲突时（40001）自动重试
-	return execWithSQLRetry(ctx, func() error {
-		return r.db.WithContext(ctx).Model(&models.MessageSendRecord{}).
-			Where(models.QueryMessageIDReceiverWhere, key.MessageID, key.Receiver).
-			Updates(updates).Error
-	})
-}
-
 // BatchUpdateStatus 批量更新消息状态（按 (message_id, receiver) 复合键批量定位）
+// 状态更新唯一路径：单条 UpdateStatus 已随攒批化移除（MessageStatusUpdater 批量调用本方法）
 func (r *MessageSink) BatchUpdateStatus(ctx context.Context, keys []models.MessageRecordKey, status models.MessageSendStatus, reason models.FailureReason, errorMsg string) error {
 	if len(keys) == 0 {
 		return nil

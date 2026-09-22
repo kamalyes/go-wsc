@@ -109,36 +109,6 @@ func (m *Manager) QueryRetryableMessageRecords(ctx context.Context, limit int) (
 }
 
 // ============================================================================
-// 消息记录更新接口
-// ============================================================================
-
-// UpdateMessageRecordStatus 更新消息记录状态
-// 参数:
-//   - ctx: 上下文（用于超时控制和取消）
-//   - messageID: 消息ID
-//   - receiver: 接收者ID（广播类记录传空字符串；与 messageID 共同精确定位一条记录）
-//   - status: 新状态
-//   - reason: 失败原因（可选）
-//   - errorMsg: 错误消息（可选）
-func (m *Manager) UpdateMessageRecordStatus(ctx context.Context, messageID, receiver string, status models.MessageSendStatus, reason models.FailureReason, errorMsg string) error {
-	if m.host.GetMessageSink() == nil {
-		return models.ErrRecordRepositoryNotSet
-	}
-	return m.host.GetMessageSink().UpdateStatus(ctx, models.MessageRecordKey{MessageID: messageID, Receiver: receiver}, status, reason, errorMsg)
-}
-
-// UpdateMessageRecord 更新消息记录
-// 参数:
-//   - ctx: 上下文（用于超时控制和取消）
-//   - record: 要更新的消息记录
-func (m *Manager) UpdateMessageRecord(ctx context.Context, record *models.MessageSendRecord) error {
-	if m.host.GetMessageSink() == nil {
-		return models.ErrRecordRepositoryNotSet
-	}
-	return m.host.GetMessageSink().Update(ctx, record)
-}
-
-// ============================================================================
 // 消息记录删除接口
 // ============================================================================
 

@@ -59,6 +59,14 @@ func (m *Manager) scheduleAckTimeout(key models.MessageRecordKey) {
 	m.ackTimeoutTimer.ScheduleWithKey(ackTimerKey(key), timeout, m.makeAckTimeoutCallback(key))
 }
 
+// ScheduleAckTimeouts 批量注册跨节点 ACK 超时任务（outbox flush 成功后回调，
+// 仅传入状态仍为 sending 的记录键；注册延后 = outbox 攒批间隔，秒级超时语义无损）
+func (m *Manager) ScheduleAckTimeouts(keys []models.MessageRecordKey) {
+	for _, key := range keys {
+		m.scheduleAckTimeout(key)
+	}
+}
+
 // cancelAckTimeout 取消跨节点 ACK 超时任务（O(1) 惰性取消）
 // 在 updateMessageStatusAsync 状态从 sending 变更为 success/failed/useroffline 时调用
 // 跨节点场景：目标节点 CancelByKey 扑空（key 不在本节点时间轮）→ no-op，发送节点 timer 仍会触发兜底检查

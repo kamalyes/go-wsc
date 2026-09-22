@@ -73,9 +73,13 @@ type Host interface {
 	IsGRPCEnabled() bool
 	// RouteToCluster 路由消息到集群其他节点
 	RouteToCluster(ctx context.Context, msg *models.HubMessage, opts cluster.ClusterDispatchOptions) error
+	// GetUserNodes 查询用户所在的全部节点（路由索引，routerCache 兜底 + 自愈回写）
+	// 在线判定与路由共享单次 Redis 往返（本地 miss 路径）：len(nodes)>0 即在线
+	GetUserNodes(ctx context.Context, userID string) []string
 	// CheckAndRouteToNode 检查用户在线节点并按需跨节点投递
+	// presetNodes 非空时跳过节点查询（调用方已预取，消第二次 Redis 往返）
 	// 返回：是否命中跨节点路由、目标节点列表、错误
-	CheckAndRouteToNode(ctx context.Context, userID string, msg *models.HubMessage) (bool, []string, error)
+	CheckAndRouteToNode(ctx context.Context, userID string, msg *models.HubMessage, presetNodes []string) (bool, []string, error)
 	// GetAllClusterNodeIDs 获取集群全部节点 ID
 	GetAllClusterNodeIDs() []string
 	// MarkRerouteAttempted 标记消息已尝试重路由（防循环投递）
@@ -87,8 +91,8 @@ type Host interface {
 
 	// ========== 统计域服务 ==========
 
-	// CheckUserOnline 检查用户是否在线（跨节点汇总判定）
-	CheckUserOnline(ctx context.Context, userID string) bool
+	// GetMessageRecordOutbox 消息记录攒批 outbox（未注入时返回 nil，消息域降级单条 Create）
+	GetMessageRecordOutbox() *batcher.MessageRecordOutbox
 	// TrackReceiverMessageStats 投递接收方消息统计
 	TrackReceiverMessageStats(connectionID string, receiverType models.UserType, dataSize int)
 	// TrackConnectionError 记录连接错误（异常断开排查）

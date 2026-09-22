@@ -61,6 +61,15 @@ type DistributedMessage struct {
 	SenderID      string        `json:"sender_id,omitempty"`      // 发送者ID（排除发送者时用，跨节点 PubSub 兜底场景）
 }
 
+// LogMessageID 返回日志安全的消息ID（控制类消息如 client_reclaim 无 Message 体，返回空串）
+// 发布路径日志统一使用此方法，避免无 Message 体的控制消息触发 nil pointer panic
+func (dm *DistributedMessage) LogMessageID() string {
+	if dm == nil || dm.Message == nil {
+		return ""
+	}
+	return dm.Message.GetMessageID()
+}
+
 // InjectContext 从 ctx 注入上下文信息到分布式消息（trace_id 等）
 // 优先从 OTel span 提取 trace_id，fallback 到 ctx.Value(logger.ContextKeyTraceID)
 // 已有 trace_id 时不覆盖（跨节点消息保留源 trace）

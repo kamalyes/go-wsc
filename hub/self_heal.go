@@ -303,7 +303,7 @@ func (h *Hub) replyUserNotFound(ctx context.Context, distMsg *DistributedMessage
 	// deadNodes 忽略：回告丢失仅退化为 30s ACK 超时兜底（publishToTargetedNodes 已打 Warn 日志）
 	if _, err := h.publishToTargetedNodes(ctx, reply, []string{distMsg.NodeID}); err != nil {
 		h.logger.WarnContextKV(ctx, "user_not_found 回告发布失败",
-			"message_id", distMsg.Message.GetMessageID(),
+			"message_id", distMsg.LogMessageID(),
 			"user_id", distMsg.TargetID,
 			"from_node", distMsg.NodeID,
 			"error", err,

@@ -333,6 +333,65 @@ func TestBatchUpdateHeartbeats(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// TestBatchQualityUpdate_MultipleConnections 多连接批量更新回归测试
+// 历史 bug：事务内复用同一 GORM 链式对象，WHERE 条件逐条累积成
+// connection_id='id1' AND connection_id='id2' AND ...（恒 false），
+// 第 2..N 条 entry 全部 rows=0，Ping 统计与消息统计静默丢失。
+// 修复后每条 entry 使用独立会话（Session NewDB），本测试断言每条连接都更新成功
+func TestBatchQualityUpdate_MultipleConnections(t *testing.T) {
+	tc := newTestConnectionRepoContext(t)
+
+	// 建立三条连接的 quality 行（模拟 batcher 攒批的多连接心跳上报）
+	connIDs := make([]string, 3)
+	for i := range connIDs {
+		connIDs[i] = tc.generateConnectionID()
+		err := tc.qualityRepo.Upsert(tc.ctx, &models.ConnectionQuality{
+			ConnectionID: connIDs[i],
+			UserID:       tc.generateUserID(),
+		})
+		require.NoError(t, err)
+	}
+
+	// 批量心跳：三条全部 PingMs=100（旧 bug 下第 2、3 条 AND 拼接后 rows=0）
+	heartbeatEntries := make([]*repository.HeartbeatUpdateEntry, len(connIDs))
+	for i, connID := range connIDs {
+		pingTime := time.Now()
+		heartbeatEntries[i] = &repository.HeartbeatUpdateEntry{
+			ConnectionID: connID,
+			PingTime:     &pingTime,
+			PingMs:       100,
+		}
+	}
+	err := tc.qualityRepo.BatchUpdateHeartbeats(tc.ctx, heartbeatEntries)
+	assert.NoError(t, err)
+	for i, connID := range connIDs {
+		saved, err := tc.qualityRepo.GetByConnectionID(tc.ctx, connID)
+		assert.NoError(t, err)
+		// 旧 bug：第 2..N 条 Ping 统计未写入，AveragePingMs 保持零值
+		assert.Equal(t, 100.0, saved.AveragePingMs, "第 %d 条连接的 average_ping_ms 应更新成功", i+1)
+		assert.Equal(t, 100.0, saved.MaxPingMs, "第 %d 条连接的 max_ping_ms 应更新成功", i+1)
+		assert.Equal(t, 100.0, saved.MinPingMs, "第 %d 条连接的 min_ping_ms 应更新成功", i+1)
+	}
+
+	// 批量消息统计：三条各发 5 条消息（旧 bug 同样只更新第 1 条）
+	statsEntries := make([]*repository.StatsIncrementEntry, len(connIDs))
+	for i, connID := range connIDs {
+		statsEntries[i] = &repository.StatsIncrementEntry{
+			ConnectionID:     connID,
+			MessagesSent:     5,
+			MessagesReceived: 5,
+		}
+	}
+	err = tc.qualityRepo.BatchIncrementStats(tc.ctx, statsEntries)
+	assert.NoError(t, err)
+	for i, connID := range connIDs {
+		saved, err := tc.qualityRepo.GetByConnectionID(tc.ctx, connID)
+		assert.NoError(t, err)
+		assert.Equal(t, int64(5), saved.MessagesSent, "第 %d 条连接的 messages_sent 应累加成功", i+1)
+		assert.Equal(t, int64(5), saved.MessagesReceived, "第 %d 条连接的 messages_received 应累加成功", i+1)
+	}
+}
+
 // TestQualityAddError 测试记录错误（拆表后由 ConnectionQualityRepository 承载）
 func TestQualityAddError(t *testing.T) {
 	tc := newTestConnectionRepoContext(t)

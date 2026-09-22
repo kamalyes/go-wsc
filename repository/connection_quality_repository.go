@@ -162,14 +162,16 @@ func (r *connectionQualityRepositoryImpl) BatchUpdateHeartbeats(ctx context.Cont
 	}
 
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		query := tx
-		if r.tableName != "" {
-			query = tx.Table(r.tableName)
-		} else {
-			query = tx.Model(&models.ConnectionQuality{})
-		}
-
+		// 每条 entry 必须用全新会话（Session NewDB）：
+		// GORM 链式对象复用会累积 WHERE 条件，N 条 entry 拼成
+		// WHERE connection_id='id1' AND connection_id='id2' AND ...（恒 false，rows=0）
 		for _, entry := range entries {
+			query := tx.Session(&gorm.Session{NewDB: true})
+			if r.tableName != "" {
+				query = query.Table(r.tableName)
+			} else {
+				query = query.Model(&models.ConnectionQuality{})
+			}
 			// 刷新活跃时间（供清理任务判断，心跳时间戳本身落 connect 表）
 			updates := make(map[string]any)
 			if entry.PingTime != nil {
@@ -202,14 +204,14 @@ func (r *connectionQualityRepositoryImpl) BatchIncrementStats(ctx context.Contex
 	}
 
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		query := tx
-		if r.tableName != "" {
-			query = tx.Table(r.tableName)
-		} else {
-			query = tx.Model(&models.ConnectionQuality{})
-		}
-
+		// 每条 entry 用全新会话，理由同 BatchUpdateHeartbeats（复用会累积 WHERE 条件致 rows=0）
 		for _, entry := range entries {
+			query := tx.Session(&gorm.Session{NewDB: true})
+			if r.tableName != "" {
+				query = query.Table(r.tableName)
+			} else {
+				query = query.Model(&models.ConnectionQuality{})
+			}
 			updates := make(map[string]any)
 			if entry.MessagesSent > 0 {
 				updates["messages_sent"] = gorm.Expr("messages_sent + ?", entry.MessagesSent)

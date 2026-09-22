@@ -62,11 +62,15 @@ func (h *Hub) handleRegister(client *Client) {
 		client.Context = ctx
 	}
 	defer syncx.RecoverWithHandler(func(r interface{}) {
-		h.logger.ErrorContextKV(ctx, "handleRegister panic",
+		h.logger.ErrorContextKV(ctx, "handleRegister panic，清理半注册连接",
 			"client_id", client.ID,
 			"user_id", client.UserID,
 			"panic", r,
 		)
+		// panic 点可能在注册表加入/心跳任务调度之后、读写协程启动之前：
+		// 不清理会留下"已完成 Upgrade 但无法读取心跳"的幽灵连接，
+		// 90 秒后被心跳超时强制注销且无 Close 帧（浏览器表现为 1006）
+		h.cleanupHalfRegisteredClient(client)
 	})
 
 	// 双重检查：如果 Hub 正在关闭，拒绝注册
@@ -205,8 +209,14 @@ func (h *Hub) handleRegister(client *Client) {
 
 	// 旧归属其他节点 → 通知旧节点回收幽灵连接（此时本节点 owner 已写入，
 	// 旧节点清理受 Lua 归属校验保护：仅清自身集合，不动本节点已接管的共享索引）
+	// 🔥 异步执行：回收通知的任何失败/异常不得中断注册主流程——
+	// 注册主路径后半段（setupPingHandler + 读写协程启动）尚未执行，
+	// 同步路径一旦 panic（历史 bug：回收消息无 Message 体触发 publishToTargetedNodes
+	// 空指针）会导致连接只完成 Upgrade 却无读写协程，90 秒后被心跳超时注销
 	if migratedFromNode != "" && migratedFromNode != h.nodeID {
-		h.notifyClientReclaim(ctx, client, migratedFromNode)
+		h.workerPool.TrySubmitDistributed(func() {
+			h.notifyClientReclaim(ctx, client, migratedFromNode)
+		})
 	}
 
 	// 系统组加入 + 成员组加入 + 离线消息推送（提交到分布式池，均不依赖在线状态索引）
@@ -316,6 +326,22 @@ func (h *Hub) handleUnregister(client *Client) {
 	if h.routerCache != nil {
 		h.routerCache.InvalidateUser(ctx, client.UserID)
 	}
+}
+
+// cleanupHalfRegisteredClient 清理半注册连接（handleRegister panic 兜底）
+// 半注册状态：连接已加入注册表 + 心跳超时任务已调度，但读写协程未启动（注册流程中断）
+// 幂等安全：各清理步骤对"未执行到"的步骤均为无操作
+func (h *Hub) cleanupHalfRegisteredClient(client *Client) {
+	if client == nil {
+		return
+	}
+	// 移除注册表条目（未注册时无操作）
+	h.removeClientUnsafe(client)
+	// 撤销已调度的心跳超时任务（未调度时无操作），避免重复注销
+	h.cancelHeartbeatTimeout(client.ID)
+	// 关闭 SendChan 与底层连接（触发客户端立即重连，重连后走正常注册流程）
+	h.closeClientChannel(client)
+	h.closeClientConnection(client)
 }
 
 // ============================================================================

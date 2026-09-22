@@ -421,7 +421,7 @@ func (h *Hub) publishToCluster(ctx context.Context, dispatch *models.Distributed
 	h.logger.InfoContextKV(ctx, "📡 PubSub 广播频道发布",
 		"channel", channel,
 		"payload_size", len(data),
-		"message_id", dispatch.Message.GetMessageID(),
+		"message_id", dispatch.LogMessageID(),
 	)
 	err := h.pubsub.Publish(ctx, channel, string(data))
 	if err != nil {
@@ -429,7 +429,7 @@ func (h *Hub) publishToCluster(ctx context.Context, dispatch *models.Distributed
 			"channel", channel,
 			"payload_size", len(data),
 			"error", err,
-			"message_id", dispatch.Message.GetMessageID(),
+			"message_id", dispatch.LogMessageID(),
 		)
 	}
 	return err
@@ -454,7 +454,7 @@ func (h *Hub) publishToTargetedNodes(ctx context.Context, dispatch *models.Distr
 		"target_nodes", nodeIDs,
 		"target_count", len(nodeIDs),
 		"payload_size", len(data),
-		"message_id", dispatch.Message.GetMessageID(),
+		"message_id", dispatch.LogMessageID(), // 控制消息（如 client_reclaim）无 Message 体，LogMessageID 安全返回空串
 	)
 
 	// 防御：过滤自身（不应出现，但避免意外循环投递）
@@ -497,7 +497,7 @@ func (h *Hub) publishToTargetedNodes(ctx context.Context, dispatch *models.Distr
 				"target_node", targets[i],
 				"channel", channels[i],
 				"error", err,
-				"message_id", dispatch.Message.GetMessageID())
+				"message_id", dispatch.LogMessageID())
 			continue
 		}
 		if cmd.Val() == 0 {
@@ -520,7 +520,7 @@ func (h *Hub) publishToTargetedNodes(ctx context.Context, dispatch *models.Distr
 		h.logger.WarnContextKV(ctx, "📡 [死节点感知] 定向频道无人订阅，消息未送达（Pod 挂掉或订阅断连重连中）",
 			"dead_nodes", deadNodes,
 			"total_targets", len(targets),
-			"message_id", dispatch.Message.GetMessageID(),
+			"message_id", dispatch.LogMessageID(),
 		)
 	}
 	return deadNodes, lastErr

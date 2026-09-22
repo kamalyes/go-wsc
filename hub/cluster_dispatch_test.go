@@ -586,9 +586,11 @@ func TestDeadNodesPartialAlive_DoesNotStoreOffline(t *testing.T) {
 	}()
 
 	// 为 node-alive 频道挂一个真实订阅者（模拟健康节点），node-dead 无订阅者
+	// 频道须经 ResolveChannel 解析为物理频道（含 namespace 前缀），与 publishToTargetedNodes
+	// 的发布频道保持一致，否则订阅扑空会被误判为死节点
 	ctx := context.Background()
 	prefix := hub.config.RedisRepository.PubSub.GetNodeChannelPrefix()
-	aliveChannel := prefix + "node-alive"
+	aliveChannel := hub.pubsub.ResolveChannel(prefix + "node-alive")
 	sub := redisClient.Subscribe(ctx, aliveChannel)
 	defer func() { _ = sub.Close() }()
 	require.Eventually(t, func() bool {

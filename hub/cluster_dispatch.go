@@ -470,12 +470,18 @@ func (h *Hub) publishToTargetedNodes(ctx context.Context, dispatch *models.Distr
 
 	// Pipeline 批量发布：逐节点 cachex.Publish 是 N 次串行 RTT（内含 retry 包装开销），
 	// 且丢弃 PUBLISH 返回值无法感知死节点；直接走底层 client 等价（data 已序列化，
-	// 本项目 PubSub 未启用压缩/namespace 前缀，cachex.Publish 对 string 仅透传）
+	// cachex.Publish 对 string 仅透传压缩语义）
+	// 🔥 频道必须经 ResolveChannel 解析为物理频道（含 namespace 前缀）：
+	// 订阅侧（SubscribeNodeMessages → cachex.Subscribe）会自动拼接 namespace 前缀，
+	// 此前直接用 prefix+nodeID 裸频道发布，造成"订阅带前缀、发布不带前缀"的频道错配，
+	// PUBLISH 永远返回 0（定向频道无人订阅）
 	client := h.pubsub.GetClient()
 	pipe := client.Pipeline()
 	cmds := make([]*redis.IntCmd, len(targets))
+	channels := make([]string, len(targets))
 	for i, nodeID := range targets {
-		cmds[i] = pipe.Publish(ctx, prefix+nodeID, data)
+		channels[i] = h.pubsub.ResolveChannel(prefix + nodeID)
+		cmds[i] = pipe.Publish(ctx, channels[i], data)
 	}
 	_, _ = pipe.Exec(ctx) // 网络/命令错误统一在下方逐命令检查（Exec 聚合错误不区分粒度）
 
@@ -489,7 +495,7 @@ func (h *Hub) publishToTargetedNodes(ctx context.Context, dispatch *models.Distr
 			deadNodes = append(deadNodes, targets[i])
 			h.logger.WarnContextKV(ctx, "📡 PubSub 定向发布失败（单节点）",
 				"target_node", targets[i],
-				"channel", prefix+targets[i],
+				"channel", channels[i],
 				"error", err,
 				"message_id", dispatch.Message.GetMessageID())
 			continue
@@ -500,7 +506,7 @@ func (h *Hub) publishToTargetedNodes(ctx context.Context, dispatch *models.Distr
 			// 避免订阅抖动导致消息被批量误转离线
 			if h.nodeRegistry != nil && h.nodeRegistry.IsNodeAlive(ctx, targets[i]) {
 				time.Sleep(deadNodeProbeRetryDelay)
-				if retry, rerr := client.Publish(ctx, prefix+targets[i], data).Result(); rerr == nil && retry > 0 {
+				if retry, rerr := client.Publish(ctx, channels[i], data).Result(); rerr == nil && retry > 0 {
 					h.logger.InfoContextKV(ctx, "📡 [死节点探测] 心跳正常+订阅恢复，重试投递成功",
 						"target_node", targets[i],
 						"message_id", dispatch.Message.GetMessageID())

@@ -9,7 +9,7 @@ require (
 	github.com/gorilla/websocket v1.4.2
 	github.com/jpillora/backoff v1.0.0
 	github.com/kamalyes/go-argus v0.3.1
-	github.com/kamalyes/go-cachex v0.3.8
+	github.com/kamalyes/go-cachex v0.3.9-0.20260922081736-5656b5287fea
 	github.com/kamalyes/go-config v0.21.18
 	github.com/kamalyes/go-logger v0.6.2
 	github.com/kamalyes/go-pbmo v0.2.0

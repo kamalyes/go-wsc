@@ -32,6 +32,7 @@ package hub
 
 import (
 	"context"
+	"math/rand/v2"
 	"time"
 
 	"github.com/kamalyes/go-wsc/models"
@@ -45,11 +46,17 @@ func ackTimerKey(key models.MessageRecordKey) string {
 
 // scheduleAckTimeout 在时间轮上调度跨节点 ACK 超时任务（per-record，O(1)）
 // 在 recordMessageToDatabase 创建 sending 记录后调用
+//
+// 超时窗口附加 0~nodeAckTimeoutJitter 随机抖动：目标节点的慢回报恰好落在 30s 边缘时，
+// 会与整点定时器在毫秒级窗口对撞同一行（行锁排队 → SLOW SQL / CRDB 40001 冲突），
+// 抖动把认领时刻错峰到 30s~33s，边缘碰撞概率断崖式下降；
+// 兜底扫描的 30s cutoff（node_ack_timeout.go）不受影响——先到者认领，后到者守卫扑空 no-op
 func (h *Hub) scheduleAckTimeout(key models.MessageRecordKey) {
 	if h.ackTimeoutTimer == nil || key.MessageID == "" {
 		return
 	}
-	h.ackTimeoutTimer.ScheduleWithKey(ackTimerKey(key), nodeAckTimeout, h.makeAckTimeoutCallback(key))
+	timeout := nodeAckTimeout + time.Duration(rand.Int64N(int64(nodeAckTimeoutJitter)))
+	h.ackTimeoutTimer.ScheduleWithKey(ackTimerKey(key), timeout, h.makeAckTimeoutCallback(key))
 }
 
 // cancelAckTimeout 取消跨节点 ACK 超时任务（O(1) 惰性取消）

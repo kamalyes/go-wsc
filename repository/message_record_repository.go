@@ -271,15 +271,12 @@ func (r *MessageRecordGormRepository) UpdateStatus(ctx context.Context, key mode
 	}
 
 	// 单次 UPDATE 完成所有字段更新（含 first_send_time 的条件更新）
-	result := r.db.WithContext(ctx).Model(&MessageSendRecord{}).
-		Where(models.QueryMessageIDReceiverWhere, key.MessageID, key.Receiver).
-		Updates(updates)
-
-	// 🔥 如果没有找到记录（RowsAffected == 0），静默返回（记录可能尚未创建或不需要记录）
-	if result.Error != nil {
-		return result.Error
-	}
-	return nil
+	// CRDB Serializable 下与 ACK 超时认领等并发事务冲突时（40001）自动重试
+	return execWithSQLRetry(ctx, func() error {
+		return r.db.WithContext(ctx).Model(&MessageSendRecord{}).
+			Where(models.QueryMessageIDReceiverWhere, key.MessageID, key.Receiver).
+			Updates(updates).Error
+	})
 }
 
 // BatchUpdateStatus 批量更新消息状态（按 (message_id, receiver) 复合键批量定位）
@@ -313,11 +310,11 @@ func (r *MessageRecordGormRepository) BatchUpdateStatus(ctx context.Context, key
 		tuples[i] = []interface{}{key.MessageID, key.Receiver}
 	}
 
-	result := r.db.WithContext(ctx).Model(&MessageSendRecord{}).
-		Where("(message_id, receiver) IN ?", tuples).
-		Updates(updates)
-
-	return result.Error
+	return execWithSQLRetry(ctx, func() error {
+		return r.db.WithContext(ctx).Model(&MessageSendRecord{}).
+			Where("(message_id, receiver) IN ?", tuples).
+			Updates(updates).Error
+	})
 }
 
 // ClaimStaleSending 原子认领超时的 sending 记录（接口说明见 MessageRecordRepository）
@@ -347,13 +344,20 @@ func (r *MessageRecordGormRepository) ClaimStaleSending(ctx context.Context, key
 			updates["error_message"] = errorMsg
 		}
 
-		result := r.db.WithContext(ctx).Model(&MessageSendRecord{}).
-			Where(models.QueryMessageIDReceiverWhere+" AND status = ?", key.MessageID, key.Receiver, models.MessageSendStatusSending).
-			Updates(updates)
-		if result.Error != nil {
-			return claimed, result.Error
+		// CRDB Serializable 下与目标节点状态回报并发更新同一行时（40001）自动重试；
+		// RowsAffected 经由闭包外变量传递，避免重试后重复 append 认领键
+		var affected int64
+		err := execWithSQLRetry(ctx, func() error {
+			result := r.db.WithContext(ctx).Model(&MessageSendRecord{}).
+				Where(models.QueryMessageIDReceiverWhere+" AND status = ?", key.MessageID, key.Receiver, models.MessageSendStatusSending).
+				Updates(updates)
+			affected = result.RowsAffected
+			return result.Error
+		})
+		if err != nil {
+			return claimed, err
 		}
-		if result.RowsAffected > 0 {
+		if affected > 0 {
 			claimed = append(claimed, key)
 		}
 	}
@@ -394,38 +398,39 @@ func (r *MessageRecordGormRepository) IncrementRetry(ctx context.Context, key mo
 	retryHistoryExpr := dialect.JsonArrayAppend("retry_history", "?")
 
 	// 单条 UPDATE 完成所有更新，WHERE message_id = ? AND receiver = ? 与 UpdateStatus 保持一致
-	result := r.db.WithContext(ctx).Exec(
-		`UPDATE `+MessageSendRecord{}.TableName()+` SET
-			retry_count = ?,
-			retry_history = `+retryHistoryExpr+`,
-			last_send_time = ?,
-			first_send_time = CASE WHEN first_send_time IS NULL THEN ? ELSE first_send_time END,
-			status = CASE
-				WHEN ? = 1 THEN ?
-				WHEN ? >= max_retry THEN ?
-				ELSE ?
-			END,
-			success_time = CASE WHEN ? = 1 THEN ? ELSE success_time END,
-			failure_reason = CASE WHEN ? = 0 AND ? >= max_retry THEN ? ELSE failure_reason END,
-			error_message = CASE WHEN ? = 0 AND ? = 1 THEN ? ELSE error_message END,
-			updated_at = ?
-		WHERE message_id = ? AND receiver = ?`,
-		attempt.AttemptNumber,
-		string(attemptJSON),
-		now,
-		now,
-		successFlag, models.MessageSendStatusSuccess,
-		attempt.AttemptNumber, models.MessageSendStatusFailed,
-		models.MessageSendStatusRetrying,
-		successFlag, now,
-		successFlag, attempt.AttemptNumber, models.FailureReasonMaxRetry,
-		successFlag, hasError, attempt.Error,
-		now,
-		key.MessageID,
-		key.Receiver,
-	)
-
-	return result.Error
+	// CRDB Serializable 下与 ACK 状态回报并发更新同一行时（40001）自动重试
+	return execWithSQLRetry(ctx, func() error {
+		return r.db.WithContext(ctx).Exec(
+			`UPDATE `+MessageSendRecord{}.TableName()+` SET
+				retry_count = ?,
+				retry_history = `+retryHistoryExpr+`,
+				last_send_time = ?,
+				first_send_time = CASE WHEN first_send_time IS NULL THEN ? ELSE first_send_time END,
+				status = CASE
+					WHEN ? = 1 THEN ?
+					WHEN ? >= max_retry THEN ?
+					ELSE ?
+				END,
+				success_time = CASE WHEN ? = 1 THEN ? ELSE success_time END,
+				failure_reason = CASE WHEN ? = 0 AND ? >= max_retry THEN ? ELSE failure_reason END,
+				error_message = CASE WHEN ? = 0 AND ? = 1 THEN ? ELSE error_message END,
+				updated_at = ?
+			WHERE message_id = ? AND receiver = ?`,
+			attempt.AttemptNumber,
+			string(attemptJSON),
+			now,
+			now,
+			successFlag, models.MessageSendStatusSuccess,
+			attempt.AttemptNumber, models.MessageSendStatusFailed,
+			models.MessageSendStatusRetrying,
+			successFlag, now,
+			successFlag, attempt.AttemptNumber, models.FailureReasonMaxRetry,
+			successFlag, hasError, attempt.Error,
+			now,
+			key.MessageID,
+			key.Receiver,
+		).Error
+	})
 }
 
 // GetStatistics 获取统计信息

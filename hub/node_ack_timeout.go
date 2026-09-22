@@ -46,6 +46,8 @@ const (
 	// 跨节点回报链路含目标节点投递 + statusUpdater 批量落盘刷写，亚秒到秒级完成，
 	// 500ms 会大量误判；30s 足够宽容，只捕获真正的订阅失活/消息丢失
 	nodeAckTimeout = 30 * time.Second
+	// nodeAckTimeoutJitter ACK 超时定时器随机抖动上限（见 ack_timer.go scheduleAckTimeout）
+	nodeAckTimeoutJitter = 3 * time.Second
 	// nodeAckScanLimit 单轮兜底扫描上限（防历史大堆积时打爆 DB/离线队列）
 	nodeAckScanLimit = 200
 )

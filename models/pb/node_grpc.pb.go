@@ -3,7 +3,7 @@
 // @Date: 2026-07-18 00:00:00
 // @LastEditors: kamalyes 501893067@qq.com
 // @LastEditTime: 2026-07-18 00:00:00
-// @FilePath: \go-wsc\proto\node.proto
+// @FilePath: \go-wsc\models\pb\node_grpc.pb.go
 // @Description: 节点间 gRPC 通信协议定义
 //
 // 每个 WebSocket Hub 节点同时运行 gRPC 服务端与客户端，支持点对点直连通信

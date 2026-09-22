@@ -6,7 +6,7 @@
  * @FilePath: \go-wsc\hub\lifecycle.go
  * @Description: Hub 生命周期管理
  *
- * Copyright (c) 2025 by kamalyes, All Rights Reserved.
+ * Copyright (c) 2026 by kamalyes, All Rights Reserved.
  */
 
 package hub
@@ -17,9 +17,26 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kamalyes/go-toolbox/pkg/json"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
+	"github.com/kamalyes/go-wsc/connection"
 	"github.com/kamalyes/go-wsc/constants"
+	"github.com/kamalyes/go-wsc/models"
+)
+
+const (
+	// heartbeatRenewChunkSize 心跳批量续期的分块大小（单次 RenewClientsOnline Eval 的客户端数）
+	heartbeatRenewChunkSize = 512
+	// heartbeatRenewWorkers 并行续期的最大并发块数（对 Redis 的并发 Eval 上限）
+	heartbeatRenewWorkers = 8
+	// coalescerDrainInterval 合并快照投递周期（50ms：高频状态消息的可感知延迟上限）
+	// 合并器本体在 overload 域（Offer/Drain），drain 节拍与投递归编排层
+	coalescerDrainInterval = 50 * time.Millisecond
+	// nodeAckFallbackScanInterval 跨节点 ACK 超时兜底扫描间隔（与 messaging 域扫描器节拍一致）
+	// 主路径为 messaging 域的 per-message ACK 超时时间轮，此低频扫描仅恢复发送节点宕机
+	// 导致 in-memory timer 丢失、永久停留 sending 的记录（见 messaging/node_ack_timeout.go）
+	nodeAckFallbackScanInterval = 5 * time.Minute
 )
 
 // Run 启动Hub
@@ -66,17 +83,8 @@ func (h *Hub) Run() {
 	)
 
 	// 心跳统计批量更新器在构造时已自动启动（BatchProcessor 内部 worker）
-
-	// ⏰ 心跳时间轮已在 NewHub() 构造期初始化（避免与并发 Register 产生数据竞争）
-
-	// ⏰ 跨节点 ACK 超时时间轮（替代 timeoutStaleSendingRecords 的 30s 全量 DB 扫描主路径）
-	// recordMessageToDatabase 创建 sending 记录时调度 per-message 超时任务，
-	// updateMessageStatusAsync 状态变更时 O(1) 取消；详见 ack_timer.go
-	// 与心跳时间轮共用 config.Timer 配置（NewHub 已兜底，GetTimerOptions 对 nil 配置安全）
-	// 依赖 messageRecordRepo / pubsub（由 InitializeRepositories / SetPubSub 在 Run 前注入）
-	if h.messageRecordRepo != nil && h.pubsub != nil {
-		h.ackTimeoutTimer = syncx.NewHashedWheelTimer(h.config.Timer.GetTimerOptions()...)
-	}
+	// ⏰ 心跳/跨节点 ACK 超时时间轮已在 NewHub() 构造期无条件初始化
+	//（避免与并发 Register 产生数据竞争，见 hub.go）
 
 	// 🚦 启动准入闸门水位评估循环（AIMD 升降级；NewHub 构造期已初始化默认水位）
 	if gate := h.admission.Load(); gate != nil {
@@ -95,7 +103,7 @@ func (h *Hub) Run() {
 				h.logger.ErrorKV("广播延迟队列 drain panic", "panic", r, "stack", string(debug.Stack()), "node_id", h.nodeID)
 			}).
 			Exec(func() {
-				h.broadcastDelayQueue.drainLoop(h.ctx)
+				h.broadcastDelayQueue.DrainLoop(h.ctx)
 			})
 	}
 
@@ -121,7 +129,7 @@ func (h *Hub) Run() {
 
 	// 🌐 启动分布式服务（如果启用了 PubSub）
 	if h.pubsub != nil {
-		// 节点心跳已由 node_registry.go::NodeRegistry.refreshLoop 接管（gRPC 模式）
+		// 节点心跳已由 cluster.NodeRegistry.refreshLoop 接管（gRPC 模式）
 		// 订阅节点间消息
 		syncx.Go(h.ctx).
 			OnPanic(func(r any) {
@@ -160,6 +168,12 @@ func (h *Hub) Run() {
 
 	// 🔗 启动节点间 gRPC 通信（若启用 node-grpc 配置）
 	// gRPC 直连优先于 Redis PubSub 用于点对点路由，降低跨节点消息延迟
+	// 组件「用时才装配」：配置启用且未经 InitNodeGRPC 显式初始化（也未经
+	// WithNodeRegistry 注入）时在此补装，避免配置开了却不生效；
+	// InitNodeGRPC 内部自检 PubSub 依赖，未设置时降级 Redis PubSub 模式
+	if h.IsGRPCEnabled() && h.nodeRegistry == nil {
+		h.InitNodeGRPC()
+	}
 	h.startNodeGRPC()
 
 	// 使用 EventLoop 管理事件循环
@@ -172,32 +186,32 @@ func (h *Hub) Run() {
 		// 性能监控定时器：定期报告性能指标
 		// 使用配置中的 PerformanceMetricsInterval (默认5分钟)
 		OnTicker(h.config.PerformanceMetricsInterval, h.reportPerformanceMetrics).
-		// ACK清理定时器：定期清理过期的ACK记录
+		// ACK清理定时器：定期清理过期的ACK记录（经 messaging 域管理器触发）
 		// 使用配置中的 AckCleanupInterval (默认1分钟)
 		OnTicker(h.config.AckCleanupInterval, h.cleanupExpiredAck).
-		// user_not_found 重路由守卫过期条目清扫（防泄漏；正常路径由 ACK 终态删除，见 self_heal.go）
-		IfTicker(h.pubsub != nil,
+		// user_not_found 重路由守卫过期条目清扫（防泄漏；PubSub 或 gRPC 任一跨节点通道
+		// 启用即需要——gRPC-only 部署同样产生守卫条目；P2P 条目由 ACK 超时回调终态删除，
+		// 广播兜底条目仅靠本清扫回收，见 self_heal.go）
+		IfTicker(h.pubsub != nil || h.IsGRPCEnabled(),
 			rerouteGuardSweepInterval,
 			h.sweepRerouteGuard).
-		// ACK 超时日志聚合窗口清扫（防泄漏；条目量 = 保留期内活跃 messageID 数，见 ack_log_window.go）
-		IfTicker(h.messageRecordRepo != nil,
-			ackLogWindowSweepInterval,
-			h.sweepAckTimeoutLogWindows).
 		// 在线状态清理定时器：定期清理过期的在线状态数据
 		// 使用 OnlineStatus 配置中的 StatusRefreshInterval 和 EnableAutoCleanup
-		IfTicker(h.onlineStatusRepo != nil && h.config.RedisRepository.OnlineStatus != nil && h.config.RedisRepository.OnlineStatus.EnableAutoCleanup,
+		IfTicker(h.onlineStatusRepo != nil && h.config.RedisRepository != nil &&
+			h.config.RedisRepository.OnlineStatus != nil && h.config.RedisRepository.OnlineStatus.EnableAutoCleanup,
 			mathx.IfNotZero(h.config.RedisRepository.OnlineStatus.StatusRefreshInterval, 60*time.Second),
 			h.cleanupExpiredOnlineStatus).
 		// 添加消息记录清理定时器（如果启用了消息记录仓库）
-		IfTicker(h.messageRecordRepo != nil,
+		IfTicker(h.messageSink != nil,
 			mathx.IfNotZero(h.config.RecordCleanupInterval, 30*time.Minute),
 			h.cleanupExpiredMessageRecords).
-		// ⏰ 跨节点投递 ACK 超时兜底（崩溃安全网）：主路径由 ack_timer.go 的 per-message 时间轮接管，
+		// ⏰ 跨节点投递 ACK 超时兜底（崩溃安全网）：主路径由 messaging 域 per-message 时间轮接管，
 		// 此低频扫描仅恢复发送节点宕机导致 in-memory timer 丢失、永久停留 sending 的记录
-		// （PubSub 至多一次投递：目标节点订阅失活/消息丢失时状态会永远停留 sending，见 node_ack_timeout.go）
-		IfTicker(h.messageRecordRepo != nil && h.pubsub != nil,
+		// （PubSub 至多一次投递：目标节点订阅失活/消息丢失时状态会永远停留 sending，
+		// 见 messaging/node_ack_timeout.go）
+		IfTicker(h.messageSink != nil && h.pubsub != nil,
 			nodeAckFallbackScanInterval,
-			h.timeoutStaleSendingRecords).
+			h.messagingMgr.ScanNodeAckTimeouts).
 		// Panic处理：捕获事件处理过程中的panic，防止整个Hub崩溃
 		OnPanic(func(r interface{}) {
 			h.logger.ErrorKV("Hub事件循环panic", "panic", r, "stack", string(debug.Stack()), "node_id", h.nodeID)
@@ -249,7 +263,7 @@ func (h *Hub) reportPerformanceMetrics() {
 		"broadcasts_sent", stats.BroadcastsSent,
 		"uptime_seconds", stats.Uptime,
 		// 本周期 routeToClusterForOfflineUser 触发次数，治本后应趋近 0
-		"broadcast_fallback_count", h.broadcastFallbackCount.Swap(0),
+		"broadcast_fallback_count", h.messagingMgr.SwapBroadcastFallbackCount(),
 	)
 }
 
@@ -257,10 +271,10 @@ func (h *Hub) reportPerformanceMetrics() {
 // 替代每次心跳创建独立 goroutine 的模式，大幅减少 goroutine 创建/GC 压力
 //
 // 关键设计：投递 *Client，flush 时分块并行调用 RenewClientsOnline 轻量续期
-// （EXPIRE client:<id> + ZADD user_clients/node_clients/all_users/type 刷新 score + SETBIT 续期，
-// 跳过 JSON 序列化/压缩/SETEX 全量重写）。client:<id> 键已过期或被淘汰的客户端
-// 由 repo 内部检测后走全量重建，保留自愈语义——即使 Redis 键丢失，
-// 心跳仍能重建索引，避免「用户实际在线但查询为离线」、跨节点路由 GetUserNodes 返回空的问题
+// （EXPIRE client:<id> + 索引刷新，跳过 JSON 序列化/压缩/SETEX 全量重写）。
+// client:<id> 键已过期或被淘汰的客户端由 repo 内部检测后走全量重建，保留自愈语义
+// ——即使 Redis 键丢失，心跳仍能重建索引，避免「用户实际在线但查询为离线」、
+// 跨节点路由 GetUserNodes 返回空的问题
 //
 // 断开竞态保护：removeClientUnsafe 中 closeClientChannel(MarkClosed) 先于
 // removeOnlineStatusFromRedis(SetClientOffline) 执行，故 flush 时用 IsClosed()
@@ -270,11 +284,11 @@ func (h *Hub) processHeartbeatRedisUpdates() {
 	defer h.wg.Done()
 
 	// 按 clientID 去重收集客户端（同一客户端多次心跳只保留最新指针）
-	batch := make(map[string]*Client, 256)
+	batch := make(map[string]*models.Client, 256)
 	// 心跳批量续期在线索引的 flush 间隔：从 OnlineStatus.HeartbeatRefreshInterval 读取（默认 2s）
 	// 可配置以应对不同负载场景（高并发可调小到 500ms 缩短索引续期窗口；该间隔仅影响续期与
-	// 键缺失时的自愈重建，首次注册的索引写入由 handleRegister 的 syncOnlineStatus 同步完成，
-	// 不依赖此 ticker）
+	// 键缺失时的自愈重建，首次注册的索引写入由 handleRegister 提交到记录池的
+	// statsMgr.SyncOnlineStatus 异步完成，不依赖此 ticker）
 	heartbeatRefreshInterval := 2 * time.Second
 	if h.config != nil && h.config.RedisRepository != nil && h.config.RedisRepository.OnlineStatus != nil {
 		heartbeatRefreshInterval = mathx.IfNotZero(h.config.RedisRepository.OnlineStatus.HeartbeatRefreshInterval, 2*time.Second)
@@ -288,7 +302,7 @@ func (h *Hub) processHeartbeatRedisUpdates() {
 		}
 
 		// 过滤已断开客户端，避免为其重建在线索引（断开竞态保护）
-		liveClients := make([]*Client, 0, len(batch))
+		liveClients := make([]*models.Client, 0, len(batch))
 		for clientID, client := range batch {
 			delete(batch, clientID)
 			if client != nil && !client.IsClosed() {
@@ -319,7 +333,7 @@ func (h *Hub) processHeartbeatRedisUpdates() {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
 
-				// 轻量续期：跳过 JSON 序列化/压缩/SETEX，仅刷新 TTL 与 ZSET score；
+				// 轻量续期：跳过 JSON 序列化/压缩/SETEX，仅刷新 TTL 与索引；
 				// client:<id> 键缺失的由 repo 内部走全量重建（保留原自愈语义）
 				if err := h.onlineStatusRepo.RenewClientsOnline(ctx, chunk); err != nil {
 					h.logger.DebugKV("心跳续期 Redis 在线状态失败",
@@ -352,14 +366,15 @@ func (h *Hub) processHeartbeatRedisUpdates() {
 
 // flushStatsCounters 将原子计数器累积的统计刷写到 Redis
 // 替代每次消息/广播创建 goroutine 更新 Redis 的模式
+// （计数器归 messaging 域，经 Swap 系列方法取出并清零）
 func (h *Hub) flushStatsCounters() {
 	if h.statsRepo == nil {
 		return
 	}
 
 	// 原子读取并重置
-	msgs := h.msgSentCount.Swap(0)
-	bcasts := h.broadcastSentCount.Swap(0)
+	msgs := h.messagingMgr.SwapMessageSentCount()
+	bcasts := h.messagingMgr.SwapBroadcastSentCount()
 
 	if msgs > 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -383,13 +398,9 @@ func (h *Hub) FlushStats() {
 	h.flushStatsCounters()
 }
 
-// cleanupExpiredAck 清理过期的ACK消息
+// cleanupExpiredAck 清理过期的ACK消息（经 messaging 域管理器触发，未注入 ACK 管理器时 no-op）
 func (h *Hub) cleanupExpiredAck() {
-	if h.ackManager == nil {
-		return
-	}
-
-	cleaned := h.ackManager.CleanupExpired()
+	cleaned := h.messagingMgr.CleanupExpiredAcks()
 	if cleaned > 0 {
 		h.logger.InfoKV("清理过期ACK消息",
 			"count", cleaned,
@@ -400,14 +411,14 @@ func (h *Hub) cleanupExpiredAck() {
 
 // cleanupExpiredMessageRecords 清理过期的消息记录
 func (h *Hub) cleanupExpiredMessageRecords() {
-	if h.messageRecordRepo == nil {
+	if h.messageSink == nil {
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	deletedCount, err := h.messageRecordRepo.DeleteExpired(ctx)
+	deletedCount, err := h.messageSink.DeleteExpired(ctx)
 	if err != nil {
 		h.logger.WarnKV("清理过期消息记录失败",
 			"error", err,
@@ -436,8 +447,17 @@ func (h *Hub) WaitForStartWithTimeout(timeout time.Duration) error {
 	case <-h.startCh:
 		return nil
 	case <-time.After(timeout):
-		return ErrHubStartupTimeout
+		return models.ErrHubStartupTimeout
 	}
+}
+
+// Wait 等待所有显式登记进 h.wg 的后台 goroutine 退出（SafeShutdown 完成后返回）
+// 当前登记项：Run 事件循环、心跳 Redis worker（processHeartbeatRedisUpdates）、
+// 注册/注销异步任务（Register/Unregister 的 go 协程）
+// 注意：syncx.Go 启动的订阅/drain/扫描协程未绑定 h.wg，依赖 h.ctx 取消退出；
+// 消息域读写泵由 messaging.Manager.Wait 单独等待（不同接收者，互不冲突）
+func (h *Hub) Wait() {
+	h.wg.Wait()
 }
 
 // SafeShutdown 安全关闭Hub，确保所有操作完成
@@ -457,6 +477,15 @@ func (h *Hub) SafeShutdown() error {
 	// 此时所有 wg 管理的 goroutine 已退出，不会再向 workerPool 提交任务，
 	// 可安全关闭 4 个子池（Message/Callback/Record/Distributed），避免 worker goroutine 泄漏
 	defer h.workerPool.Stop()
+
+	// 关闭 PubSub（等待全部 goroutine 退出后释放底层 Redis 连接）
+	defer func() {
+		if h.pubsub != nil {
+			if err := h.pubsub.Close(); err != nil {
+				h.logger.WarnKV("关闭 PubSub 失败", "error", err, "node_id", h.nodeID)
+			}
+		}
+	}()
 
 	shutdownStart := time.Now()
 
@@ -487,10 +516,7 @@ func (h *Hub) SafeShutdown() error {
 		h.observerBatcher.Stop()
 	}
 
-	// 停止跨节点分发批量处理器，flush 剩余分发
-	if h.clusterBatcher != nil {
-		h.clusterBatcher.Stop()
-	}
+	// （旧 clusterBatcher 已随跨节点分发域化移除：gRPC 直连 + PubSub 定向发布，无批量处理器）
 
 	// 停止准入闸门水位评估循环（写泵/投递埋点为 atomic add，无需 flush）
 	if gate := h.admission.Load(); gate != nil {
@@ -558,6 +584,8 @@ func (h *Hub) SafeShutdown() error {
 		}).
 		Exec(func() {
 			h.wg.Wait()
+			// 消息域读写泵（messaging.Manager 自持 wg）：连接已全部关闭、ctx 已取消，泵随之退出
+			h.messagingMgr.Wait()
 			close(done)
 		})
 
@@ -600,7 +628,7 @@ func (h *Hub) SafeShutdown() error {
 			"timeout", calculatedTimeout.String(),
 			"shutdown_duration_ms", time.Since(shutdownStart).Milliseconds(),
 		)
-		return ErrHubShutdownTimeout
+		return models.ErrHubShutdownTimeout
 	}
 }
 
@@ -629,17 +657,17 @@ func (h *Hub) cleanupExpiredOnlineStatus() {
 }
 
 // shutdownAllClientsParallel 并行关闭所有客户端连接
-func (h *Hub) shutdownAllClientsParallel(clients []*Client) {
+func (h *Hub) shutdownAllClientsParallel(clients []*models.Client) {
 	if len(clients) == 0 {
 		return
 	}
-	syncx.ParallelForEachSlice(clients, func(i int, client *Client) {
+	syncx.ParallelForEachSlice(clients, func(i int, client *models.Client) {
 		h.removeClientUnsafe(client)
 	})
 }
 
 // batchCleanupOnShutdown 批量清理 Redis 在线状态和 DB 连接记录
-func (h *Hub) batchCleanupOnShutdown(clients []*Client) {
+func (h *Hub) batchCleanupOnShutdown(clients []*models.Client) {
 	if len(clients) == 0 {
 		return
 	}
@@ -655,7 +683,7 @@ func (h *Hub) batchCleanupOnShutdown(clients []*Client) {
 
 	// 批量清理 Redis 在线状态
 	if h.onlineStatusRepo != nil {
-		syncx.ParallelForEachSlice(clients, func(i int, client *Client) {
+		syncx.ParallelForEachSlice(clients, func(i int, client *models.Client) {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			if err := h.onlineStatusRepo.SetClientOffline(ctx, client); err != nil {
@@ -669,11 +697,11 @@ func (h *Hub) batchCleanupOnShutdown(clients []*Client) {
 	}
 
 	// 批量更新连接记录为断开
-	if h.connectionRecordRepo != nil {
-		syncx.ParallelForEachSlice(clients, func(i int, client *Client) {
+	if h.connectionStore != nil {
+		syncx.ParallelForEachSlice(clients, func(i int, client *models.Client) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if err := h.connectionRecordRepo.MarkDisconnected(ctx, client.ID, DisconnectReasonServerShutdown, 1001); err != nil {
+			if err := h.connectionStore.MarkDisconnected(ctx, client.ID, models.DisconnectReasonServerShutdown, 1001); err != nil {
 				h.logger.DebugContextKV(client.Context, "shutdown: 更新连接断开记录失败",
 					"client_id", client.ID,
 					"user_id", client.UserID,
@@ -684,11 +712,11 @@ func (h *Hub) batchCleanupOnShutdown(clients []*Client) {
 	}
 
 	// 批量质量终评（读 connect.duration 算 FinalScore 写 quality_score）
-	if h.connectionQualityRepo != nil {
-		syncx.ParallelForEachSlice(clients, func(i int, client *Client) {
+	if h.connectionQualityStore != nil {
+		syncx.ParallelForEachSlice(clients, func(i int, client *models.Client) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if err := h.connectionQualityRepo.FinalizeOnDisconnect(ctx, client.ID); err != nil {
+			if err := h.connectionQualityStore.FinalizeOnDisconnect(ctx, client.ID); err != nil {
 				h.logger.DebugContextKV(client.Context, "shutdown: 质量终评失败",
 					"client_id", client.ID,
 					"user_id", client.UserID,
@@ -699,4 +727,124 @@ func (h *Hub) batchCleanupOnShutdown(clients []*Client) {
 	}
 
 	h.logger.InfoKV("shutdown: 批量清理完成", "client_count", len(clients))
+}
+
+// ============================================================================
+// 高频合并器 drain（合并器本体在 overload 域，节拍与投递归编排层）
+// ============================================================================
+
+// startCoalescerDrain 启动合并器 drain ticker（Run 时调用，ctx 结束自动退出）
+//
+// 周期：每 50ms Drain 一次 latest-wins 快照，逐条按 Receiver 走 P2P 投递
+// （TrySend：满则高频语义丢弃——最新值本就只需送达一次）
+func (h *Hub) startCoalescerDrain() {
+	syncx.Go(h.ctx).
+		OnPanic(func(r any) {
+			h.logger.ErrorKV("合并器 drain panic", "panic", r, "stack", string(debug.Stack()), "node_id", h.nodeID)
+		}).
+		Exec(func() {
+			ticker := time.NewTicker(coalescerDrainInterval)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-h.ctx.Done():
+					return
+				case <-ticker.C:
+					// atomic load：热替换后的新合并器实例即刻生效（nil 时本轮跳过）
+					c := h.ephemeralCoalescer.Load()
+					if c == nil {
+						continue
+					}
+					batch := c.Drain()
+					for _, msg := range batch {
+						h.deliverCoalesced(msg)
+					}
+				}
+			}
+		})
+}
+
+// deliverCoalesced 投递一条合并后的高频消息（按 Receiver 查找在线客户端）
+func (h *Hub) deliverCoalesced(msg *models.HubMessage) {
+	if msg == nil || msg.Receiver == "" {
+		return
+	}
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		h.logger.ErrorContextKV(h.ctx, "高频合并消息序列化失败",
+			"message_id", msg.MessageID,
+			"error", err,
+		)
+		return
+	}
+
+	h.shardedRegistry.ForEachUserClientFiltered(msg.Receiver, msg.AppID, msg.Namespace, msg.GroupIDs, func(_ string, client *models.Client) bool {
+		if client.IsClosed() {
+			return true
+		}
+		if client.ConnectionType == models.ConnectionTypeSSE {
+			client.TrySendSSE(msg)
+		} else {
+			// 高频语义：满即弃（下一条同 key 消息自然覆盖；无需转离线）
+			if client.TrySend(data) {
+				if gate := h.admission.Load(); gate != nil {
+					gate.OnDelivered()
+				}
+			}
+		}
+		return true
+	})
+}
+
+// ============================================================================
+// 慢消费者扫描（治理逻辑已域化至 connection.SlowConsumerScanner）
+// ============================================================================
+
+// startSlowConsumerScanner 启动慢消费者扫描器（Run 时调用）
+//
+// 周期 = 准入评估周期 × 2（与水位评估同源节拍，避免扫描与评估完全同步造成的
+// 周期性毛刺）；三级递进治理（记录 → 告警 → 驱逐）在 connection 域内实现，
+// 驱逐动作经 EvictHook 回调本文件 OnSlowConsumerEvicted 落地
+func (h *Hub) startSlowConsumerScanner() {
+	// atomic load：与 SetOverloadPolicy 热替换并发安全（nil 时用默认节拍）
+	interval := time.Second
+	if gate := h.admission.Load(); gate != nil && gate.EvalInterval() > 0 {
+		interval = 2 * gate.EvalInterval()
+	}
+	scanner := connection.NewSlowConsumerScanner(h.shardedRegistry, h, interval, h.logger)
+	syncx.Go(h.ctx).
+		OnPanic(func(r any) {
+			h.logger.ErrorKV("慢消费者扫描器 panic", "panic", r, "stack", string(debug.Stack()), "node_id", h.nodeID)
+		}).
+		Exec(func() {
+			scanner.Start(h.ctx)
+		})
+}
+
+// OnSlowConsumerEvicted 实现 connection.EvictHook：慢消费者驱逐动作
+//
+// 扫描器已完成消息保全（SendChan 残留移交 ACK 超时链路兜底）与告警日志，
+// 此处只做编排层三件事：
+//  1. 过载漏斗埋点（slow_evict）
+//  2. KickOut 控制消息通知客户端驱逐理由（控制通道独立 lane，不被业务洪峰淹没）
+//  3. Unregister 断链（断链不丢消息）
+func (h *Hub) OnSlowConsumerEvicted(client *models.Client, _ int, ratio float64) {
+	h.overloadMetrics.RecordSlowEvict()
+
+	kickMsg := models.NewHubMessage().
+		SetMessageType(models.MessageTypeKickOut).
+		SetSender("system").
+		SetSenderType(models.UserTypeSystem).
+		SetReceiver(client.UserID).
+		SetReceiverType(client.UserType).
+		SetContent("slow consumer evicted").
+		WithContentExtra("reason", "backlog_ratio").
+		WithContentExtra("backlog_ratio", ratio)
+
+	connection.NewControlLane(h.logger).SendControlMessage(client, kickMsg)
+
+	// Unregister（KickOut 控制通道满时 ControlLane 内部已降级直接断链）
+	h.Unregister(client)
 }

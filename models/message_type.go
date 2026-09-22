@@ -34,7 +34,7 @@ const (
 	MessageTypeMarkdown             MessageType = "markdown"               // Markdown格式消息
 	MessageTypeRichText             MessageType = "rich_text"              // 富文本消息
 	MessageTypeCode                 MessageType = "code"                   // 代码消息
-	MessageTypeJson                 MessageType = "json"                   // JSON数据消息
+	MessageTypeJSON                 MessageType = "json"                   // JSON数据消息
 	MessageTypeXML                  MessageType = "xml"                    // XML数据消息
 	MessageTypeBinary               MessageType = "binary"                 // 二进制数据消息
 	MessageTypeVoice                MessageType = "voice"                  // 语音消息
@@ -135,7 +135,7 @@ func (t MessageType) IsValid() bool {
 		MessageTypeSystem, MessageTypeNotice, MessageTypeEvent, MessageTypeAck, MessageTypeLocation,
 		MessageTypeCard, MessageTypeEmoji, MessageTypeSticker, MessageTypeLink, MessageTypeQuote,
 		MessageTypeForward, MessageTypeCommand, MessageTypeMarkdown, MessageTypeRichText, MessageTypeCode,
-		MessageTypeJson, MessageTypeXML, MessageTypeBinary, MessageTypeVoice, MessageTypeGIF,
+		MessageTypeJSON, MessageTypeXML, MessageTypeBinary, MessageTypeVoice, MessageTypeGIF,
 		MessageTypeDocument, MessageTypeSpreadsheet, MessageTypePresentation, MessageTypeContact,
 		MessageTypeCalendar, MessageTypeTask, MessageTypePoll, MessageTypeForm, MessageTypePayment,
 		MessageTypeOrder, MessageTypeProduct, MessageTypeInvite, MessageTypeAnnouncement, MessageTypeAlert,
@@ -490,7 +490,7 @@ func (t MessageType) GetDefaultPriority() MessagePriority {
 	case t == MessageTypeTyping || t == MessageTypeRead || t == MessageTypeDelivered ||
 		t == MessageTypeAck || t == MessageTypeHeartbeat || t == MessageTypePing ||
 		t == MessageTypePong || t == MessageTypeInfo || t == MessageTypeEdit ||
-		t == MessageTypeReaction || t == MessageTypeJson || t == MessageTypeXML ||
+		t == MessageTypeReaction || t == MessageTypeJSON || t == MessageTypeXML ||
 		t == MessageTypeBinary || t == MessageTypeSpreadsheet || t == MessageTypePresentation ||
 		t == MessageTypeCustom || t == MessageTypeCommand:
 		return MessagePriorityLow
@@ -508,7 +508,7 @@ func GetAllMessageTypes() []MessageType {
 		MessageTypeSystem, MessageTypeNotice, MessageTypeEvent, MessageTypeAck, MessageTypeLocation,
 		MessageTypeCard, MessageTypeEmoji, MessageTypeSticker, MessageTypeLink, MessageTypeQuote,
 		MessageTypeForward, MessageTypeCommand, MessageTypeMarkdown, MessageTypeRichText, MessageTypeCode,
-		MessageTypeJson, MessageTypeXML, MessageTypeBinary, MessageTypeVoice, MessageTypeGIF,
+		MessageTypeJSON, MessageTypeXML, MessageTypeBinary, MessageTypeVoice, MessageTypeGIF,
 		MessageTypeDocument, MessageTypeSpreadsheet, MessageTypePresentation, MessageTypeContact,
 		MessageTypeCalendar, MessageTypeTask, MessageTypePoll, MessageTypeForm, MessageTypePayment,
 		MessageTypeOrder, MessageTypeProduct, MessageTypeInvite, MessageTypeAnnouncement, MessageTypeAlert,

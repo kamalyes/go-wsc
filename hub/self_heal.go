@@ -32,6 +32,7 @@ import (
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
+	"github.com/kamalyes/go-wsc/cluster"
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/routing"
 )
@@ -123,7 +124,10 @@ func (h *Hub) markRerouteRejected(messageID, rejectedNode string) *rerouteGuardE
 	return entry
 }
 
-// sweepRerouteGuard 周期清扫过期的守卫条目（防内存泄漏；正常路径由 ACK 终态删除）
+// sweepRerouteGuard 周期清扫过期的守卫条目（防内存泄漏）
+// P2P 定向路由创建的条目由 ACK 超时回调无条件终态删除（见 messaging/ack_timer.go）；
+// 广播兜底路径（send.go doOfflineBroadcast）创建的条目无 ACK 记录、无终态删除路径，
+// 只能靠本清扫回收
 func (h *Hub) sweepRerouteGuard() {
 	now := time.Now()
 	h.rerouteGuard.Range(func(key, value any) bool {
@@ -154,7 +158,7 @@ func (h *Hub) sweepRerouteGuard() {
 //  2. 重查在线索引：出现"从未尝试过的新节点"（用户已迁移）→ 定向重路由补投
 //  3. 所有已尝试节点均回告不存在（用户真实离线/索引死条目）→ P2P 路径立即转离线，
 //     不再干等 30s ACK 超时；广播兜底路径离线已预存，仅静默结束防重复
-func (h *Hub) handleDistributedUserNotFound(ctx context.Context, distMsg *DistributedMessage) error {
+func (h *Hub) handleDistributedUserNotFound(ctx context.Context, distMsg *models.DistributedMessage) error {
 	if distMsg.Message == nil {
 		return fmt.Errorf("user_not_found 回告缺少原始消息体")
 	}
@@ -183,7 +187,7 @@ func (h *Hub) handleDistributedUserNotFound(ctx context.Context, distMsg *Distri
 //
 // missNode = 明确声称"用户不在该节点"的节点 ID；appID/namespace 为按投递信封归一化后的查询维度
 // 返回 true 表示已向新节点定向补投（调用方应跳过广播兜底，防同一消息重复投递）
-func (h *Hub) decideUserNotFoundReroute(ctx context.Context, msg *HubMessage, userID, missNode, appID, namespace string) bool {
+func (h *Hub) decideUserNotFoundReroute(ctx context.Context, msg *models.HubMessage, userID, missNode, appID, namespace string) bool {
 	if h.onlineStatusRepo == nil {
 		return false
 	}
@@ -244,8 +248,8 @@ func (h *Hub) decideUserNotFoundReroute(ctx context.Context, msg *HubMessage, us
 			"reroute_nodes", candidates,
 			"from_node", missNode,
 		)
-		opts := ClusterDispatchOptions{
-			Operation:     OperationTypeSendMessage,
+		opts := cluster.ClusterDispatchOptions{
+			Operation:     models.OperationTypeSendMessage,
 			TargetNodeIDs: candidates,
 			TargetUserID:  userID,
 		}
@@ -263,14 +267,14 @@ func (h *Hub) decideUserNotFoundReroute(ctx context.Context, msg *HubMessage, us
 	}
 
 	// 4b. 无新节点可路由：所有已尝试节点均回告不存在 + P2P 路径（离线未预存）→ 立即转离线
-	// 复用 tryStoreOfflineOnDeliveryFailure：含离线源防循环、状态覆盖 UserOffline、ACK 超时任务取消
+	// 复用 messaging 域 StoreOfflineOnDeliveryFailure：含离线源防循环、状态覆盖 UserOffline、ACK 超时任务取消
 	if allRejected && p2p {
 		h.logger.WarnContextKV(ctx, "所有定向节点均回告用户不存在，立即转离线",
 			"message_id", msg.MessageID,
 			"user_id", userID,
 			"rejected_nodes", missNode,
 		)
-		h.tryStoreOfflineOnDeliveryFailure(msg, errUserNotFoundAllRejected, false)
+		h.messagingMgr.StoreOfflineOnDeliveryFailure(msg, errUserNotFoundAllRejected)
 		// 终态清理守卫条目
 		h.rerouteGuard.Delete(msg.MessageID)
 	}
@@ -284,13 +288,13 @@ func (h *Hub) decideUserNotFoundReroute(ctx context.Context, msg *HubMessage, us
 // replyUserNotFound 回告发送节点：用户不在本节点（索引死条目自愈信号）
 // 发送方收到后秒级重查索引重路由/转离线，不再干等 30s ACK 超时
 // 仅 PubSub 定向投递路径需要回告（gRPC 路径的响应体已即时携带 Success=false）
-func (h *Hub) replyUserNotFound(ctx context.Context, distMsg *DistributedMessage) {
+func (h *Hub) replyUserNotFound(ctx context.Context, distMsg *models.DistributedMessage) {
 	if h.pubsub == nil || distMsg.NodeID == "" || distMsg.NodeID == h.nodeID {
 		// gRPC-only 集群无法经 PubSub 回告：gRPC 响应体已即时告知发送方，无需回告
 		return
 	}
-	reply := &DistributedMessage{
-		Type:      OperationTypeUserNotFound,
+	reply := &models.DistributedMessage{
+		Type:      models.OperationTypeUserNotFound,
 		NodeID:    h.nodeID,
 		TargetID:  distMsg.TargetID,
 		Message:   distMsg.Message,
@@ -302,8 +306,13 @@ func (h *Hub) replyUserNotFound(ctx context.Context, distMsg *DistributedMessage
 	reply.InjectContext(ctx)
 	// deadNodes 忽略：回告丢失仅退化为 30s ACK 超时兜底（publishToTargetedNodes 已打 Warn 日志）
 	if _, err := h.publishToTargetedNodes(ctx, reply, []string{distMsg.NodeID}); err != nil {
+		// models.DistributedMessage 已无 LogMessageID 辅助方法，内联判空提取消息 ID
+		var replyMsgID string
+		if distMsg.Message != nil {
+			replyMsgID = distMsg.Message.MessageID
+		}
 		h.logger.WarnContextKV(ctx, "user_not_found 回告发布失败",
-			"message_id", distMsg.LogMessageID(),
+			"message_id", replyMsgID,
 			"user_id", distMsg.TargetID,
 			"from_node", distMsg.NodeID,
 			"error", err,
@@ -358,7 +367,7 @@ func (h *Hub) doSelfHealDeadIndexEntries(ctx context.Context, userID, appID, nam
 	}
 
 	// 仅清理指向本节点的条目（他节点条目不动，防误删活跃连接索引）
-	deadClients := make([]*Client, 0, len(clients))
+	deadClients := make([]*models.Client, 0, len(clients))
 	for _, c := range clients {
 		if c != nil && c.NodeID == h.nodeID {
 			deadClients = append(deadClients, c)
@@ -391,7 +400,7 @@ func (h *Hub) doSelfHealDeadIndexEntries(ctx context.Context, userID, appID, nam
 // detectClientMigration 检测同 clientID 跨节点迁移（必须在 syncOnlineStatus 覆写 owner key 之前调用）
 // 返回旧归属节点 ID（空串表示无迁移）；断线重连漂移到本节点时，旧节点可能残留幽灵连接，
 // 消息按索引路由到旧节点会扑空 → 需通知旧节点回收
-func (h *Hub) detectClientMigration(ctx context.Context, client *Client) string {
+func (h *Hub) detectClientMigration(ctx context.Context, client *models.Client) string {
 	if client == nil || client.ID == "" || h.onlineStatusRepo == nil {
 		return ""
 	}
@@ -413,7 +422,7 @@ func (h *Hub) detectClientMigration(ctx context.Context, client *Client) string 
 
 // notifyClientReclaim 通知旧节点回收幽灵连接（须在 syncOnlineStatus 写入本节点 owner 之后调用：
 // 此时旧节点收到回收后的清理受 Lua 归属校验保护，owner 已是本节点，仅清自身集合不动共享索引）
-func (h *Hub) notifyClientReclaim(ctx context.Context, client *Client, ownerNode string) {
+func (h *Hub) notifyClientReclaim(ctx context.Context, client *models.Client, ownerNode string) {
 	if h.pubsub == nil || client == nil || ownerNode == "" || ownerNode == h.nodeID {
 		return
 	}
@@ -424,8 +433,8 @@ func (h *Hub) notifyClientReclaim(ctx context.Context, client *Client, ownerNode
 		"new_node", h.nodeID,
 		"connected_at", client.ConnectedAt,
 	)
-	dispatch := &DistributedMessage{
-		Type:      OperationTypeClientReclaim,
+	dispatch := &models.DistributedMessage{
+		Type:      models.OperationTypeClientReclaim,
 		NodeID:    h.nodeID,
 		TargetID:  client.ID,
 		Timestamp: client.ConnectedAt, // 新连接建立时间，旧节点据此判定本地连接是否为幽灵
@@ -446,7 +455,7 @@ func (h *Hub) notifyClientReclaim(ctx context.Context, client *Client, ownerNode
 
 // handleDistributedClientReclaim 旧节点回收同 clientID 幽灵连接（断线重连跨节点迁移）
 // distMsg.TargetID = clientID，distMsg.Timestamp = 新节点连接建立时间
-func (h *Hub) handleDistributedClientReclaim(ctx context.Context, distMsg *DistributedMessage) error {
+func (h *Hub) handleDistributedClientReclaim(ctx context.Context, distMsg *models.DistributedMessage) error {
 	clientID := distMsg.TargetID
 	if clientID == "" {
 		return nil
@@ -476,6 +485,6 @@ func (h *Hub) handleDistributedClientReclaim(ctx context.Context, distMsg *Distr
 	)
 	// kick 内部 Unregister → SetClientOffline 受 Lua 归属校验保护：
 	// owner 已是新节点，仅清本节点集合，不动新节点已接管的共享索引
-	h.kickClientWithNotification(client, DisconnectReasonKickOut, "连接已迁移到新节点，本地连接已回收")
+	h.kickClientWithNotification(client, models.DisconnectReasonKickOut, "连接已迁移到新节点，本地连接已回收")
 	return nil
 }

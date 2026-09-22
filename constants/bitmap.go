@@ -4,13 +4,13 @@
  * @LastEditors: kamalyes 501893067@qq.com
  * @LastEditTime: 2026-08-23 00:00:00
  * @FilePath: \go-wsc\constants\bitmap.go
- * @Description: Bitmap 分层常量（用户在线状态快速判否层）
+ * @Description: Bitmap 分层常量（用户在线状态判定层，位即真相）
  *
- * L0 Bitmap 判否层(SETBIT/GETBIT) + L1 uid→offset 映射 + L2 ZSET 详情层
+ * L0 Bitmap 判定层(SETBIT/GETBIT) + L1 uid→offset 映射，位即真相，无 ZSET 兜底
  * GlobalBitmapNS 为全局广播 bitmap 的 ns 段，与 DefaultNamespace 区分
  *
  * 热点 key 分桶：uid_map/all_users/type 按 hash(userID)%256 分桶，
- * 消除亿级用户下单 key 写热点（详见 repository 的 keyBucket）
+ * 消除亿级用户下单 key 写热点（详见 adapter/redis 的 keyBucket）
  *
  * Copyright (c) 2026 by kamalyes, All Rights Reserved.
  */

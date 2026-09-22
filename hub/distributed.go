@@ -8,10 +8,10 @@
  *
  * 本文件职责单一：订阅跨节点消息并分发到本地处理函数
  * 跨节点路由（gRPC 直连 + PubSub 兜底）统一由 cluster_dispatch.go::routeToCluster 处理，
- * 节点注册与发现由 node_registry.go::NodeRegistry 负责，
+ * 节点注册与发现由 cluster 包 NodeRegistry 负责，
  * 消除了历史上分散在此的 RegisterNode/DiscoverNodes/broadcastToAllNodes 等重复实现
  *
- * Copyright (c) 2025 by kamalyes, All Rights Reserved.
+ * Copyright (c) 2026 by kamalyes, All Rights Reserved.
  */
 
 package hub
@@ -26,6 +26,8 @@ import (
 	"github.com/kamalyes/go-toolbox/pkg/json"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
+	"github.com/kamalyes/go-wsc/cluster"
+	"github.com/kamalyes/go-wsc/models"
 	pb "github.com/kamalyes/go-wsc/models/pb"
 	"github.com/kamalyes/go-wsc/routing"
 )
@@ -42,7 +44,7 @@ import (
 // 返回: (是否在其他节点, 实际投递的目标节点列表, 错误)
 //   - routed=true:  消息已路由到 targetNodes，调用方无需本地发送
 //   - routed=false: 用户在本节点或离线，调用方应本地发送（targetNodes 为空）
-func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMessage) (bool, []string, error) {
+func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *models.HubMessage) (bool, []string, error) {
 	// 单机模式：无 PubSub 且无 gRPC，不跨节点
 	if h.pubsub == nil && !h.IsGRPCEnabled() {
 		return false, nil, nil
@@ -113,8 +115,8 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMe
 	h.markRerouteAttempted(msg.MessageID, otherNodes, true)
 
 	// 4. 统一跨节点路由：gRPC 直连优先，PubSub 兜底（由 routeToCluster 集中决策）
-	opts := ClusterDispatchOptions{
-		Operation:     OperationTypeSendMessage,
+	opts := cluster.ClusterDispatchOptions{
+		Operation:     models.OperationTypeSendMessage,
 		Namespace:     "",         // namespace 由 routeToCluster 从 msg 信封提取（msg.Namespace），此处留空不覆盖
 		TargetNodeID:  "",         // 不再依赖单节点精确路由（老路径：nodeRegistry 自动发现，gRPC 未启用时会落空）
 		TargetNodeIDs: otherNodes, // 已知目标节点列表，传给 routeToCluster：gRPC 未启用时优先定向 PubSub 而非广播频道
@@ -134,7 +136,7 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *HubMe
 // unmarshalDistributedMessage 反序列化分布式消息
 // 优先使用 protobuf（高性能、低体积），失败时降级到 JSON（兼容旧节点）
 // 三处订阅回调（节点消息/广播/观察者）共用此方法，避免逻辑重复
-func (h *Hub) unmarshalDistributedMessage(ctx context.Context, data []byte) (*DistributedMessage, error) {
+func (h *Hub) unmarshalDistributedMessage(ctx context.Context, data []byte) (*models.DistributedMessage, error) {
 	// 🚀 优先尝试 protobuf 反序列化
 	distMsg, pErr := pb.UnmarshalDistributedMessage(data)
 	if pErr == nil {
@@ -142,7 +144,7 @@ func (h *Hub) unmarshalDistributedMessage(ctx context.Context, data []byte) (*Di
 	}
 
 	// 降级到 JSON（兼容旧节点或非 protobuf 消息）
-	var jsonMsg DistributedMessage
+	var jsonMsg models.DistributedMessage
 	if jErr := json.Unmarshal(data, &jsonMsg); jErr != nil {
 		// 消息体损坏无法提取信封 trace，使用订阅回调的 subCtx（含订阅链路 trace）
 		h.logger.ErrorContextKV(ctx, "解析分布式消息失败",
@@ -156,7 +158,7 @@ func (h *Hub) unmarshalDistributedMessage(ctx context.Context, data []byte) (*Di
 
 // marshalDistributedMessage 序列化分布式消息
 // 优先使用 protobuf（高性能、低体积），失败时降级到 JSON
-func (h *Hub) marshalDistributedMessage(ctx context.Context, distMsg *DistributedMessage) []byte {
+func (h *Hub) marshalDistributedMessage(ctx context.Context, distMsg *models.DistributedMessage) []byte {
 	// 🚀 使用 protobuf 序列化（高性能、低体积）
 	data, mErr := pb.MarshalDistributedMessage(distMsg)
 	if mErr == nil {
@@ -179,7 +181,7 @@ func (h *Hub) marshalDistributedMessage(ctx context.Context, distMsg *Distribute
 // SubscribeNodeMessages 订阅本节点的消息通道
 func (h *Hub) SubscribeNodeMessages(ctx context.Context) error {
 	if h.pubsub == nil {
-		return ErrPubSubNotSet
+		return models.ErrPubSubNotSet
 	}
 
 	channel := h.config.RedisRepository.PubSub.GetNodeChannelPrefix() + h.nodeID
@@ -225,7 +227,7 @@ func (h *Hub) SubscribeNodeMessages(ctx context.Context) error {
 }
 
 // handleDistributedMessage 处理从其他节点转发来的消息（广播/观察者频道入口，非定向投递）
-func (h *Hub) handleDistributedMessage(ctx context.Context, distMsg *DistributedMessage) error {
+func (h *Hub) handleDistributedMessage(ctx context.Context, distMsg *models.DistributedMessage) error {
 	return h.handleDistributedMessageTargeted(ctx, distMsg, false)
 }
 
@@ -233,7 +235,7 @@ func (h *Hub) handleDistributedMessage(ctx context.Context, distMsg *Distributed
 // targeted=true 表示消息经节点专属频道定向投递到本节点（P2P 跨节点路由主路径），
 // 此时"用户不在本节点"属于索引死条目，需触发自愈与回告（见 handleDistributedSendMessage）；
 // targeted=false 表示来自广播/观察者频道，未持有用户属正常预期，静默跳过
-func (h *Hub) handleDistributedMessageTargeted(ctx context.Context, distMsg *DistributedMessage, targeted bool) error {
+func (h *Hub) handleDistributedMessageTargeted(ctx context.Context, distMsg *models.DistributedMessage, targeted bool) error {
 	// 参数验证
 	if distMsg == nil {
 		return fmt.Errorf("distributed message is nil")
@@ -259,8 +261,8 @@ func (h *Hub) handleDistributedMessageTargeted(ctx context.Context, distMsg *Dis
 
 	// 🔏 路由信封同步：将 DistributedMessage 外层路由信封同步写入内层 HubMessage
 	// 兼容两类发送路径：
-	//   1. 新节点：HubMessage 自身信封已带路由（pb 序列化），此调用为幂等（已有不覆盖）
-	//   2. 旧节点/历史路径：仅 DistributedMessage 外层信封带路由，此处补齐 HubMessage 内部信封
+	//  1. 新节点：HubMessage 自身信封已带路由（pb 序列化），此调用为幂等（已有不覆盖）
+	//  2. 旧节点/历史路径：仅 DistributedMessage 外层信封带路由，此处补齐 HubMessage 内部信封
 	// 下游所有本地投递过滤（broadcastToUserIDs / broadcastToFiltered / handleBroadcast）统一从 msg 取路由
 	if distMsg.Message != nil {
 		distMsg.Message.ContextWithRoute(ctx, distMsg.AppID, distMsg.Namespace, distMsg.GroupIDs)
@@ -275,30 +277,30 @@ func (h *Hub) handleDistributedMessageTargeted(ctx context.Context, distMsg *Dis
 	)
 
 	switch distMsg.Type {
-	case OperationTypeSendMessage:
+	case models.OperationTypeSendMessage:
 		return h.handleDistributedSendMessage(ctx, distMsg, targeted)
 
-	case OperationTypeUserNotFound:
+	case models.OperationTypeUserNotFound:
 		// 定向回告：发送节点处理"目标节点声称用户不在"（重查索引/重路由/广播兜底）
 		return h.handleDistributedUserNotFound(ctx, distMsg)
 
-	case OperationTypeClientReclaim:
+	case models.OperationTypeClientReclaim:
 		// 旧节点回收同 clientID 幽灵连接（断线重连迁移到新节点）
 		return h.handleDistributedClientReclaim(ctx, distMsg)
 
-	case OperationTypeKickUser:
+	case models.OperationTypeKickUser:
 		return h.handleDistributedKickUser(ctx, distMsg)
 
-	case OperationTypeBroadcast:
+	case models.OperationTypeBroadcast:
 		return h.handleDistributedBroadcast(ctx, distMsg)
 
-	case OperationTypeGroupBroadcast, OperationTypeGroupsBroadcast:
+	case models.OperationTypeGroupBroadcast, models.OperationTypeGroupsBroadcast:
 		// 单群组（group_broadcast）与批量群组（groups_broadcast）统一走同一处理函数：
 		// handleDistributedGroupsBroadcast 接收 GroupIDs 列表，len==1 即单群组场景。
 		// 历史遗漏：switch 曾只有复数 case，单群组 PubSub 兜底消息会进 default 丢失。
 		return h.handleDistributedGroupsBroadcast(ctx, distMsg)
 
-	case OperationTypeObserverNotify:
+	case models.OperationTypeObserverNotify:
 		return h.handleDistributedObserverNotify(ctx, distMsg)
 
 	default:
@@ -310,7 +312,7 @@ func (h *Hub) handleDistributedMessageTargeted(ctx context.Context, distMsg *Dis
 // handleDistributedSendMessage 处理跨节点发送消息
 // 使用 ForEachUserClient 零拷贝遍历 + 预序列化，替代 CopyClientsFromMap 双重拷贝
 // targeted=true 表示消息经节点专属频道定向投递（未持有用户 = 索引死条目，触发自愈+回告）
-func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *DistributedMessage, targeted bool) error {
+func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *models.DistributedMessage, targeted bool) error {
 	if distMsg.Message == nil {
 		return fmt.Errorf("message data not found")
 	}
@@ -367,12 +369,12 @@ func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *Distrib
 	// 零拷贝遍历：ForEachUserClientFiltered 持读锁遍历 + appId/namespace 严格匹配，TrySend 非阻塞安全
 	// ⚠️ 必须按 appId+namespace 过滤：同一 userID 可能跨 app/ns 多端登录，不过滤会导致跨应用/租户消息泄露
 	//
-	// 复用 sendToClientSerialized（与本地/gRPC 路径对齐）：
+	// 复用 SendToClientSerialized（与本地/gRPC 路径对齐）：
 	// 统一状态回报（Success/Failed → wsc_message_send_records）、接收者统计、失败转存离线、SSE 客户端支持。
 	// 🔥 历史遗漏：此前裸调 client.TrySend，跨节点消息状态永远停留 sending，且 SSE 客户端收不到跨节点消息
 	successCount := 0
-	h.shardedRegistry.ForEachUserClientFiltered(distMsg.TargetID, appID, namespace, nil, func(_ string, client *Client) bool {
-		if h.sendToClientSerialized(ctx, client, distMsg.Message, msgData) {
+	h.shardedRegistry.ForEachUserClientFiltered(distMsg.TargetID, appID, namespace, nil, func(_ string, client *models.Client) bool {
+		if h.messagingMgr.SendToClientSerialized(ctx, client, distMsg.Message, msgData) {
 			successCount++
 		}
 
@@ -400,13 +402,13 @@ func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *Distrib
 
 	// 🔔 通知观察者（跨节点消息也需要通知观察者）
 	// 点对点消息的 groupIDs 由路由信封携带（群组消息场景），观察者按 appId+namespace+groupIDs 三级索引匹配
-	h.notifyObservers(routing.NewRoute().WithAppID(distMsg.AppID).WithNamespace(distMsg.Namespace).WithGroupIDs(distMsg.GroupIDs).Inject(ctx), distMsg.Message)
+	h.NotifyObservers(routing.NewRoute().WithAppID(distMsg.AppID).WithNamespace(distMsg.Namespace).WithGroupIDs(distMsg.GroupIDs).Inject(ctx), distMsg.Message)
 
 	return nil
 }
 
 // handleSendFailure 处理跨节点消息发送失败
-func (h *Hub) handleSendFailure(ctx context.Context, userID string, msg *HubMessage, reason string) {
+func (h *Hub) handleSendFailure(ctx context.Context, userID string, msg *models.HubMessage, reason string) {
 	h.logger.WarnContextKV(ctx, "跨节点消息发送失败",
 		"user_id", userID,
 		"message_id", msg.MessageID,
@@ -417,7 +419,7 @@ func (h *Hub) handleSendFailure(ctx context.Context, userID string, msg *HubMess
 
 // handleDistributedKickUser 处理跨节点踢人
 // 注入 distMsg 的 appID+namespace 到 ctx，确保 KickUserSimple 按 appID+namespace 隔离踢人
-func (h *Hub) handleDistributedKickUser(ctx context.Context, distMsg *DistributedMessage) error {
+func (h *Hub) handleDistributedKickUser(ctx context.Context, distMsg *models.DistributedMessage) error {
 	select {
 	case <-ctx.Done():
 		return fmt.Errorf("context cancelled: %w", ctx.Err())
@@ -435,7 +437,7 @@ func (h *Hub) handleDistributedKickUser(ctx context.Context, distMsg *Distribute
 
 // handleDistributedBroadcast 处理跨节点广播
 // 命名空间隔离：distMsg.Namespace 为空表示全命名空间广播，非空仅广播给同命名空间客户端
-func (h *Hub) handleDistributedBroadcast(ctx context.Context, distMsg *DistributedMessage) error {
+func (h *Hub) handleDistributedBroadcast(ctx context.Context, distMsg *models.DistributedMessage) error {
 	if distMsg.Message == nil {
 		return fmt.Errorf("message data not found")
 	}
@@ -443,20 +445,20 @@ func (h *Hub) handleDistributedBroadcast(ctx context.Context, distMsg *Distribut
 	namespace := distMsg.Namespace
 
 	if namespace == "" {
-		// 全命名空间广播（Namespace 为空）→ 直接调用 handleBroadcastMessage 投递给所有客户端
+		// 全命名空间广播（Namespace 为空）→ 直接调用 HandleBroadcastMessage 投递给所有客户端
 		//
 		// 🔥 不走 h.broadcast → handleBroadcast 路径：
 		//   handleBroadcast 会调用 notifyObservers → broadcastObserverNotification，
 		//   而源节点 Broadcast 已通过 notifyObservers → broadcastObserverNotification 通知了所有节点的观察者。
 		//   若目标节点再次走 handleBroadcast，会导致 N 个节点各自广播观察者通知 → 每个节点收到 N-1 份重复（N² 总通知量）。
-		//   直接调用 handleBroadcastMessage 跳过观察者通知，仅做本地客户端投递。
-		h.handleBroadcastMessage(ctx, distMsg.Message)
+		//   直接调用 HandleBroadcastMessage 跳过观察者通知，仅做本地客户端投递。
+		h.messagingMgr.HandleBroadcastMessage(ctx, distMsg.Message)
 		return nil
 	}
 
 	// 命名空间广播 → 仅发送给同命名空间客户端
-	// broadcastToFiltered 不调用 notifyObservers（源节点 BroadcastToNamespace 已统一通知观察者）
-	count := h.broadcastToFiltered(ctx, func(c *Client) bool {
+	// BroadcastToFiltered 不调用 notifyObservers（源节点 BroadcastToNamespace 已统一通知观察者）
+	count := h.messagingMgr.BroadcastToFiltered(ctx, func(c *models.Client) bool {
 		return c.Namespace == namespace
 	}, distMsg.Message)
 
@@ -475,7 +477,7 @@ func (h *Hub) handleDistributedBroadcast(ctx context.Context, distMsg *Distribut
 // AcquireDistributedLock 获取分布式锁
 func (h *Hub) AcquireDistributedLock(ctx context.Context, key string, ttl time.Duration) (bool, error) {
 	if h.pubsub == nil {
-		return false, ErrPubSubNotSet
+		return false, models.ErrPubSubNotSet
 	}
 
 	lockKey := h.config.RedisRepository.PubSub.GetLockKeyPrefix() + key
@@ -508,7 +510,7 @@ func (h *Hub) AcquireDistributedLock(ctx context.Context, key string, ttl time.D
 // ReleaseDistributedLock 释放分布式锁
 func (h *Hub) ReleaseDistributedLock(ctx context.Context, key string) error {
 	if h.pubsub == nil {
-		return ErrPubSubNotSet
+		return models.ErrPubSubNotSet
 	}
 
 	lockKey := h.config.RedisRepository.PubSub.GetLockKeyPrefix() + key
@@ -535,7 +537,7 @@ func (h *Hub) ReleaseDistributedLock(ctx context.Context, key string) error {
 // 相比逐群组处理，N 个群组从 N 次 GetMembers + N 次 broadcastToFiltered 降为 1 + 1
 //
 // 兼容旧消息：GroupIDs 为空时回退到 TargetID（旧版单群组消息）
-func (h *Hub) handleDistributedGroupsBroadcast(ctx context.Context, distMsg *DistributedMessage) error {
+func (h *Hub) handleDistributedGroupsBroadcast(ctx context.Context, distMsg *models.DistributedMessage) error {
 	// SubscribeBroadcastChannel 已过滤自身消息，此处二次防御
 	if distMsg.NodeID == h.nodeID {
 		return nil
@@ -545,7 +547,7 @@ func (h *Hub) handleDistributedGroupsBroadcast(ctx context.Context, distMsg *Dis
 		return fmt.Errorf("message data not found")
 	}
 
-	if h.groupRepo == nil {
+	if h.groupStore == nil {
 		return fmt.Errorf("group repository is not set")
 	}
 
@@ -562,7 +564,21 @@ func (h *Hub) handleDistributedGroupsBroadcast(ctx context.Context, distMsg *Dis
 	appID, namespace := routing.NormalizeRoute(distMsg.AppID, distMsg.Namespace)
 
 	// Pipeline 批量获取所有群组成员并合并去重（用户跨群组只收一条）
-	memberSet := h.batchGetGroupMembers(ctx, appID, namespace, groupIDs)
+	groupMembers, err := h.groupStore.GetMultiGroupMembers(ctx, appID, namespace, groupIDs)
+	if err != nil {
+		h.logger.WarnContextKV(ctx, "跨节点群组广播：批量获取群组成员失败",
+			"app_id", appID,
+			"namespace", namespace,
+			"group_count", len(groupIDs),
+			"error", err)
+		return nil
+	}
+	memberSet := make(map[string]struct{})
+	for _, members := range groupMembers {
+		for _, uid := range members {
+			memberSet[uid] = struct{}{}
+		}
+	}
 	if len(memberSet) == 0 {
 		return nil
 	}
@@ -578,7 +594,7 @@ func (h *Hub) handleDistributedGroupsBroadcast(ctx context.Context, distMsg *Dis
 	}
 
 	// 按成员ID查找本地连接并投递
-	count := h.broadcastToUserIDs(ctx, members, distMsg.Message)
+	count := h.messagingMgr.BroadcastToUserIDs(ctx, members, distMsg.Message)
 
 	h.logger.DebugContextKV(ctx, "跨节点群组广播已处理",
 		"namespace", namespace,
@@ -594,7 +610,7 @@ func (h *Hub) handleDistributedGroupsBroadcast(ctx context.Context, distMsg *Dis
 
 // handleDistributedObserverNotify 处理跨节点观察者通知
 // 三级索引查找：全局 + 命名空间 + 命名空间+群组（观察者可订阅多个组，按 groupIDs 合并去重）
-func (h *Hub) handleDistributedObserverNotify(ctx context.Context, distMsg *DistributedMessage) error {
+func (h *Hub) handleDistributedObserverNotify(ctx context.Context, distMsg *models.DistributedMessage) error {
 	// 忽略自己发出的通知（本地观察者已经在 notifyObservers 中收到了）
 	if distMsg.NodeID == h.nodeID {
 		h.logger.DebugContextKV(ctx, "忽略自己发出的观察者通知",
@@ -615,7 +631,7 @@ func (h *Hub) handleDistributedObserverNotify(ctx context.Context, distMsg *Dist
 
 	// 三级索引查找：全局 + 命名空间 + 各群组，按 clientID 去重
 	// 观察者可订阅多个组，传入所有 groupIDs 合并匹配
-	observers := h.GetObserversForMessage(namespace, groupIDs...)
+	observers := h.shardedRegistry.GetObserversForMessage(namespace, groupIDs...)
 	if len(observers) == 0 {
 		h.logger.DebugContextKV(ctx, "本节点无匹配观察者，跳过通知",
 			"message_id", distMsg.Message.MessageID,
@@ -650,12 +666,13 @@ func (h *Hub) handleDistributedObserverNotify(ctx context.Context, distMsg *Dist
 	msgID := observerMsg.MessageID
 
 	// 通知本节点的所有观察者
+	// TrySend 内部已处理 nil SendChan/IsClosed/缓冲满（等价旧 sendToObserver 的防御逻辑）
 	var successCount atomic.Int32
-	syncx.NewParallelSliceExecutor[*Client, error](observers).
-		OnSuccess(func(idx int, client *Client, result error) {
+	syncx.NewParallelSliceExecutor[*models.Client, error](observers).
+		OnSuccess(func(idx int, client *models.Client, result error) {
 			successCount.Add(1)
 		}).
-		OnError(func(idx int, client *Client, err error) {
+		OnError(func(idx int, client *models.Client, err error) {
 			h.logger.WarnContextKV(ctx, "跨节点通知观察者失败",
 				"observer_id", client.UserID,
 				"client_id", client.ID,
@@ -663,7 +680,7 @@ func (h *Hub) handleDistributedObserverNotify(ctx context.Context, distMsg *Dist
 				"error", err,
 			)
 		}).
-		OnPanic(func(idx int, client *Client, panicVal any) {
+		OnPanic(func(idx int, client *models.Client, panicVal any) {
 			h.logger.WarnContextKV(ctx, "跨节点通知观察者时发生 panic(通道可能已关闭)",
 				"observer_id", client.UserID,
 				"client_id", client.ID,
@@ -672,8 +689,11 @@ func (h *Hub) handleDistributedObserverNotify(ctx context.Context, distMsg *Dist
 				"stack", string(debug.Stack()),
 			)
 		}).
-		Execute(func(idx int, observer *Client) (error, error) {
-			return h.sendToObserver(ctx, observer, msgID, msgData), nil
+		Execute(func(idx int, observer *models.Client) (error, error) {
+			if observer.TrySend(msgData) {
+				return nil, nil
+			}
+			return models.ErrQueueAndPendingFull, nil
 		})
 
 	h.logger.DebugContextKV(ctx, "已处理跨节点观察者通知",
@@ -689,7 +709,7 @@ func (h *Hub) handleDistributedObserverNotify(ctx context.Context, distMsg *Dist
 // SubscribeBroadcastChannel 订阅全局广播频道
 func (h *Hub) SubscribeBroadcastChannel(ctx context.Context) error {
 	if h.pubsub == nil {
-		return ErrPubSubNotSet
+		return models.ErrPubSubNotSet
 	}
 
 	channel := h.config.RedisRepository.PubSub.GetBroadcastChannel()
@@ -735,7 +755,7 @@ func (h *Hub) SubscribeBroadcastChannel(ctx context.Context) error {
 // SubscribeObserverChannel 订阅观察者通知频道
 func (h *Hub) SubscribeObserverChannel(ctx context.Context) error {
 	if h.pubsub == nil {
-		return ErrPubSubNotSet
+		return models.ErrPubSubNotSet
 	}
 
 	channel := h.config.RedisRepository.PubSub.GetObserverChannel()

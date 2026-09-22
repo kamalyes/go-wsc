@@ -4,9 +4,12 @@
  * @LastEditors: kamalyes 501893067@qq.com
  * @LastEditTime: 2026-01-02 12:15:30
  * @FilePath: \go-wsc\hub\hub.go
- * @Description: Hub 核心结构和类型定义
+ * @Description: Slim orchestration Hub —— 组装域管理器与过载/集群/连接组件的编排层
  *
- * Copyright (c) 2025 by kamalyes, All Rights Reserved.
+ * 从旧 god-object Hub 拆出：域逻辑已下沉到 messaging/stats/group/overload/
+ * cluster/connection 等包，本结构仅持有组件并实现各域 Host 端口做委托。
+ *
+ * Copyright (c) 2026 by kamalyes, All Rights Reserved.
  */
 
 package hub
@@ -22,381 +25,124 @@ import (
 
 	"github.com/kamalyes/go-cachex"
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
-	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"github.com/kamalyes/go-toolbox/pkg/idgen"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/osx"
 	"github.com/kamalyes/go-toolbox/pkg/safe"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 
-	"github.com/kamalyes/go-wsc/handler"
-	"github.com/kamalyes/go-wsc/middleware"
+	"github.com/kamalyes/go-wsc/batcher"
+	"github.com/kamalyes/go-wsc/cluster"
+	"github.com/kamalyes/go-wsc/connection"
+	"github.com/kamalyes/go-wsc/group"
+	"github.com/kamalyes/go-wsc/messaging"
 	"github.com/kamalyes/go-wsc/models"
-	"github.com/kamalyes/go-wsc/protocol"
-	"github.com/kamalyes/go-wsc/repository"
+	"github.com/kamalyes/go-wsc/overload"
+	"github.com/kamalyes/go-wsc/spi"
+	"github.com/kamalyes/go-wsc/stats"
 )
 
 // ============================================================================
-// 类型别名 - 从 models repository middleware 包导入
+// 应用层回调类型（编排层注入，连接生命周期与群组生命周期触发）
 // ============================================================================
 
-type (
-	HubMessage                  = models.HubMessage
-	AckManager                  = protocol.AckManager
-	MessageRecordRepository     = repository.MessageRecordRepository
-	OnlineStatusRepository      = repository.OnlineStatusRepository
-	Client                      = models.Client
-	HubStatsRepository          = repository.HubStatsRepository
-	WorkloadRepository          = repository.WorkloadRepository
-	OfflineMessageHandler       = handler.OfflineMessageHandler
-	ConnectionRecordRepository  = repository.ConnectionRecordRepository
-	ConnectionRecord            = models.ConnectionRecord
-	ConnectionQualityRepository = repository.ConnectionQualityRepository
-	ConnectionQuality           = models.ConnectionQuality
-	IDGenerator                 = models.IDGenerator
-	WSCLogger                   = middleware.WSCLogger
-	WelcomeMessageProvider      = models.WelcomeMessageProvider
-	RateLimiter                 = middleware.RateLimiter
-	DistributedMessage          = models.DistributedMessage
-	DisconnectReason            = models.DisconnectReason
-	ErrorSeverity               = models.ErrorSeverity
-	UserType                    = models.UserType
-	ErrorType                   = errorx.ErrorType
-	MessageType                 = models.MessageType
-	QueueType                   = models.QueueType
-	VIPLevel                    = models.VIPLevel
-	UserRole                    = models.UserRole
-	UserStatus                  = models.UserStatus
-	Department                  = models.Department
-	Skill                       = models.Skill
-	NodeStatus                  = models.NodeStatus
-	ClientType                  = models.ClientType
-	RetryAttempt                = models.RetryAttempt
-	MessageSendStatus           = models.MessageSendStatus
-	FailureReason               = models.FailureReason
-	MessageSendRecord           = models.MessageSendRecord
-	WorkloadInfo                = repository.WorkloadInfo
-	MessageClassification       = models.MessageClassification
-	GroupRepository             = repository.GroupRepository
-	Group                       = repository.Group
-	GroupSendResult             = repository.GroupSendResult
-	Priority                    = models.Priority
-	AckMessage                  = protocol.AckMessage
-	AckStatus                   = protocol.AckStatus
-	HubStats                    = models.HubStats
-	SendResult                  = models.SendResult
-	NodeInfo                    = models.NodeInfo
-	KickUserResult              = models.KickUserResult
-	SendAttempt                 = models.SendAttempt
-	BroadcastResult             = models.BroadcastResult
-	DeliverResult               = models.DeliverResult
-	DeliveryMode                = models.DeliveryMode
-	HubHealthInfo               = models.HubHealthInfo
-	ConnectionType              = models.ConnectionType
-	ObserverManagerStats        = models.ObserverManagerStats
-	NamespaceObserverStats      = models.NamespaceObserverStats
-	GroupObserverStats          = models.GroupObserverStats
-	ObserverStats               = models.ObserverStats
-	MessageRecordFilter         = repository.MessageRecordFilter
-	OfflineMessageFilter        = repository.OfflineMessageFilter
-	MessageRole                 = repository.MessageRole
-	WorkloadDimension           = models.WorkloadDimension
-)
+// OfflineMessagePushCallback 离线消息推送回调
+type OfflineMessagePushCallback func(userID string, pushedMessageIDs []string, failedMessageIDs []string)
 
-// DeliveryMode 投递模式常量（Deliver 决策树分派用，由 models 包统一收敛）
-const (
-	DeliveryModeP2P            = models.DeliveryModeP2P            // 点对点（msg.Receiver 非空）
-	DeliveryModeGroupReliable  = models.DeliveryModeGroupReliable  // 群组可靠投递（RequireAck=true）
-	DeliveryModeGroupBroadcast = models.DeliveryModeGroupBroadcast // 群组广播（RequireAck=false，fire-and-forget）
-	DeliveryModeNamespace      = models.DeliveryModeNamespace      // 命名空间广播
-	DeliveryModeGlobal         = models.DeliveryModeGlobal         // 全局广播
-)
+// QueueFullCallback 队列满回调
+type QueueFullCallback func(msg *models.HubMessage, recipient string, queueType models.QueueType, err error)
 
-// 函数导入
-var (
-	NewAckManager      = protocol.NewAckManager
-	InitLogger         = middleware.InitLogger
-	IsRetryableError   = models.IsRetryableError
-	IsQueueFullError   = models.IsQueueFullError
-	IsUserOfflineError = models.IsUserOfflineError
-	IsSendTimeoutError = models.IsSendTimeoutError
-	IsAckTimeoutError  = models.IsAckTimeoutError
-	GetAllVIPLevels    = models.GetAllVIPLevels
-)
+// HeartbeatTimeoutCallback 心跳超时回调
+type HeartbeatTimeoutCallback func(clientID string, userID string, lastHeartbeat time.Time)
 
-// 常量
-const (
-	NodeStatusActive      = models.NodeStatusActive
-	ErrorSeverityInfo     = models.ErrorSeverityInfo
-	ErrorSeverityWarning  = models.ErrorSeverityWarning
-	ErrorSeverityError    = models.ErrorSeverityError
-	ErrorSeverityCritical = models.ErrorSeverityCritical
-	ErrorSeverityFatal    = models.ErrorSeverityFatal
+// HeartbeatReportCallback 心跳上报回调
+type HeartbeatReportCallback func(client *models.Client)
 
-	// ConnectionType 常量
-	ConnectionTypeWebSocket = models.ConnectionTypeWebSocket
-	ConnectionTypeSSE       = models.ConnectionTypeSSE
+// BeforeHeartbeatCallback 心跳处理前回调，返回 false 则跳过后续心跳处理
+type BeforeHeartbeatCallback func(client *models.Client) bool
 
-	// UserType 常量
-	UserTypeVisitor  = models.UserTypeVisitor
-	UserTypeCustomer = models.UserTypeCustomer
-	UserTypeAgent    = models.UserTypeAgent
-	UserTypeAdmin    = models.UserTypeAdmin
-	UserTypeBot      = models.UserTypeBot
-	UserTypeVIP      = models.UserTypeVIP
-	UserTypeSystem   = models.UserTypeSystem
-	UserTypeObserver = models.UserTypeObserver
+// AfterHeartbeatCallback 心跳处理后回调
+type AfterHeartbeatCallback func(client *models.Client)
 
-	// MessageType 常量
-	MessageTypeWelcome          = models.MessageTypeWelcome
-	MessageTypeKickOut          = models.MessageTypeKickOut
-	MessageTypeText             = models.MessageTypeText
-	MessageTypePong             = models.MessageTypePong
-	MessageTypePing             = models.MessageTypePing
-	MessageTypeHeartbeat        = models.MessageTypeHeartbeat
-	MessageTypeAck              = models.MessageTypeAck
-	MessageTypeClientRegistered = models.MessageTypeClientRegistered
+// ClientConnectCallback 客户端连接回调
+type ClientConnectCallback func(ctx context.Context, client *models.Client, record *models.ConnectionRecord) error
 
-	// QueueType 常量
-	QueueTypeAllQueues = models.QueueTypeAllQueues
-
-	// FailureReason 常量
-	FailureReasonUnknown     = models.FailureReasonUnknown
-	FailureReasonQueueFull   = models.FailureReasonQueueFull
-	FailureReasonConnError   = models.FailureReasonConnError
-	FailureReasonUserOffline = models.FailureReasonUserOffline
-	FailureReasonAckTimeout  = models.FailureReasonAckTimeout
-
-	// MessageSendStatus 常量
-	MessageSendStatusPending      = models.MessageSendStatusPending
-	MessageSendStatusSending      = models.MessageSendStatusSending
-	MessageSendStatusSuccess      = models.MessageSendStatusSuccess
-	MessageSendStatusFailed       = models.MessageSendStatusFailed
-	MessageSendStatusUserOffline  = models.MessageSendStatusUserOffline
-	MessageSendStatusAckTimeout   = models.MessageSendStatusAckTimeout
-	MessageTypeHealthCheck        = models.MessageTypeHealthCheck
-	MessageTypeConnectionRejected = models.MessageTypeConnectionRejected
-
-	// AckStatus 常量
-	AckStatusFailed    = protocol.AckStatusFailed
-	AckStatusConfirmed = protocol.AckStatusConfirmed
-
-	MessageSourceOnline  = models.MessageSourceOnline
-	MessageSourceOffline = models.MessageSourceOffline
-
-	BroadcastTypeGlobal  = models.BroadcastTypeGlobal
-	BroadcastTypeSession = models.BroadcastTypeSession
-	BroadcastTypeNone    = models.BroadcastTypeNone
-)
-
-var (
-	OperationTypeSendMessage     = models.OperationTypeSendMessage
-	OperationTypeKickUser        = models.OperationTypeKickUser
-	OperationTypeBroadcast       = models.OperationTypeBroadcast
-	OperationTypeObserverNotify  = models.OperationTypeObserverNotify
-	OperationTypeGroupBroadcast  = models.OperationTypeGroupBroadcast  // 单群组广播（跨节点 PubSub 兜底必需）
-	OperationTypeGroupsBroadcast = models.OperationTypeGroupsBroadcast // 批量群组广播
-	OperationTypeUserNotFound    = models.OperationTypeUserNotFound    // 目标节点回告：用户不在该节点（索引死条目自愈）
-	OperationTypeClientReclaim   = models.OperationTypeClientReclaim   // 新节点回收旧节点同 clientID 幽灵连接
-	MapDeviceTypeToClientType    = models.MapDeviceTypeToClientType
-)
-
-// NewHubMessage 创建新的 HubMessage
-var (
-	NewHubMessage = models.NewHubMessage
-)
-
-// NewClient 创建新的 Client
-var (
-	NewClient = models.NewClient
-)
-
-// WsCloseCodeMap WebSocket 关闭代码映射
-var (
-	WsCloseCodeMap = models.WsCloseCodeMap
-)
-
-// 心跳批量续期并行参数（processHeartbeatRedisUpdates 的 flush 使用）
-const (
-	// heartbeatRenewChunkSize 单个并行块的客户端数，块内按 maxBatchSize 分批走 Lua 续期
-	heartbeatRenewChunkSize = 512
-	// heartbeatRenewWorkers 并行续期的最大并发块数（对 Redis 的并发 Eval 上限）
-	heartbeatRenewWorkers = 8
-)
-
-// 错误常量
-var (
-	ErrHubShutdownTimeout           = models.ErrHubShutdownTimeout
-	ErrHubStartupTimeout            = models.ErrHubStartupTimeout
-	ErrRecordRepositoryNotSet       = models.ErrRecordRepositoryNotSet
-	ErrOnlineStatusRepositoryNotSet = models.ErrOnlineStatusRepositoryNotSet
-	ErrMessageDeliveryTimeout       = models.ErrMessageDeliveryTimeout
-	ErrQueueAndPendingFull          = models.ErrQueueAndPendingFull
-	ErrPubSubNotSet                 = models.ErrPubSubNotSet
-	ErrPubSubPublishFailed          = models.ErrPubSubPublishFailed
-	ErrClientNotFound               = models.ErrClientNotFound
-	ErrClientDisconnected           = models.ErrClientDisconnected
-
-	// 群组相关错误
-	ErrGroupNotFound      = models.ErrGroupNotFound
-	ErrGroupMemberExisted = models.ErrGroupMemberExisted
-	ErrGroupFull          = models.ErrGroupFull
-	ErrGroupRepoNotSet    = models.ErrGroupRepoNotSet
-	ErrGroupExisted       = models.ErrGroupExisted
-
-	// ErrorType 常量
-	ErrTypeUserNotFound   = models.ErrTypeUserNotFound
-	ErrTypeUserOffline    = models.ErrTypeUserOffline
-	ErrTypeClientNotFound = models.ErrTypeClientNotFound
-)
-
-// UserStatus 常量
-const (
-	UserStatusOnline    = models.UserStatusOnline
-	UserStatusOffline   = models.UserStatusOffline
-	UserStatusBusy      = models.UserStatusBusy
-	UserStatusAway      = models.UserStatusAway
-	UserStatusInvisible = models.UserStatusInvisible
-)
-
-// Priority 常量
-const (
-	PriorityLow      = models.PriorityLow
-	PriorityNormal   = models.PriorityNormal
-	PriorityHigh     = models.PriorityHigh
-	PriorityCritical = models.PriorityCritical
-)
-
-// DisconnectReason 常量
-const (
-	DisconnectReasonReadError      = models.DisconnectReasonReadError
-	DisconnectReasonWriteError     = models.DisconnectReasonWriteError
-	DisconnectReasonContextDone    = models.DisconnectReasonContextDone
-	DisconnectReasonCloseMessage   = models.DisconnectReasonCloseMessage
-	DisconnectReasonHeartbeatFail  = models.DisconnectReasonHeartbeatFail
-	DisconnectReasonKickOut        = models.DisconnectReasonKickOut
-	DisconnectReasonForceOffline   = models.DisconnectReasonForceOffline
-	DisconnectReasonTimeout        = models.DisconnectReasonTimeout
-	DisconnectReasonClientRequest  = models.DisconnectReasonClientRequest
-	DisconnectReasonServerShutdown = models.DisconnectReasonServerShutdown
-	DisconnectReasonUnknown        = models.DisconnectReasonUnknown
-)
+// ClientDisconnectCallback 客户端断开回调
+type ClientDisconnectCallback func(ctx context.Context, client *models.Client, reason models.DisconnectReason) error
 
 // ============================================================================
-// Hub 独有类型定义
+// Hub 核心结构 —— slim 编排层
 // ============================================================================
 
-// PoolManager 连接池管理器接口
-type PoolManager interface {
-	GetSMTPClient() interface{}
-}
-
-// 回调函数类型
-type (
-	// OfflineMessagePushCallback 离线消息推送回调
-	OfflineMessagePushCallback func(userID string, pushedMessageIDs []string, failedMessageIDs []string)
-	// MessageSendCallback 消息发送回调
-	MessageSendCallback func(msg *HubMessage, result *SendResult)
-	// QueueFullCallback 队列满回调
-	QueueFullCallback func(msg *HubMessage, recipient string, queueType QueueType, err errorx.BaseError)
-	// HeartbeatTimeoutCallback 心跳超时回调
-	HeartbeatTimeoutCallback func(clientID string, userID string, lastHeartbeat time.Time)
-	// HeartbeatReportCallback 心跳上报回调
-	HeartbeatReportCallback func(client *Client)
-	// BeforeHeartbeatCallback 心跳处理前回调，返回 false 则跳过后续心跳处理
-	BeforeHeartbeatCallback func(client *Client) bool
-	// AfterHeartbeatCallback 心跳处理后回调
-	AfterHeartbeatCallback func(client *Client)
-	// ClientConnectCallback 客户端连接回调
-	// record 为已构造的连接记录（内存对象，已异步落库），调用方可获取 connect 身份+会话生命周期做额外落盘
-	ClientConnectCallback func(ctx context.Context, client *Client, record *ConnectionRecord) error
-	// ClientDisconnectCallback 客户端断开回调
-	ClientDisconnectCallback func(ctx context.Context, client *Client, reason DisconnectReason) error
-	// MessageReceivedCallback 消息接收回调
-	MessageReceivedCallback func(ctx context.Context, client *Client, msg *HubMessage) error
-	// ErrorCallback 错误处理回调
-	ErrorCallback func(ctx context.Context, err error, severity ErrorSeverity) error
-	// BatchSendFailureCallback 批量发送失败回调
-	BatchSendFailureCallback func(userID string, msg *HubMessage, err error)
-	// GroupDisbandCallback 群组解散回调
-	GroupDisbandCallback func(ctx context.Context, namespace, groupID string)
-	// GroupMemberJoinCallback 群组成员加入回调
-	// 在客户端连接时自动加群成功后触发（register 自动装配 + 系统组自动加入），手动 AddGroupMembers 不触发
-	GroupMemberJoinCallback func(ctx context.Context, namespace, groupID string, userIDs []string)
-	// GroupMemberLeaveCallback 群组成员离开回调
-	GroupMemberLeaveCallback func(ctx context.Context, namespace, groupID string, userIDs []string)
-)
-
-// ============================================================================
-// Hub 核心结构
-// ============================================================================
-
-// Hub WebSocket/SSE 连接管理中心
+// Hub WebSocket/SSE 连接管理中心（编排层）
+//
+// 持有域管理器（messaging/stats/group）与运行时组件（overload/cluster/connection），
+// 实现各域 Host 端口做委托。域逻辑不在本结构内，仅做组装与转发。
 type Hub struct {
+	// ========== 基础环境 ==========
 	nodeID    string
-	nodeInfo  *NodeInfo
+	nodeInfo  *models.NodeInfo
 	startTime time.Time
 
-	// upgrader 复用（避免每次连接升级时分配新对象）
-	upgrader     *websocket.Upgrader
-	upgraderOnce sync.Once
+	config *wscconfig.WSC
+	logger spi.Logger
+	ctx    context.Context
+	cancel context.CancelFunc
 
-	nodeMessage chan *DistributedMessage
+	workerID       int64
+	idGenerator    models.IDGenerator
+	temporalHasher *safe.TemporalHasher
 
-	ackManager             *AckManager
-	messageRecordRepo      MessageRecordRepository
-	onlineStatusRepo       OnlineStatusRepository
-	statsRepo              HubStatsRepository
-	workloadRepo           WorkloadRepository
-	offlineMessageHandler  OfflineMessageHandler
-	connectionRecordRepo   ConnectionRecordRepository
-	connectionQualityRepo  ConnectionQualityRepository
-	groupRepo              GroupRepository
-	connectionTokenDecoder ConnectionTokenDecoder // 连接 Token 解码器（可选启用，nil 时走明文参数）
-	idGenerator            IDGenerator
-	temporalHasher         *safe.TemporalHasher
-	workerID               int64
+	// ========== 域管理器 ==========
+	messagingMgr *messaging.Manager
+	statsMgr     *stats.Manager
+	groupMgr     *group.Manager
 
-	// user_not_found 重路由守卫：messageID → *rerouteGuardEntry
-	// 记录每条消息已被哪些节点拒绝，重路由时排除已拒绝节点，防止索引抖动引发 ping-pong 循环
-	// 条目懒过期（rerouteGuardTTL），ACK 超时终态时删除（见 ack_timer.go）
+	// ========== 连接域 ==========
+	shardedRegistry *connection.ShardedRegistry
+
+	// ========== 集群域 ==========
+	nodeRegistry   *cluster.NodeRegistry
+	grpcClientPool *cluster.GRPCClientPool
+	routerCache    *cluster.RouterCache
+	// rerouteGuard user_not_found 重路由守卫：messageID → 已拒绝节点集合
 	rerouteGuard sync.Map
 
-	// 跨节点 ACK 超时日志聚合窗口：messageID → *ackTimeoutLogWindow
-	// 广播消息 N 个 receiver 的超时定时器同波次集中触发，逐 receiver 打 WARN+INFO 会产生
-	// 2N 行/消息的日志洪水；按 messageID 开窗聚合，窗口内仅首条放行（见 ack_log_window.go）
-	ackTimeoutLogWindows sync.Map
+	// ========== 过载保护域（atomic.Pointer 支持运行期热替换） ==========
+	admission           atomic.Pointer[overload.AdmissionGate]
+	broadcastShaper     atomic.Pointer[overload.Shaper]
+	ephemeralCoalescer  atomic.Pointer[overload.Coalescer]
+	broadcastDelayQueue *overload.BroadcastDelayQueue
+	overloadMetrics     overload.OverloadMetrics
 
-	// 📡 事件发布订阅
-	pubsub *cachex.PubSub
+	// ========== 批处理器（攒批落库/通知抑制写放大） ==========
+	statusUpdater       *batcher.MessageStatusUpdater
+	heartbeatBatcher    *batcher.HeartbeatStatsUpdater
+	messageStatsBatcher *batcher.MessageStatsBatcher
+	observerBatcher     *batcher.ObserverNotificationBatcher
 
-	// 🔗 节点间 gRPC 通信（主从直连，优先于 Redis PubSub 用于点对点路由）
-	// nodeRegistry 基于 Redis 维护节点→gRPC 地址映射，支持节点发现与心跳
-	// grpcServer 接收远端节点请求，grpcClientPool 复用到各节点的连接
-	nodeRegistry   *NodeRegistry
-	grpcServer     *GRPCServer
-	grpcClientPool *GRPCClientPool
-
-	// 🚀 性能优化组件（v2 新增）
-	// workerPool 按任务类型分池控制并发，防止 goroutine 泛滥
-	workerPool *HubWorkerPool
-	// routerCache 用户→节点路由缓存（KVCache 三层兜底），加速分布式路由判断
-	routerCache *RouterCache
-	// shardedRegistry 分片注册表（64 shard），降低高并发锁竞争
-	// 替代 clients/userToClients 的单 mutex 访问
-	shardedRegistry *ShardedRegistry
-	// statusUpdater 消息状态批量更新器
-	// 收集消息状态更新请求，按 batch flush 到 DB，减少广播场景下的 DB 压力
-	statusUpdater *MessageStatusUpdater
-
-	// ⏰ 跨节点 ACK 超时时间轮（主路径，替代原 timeoutStaleSendingRecords 的 30s 全量 DB 扫描）
-	// 每条跨节点消息调度一个 ACK 超时任务，收到 ACK 时 O(1) 取消，超时回调标记 AckTimeout + 转存离线
-	// timeoutStaleSendingRecords 已降级为 5min 兜底安全网（节点崩溃导致 in-memory timer 丢失时接管）
-	// 详见 ack_timer.go（主路径）与 node_ack_timeout.go（兜底）
+	// ========== 定时器（分片时间轮，O(1) 超时管理） ==========
+	heartbeatTimer  *syncx.HashedWheelTimer
 	ackTimeoutTimer *syncx.HashedWheelTimer
 
+	// ========== 工作池 ==========
+	workerPool *messaging.HubWorkerPool
+
+	// ========== SPI 仓储（未注入即 nil，域内自行判空降级） ==========
+	messageSink            spi.MessageSink
+	groupStore             spi.GroupStore
+	statsRepo              spi.HubStats
+	onlineStatusRepo       spi.OnlineStore
+	connectionStore        spi.ConnectionStore
+	connectionQualityStore spi.ConnectionQualityStore
+	workloadStore          spi.WorkloadStore
+
+	// ========== 连接 Token 鉴权器（可选启用，nil 时走明文参数） ==========
+	connectionTokenDecoder spi.ConnectionAuthenticator
+
+	// ========== 应用层回调 ==========
 	offlineMessagePushCallback OfflineMessagePushCallback
-	messageSendCallback        MessageSendCallback
+	messageSendCallback        messaging.MessageSendCallback
 	queueFullCallback          QueueFullCallback
 	heartbeatTimeoutCallback   HeartbeatTimeoutCallback
 	heartbeatReportCallback    HeartbeatReportCallback
@@ -404,85 +150,53 @@ type Hub struct {
 	afterHeartbeatCallback     AfterHeartbeatCallback
 	clientConnectCallback      ClientConnectCallback
 	clientDisconnectCallback   ClientDisconnectCallback
-	messageReceivedCallback    MessageReceivedCallback
-	errorCallback              ErrorCallback
-	batchSendFailureCallback   BatchSendFailureCallback
-	groupDisbandCallback       GroupDisbandCallback
-	groupMemberJoinCallback    GroupMemberJoinCallback
-	groupMemberLeaveCallback   GroupMemberLeaveCallback
+	messageReceivedCallback    messaging.MessageReceivedCallback
+	errorCallback              messaging.ErrorCallback
+	batchSendFailureCallback   overload.BatchSendFailureCallback
+	// 群组生命周期回调（结构类型，与 group.Host 端口返回类型一致）
+	groupDisbandCallback     func(ctx context.Context, namespace, groupID string)
+	groupMemberJoinCallback  func(ctx context.Context, namespace, groupID string, userIDs []string)
+	groupMemberLeaveCallback func(ctx context.Context, namespace, groupID string, userIDs []string)
 
+	// ========== 生命周期 ==========
 	wg       sync.WaitGroup
 	shutdown atomic.Bool
 	started  atomic.Bool
 	startCh  chan struct{}
+
+	// ========== 基础设施 ==========
+	pubsub  *cachex.PubSub
+	msgPool sync.Pool
+	// nodeMessage 跨节点消息通道
+	nodeMessage chan *models.DistributedMessage
+	// heartbeatRedisCh 心跳 Redis 更新通道（单 goroutine 消费，替代每心跳一 goroutine）
+	heartbeatRedisCh chan *models.Client
+	welcomeProvider  models.WelcomeMessageProvider
+
+	// 消息统计原子计数器（编排层定时刷写到 statsRepo）
+	msgSentCount           atomic.Int64
+	broadcastSentCount     atomic.Int64
+	broadcastFallbackCount atomic.Int64
 
 	// 活跃连接数同步防抖
 	syncActiveConnTimer   *time.Timer
 	syncActiveConnMutex   sync.Mutex
 	syncActiveConnPending atomic.Bool
 
-	// 心跳统计批量更新器（基于 syncx.BatchProcessor，单事务批量 UPDATE）
-	heartbeatBatcher *HeartbeatStatsUpdater
-
-	// ⏰ 分片时间轮（心跳超时管理，替代 O(N) 全量扫描）
-	// WebSocket 客户端注册时调度超时任务，收到 PING 时 Refresh，
-	// 超时未刷新则触发注销。SSE 客户端由 checkHeartbeat 扫描兜底。
-	heartbeatTimer *syncx.HashedWheelTimer
-
-	// 消息统计批量更新器（替代每消息 syncx.Go() goroutine）
-	messageStatsBatcher *MessageStatsBatcher
-
-	// 观察者通知批量处理器（替代每消息 syncx.Go() 观察者投递 + 跨节点广播）
-	observerBatcher *ObserverNotificationBatcher
-
-	// 跨节点分发批量处理器（替代每消息 go func() { routeToCluster(...) }()）
-	clusterBatcher *ClusterDispatchBatcher
-
-	// 心跳 Redis 更新通道（替代每次心跳创建 goroutine）
-	// 携带 *Client 而非 clientID，使 worker 在 Redis 中 client:<id> 键缺失/过期时
-	// 仍能基于内存客户端重建在线索引与跨节点路由信息
-	heartbeatRedisCh chan *Client
-
-	// 消息统计原子计数器（替代每次消息创建 goroutine 更新 Redis）
-	msgSentCount       atomic.Int64
-	broadcastSentCount atomic.Int64
-	// 跨 Pod 广播兜底触发次数（routeToClusterForOfflineUser 触发时 +1）
-	// reportPerformanceMetrics 每 5min 上报后清零，用于监控"索引滞后"是否消除（治本后应趋近 0）
-	broadcastFallbackCount atomic.Int64
-
-	welcomeProvider WelcomeMessageProvider
-	logger          WSCLogger
-	ctx             context.Context
-	cancel          context.CancelFunc
-	config          *wscconfig.WSC
-	msgPool         sync.Pool
-	chanPools       map[int]*sync.Pool // 多级 channel 对象池，key 为容量
-	rateLimiter     *RateLimiter
-	poolManager     PoolManager
-
-	// ========== 削峰填谷与分级送达体系（轻量组装：零值/nil 即关闭，热路径 nil 检查跳过） ==========
-	// 三个组件均为 atomic.Pointer：SetOverloadPolicy 运行期热替换与后台循环
-	// （水位评估/慢消费者扫描/延迟队列 drain/合并器 drain）的并发读写需要安全发布
-	// atomic.Pointer 存取本身建立 happens-before，组件字段无需额外同步
-	// admission 准入闸门（水位线 + AIMD 升降级 + 分级裁决）；nil 时全放行
-	admission atomic.Pointer[AdmissionGate]
-	// broadcastShaper 广播出向整形（GCRA 令牌桶）；nil 时不整形
-	broadcastShaper atomic.Pointer[Shaper]
-	// ephemeralCoalescer 高频消息合并器（latest-wins）；nil 时不合并
-	ephemeralCoalescer atomic.Pointer[Coalescer]
-	// broadcastDelayQueue 广播延迟队列（整形/准入拒绝的填谷重投；有界，满走分级兜底）
-	broadcastDelayQueue *broadcastDelayQueue
-	// overloadMetrics 送达漏斗与过载指标（零值可用，全 atomic 无锁，无需配置）
-	overloadMetrics OverloadMetrics
+	// upgrader 复用（避免每次连接升级时分配新对象）
+	upgrader     *websocket.Upgrader
+	upgraderOnce sync.Once
 }
 
-// NewHub 创建新的Hub
+// NewHub 创建新的 Hub（编排层组装入口）
+//
+// 域管理器与批处理器均以 hub 作为 Host 端口构造：Go 允许在构造函数返回前
+// 使用指针的方法集，因为方法集在编译期已确定。
 func NewHub(config *wscconfig.WSC) *Hub {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// 生成节点ID（支持K8s环境），统一使用短哈希格式
+	// 生成节点 ID（支持 K8s 环境），统一使用短哈希格式
 	nodeID := safe.ShortHash(generateNodeID(config))
-
 	workerID := osx.GetWorkerIdForSnowflake()
 	idGenerator := idgen.NewShortFlakeGenerator(workerID)
 
@@ -502,27 +216,20 @@ func NewHub(config *wscconfig.WSC) *Hub {
 	)
 
 	// 预估初始容量，减少 map 扩容
-	// CalculateCapacities 返回：(clients, userToClients, agentClients, observerClients, sseClients)
-	// 主存储 userShards 用 clients（连接数）作为总容量提示
-	// 各分类索引用对应类型的预估连接数
-	//
-	// 预分配容量联动节点最大连接数（动态扩容策略）：
-	//   - CapacityEstimation.Clients 显式配置 > 0 时，按配置预分配
-	//   - 未配置(<=0) 时按 Performance.MaxConnectionsPerNode 自动计算，与硬限制对齐
-	//   - 两者均未配置时兜底 3000，避免预分配为 0 导致频繁扩容
-	//   - 实际连接数达到 MaxConnectionsPerNode 前 map 会按需扩容，不受预分配值约束
 	maxConnsPerNode := 0
 	if config.Performance != nil {
 		maxConnsPerNode = config.Performance.MaxConnectionsPerNode
 	}
 	config.CapacityEstimation.Clients = mathx.IfLeZero(config.CapacityEstimation.Clients, mathx.IfLeZero(maxConnsPerNode, 3000))
 	clientsCap, _, agentClientsCap, observerClientsCap, sseClientsCap := config.CapacityEstimation.CalculateCapacities()
-	registryCapacity := RegistryCapacity{
+	registryCapacity := connection.RegistryCapacity{
 		TotalClients:    clientsCap,
 		SSEClients:      sseClientsCap,
 		ObserverClients: observerClientsCap,
 		AgentClients:    agentClientsCap,
 	}
+
+	logger := spi.InitLogger(config)
 
 	hub := &Hub{
 		nodeID:         nodeID,
@@ -530,23 +237,21 @@ func NewHub(config *wscconfig.WSC) *Hub {
 		idGenerator:    idGenerator,
 		temporalHasher: temporalHasher,
 		startTime:      time.Now(),
-		nodeInfo: &NodeInfo{
+		nodeInfo: &models.NodeInfo{
 			ID:        nodeID,
 			IPAddress: config.NodeIP,
 			Port:      config.NodePort,
-			Status:    NodeStatusActive,
+			Status:    models.NodeStatusActive,
 			LastSeen:  time.Now(),
 		},
-		nodeMessage: make(chan *DistributedMessage, config.MessageBufferSize*4),
-		ackManager:  NewAckManager(config.AckTimeout, config.AckMaxRetries),
+		nodeMessage: make(chan *models.DistributedMessage, config.MessageBufferSize*4),
 		ctx:         ctx,
 		cancel:      cancel,
 		startCh:     make(chan struct{}),
-		// 千万级连接缓冲：并行 flush（heartbeatRenewWorkers×chunk）消费速度决定容量下限，
-		// 8192 覆盖一个 flush 周期内的心跳突发；满时非阻塞丢弃（下次心跳补上）
-		heartbeatRedisCh: make(chan *Client, 8192),
+		// 心跳 Redis 更新通道：8192 覆盖一个 flush 周期内的突发
+		heartbeatRedisCh: make(chan *models.Client, 8192),
 		config:           config,
-		logger:           InitLogger(config),
+		logger:           logger,
 		msgPool: sync.Pool{
 			New: func() any {
 				b := make([]byte, 0, 1024)
@@ -555,226 +260,85 @@ func NewHub(config *wscconfig.WSC) *Hub {
 		},
 	}
 
-	// 初始化连接 Token 解码器（若启用）
-	// 此时 Redis 客户端未知，仅创建 JWT 解码能力；
-	// 后续在 InitializeRepositories 中通过 SetConnectionTokenRedis 注入 Redis 客户端
-	if config.Security != nil && config.Security.ConnectionToken.IsEnabled() {
-		hub.connectionTokenDecoder = NewConnectionTokenDecoder(config.Security.ConnectionToken, nil, hub.logger)
-		hub.logger.InfoKV("[Hub] 连接 Token 解码器已启用", "use_redis", config.Security.ConnectionToken.UseRedis)
-	}
-
-	// 初始化多级 channel 对象池
-	hub.initChannelPools()
-
-	// 🚀 初始化性能优化组件
 	// 分片注册表（替代单 mutex 的 clients/userToClients map）
-	// 同时内化了 SSE/Observer/Agent 三个分类分片索引（按功能开关条件化初始化）
-	// 同时按预估容量预分配每 shard 内部 map，减少扩容次数
-	hub.shardedRegistry = NewShardedRegistry(config.EnableAgent, config.EnableObserver, registryCapacity)
-	// WorkerPool（按任务类型分池控制并发，防止 goroutine 泛滥）
-	hub.workerPool = NewHubWorkerPool(mathx.IfNotZero(config.WorkerPool, wscconfig.DefaultWorkerPoolConfig()), hub.logger)
+	hub.shardedRegistry = connection.NewShardedRegistry(config.EnableAgent, config.EnableObserver, registryCapacity)
 
-	// 批量处理器参数（从 config 读取，nil/零值时使用默认值）
+	// WorkerPool（按任务类型分池控制并发）
+	hub.workerPool = messaging.NewHubWorkerPool(
+		mathx.IfNotZero(config.WorkerPool, wscconfig.DefaultWorkerPoolConfig()),
+		logger,
+	)
+
+	// ⏰ 定时器（构造期初始化，确保 Register/Refresh/Cancel 在任何 goroutine 启动前读到非 nil）
+	hub.heartbeatTimer = syncx.NewHashedWheelTimer(config.Timer.GetTimerOptions()...)
+	hub.ackTimeoutTimer = syncx.NewHashedWheelTimer(config.Timer.GetTimerOptions()...)
+
+	// ACK 管理器
+	ackManager := messaging.NewAckManager(config.AckTimeout, config.AckMaxRetries)
+
+	// 消息域管理器（链式注入域内组件）
+	hub.messagingMgr = messaging.NewManager(hub).
+		WithAckManager(ackManager).
+		WithAckTimeoutTimer(hub.ackTimeoutTimer).
+		WithWorkerPool(hub.workerPool).
+		WithIDGenerator(hub.idGenerator)
+	// 离线消息处理器不在此注入：依赖 Redis 队列 + RDBMS 双后端，业务侧在存储就绪后
+	// 经 WithOfflineMessageHandler（或 messaging.InitializeOfflineQueue 经 StoreTarget
+	// 能力面）注入，内部挂接到 messagingMgr
+
+	// 统计域与群组域管理器
+	hub.statsMgr = stats.NewManager(hub)
+	hub.groupMgr = group.NewManager(hub)
+
+	// 批处理器参数（从 config 读取，nil/零值时使用默认值）
 	batcherCfg := config.Batcher
 
-	// 消息状态批量更新器（广播 1 万人成功 = 1 次 UPDATE，而非 1 万次）
+	// 消息状态批量更新器
 	msgStatus := batcherCfg.GetMessageStatusParams()
-	hub.statusUpdater = NewMessageStatusUpdater(hub, msgStatus.QueueSize, msgStatus.BatchSize, msgStatus.FlushInterval)
+	hub.statusUpdater = batcher.NewMessageStatusUpdater(hub, msgStatus.QueueSize, msgStatus.BatchSize, msgStatus.FlushInterval)
 
 	// 心跳统计批量更新器
 	hbStats := batcherCfg.GetHeartbeatStatsParams()
-	hub.heartbeatBatcher = NewHeartbeatStatsUpdater(hub, hbStats.QueueSize, hbStats.BatchSize, hbStats.FlushInterval)
+	hub.heartbeatBatcher = batcher.NewHeartbeatStatsUpdater(hub, hbStats.QueueSize, hbStats.BatchSize, hbStats.FlushInterval)
 
-	// 消息统计批量更新器（广播 939 人 = 939 次 Submit + 1 次事务，而非 939 个 goroutine + 1878 次 DB 调用）
+	// 消息统计批量更新器
 	msgStats := batcherCfg.GetMessageStatsParams()
-	hub.messageStatsBatcher = NewMessageStatsBatcher(hub, msgStats.QueueSize, msgStats.BatchSize, msgStats.FlushInterval)
+	hub.messageStatsBatcher = batcher.NewMessageStatsBatcher(hub, msgStats.QueueSize, msgStats.BatchSize, msgStats.FlushInterval)
 
-	// 观察者通知批量处理器（替代每条消息 syncx.Go() 观察者投递 + syncx.Go() 跨节点广播）
+	// 观察者通知批量处理器
 	obsNotify := batcherCfg.GetObserverNotifyParams()
-	hub.observerBatcher = NewObserverNotificationBatcher(hub, obsNotify.QueueSize, obsNotify.BatchSize, obsNotify.FlushInterval)
-
-	// 跨节点分发批量处理器（替代每条广播消息 go func() { routeToCluster(...) }()）
-	clusterDisp := batcherCfg.GetClusterDispatchParams()
-	hub.clusterBatcher = NewClusterDispatchBatcher(hub, clusterDisp.QueueSize, clusterDisp.BatchSize, clusterDisp.FlushInterval)
-
-	// ⏰ 构造期初始化心跳时间轮（替代 checkHeartbeat 的 O(N) 全量扫描）
-	// 必须在 NewHub 完成初始化，确保 Register/Refresh/Cancel 在任何 goroutine 启动前读到非 nil 值，
-	// 避免与 Run() 的延迟初始化产生数据竞争
-	// tick 精度与分片数由 config.Timer 控制（NewHub 已兜底默认 10ms × 16 分片，秒级超时语义足够）
-	hub.heartbeatTimer = syncx.NewHashedWheelTimer(config.Timer.GetTimerOptions()...)
+	hub.observerBatcher = batcher.NewObserverNotificationBatcher(hub, obsNotify.QueueSize, obsNotify.BatchSize, obsNotify.FlushInterval)
 
 	// 🚦 削峰填谷组件默认启用（开箱即用；SetOverloadPolicy 可覆盖/关闭）
-	// 准入闸门：默认水位（constants），Run() 时启动评估循环
-	hub.admission.Store(NewAdmissionGate(0, 0, 0))
-	// 广播出向整形：默认速率（GCRA 令牌桶，洪峰平滑扇出）
-	hub.broadcastShaper.Store(NewShaper(0))
-	// 高频消息合并器：默认容量（latest-wins）
-	hub.ephemeralCoalescer.Store(NewCoalescer(0))
+	hub.admission.Store(overload.NewAdmissionGate(0, 0, 0))
+	hub.broadcastShaper.Store(overload.NewShaper(0))
+	hub.ephemeralCoalescer.Store(overload.NewCoalescer(0))
 	// 广播延迟队列：填谷重投（Run() 时启动 drain 循环）
-	hub.broadcastDelayQueue = newBroadcastDelayQueue(hub)
+	hub.broadcastDelayQueue = overload.NewBroadcastDelayQueue(func() overload.ShaperInterval {
+		if s := hub.broadcastShaper.Load(); s != nil {
+			return s
+		}
+		return nil
+	})
 
 	return hub
 }
 
-// SetConnectionTokenDecoder 注入连接 Token 解码器
-// 高级用法：允许业务层自定义 decoder 实现（例如自定义 Redis 客户端或自定义校验逻辑）
-func (h *Hub) SetConnectionTokenDecoder(decoder ConnectionTokenDecoder) {
-	h.connectionTokenDecoder = decoder
-}
-
-// GetConnectionTokenDecoder 获取连接 Token 解码器
-func (h *Hub) GetConnectionTokenDecoder() ConnectionTokenDecoder {
-	return h.connectionTokenDecoder
-}
-
 // ============================================================================
-// 基础 Getter/Setter 方法
+// K8s 兼容的节点 ID 生成
 // ============================================================================
 
-func (h *Hub) GetNodeID() string                           { return h.nodeID }
-func (h *Hub) GetWorkerID() int64                          { return h.workerID }
-func (h *Hub) GetIDGenerator() IDGenerator                 { return h.idGenerator }
-func (h *Hub) GetLogger() WSCLogger                        { return h.logger }
-func (h *Hub) GetContext() context.Context                 { return h.ctx }
-func (h *Hub) IsStarted() bool                             { return h.started.Load() }
-func (h *Hub) IsShutdown() bool                            { return h.shutdown.Load() }
-func (h *Hub) GetConfig() *wscconfig.WSC                   { return h.config }
-func (h *Hub) GetOnlineStatusRepo() OnlineStatusRepository { return h.onlineStatusRepo }
-func (h *Hub) GetGroupRepository() GroupRepository         { return h.groupRepo }
-func (h *Hub) Context() context.Context                    { return h.ctx }
-
-func (h *Hub) SetIDGenerator(generator IDGenerator) {
-	h.idGenerator = generator
-	h.logger.InfoKV("ID生成器已设置", "generator_type", "idgen")
-}
-
-func (h *Hub) SetWelcomeProvider(provider WelcomeMessageProvider) {
-	h.welcomeProvider = provider
-}
-
-func (h *Hub) SetRateLimiter(limiter *RateLimiter) {
-	h.rateLimiter = limiter
-}
-
-// SetOverloadPolicy 链式配置过载保护策略（同 SetRateLimiter 注入模式，不动 go-config）
-//
-// 零值字段用默认值（水位/速率见 constants）；nil gate 时完全关闭准入（不推荐——
-// 送达兜底路由仍生效，但失去水位驱动的削峰能力）
-// 已 Start 的 Hub 调用时：闸门自动重启评估循环（覆盖旧实例并停旧循环）
-func (h *Hub) SetOverloadPolicy(gate *AdmissionGate, shaper *Shaper, coalescer *Coalescer) *Hub {
-	if gate != nil {
-		if old := h.admission.Load(); old != nil {
-			old.Stop()
-		}
-		h.admission.Store(gate) // atomic 发布：后台循环并发 Load 读到完整初始化的实例
-		gate.Start()
-	}
-	if shaper != nil {
-		h.broadcastShaper.Store(shaper)
-	}
-	if coalescer != nil {
-		h.ephemeralCoalescer.Store(coalescer)
-	}
-	return h
-}
-
-// onWriteBatch 写泵批埋点转发（nil-safe：闸门未启用时仅记漏斗计数）
-func (h *Hub) onWriteBatch(n int) {
-	h.overloadMetrics.recordWriteBatch(n)
-	if gate := h.admission.Load(); gate != nil {
-		gate.onWriteBatch(n)
-	}
-}
-
-// admissionOnDelivered 投递埋点转发（nil-safe）
-func (h *Hub) admissionOnDelivered() {
-	if gate := h.admission.Load(); gate != nil {
-		gate.OnDelivered()
-	}
-}
-
-// admitMessage 消息级准入裁决（nil-safe：闸门未启用时全放行 + 漏斗计数）
-//
-// 热路径契约：零分配（枚举返回）；isBroadcast 标识广播路径（L2 阶梯差异化）
-func (h *Hub) admitMessage(msg *models.HubMessage, isBroadcast bool) AdmitVerdict {
-	guarantee := msg.ResolveGuarantee()
-	h.overloadMetrics.recordAdmitted(guarantee)
-	gate := h.admission.Load()
-	if gate == nil {
-		return VerdictAdmit
-	}
-	verdict := gate.Admit(msg, isBroadcast)
-	h.overloadMetrics.recordAdmissionVerdict(verdict)
-	return verdict
-}
-
-func (h *Hub) SetPoolManager(manager PoolManager) {
-	h.poolManager = manager
-}
-
-func (h *Hub) SetPubSub(pubsub *cachex.PubSub) {
-	h.pubsub = pubsub
-
-	// 🚀 初始化路由缓存（需要 Redis 客户端，从 PubSub 获取）
-	// KVCache 三层兜底：本地 map → Redis Hash → BatchLoader 回源
-	if pubsub != nil && h.onlineStatusRepo != nil {
-		h.routerCache = NewRouterCache(pubsub.GetClient(), h.onlineStatusRepo, mathx.IfNotZero(h.config.RouterCache, wscconfig.DefaultRouterCacheConfig()))
-		h.logger.InfoKV("路由缓存已启用", "type", "KVCache三层兜底")
-	}
-
-	// 🔗 自动初始化节点间 gRPC 通信（若启用 node-grpc 配置）
-	// 节点发现依赖 Redis，因此必须在 PubSub 设置后初始化
-	h.InitNodeGRPC()
-
-	h.logger.InfoKV("PubSub已设置", "enabled", true)
-}
-
-func (h *Hub) GetPubSub() *cachex.PubSub {
-	return h.pubsub
-}
-
-// 🚀 性能优化组件 Getter 方法
-func (h *Hub) GetWorkerPool() *HubWorkerPool        { return h.workerPool }
-func (h *Hub) GetRouterCache() *RouterCache         { return h.routerCache }
-func (h *Hub) GetShardedRegistry() *ShardedRegistry { return h.shardedRegistry }
-
-// 🔗 gRPC 节点通信 Getter 方法
-func (h *Hub) GetNodeRegistry() *NodeRegistry     { return h.nodeRegistry }
-func (h *Hub) GetGRPCServer() *GRPCServer         { return h.grpcServer }
-func (h *Hub) GetGRPCClientPool() *GRPCClientPool { return h.grpcClientPool }
-
-// IsGRPCEnabled 是否启用了节点间 gRPC 直连通信
-// 启用后 SendToUser/SendToGroup 会优先走 gRPC 直连，降低 Redis PubSub 延迟
-func (h *Hub) IsGRPCEnabled() bool {
-	return h.nodeRegistry != nil && h.grpcClientPool != nil
-}
-
-// ============================================================================
-// K8s 兼容的节点ID生成
-// ============================================================================
-
-// generateNodeID 生成节点ID（支持K8s环境）
-// 优先级：
-// 1. 环境变量 POD_NAME（K8s推荐）
-// 2. 环境变量 HOSTNAME（容器环境）
-// 3. 环境变量 NODE_ID（自定义）
-// 4. IP:Port（传统方式）
+// generateNodeID 生成节点 ID（支持 K8s 环境）
+// 优先级：POD_NAME > HOSTNAME > NODE_ID > IP:Port
 func generateNodeID(config *wscconfig.WSC) string {
-	// 1. 优先使用 K8s Pod Name
 	if podName := osx.Getenv("POD_NAME", ""); podName != "" {
 		return podName
 	}
-
-	// 2. 使用 Hostname（容器环境）
 	if hostname := osx.Getenv("HOSTNAME", ""); hostname != "" {
 		return hostname
 	}
-
-	// 3. 使用自定义 NODE_ID
 	if nodeID := osx.Getenv("NODE_ID", ""); nodeID != "" {
 		return nodeID
 	}
-
-	// 4. 回退到 IP:Port（传统方式）
 	return fmt.Sprintf("%s-%d", config.NodeIP, config.NodePort)
 }

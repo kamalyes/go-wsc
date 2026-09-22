@@ -30,10 +30,10 @@ import (
 // 修复后：sentinel 在 init() 末尾赋值（Type/消息正确），Is*Error 改用 errorx.ClassifyError
 func TestSentinelsInitializedCorrectly(t *testing.T) {
 	// 1. sentinel 必须携带正确的 ErrorType（非 0）与有意义的消息（非 "unknown error"）
-	assert.NotEqual(t, ErrorType(0), ErrUserOffline.Type, "ErrUserOffline.Type 不应为 0")
-	assert.NotEqual(t, ErrorType(0), ErrQueueFull.Type, "ErrQueueFull.Type 不应为 0")
-	assert.NotEqual(t, ErrorType(0), ErrClientNotFound.Type, "ErrClientNotFound.Type 不应为 0")
-	assert.NotEqual(t, ErrorType(0), ErrMessageBufferFull.Type, "ErrMessageBufferFull.Type 不应为 0")
+	assert.NotEqual(t, errorx.ErrorType(0), ErrUserOffline.Type, "ErrUserOffline.Type 不应为 0")
+	assert.NotEqual(t, errorx.ErrorType(0), ErrQueueFull.Type, "ErrQueueFull.Type 不应为 0")
+	assert.NotEqual(t, errorx.ErrorType(0), ErrClientNotFound.Type, "ErrClientNotFound.Type 不应为 0")
+	assert.NotEqual(t, errorx.ErrorType(0), ErrMessageBufferFull.Type, "ErrMessageBufferFull.Type 不应为 0")
 
 	assert.NotEqual(t, "unknown error", ErrUserOffline.Error(), "ErrUserOffline 消息不应为 unknown error")
 	assert.Equal(t, ErrTypeUserOffline, ErrUserOffline.Type)

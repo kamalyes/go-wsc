@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
+	"github.com/kamalyes/go-wsc/cluster"
 	"github.com/kamalyes/go-wsc/models"
 	wscpb "github.com/kamalyes/go-wsc/models/pb"
 	"github.com/kamalyes/go-wsc/routing"
@@ -40,24 +41,8 @@ import (
 // 类型定义
 // ============================================================================
 
-// ClusterOperation 集群操作类型（统一别名，消除 DistributedMessage 历史命名歧义）
-type ClusterOperation = models.OperationType
-
-// ClusterDispatchOptions 跨节点分发选项
-// 封装所有跨节点通信的路由参数，由 routeToCluster 统一消费
-// 设计原则：调用方爱传什么传什么，单/多元素统一走切片，不做单值字段冗余
-type ClusterDispatchOptions struct {
-	Operation     ClusterOperation // 操作类型（SendMessage/GroupsBroadcast/Broadcast/ObserverNotify/KickUser）
-	AppID         string           // 应用ID（最上层隔离维度，空=全局共享）
-	Namespace     string           // 命名空间ID（空="default"；Broadcast 时空表示全命名空间）
-	TargetNodeID  string           // 目标节点ID（精确路由，空=所有已知节点广播）
-	TargetNodeIDs []string         // 已知目标节点列表（P2P 跨节点路由用，gRPC 未启用时优先定向 PubSub 而非广播频道）
-	TargetUserID  string           // 目标用户ID（Operation=SendMessage 时使用）
-	GroupIDs      []string         // 群组ID列表（len==1 单群组广播，len>1 批量广播，len==0 不广播）
-	ExcludeSender bool             // 是否排除发送者（群组广播时使用）
-	SenderID      string           // 发送者ID（排除发送者时使用）
-	Reason        string           // 辅助信息（踢人原因等）
-}
+// ClusterOperation/ClusterDispatchOptions 已迁至 cluster 包（cluster/dispatch_options.go），
+// 本文件统一使用 cluster.ClusterDispatchOptions。
 
 // clusterRouteResult 路由结果（内部使用）
 type clusterRouteResult struct {
@@ -95,7 +80,7 @@ const deadNodeProbeRetryDelay = 300 * time.Millisecond
 //   - opts: 分发选项
 //
 // 返回：error（nil 表示至少一个节点投递成功或无需跨节点）
-func (h *Hub) routeToCluster(ctx context.Context, msg *HubMessage, opts ClusterDispatchOptions) error {
+func (h *Hub) routeToCluster(ctx context.Context, msg *models.HubMessage, opts cluster.ClusterDispatchOptions) error {
 	// 单机模式：无 PubSub 且无 gRPC，不跨节点
 	if h.pubsub == nil && !h.IsGRPCEnabled() {
 		return nil
@@ -246,7 +231,7 @@ func (h *Hub) routeToCluster(ctx context.Context, msg *HubMessage, opts ClusterD
 
 // resolveDispatchTargetID 根据操作类型解析 TargetID
 // 广播类操作无特定目标，返回空字符串（群组信息由 GroupIDs 携带）
-func resolveDispatchTargetID(opts ClusterDispatchOptions) string {
+func resolveDispatchTargetID(opts cluster.ClusterDispatchOptions) string {
 	switch opts.Operation {
 	case models.OperationTypeSendMessage, models.OperationTypeKickUser:
 		return opts.TargetUserID
@@ -262,7 +247,7 @@ func resolveDispatchTargetID(opts ClusterDispatchOptions) string {
 // dispatchViaGRPC 通过 gRPC 向目标节点直连投递
 //
 // 返回路由结果：哪些节点成功、哪些需要 PubSub 兜底
-func (h *Hub) dispatchViaGRPC(ctx context.Context, msg *HubMessage, opts ClusterDispatchOptions) clusterRouteResult {
+func (h *Hub) dispatchViaGRPC(ctx context.Context, msg *models.HubMessage, opts cluster.ClusterDispatchOptions) clusterRouteResult {
 	result := clusterRouteResult{}
 
 	if !h.IsGRPCEnabled() {
@@ -332,7 +317,7 @@ func (h *Hub) dispatchViaGRPC(ctx context.Context, msg *HubMessage, opts Cluster
 
 // resolveGRPCTargetNodes 根据操作类型确定 gRPC 目标节点列表
 // 优先级：TargetNodeID（单节点精确）> TargetNodeIDs（多节点定向）> nodeRegistry 所有其他节点（广播）
-func (h *Hub) resolveGRPCTargetNodes(opts ClusterDispatchOptions) []string {
+func (h *Hub) resolveGRPCTargetNodes(opts cluster.ClusterDispatchOptions) []string {
 	if opts.TargetNodeID != "" {
 		return []string{opts.TargetNodeID}
 	}
@@ -344,7 +329,7 @@ func (h *Hub) resolveGRPCTargetNodes(opts ClusterDispatchOptions) []string {
 }
 
 // executeGRPCDispatch 执行单次 gRPC 投递（按操作类型分发）
-func (h *Hub) executeGRPCDispatch(ctx context.Context, addr string, msgData []byte, opts ClusterDispatchOptions) grpcDispatchOutcome {
+func (h *Hub) executeGRPCDispatch(ctx context.Context, addr string, msgData []byte, opts cluster.ClusterDispatchOptions) grpcDispatchOutcome {
 	grpcClient := h.grpcClientPool
 	if grpcClient == nil {
 		return grpcOutcomeFallback
@@ -369,12 +354,9 @@ func (h *Hub) executeGRPCDispatch(ctx context.Context, addr string, msgData []by
 		}
 		err = derr
 
-	case models.OperationTypeGroupBroadcast:
-		// 单群组广播（GroupIDs[0]）：一次 BroadcastGroup RPC
-		return mathx.IF(h.grpcBroadcastGroup(ctx, addr, opts, msgData), grpcOutcomeDelivered, grpcOutcomeFallback)
-
-	case models.OperationTypeGroupsBroadcast:
-		// 批量群组广播（len(GroupIDs)>1）：并行复用 BroadcastGroup RPC
+	case models.OperationTypeGroupBroadcast, models.OperationTypeGroupsBroadcast:
+		// 群组广播（两种 op 统一复数语义）：全量 GroupIDs 并行投递，单群组即单元素特例；
+		// 任一成功即视为投递成功（失败群组由 PubSub 兜底补齐，保证最终送达）
 		return mathx.IF(h.grpcBroadcastGroups(ctx, addr, opts, msgData), grpcOutcomeDelivered, grpcOutcomeFallback)
 
 	case models.OperationTypeObserverNotify:
@@ -416,12 +398,18 @@ func (h *Hub) publishToCluster(ctx context.Context, dispatch *models.Distributed
 		return nil
 	}
 
+	// 控制消息（如 client_reclaim）无 Message 体，messageID 安全为空串
+	messageID := ""
+	if dispatch.Message != nil {
+		messageID = dispatch.Message.GetMessageID()
+	}
+
 	channel := h.config.RedisRepository.PubSub.GetBroadcastChannel()
 	data := h.marshalDistributedMessage(ctx, dispatch)
 	h.logger.InfoContextKV(ctx, "📡 PubSub 广播频道发布",
 		"channel", channel,
 		"payload_size", len(data),
-		"message_id", dispatch.LogMessageID(),
+		"message_id", messageID,
 	)
 	err := h.pubsub.Publish(ctx, channel, string(data))
 	if err != nil {
@@ -429,7 +417,7 @@ func (h *Hub) publishToCluster(ctx context.Context, dispatch *models.Distributed
 			"channel", channel,
 			"payload_size", len(data),
 			"error", err,
-			"message_id", dispatch.LogMessageID(),
+			"message_id", messageID,
 		)
 	}
 	return err
@@ -447,6 +435,13 @@ func (h *Hub) publishToTargetedNodes(ctx context.Context, dispatch *models.Distr
 	if h.pubsub == nil || len(nodeIDs) == 0 {
 		return nil, nil
 	}
+
+	// 控制消息（如 client_reclaim）无 Message 体，messageID 安全为空串
+	messageID := ""
+	if dispatch.Message != nil {
+		messageID = dispatch.Message.GetMessageID()
+	}
+
 	data := h.marshalDistributedMessage(ctx, dispatch)
 	prefix := h.config.RedisRepository.PubSub.GetNodeChannelPrefix()
 	h.logger.InfoContextKV(ctx, "📡 PubSub 定向发布",
@@ -454,7 +449,7 @@ func (h *Hub) publishToTargetedNodes(ctx context.Context, dispatch *models.Distr
 		"target_nodes", nodeIDs,
 		"target_count", len(nodeIDs),
 		"payload_size", len(data),
-		"message_id", dispatch.LogMessageID(), // 控制消息（如 client_reclaim）无 Message 体，LogMessageID 安全返回空串
+		"message_id", messageID,
 	)
 
 	// 防御：过滤自身（不应出现，但避免意外循环投递）
@@ -497,20 +492,24 @@ func (h *Hub) publishToTargetedNodes(ctx context.Context, dispatch *models.Distr
 				"target_node", targets[i],
 				"channel", channels[i],
 				"error", err,
-				"message_id", dispatch.LogMessageID())
+				"message_id", messageID)
 			continue
 		}
 		if cmd.Val() == 0 {
 			// 订阅失活 ≠ 节点死亡：订阅断连重连窗口（秒级）内 PUBLISH 同样返回 0。
 			// 交叉验证节点心跳：心跳正常 → 等待重连窗口后重试一次，仍无人订阅才判死，
 			// 避免订阅抖动导致消息被批量误转离线
-			if h.nodeRegistry != nil && h.nodeRegistry.IsNodeAlive(ctx, targets[i]) {
-				time.Sleep(deadNodeProbeRetryDelay)
-				if retry, rerr := client.Publish(ctx, channels[i], data).Result(); rerr == nil && retry > 0 {
-					h.logger.InfoContextKV(ctx, "📡 [死节点探测] 心跳正常+订阅恢复，重试投递成功",
-						"target_node", targets[i],
-						"message_id", dispatch.LogMessageID())
-					continue
+			// 适配说明：cluster.NodeRegistry 未暴露 IsNodeAlive，以节点在注册表缓存中
+			// 存在作为心跳新鲜代理（refreshNodes 按 TTL 清理心跳过期节点）
+			if h.nodeRegistry != nil {
+				if _, alive := h.nodeRegistry.GetNodeAddr(targets[i]); alive {
+					time.Sleep(deadNodeProbeRetryDelay)
+					if retry, rerr := client.Publish(ctx, channels[i], data).Result(); rerr == nil && retry > 0 {
+						h.logger.InfoContextKV(ctx, "📡 [死节点探测] 心跳正常+订阅恢复，重试投递成功",
+							"target_node", targets[i],
+							"message_id", messageID)
+						continue
+					}
 				}
 			}
 			deadNodes = append(deadNodes, targets[i])
@@ -520,7 +519,7 @@ func (h *Hub) publishToTargetedNodes(ctx context.Context, dispatch *models.Distr
 		h.logger.WarnContextKV(ctx, "📡 [死节点感知] 定向频道无人订阅，消息未送达（Pod 挂掉或订阅断连重连中）",
 			"dead_nodes", deadNodes,
 			"total_targets", len(targets),
-			"message_id", dispatch.LogMessageID(),
+			"message_id", messageID,
 		)
 	}
 	return deadNodes, lastErr
@@ -529,10 +528,10 @@ func (h *Hub) publishToTargetedNodes(ctx context.Context, dispatch *models.Distr
 // handleDeadNodesForP2P P2P 消息的死节点秒级兜底（publishToTargetedNodes 检测到定向频道无人订阅时调用）
 //
 // 重查在线索引：用户所有连接所在节点均失活（Pod 挂掉/订阅断连重连中）→ 实时投递无望，
-// 立即转离线（复用 tryStoreOfflineOnDeliveryFailure：含离线源防循环、状态覆盖、ACK 超时任务取消），
+// 立即转离线（复用 StoreOfflineOnDeliveryFailure：含离线源防循环、状态覆盖、ACK 超时任务取消），
 // 不再干等 30s ACK 超时；仍有健康节点（已通过 gRPC/定向 PubSub 收到消息）或索引查询失败 →
 // 不处理，保留 ACK 超时兜底
-func (h *Hub) handleDeadNodesForP2P(ctx context.Context, msg *HubMessage, userID string, deadNodes []string) {
+func (h *Hub) handleDeadNodesForP2P(ctx context.Context, msg *models.HubMessage, userID string, deadNodes []string) {
 	if h.onlineStatusRepo == nil {
 		return
 	}
@@ -565,7 +564,7 @@ func (h *Hub) handleDeadNodesForP2P(ctx context.Context, msg *HubMessage, userID
 		"user_id", userID,
 		"dead_nodes", deadNodes,
 	)
-	h.tryStoreOfflineOnDeliveryFailure(msg, fmt.Errorf("目标节点 %v 订阅失活（Pod 挂掉或订阅断连），消息未送达", deadNodes), false)
+	h.messagingMgr.StoreOfflineOnDeliveryFailure(msg, fmt.Errorf("目标节点 %v 订阅失活（Pod 挂掉或订阅断连），消息未送达", deadNodes))
 }
 
 // ============================================================================
@@ -587,21 +586,6 @@ func (h *Hub) getAllClusterNodeIDs() []string {
 	return nodeIDs
 }
 
-// grpcBroadcastGroup 通过 gRPC 广播到单个群组（GroupIDs[0]）
-func (h *Hub) grpcBroadcastGroup(ctx context.Context, addr string, opts ClusterDispatchOptions, msgData []byte) bool {
-	if len(opts.GroupIDs) == 0 || h.grpcClientPool == nil {
-		return false
-	}
-
-	_, err := h.grpcClientPool.BroadcastGroup(routing.NewRoute().WithAppID(opts.AppID).WithNamespace(opts.Namespace).WithGroupIDs(opts.GroupIDs[:1]).Inject(ctx), addr, msgData, opts.ExcludeSender, opts.SenderID)
-	if err != nil {
-		h.logger.DebugContextKV(ctx, "gRPC 群组广播投递失败",
-			"target_addr", addr, "group_id", opts.GroupIDs[0], "error", err)
-		return false
-	}
-	return true
-}
-
 // grpcBroadcastGroups 通过 gRPC 批量广播到多个群组（并行复用 BroadcastGroup RPC）
 //
 // 设计权衡：
@@ -609,7 +593,7 @@ func (h *Hub) grpcBroadcastGroup(ctx context.Context, addr string, opts ClusterD
 //   - 对每个 groupID 并行调用（并发上限 8），单群组场景仅 1 次调用零损耗
 //   - gRPC 点对点直连仍优于 PubSub 广播：精准路由、无冗余投递
 //   - 任一成功即返回 true（失败群组由 PubSub 兜底补齐，保证最终送达）
-func (h *Hub) grpcBroadcastGroups(ctx context.Context, addr string, opts ClusterDispatchOptions, msgData []byte) bool {
+func (h *Hub) grpcBroadcastGroups(ctx context.Context, addr string, opts cluster.ClusterDispatchOptions, msgData []byte) bool {
 	// 调用方统一通过 GroupIDs 传群组列表（单元素=单群组）
 	if len(opts.GroupIDs) == 0 || h.grpcClientPool == nil {
 		return false

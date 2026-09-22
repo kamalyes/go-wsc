@@ -26,9 +26,9 @@ type ConnectionRecord struct {
 	UserID       string `gorm:"column:user_id;size:64;not null;index;comment:用户ID(同一用户可有多条记录)" json:"user_id"`
 
 	// ========== 多租户/命名空间隔离 ==========
-	// 与 Bitmap/ZSET 在线状态层分桶维度一致，支持按 app+namespace 过滤连接
-	AppID     string `gorm:"column:app_id;size:64;index:idx_app_namespace;comment:应用ID(多租户隔离,与 Bitmap/ZSET 分桶一致)" json:"app_id"`
-	Namespace string `gorm:"column:namespace;size:64;index:idx_app_namespace;comment:命名空间(与 Bitmap/ZSET 分桶一致)" json:"namespace"`
+	// 与 Bitmap 在线状态层分桶维度一致，支持按 app+namespace 过滤连接
+	AppID     string `gorm:"column:app_id;size:64;index:idx_app_namespace;comment:应用ID(多租户隔离,与 Bitmap 分桶一致)" json:"app_id"`
+	Namespace string `gorm:"column:namespace;size:64;index:idx_app_namespace;comment:命名空间(与 Bitmap 分桶一致)" json:"namespace"`
 
 	// ========== 服务器节点信息 ==========
 	NodeID   string `gorm:"column:node_id;size:100;index;comment:服务器节点ID" json:"node_id"`

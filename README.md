@@ -26,7 +26,7 @@ graph TB
 
     subgraph "负载均衡层 Load Balancer Layer"
         direction LR
-        LB[Nginx/HAProxy<br/>IP Hash 会话保持]
+        LB[K8s Service / Ingress<br/>流量接入]
         Gateway[API 网关<br/>认证/限流]
     end
 
@@ -209,10 +209,34 @@ graph TB
     class RedisCluster,Database,LogStore storageStyle
 ```
 
+### 📦 模块分层
+
+14 个域包 + 2 个适配器包：每域以 `interfaces.go` 定义消费者端口，hub 编排层实现各域 Host 端口做委托；适配器只实现 `spi` 契约，与核心独立演进。根包 `wsc.go` 提供门面（`type Hub = hub.Hub`）。
+
+| 包 | 职责 |
+| --- | --- |
+| [hub](./hub/README.md) | 编排层：组装各域、实现消费者端口、生命周期与集群分发，对外唯一入口 |
+| [client](./client/README.md) | 客户端 SDK：建连、认证、收发消息、心跳保活、断线自动重连（WS 优先、SSE 降级） |
+| [connection](./connection/README.md) | 连接域：百万连接的注册/查找/容量/质量，64 分片注册表 |
+| [transport](./transport/README.md) | 接入层：WS/SSE 升级握手、AES-256-GCM Token 解密、连接预检，标准 net/http 签名 |
+| [messaging](./messaging/README.md) | 消息域：入站分发、路由收敛、P2P/广播投递、ACK、失败转离线 |
+| [batcher](./batcher/README.md) | 批处理域：消息记录/状态/统计/观察者通知的攒批写，写放大治理 |
+| [stats](./stats/README.md) | 统计域：bitmap 在线状态 O(1) 点查询 + 指标 + 健康上报 |
+| [group](./group/README.md) | 群组域：三层订阅索引 + VIP 分级 + 观察者，定向广播收敛的数据源 |
+| [overload](./overload/README.md) | 过载域：AIMD 准入闸门 + GCRA 整形 + 高频合并 + 慢消费者治理 |
+| [cluster](./cluster/README.md) | 分布式域：节点发现、跨节点投递、自愈、防乒乓（多 Pod 对等组网，无选主） |
+| [constants](./constants/README.md) | 常量域：协议常量与默认值的唯一定义源，零依赖 |
+| [models](./models/README.md) | 数据层：全部域共享的数据结构，纯 struct 零依赖 |
+| [routing](./routing/README.md) | 路由域：路由信封（appID/namespace/groupIDs）的构建与传播 |
+| [spi](./spi/README.md) | 契约层：核心与后端之间的接口边界（Store/Sink/Queue 三分法） |
+| [adapter/redis](./adapter/redis/README.md) | Redis 适配器：在线状态、集群统计、群组、客服负载、离线队列 |
+| [adapter/gorm](./adapter/gorm/README.md) | GORM 适配器：连接记录、连接质量、消息归档、离线消息持久化 |
+
 ### 架构特点
 
+- **领域分层**: 14 个域包 + 2 个适配器包（batcher、client、cluster、connection、constants、group、messaging、models、overload、routing、spi、stats、transport、hub 编排层），每域以 `interfaces.go` 定义消费者端口，hub 编排层实现各域 Host 端口做委托
 - **分布式集群**: 多节点 Hub 集群 + gRPC 直连 + Redis PubSub 兜底 + 自动节点发现
-- **负载均衡**: Nginx/HAProxy IP Hash 会话保持 + 智能流量分发
+- **K8s Deployment 部署**: 多副本对等组网，滚动更新靠优雅停机排空 + 跨节点自愈 + 离线回放，消息不丢
 - **跨节点通信**:
   - 同节点通信: 内存直达，延迟 < 1ms
   - 跨节点通信: gRPC 点对点直连（低延迟、强类型、并行投递）
@@ -294,17 +318,17 @@ graph TB
 启用示例：
 
 ```go
-hub := hub.NewHub(cfg)
+h := wsc.NewHub(cfg)
 
 // 削峰填谷三件套：准入闸门 + 广播整形 + 高频合并（均轻量组装，按需传 nil 跳过）
-hub.SetOverloadPolicy(
-    hub.NewAdmissionGate(10_000, 3_000, time.Second), // 高/低水位 + 评估周期
-    hub.NewShaper(50_000),                             // 广播出向 5w msg/s
-    hub.NewCoalescer(8_192),                           // 高频合并容量
+h.SetOverloadPolicy(
+    overload.NewAdmissionGate(10_000, 3_000, time.Second), // 高/低水位 + 评估周期
+    overload.NewShaper(50_000),                             // 广播出向 5w msg/s
+    overload.NewCoalescer(8_192),                           // 高频合并容量
 )
 
-// 洪峰漏斗指标 + pprof 快照（/debug/overload、/debug/pprof/...）
-http.Handle("/debug/", hub.DebugHandler())
+// 送达漏斗指标（overload.OverloadMetrics）全 atomic 零锁计数：
+// admitted → realtime / offline / merged / dropped，守恒不变量由测试断言
 ```
 
 > 消息分级通过 `HubMessage` 的 `Guarantee` 字段声明（`models.GuaranteeGuaranteed` / `GuaranteeStandard` / `GuaranteeEphemeral`），未声明时按决策树推导：消息类型默认表 → 分类评分 → 关键优先级 → 兜底普通档。
@@ -331,64 +355,76 @@ http.Handle("/debug/", hub.DebugHandler())
 - [🚀 快速开始](#-快速开始) - 5分钟上手指南
 - [⚡ 性能表现](#-性能表现) - 基准测试结果
 
-### 🔧 集成指南
-
-- [🎯 TypeScript 前端集成](./docs/TypeScript_Integration.md) - React/Vue/Angular 示例
-- [☕ Java 客户端集成](./docs/Java_Client_Integration.md) - 企业级 Java 客户端实现
-- [📡 ACK 消息确认机制](./docs/ACK_Mechanism.md) - 可靠消息传输
-- [🔄 失败处理与重试机制](./docs/Failure_Handling.md) - 全面的失败处理策略
-- [🏗️ 架构设计文档](./docs/Architecture_Design.md) - 回调与失败机制架构
-- [📊 性能优化指南](./docs/Performance_Guide.md) - 调优和监控
-
-### 📋 API 参考
-
-- [🔌 客户端 API](./docs/Client_API.md) - 完整接口说明
-- [🏢 服务端 Hub API](./docs/Hub_API.md) - Hub 管理接口与失败处理器
-- [🧪 测试覆盖报告](./docs/Test_Coverage.md) - 测试用例和覆盖率
-
 ## 📦 安装
 
 ```bash
 go get github.com/kamalyes/go-wsc
 ```
 
-**系统要求：** Go 1.20+ | 支持 Linux/Windows/macOS
+**系统要求：** Go 1.25+ | 支持 Linux/Windows/macOS
 
 ## 🚀 快速开始
 
-### 🎮 交互式演示（推荐）
+### 最小服务端
 
-最快的上手方式！运行完整的交互式 demo，体验客户端和服务端的实时通信：
+Hub 以库形态嵌入业务进程；`transport` 提供标准 `net/http` 签名的接入层，可嵌任何路由：
 
-```bash
-# 1. 启动演示服务器
-cd examples/demo
-go run server.go
+```go
+package main
+
+import (
+	"net/http"
+
+	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-wsc"
+	"github.com/kamalyes/go-wsc/transport"
+)
+
+func main() {
+	cfg := &wscconfig.WSC{
+		NodeIP:   "192.168.1.101",
+		NodePort: 8080,
+		Path:     "/ws",
+	}
+
+	h := wsc.NewHub(cfg)
+
+	// WS 接入（Hub 实现了 transport.Registrar 端口：注册/注销/关闭态）
+	mux := http.NewServeMux()
+	upgrader := transport.NewUpgrader(cfg, h)
+	mux.HandleFunc(cfg.Path, upgrader.HandleWebSocketUpgrade)
+
+	go h.Run() // 事件循环：心跳检查 / ACK 清理 / 统计刷写（阻塞直至关闭）
+
+	http.ListenAndServe(":8080", mux)
+}
 ```
 
-**演示特点**:
+### 注入仓储与离线链路（生产形态）
 
-- ✅ 服务端自动发送欢迎消息
-- ✅ 服务端回复客户端消息
-- ✅ 完整的双向通信流程
+```go
+rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+db, err := gorm.Open(mysql.Open("user:pass@tcp(localhost:3306)/wsc"), &gorm.Config{})
+if err != nil {
+	panic(err)
+}
 
-### 完整示例代码
+// 一行装配全部存储仓储：在线状态/集群统计/群组 + 连接记录/连接质量/消息归档
+err = spi.Initialize(ctx, h, rdb, db,
+	redisadapter.NewHooks(cfg.RedisRepository),
+	gormadapter.NewHooks(cfg.Database),
+)
 
-所有示例代码都在 `examples/` 目录中，可以直接运行：
+// 离线链路：Redis 队列 + RDBMS 双写，用户首连自动回放（Deployment 共享存储语义，跨 Pod 可见）
+offlineCfg := &wscconfig.OfflineMessage{AutoPush: true}
+err = messaging.InitializeOfflineQueue(h, messaging.OfflineDeps{
+	Queue:  redisadapter.NewOfflineQueue(rdb, offlineCfg.KeyPrefix, offlineCfg.QueueTTL),
+	Store:  gormadapter.NewOfflineStoreFor(db, offlineCfg),
+	Config: offlineCfg,
+})
+```
 
-> - **[examples/demo](./examples/demo/server.go)** - 🎮 交互式演示（推荐从这里开始！）
-> - **[examples/basic-client](./examples/basic-client/main.go)** - 基础 WebSocket 客户端
-> - **[examples/basic-server](./examples/basic-server/main.go)** - 基础 WebSocket 服务端
-> - **[examples/distributed-server](./examples/distributed-server/main.go)** - 分布式服务端
-> - **[examples/message-send](./examples/message-send/main.go)** - 各种消息发送模式
-> - **[examples/README.md](./examples/README.md)** - 详细说明请查看：
-
-📖 **详细文档**:
-
-> - [分布式架构](./docs/DISTRIBUTED_ARCHITECTURE.md) - 多节点集群部署
-> - [K8s 部署](./docs/K8S_DEPLOYMENT.md) - Kubernetes 环境部署
-> - [客户端 API](./docs/Client_API.md) - 完整接口说明
-> - [服务端 Hub API](./docs/Hub_API.md) - Hub 管理接口
+> 适配器目录名与包名不同（避免与 go-redis / gorm 冲突）：`redisadapter "github.com/kamalyes/go-wsc/adapter/redis"`、`gormadapter "github.com/kamalyes/go-wsc/adapter/gorm"`。
 
 ## ⚡ 性能表现
 
@@ -398,39 +434,6 @@ go run server.go
 - **序列化引擎**: sonic JIT（`-tags sonic`）大消息场景 ~4x 提速，默认标准库零依赖
 - **批量写**: writev 合帧，突发 N 条消息从 N 次 syscall 降为 2 次
 - **并发连接**: 百万级支持
-
-> 📊 **详细分析**: 查看 [性能优化指南](./docs/Performance_Guide.md) 获取调优建议
-
-## 🧪 测试与质量
-
-### 测试覆盖
-
-- **测试用例**: 1100+个（持续增长）
-- **通过率**: 100%
-- **覆盖范围**: 单元测试 + 集成测试 + 双节点集群测试 + 竞态检测
-- **基准测试**: 性能回归保护
-
-### 持续集成
-
-```bash
-# 运行所有测试
-go test ./... -v
-
-# 运行基准测试
-go test -bench=. -benchmem
-
-# 竞态检测
-go test -race ./...
-
-# 生成覆盖报告
-go test -coverprofile=coverage.out ./...
-go tool cover -html=coverage.out
-
-# 推荐全量回归（竞态 + 随机顺序 + 覆盖率，仅显示失败用例）
-gotestsum -f testname -- ./... -race -count=1 -timeout=120m -coverprofile=coverage.txt -covermode=atomic -shuffle=on | Select-String -Pattern "(FAIL|ERROR|panic|fatal)"
-```
-
-> 📋 **测试报告**: 查看 [测试覆盖报告](./docs/Test_Coverage.md) 了解详细测试情况
 
 ## 💼 企业特性
 
@@ -443,7 +446,7 @@ gotestsum -f testname -- ./... -race -count=1 -timeout=120m -coverprofile=covera
 
 ### 分布式架构
 
-- **零侵入部署**: 现有代码无需修改，自动支持分布式
+- **零侵入部署**: 库形态嵌入业务进程，标准 `net/http` 签名接入；多副本 Deployment 即集群，自动服务注册与发现
 - **节点发现**: 自动服务注册、心跳检测、周期性重注册（Redis key 删除/TTL 过期自动恢复上报）
 - **智能路由**:
   - 同节点通信: 内存直达，延迟 < 1ms
@@ -451,13 +454,11 @@ gotestsum -f testname -- ./... -race -count=1 -timeout=120m -coverprofile=covera
   - 自动路由到用户所在节点
 - **全局广播**: 自动同步到所有节点的所有客户端
 - **多租户隔离**: appID + namespace 应用级消息隔离，跨应用消息互不可见
-- **会话保持**: Nginx IP Hash 保证用户连接稳定性
+- **Deployment 语义**: 优雅停机排空连接 + 跨节点自愈接管 + 离线消息回放，滚动更新消息不丢
 - **故障转移**: 死节点秒级感知（PUBLISH 订阅数检测）+ user_not_found 秒级重路由 + 客户端自动重连
 - **跨节点自愈**: 死索引清理 + 幽灵连接回收 + owner 归属校验（防误删）
 - **水平扩展**: 无状态设计支持弹性伸缩，线性扩展并发能力
 - **高可用**: 多节点冗余 + 自动故障恢复 + 负载均衡
-
-> 📘 **详细文档**: 查看 [分布式架构指南](./docs/DISTRIBUTED_ARCHITECTURE.md) 和 [K8s 部署指南](./docs/K8S_DEPLOYMENT.md)
 
 ## 🤝 社区与支持
 

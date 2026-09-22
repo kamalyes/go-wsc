@@ -2,60 +2,110 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-12-28 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-01-13 10:17:07
+ * @LastEditTime: 2026-01-05 10:22:41
  * @FilePath: \go-wsc\hub\registry.go
- * @Description: Hub 客户端注册/注销管理
+ * @Description: Hub 连接生命周期 —— 注册/注销/心跳管理
  *
- * Copyright (c) 2025 by kamalyes, All Rights Reserved.
+ * 实现 transport.Registrar 端口契约（Register 异步 / RegisterSync 同步 /
+ * Unregister / IsShutdown / SendRegisteredMessage）与 messaging.Host 的
+ * Unregister / HandleHeartbeat：注册表操作全部走 shardedRegistry 分片锁，
+ * WebSocket 心跳超时由分片时间轮 O(1) 管理（取消旧任务 + 注册新任务），
+ * SSE 客户端不发送 PING，由 checkHeartbeat 定期兜底扫描。
+ * 读写泵与协议级 PING 处理已由 transport/messaging 域接管，此处不迁移。
+ *
+ * Copyright (c) 2026 by kamalyes, All Rights Reserved.
  */
 
 package hub
 
 import (
 	"context"
-	"runtime/debug"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/kamalyes/go-toolbox/pkg/contextx"
-	"github.com/kamalyes/go-toolbox/pkg/errorx"
-	"github.com/kamalyes/go-toolbox/pkg/json"
+	"github.com/kamalyes/go-sqlbuilder"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
+
 	"github.com/kamalyes/go-wsc/constants"
-	"github.com/kamalyes/go-wsc/events"
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/routing"
 )
 
 // ============================================================================
-// 客户端注册/注销
+// 客户端注册/注销（transport.Registrar 端口契约）
 // ============================================================================
 
-// Register 注册客户端
-// 直接异步执行 handleRegister，不经过 EventLoop channel 串行化
-// handleRegister 内部已用 shardedRegistry 分片锁保护临界区，IO 操作通过 workerPool 异步化
-// 避免单 goroutine EventLoop 成为并发连接的 QPS 瓶颈
-// client.Context 在 http_upgrade 升级时已注入 trace_id，内部直接用 client.Context 实现全链路追踪
-func (h *Hub) Register(client *Client) {
-	h.logger.DebugContextKV(client.Context, "客户端注册请求", "client_id", client.ID, "user_id", client.UserID)
-	go h.handleRegister(client)
+// Register 异步注册客户端（WS 升级路径：升级后立即返回，注册在后台完成）
+// client.Context 在 http_upgrade 升级时已注入 trace_id，内部直接用实现全链路追踪
+func (h *Hub) Register(client *models.Client) {
+	if client == nil {
+		return
+	}
+	h.logger.DebugContextKV(client.Context, "客户端注册请求",
+		"client_id", client.ID,
+		"user_id", client.UserID,
+	)
+	// 注册任务计入 h.wg：SafeShutdown 的 h.wg.Wait() 需等待在途注册完成，
+	// 避免半注册连接在 shutdown 批量清理后才加入注册表造成泄漏
+	h.wg.Add(1)
+	go func() {
+		defer h.wg.Done()
+		h.handleRegister(client)
+	}()
 }
 
-// Unregister 注销客户端
-// 直接异步执行 handleUnregister，不经过 EventLoop channel 串行化
-// handleUnregister 内部已用 shardedRegistry 分片锁保护临界区，IO 操作通过 workerPool 异步化
-// client.Context 在升级时已注入 trace_id，内部直接用 client.Context 实现全链路追踪
-func (h *Hub) Unregister(client *Client) {
-	h.logger.DebugContextKV(client.Context, "客户端注销请求", "client_id", client.ID, "user_id", client.UserID)
-	go h.handleUnregister(client)
+// RegisterSync 同步注册客户端（SSE 路径：注册完成才进写循环，避免首条消息竞态丢失）
+func (h *Hub) RegisterSync(client *models.Client) {
+	if client == nil {
+		return
+	}
+	h.handleRegister(client)
 }
+
+// Unregister 异步注销客户端（写循环退出后的兜底清理，幂等）
+func (h *Hub) Unregister(client *models.Client) {
+	if client == nil {
+		return
+	}
+	h.logger.DebugContextKV(client.Context, "客户端注销请求",
+		"client_id", client.ID,
+		"user_id", client.UserID,
+	)
+	// 注销任务计入 h.wg：SafeShutdown 的 h.wg.Wait() 需等待在途注销完成，
+	// 避免注册表条目/心跳时间轮任务在 shutdown 清理后被残留移除操作改动
+	h.wg.Add(1)
+	go func() {
+		defer h.wg.Done()
+		h.handleUnregister(client)
+	}()
+}
+
+// SendRegisteredMessage 发送注册成功确认消息（配置启用时由传输域调用）
+// 经消息域投递，走客户端写泵统一写出（单写者模式）
+func (h *Hub) SendRegisteredMessage(client *models.Client) {
+	if client == nil {
+		return
+	}
+	msg := models.NewHubMessage().
+		SetMessageType(models.MessageTypeClientRegistered).
+		SetSender(models.UserTypeSystem.String()).
+		SetSenderType(models.UserTypeSystem).
+		SetReceiver(client.UserID).
+		SetReceiverType(client.UserType)
+	h.messagingMgr.SendToClient(client.Context, client, msg)
+}
+
+// ============================================================================
+// 注册/注销内部实现
+// ============================================================================
 
 // handleRegister 处理客户端注册（内部方法）
-// client.Context 在升级时已注入 trace_id，全程沿用同一 trace_id 串联长连接生命周期
-func (h *Hub) handleRegister(client *Client) {
-	// ctx 兜底：生产中 http upgrade 时已注入 client.Context；直接构造 Client 调用 Register 的场景（如测试、集成）
-	// 传 nil 时降级为 h.ctx，保证 workerPool/handleMultiLoginPolicy 等下游不因 nil ctx panic
+// ctx 兜底：生产中 http upgrade 时已注入 client.Context；直接构造 Client 调用的
+// 场景（如测试、集成）传 nil 时降级为 h.ctx，保证下游不因 nil ctx panic
+func (h *Hub) handleRegister(client *models.Client) {
 	ctx := client.Context
 	if ctx == nil {
 		ctx = h.ctx
@@ -67,9 +117,8 @@ func (h *Hub) handleRegister(client *Client) {
 			"user_id", client.UserID,
 			"panic", r,
 		)
-		// panic 点可能在注册表加入/心跳任务调度之后、读写协程启动之前：
-		// 不清理会留下"已完成 Upgrade 但无法读取心跳"的幽灵连接，
-		// 90 秒后被心跳超时强制注销且无 Close 帧（浏览器表现为 1006）
+		// panic 点可能在注册表加入/心跳任务调度之后：不清理会留下
+		// "已完成 Upgrade 却无法读取心跳"的幽灵连接
 		h.cleanupHalfRegisteredClient(client)
 	})
 
@@ -84,283 +133,193 @@ func (h *Hub) handleRegister(client *Client) {
 		return
 	}
 
-	h.logger.InfoContextKV(ctx, "handleRegister开始",
-		"client_id", client.ID,
-		"user_id", client.UserID)
-
 	// ================================================================
 	// 客户端初始化（无锁，client 尚未共享）
-	// ============================================================
+	// ================================================================
 	client.NodeID = h.nodeID
 	client.NodeIP = h.config.NodeIP
 	client.NodePort = h.config.NodePort
 
 	// appID 归一化：空→DefaultAppID（入口层统一归一化，ClientMatchesEnvelope 严格匹配要求）
-	// appID 无广播语义，必填，空值统一补默认值
 	client.AppID = constants.NormalizeAppID(client.AppID)
 	// 命名空间归一化：非观察者补默认（观察者保留空，表示全局观察所有命名空间）
 	if client.UserType != models.UserTypeObserver {
 		client.Namespace = constants.NormalizeNamespace(client.Namespace)
 	}
 
-	// 初始化客户端 SendChan
-	h.initClientSendChan(client)
-
-	// 初始化客户端时间戳（原子更新）
+	// 初始化客户端时间戳（原子更新，已有值则保留——断线重连场景）
 	now := time.Now()
 	client.ConnectedAt = mathx.IfNotZero(client.ConnectedAt, now)
 	client.SetLastHeartbeat(mathx.IfNotZero(client.GetLastHeartbeat(), now))
 	client.SetLastSeen(mathx.IfNotZero(client.GetLastSeen(), now))
 
 	// ================================================================
-	// 节点级总连接数硬限制（动态扩容上限）
-	// MaxConnectionsPerNode > 0 时生效，0 表示不限制
-	// 超过上限：发送 Close 帧(1013 Try Again Later)告知客户端稍后重试，再关闭连接
-	// ============================================================
-	if maxConns := h.GetMaxConnectionsPerNode(); maxConns > 0 && h.shardedRegistry.GetClientCount() >= int64(maxConns) {
-		current := h.shardedRegistry.GetClientCount()
-		h.logger.WarnContextKV(ctx, "节点连接数已达上限，拒绝注册",
-			"client_id", client.ID,
-			"user_id", client.UserID,
-			"current_connections", current,
-			"max_connections", maxConns,
-		)
-		if client.Conn != nil {
-			// 此时读写协程尚未启动（handleRegister 末尾才启动），无并发写者，WriteControl 安全
-			msg := websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "节点连接数已达上限，请稍后重试")
-			_ = client.Conn.WriteControl(websocket.CloseMessage, msg, time.Now().Add(2*time.Second))
-			client.Conn.Close()
-		}
-		return
-	}
-
+	// 临界区 - 仅注册表操作（shardedRegistry 分片锁，粒度细）
+	// 主存储 + 分类索引（SSE/Observer/Agent）由 AddClient 内部原子完成
 	// ================================================================
-	// 临界区 - 仅 map 操作（shardedRegistry 分片锁，粒度细）
-	// 多端登录策略 + 添加到注册表，同一 shard 内原子完成
-	// ============================================================
-	h.handleMultiLoginPolicy(client) // 内部通过 shardedRegistry 加分片锁
+	// 首连守卫：注册前用户在本节点无活跃连接（0→1）才触发离线回放，
+	// 多端同时上线仅首条连接拉取一次；读数与 AddClient 非原子的极小竞态窗口内
+	// 重复触发也无害（drain 破坏性读 + 推送成功删 MySQL，天然幂等去重）
+	wasFirstConnection := h.shardedRegistry.GetUserClientCount(client.UserID) == 0
 
-	// ⏰ 在时间轮上调度心跳超时任务（WebSocket 客户端）
-	// 收到 PING 时 Refresh 刷新，超时未刷新则触发注销
+	h.shardedRegistry.AddClient(client)
+
+	// 多端登录治理（迁移自备份 registry.go）：AllowMultiLogin=false 踢旧连接、
+	// MaxConnectionsPerUser 达上限踢最旧连接（均异步注销，不阻塞注册主流程）
+	h.handleMultiLoginPolicy(client)
+
+	// ⏰ 在时间轮上调度心跳超时任务（仅 WebSocket；SSE 由 checkHeartbeat 兜底扫描）
 	h.scheduleHeartbeatTimeout(client)
 
 	// ================================================================
-	// Phase 3: 非临界区 - IO 操作异步执行（WorkerPool 控制并发）
-	// 不再持有任何锁，避免阻塞其他客户端的注册/注销/发送
-	// ============================================================
-	// ctx 为业务调用方透传的 ctx（携带 trace_id），异步任务沿用实现全链路追踪
+	// 非临界区 - IO 操作异步执行（WorkerPool 控制并发）
+	// ================================================================
 
-	// 统计同步 + 日志（提交到记录池，可丢弃）
-	// syncClientStats/syncActiveConnectionsToRedis 聚合统计用 h.ctx；logClientConnection 用 client.Context
+	// 创建连接记录（内存对象，供异步保存 + 连接回调使用）
+	record := h.createConnectionRecord(client)
+
+	// 🔥 跨节点迁移检测：读取 clientID 旧归属节点（约 1 次 Redis 读，单机模式内部早返回）。
+	// 必须在下方记录池任务的 SyncOnlineStatus 覆写 owner key 之前读取，否则读到的
+	// 是本节点自己；断线重连漂移到本节点时旧节点可能残留同 clientID 幽灵连接，
+	// 消息按索引路由到旧节点会扑空 → 检测到迁移后通知旧节点回收
+	migratedFromNode := h.detectClientMigration(ctx, client)
+
+	// 统计同步 + 在线索引写 Redis + 连接记录落库（提交到记录池，可丢弃）
+	// SyncOnlineStatus：注册即写在线索引，其他节点 checkUserOnline 直查 Redis 即可见，
+	// 不依赖心跳续期 ticker 的自愈重建
 	h.workerPool.TrySubmitRecord(func() {
-		h.syncClientStats()
-		h.syncActiveConnectionsToRedis()
-		h.logClientConnection(client)
+		h.statsMgr.LogClientConnection(client)
+		h.statsMgr.SyncOnlineStatus(client)
+		h.saveConnectionRecord(ctx, record)
+		// 旧归属其他节点 → 通知旧节点回收幽灵连接。须在 SyncOnlineStatus 写入本节点
+		// owner 之后调用（旧节点清理受 Lua 归属校验保护，仅清自身集合不动共享索引），
+		// 与 SyncOnlineStatus 同闭包顺序执行保证时序；任务被丢弃时由旧节点连接超时清理兜底
+		if migratedFromNode != "" && migratedFromNode != h.nodeID {
+			h.notifyClientReclaim(ctx, client, migratedFromNode)
+		}
 	})
 
-	// 创建连接记录（内存对象，供异步保存 + 连接回调使用，无条件构造）
-	record := h.CreateConnectionRecord(client)
-
-	// 保存连接记录到数据库（提交到记录池）
-	// 传入 client.Context 保留 client 维度 trace_id，异步保存仍可全链路追踪
-	if h.connectionRecordRepo != nil {
-		h.workerPool.TrySubmitRecord(func() {
-			h.saveConnectionRecord(ctx, record)
-		})
-	}
-
-	// 保存连接质量初始行（提交到记录池，与连接记录并行落库）
-	// 首次连接建零值行(QualityScore=100)，重连 reconnect_count+1（由 qualityRepo.Upsert 内部 OnConflict 处理）
-	if h.connectionQualityRepo != nil {
-		h.workerPool.TrySubmitRecord(func() {
-			h.saveConnectionQuality(ctx, client)
-		})
-	}
-
 	// 调用客户端连接回调（提交到回调池，不可丢弃）
-	// 传 record 让调用方获取 connect 身份+会话生命周期做额外落盘（record 已异步落库，回调方不应再写 wsc_connection_records）
-	h.workerPool.SubmitCallback(ctx, func() {
-		if h.clientConnectCallback != nil {
-			if err := h.clientConnectCallback(ctx, client, record); err != nil {
+	// 传 record 让调用方获取 connect 身份+会话生命周期做额外落盘
+	if h.clientConnectCallback != nil {
+		cb := h.clientConnectCallback
+		h.workerPool.SubmitCallback(ctx, func() {
+			if err := cb(ctx, client, record); err != nil {
 				h.logger.ErrorContextKV(ctx, "客户端连接回调执行失败",
 					"client_id", client.ID,
 					"user_id", client.UserID,
 					"error", err,
 				)
-				if h.errorCallback != nil {
-					_ = h.errorCallback(ctx, err, ErrorSeverityError)
-				}
 			}
-		}
-	})
-
-	// 🔑 同步写 Redis 在线索引：注册完成的瞬间让其他节点 checkUserOnline 直查 Redis 可见
-	// 原异步路径（TrySubmitDistributed）在 DistributedPool 队列积压时索引写入滞后，
-	// 期间其他节点 checkUserOnline 返回 false → 触发 routeToClusterForOfflineUser 广播兜底
-	// 同步调用仅阻塞本 handleRegister goroutine ~1ms（一次 Redis Pipeline 往返），
-	// handleRegister 由 go h.handleRegister(client) 异步触发（registry.go:39），不阻塞 EventLoop、不影响其他连接
-	// syncOnlineStatus 内部 onlineStatusRepo==nil 时早返回；SetClientOnline 失败仅记日志不 return，行为与原异步路径一致
-	// 🔥 跨节点迁移检测：查询 clientID 旧归属节点（必须在 syncOnlineStatus 覆写 owner key 之前，
-	// 否则读到的是本节点自己）。断线重连漂移到本节点时，旧节点可能残留同 clientID 幽灵连接，
-	// 消息按索引路由到旧节点会扑空 → 检测到迁移后通知旧节点回收
-	migratedFromNode := h.detectClientMigration(ctx, client)
-
-	h.syncOnlineStatus(client) // 内部用 client.Context 保留连接级 trace_id
-
-	// 旧归属其他节点 → 通知旧节点回收幽灵连接（此时本节点 owner 已写入，
-	// 旧节点清理受 Lua 归属校验保护：仅清自身集合，不动本节点已接管的共享索引）
-	// 🔥 异步执行：回收通知的任何失败/异常不得中断注册主流程——
-	// 注册主路径后半段（setupPingHandler + 读写协程启动）尚未执行，
-	// 同步路径一旦 panic（历史 bug：回收消息无 Message 体触发 publishToTargetedNodes
-	// 空指针）会导致连接只完成 Upgrade 却无读写协程，90 秒后被心跳超时注销
-	if migratedFromNode != "" && migratedFromNode != h.nodeID {
-		h.workerPool.TrySubmitDistributed(func() {
-			h.notifyClientReclaim(ctx, client, migratedFromNode)
 		})
 	}
 
-	// 系统组加入 + 成员组加入 + 离线消息推送（提交到分布式池，均不依赖在线状态索引）
-	// joinSystemGroupsOnConnect/joinMemberGroupOnConnect 写 group ZSET（wsc:group:* 命名空间）
-	// pushOfflineMessagesOnConnect 操作离线消息队列（ns::userID），依赖本地 shardedRegistry（L122 已完成）
-	// 内部方法已有 client 参数，直接用 client.Context 保留连接级 trace_id
-	h.workerPool.TrySubmitDistributed(func() {
-		h.joinSystemGroupsOnConnect(ctx, client)
-		h.joinMemberGroupOnConnect(ctx, client)
-		h.pushOfflineMessagesOnConnect(client)
-	})
+	h.logger.InfoContextKV(ctx, "客户端注册完成",
+		"client_id", client.ID,
+		"user_id", client.UserID,
+		"user_type", client.UserType,
+		"connection_type", client.ConnectionType,
+		"total_clients", h.shardedRegistry.GetClientCount(),
+	)
 
-	// 📡 发布用户上线事件（提交到回调池）
-	h.workerPool.TrySubmitCallback(func() {
-		events.PublishUserOnline(ctx, h, client.UserID, client.UserType, client.ID)
-	})
-
-	// 发送欢迎消息（提交到消息池）
-	h.workerPool.TrySubmitMessage(func() {
-		h.sendWelcomeMessage(client)
-	})
-
-	// 安装协议级 PING 处理器（单写者模式，必须先于读写协程启动）
-	h.setupPingHandler(client)
-
-	// 启动客户端读写 goroutine
-	if client.Conn != nil {
-		go h.handleClientWrite(client)
-		go h.handleClientRead(client)
-	}
-
-	// 🚀 失效路由缓存（让其他节点下次路由时重新加载用户节点信息）
-	if h.routerCache != nil {
-		h.routerCache.InvalidateUser(ctx, client.UserID)
-	}
-}
-
-// setupPingHandler 安装协议级 PING 处理器（gorilla 单写者模式）
-//
-// 背景：gorilla 默认 ping handler 在读协程（ReadMessage 内部）直接 WriteControl 写 pong，
-// 而 WriteControl 的内部锁仅串行化控制帧之间，与写泵 WriteMessage 的数据帧写入互不同步——
-// 并发写同一 TCP 连接会导致帧交错、连接损坏（gorilla 明确要求单写者）。
-//
-// 修复：协议级 PING 与应用层心跳等效保活（touchHeartbeat 统一路径），
-// pong 响应帧经 PongCh 非阻塞投递给写泵统一写出；PongCh 容量 1，
-// 满时丢弃本次 pong（客户端 PING 超时会重发，不阻塞读协程）
-func (h *Hub) setupPingHandler(client *Client) {
-	if client == nil || client.Conn == nil {
-		return
-	}
-	client.Conn.SetPingHandler(func(appData string) error {
-		now := time.Now()
-		h.touchHeartbeat(client, now)
-		if client.PongCh != nil {
-			select {
-			case client.PongCh <- []byte(appData):
-			default:
-				// 上一个 pong 尚未被写泵写出，丢弃（客户端 PING 超时会重发）
+	// 离线消息回放（用户从全离线转上线，仅首条活跃连接触发一次；提交到回调池不可丢弃，
+	// 不阻塞注册主流程）。两阶段全量补发在 messaging 域内执行（见 PushOfflineMessages），
+	// 状态全部在注入的共享存储（Redis 队列 + RDBMS），Deployment 滚动更新 / Pod 重新
+	// 调度下跨 Pod 可见；未注入离线处理器时域内 nil-safe 跳过。
+	// 有成功推送时触发应用回调（上游据此感知离线消息已送达）
+	if wasFirstConnection {
+		h.workerPool.SubmitCallback(ctx, func() {
+			pushedIDs, failedIDs := h.messagingMgr.PushOfflineMessages(client.Context, client)
+			if len(pushedIDs) > 0 && h.offlineMessagePushCallback != nil {
+				h.offlineMessagePushCallback(client.UserID, pushedIDs, failedIDs)
 			}
-		}
-		return nil
-	})
-}
-
-// GetMaxConnectionsPerNode 获取节点最大连接数（0 表示不限制）
-// 从 Performance.MaxConnectionsPerNode 读取；config 或 Performance 为 nil 时返回 0（不限制）
-func (h *Hub) GetMaxConnectionsPerNode() int {
-	if h.config == nil || h.config.Performance == nil {
-		return 0
+		})
 	}
-	return h.config.Performance.MaxConnectionsPerNode
 }
 
 // handleUnregister 处理客户端注销（内部方法）
-// client.Context 在升级时已注入 trace_id，内部用 client.Context 串联长连接生命周期
-func (h *Hub) handleUnregister(client *Client) {
+func (h *Hub) handleUnregister(client *models.Client) {
 	ctx := client.Context
-	// 📡 发布用户下线事件（在锁外发布，避免阻塞）
-	go events.PublishUserOffline(ctx, h, client.UserID, client.UserType, client.ID)
+	if ctx == nil {
+		ctx = h.ctx
+	}
 
-	// Phase 1: 临界区 - 仅从注册表移除（shardedRegistry 分片锁）
-	// removeClientUnsafe 内部用 client.Context 保留连接级 trace_id
-	h.removeClientUnsafe(client)
+	// Phase 1: 临界区 - 从注册表移除（shardedRegistry 分片锁）
+	removed := h.shardedRegistry.RemoveClient(client.ID, client.UserID)
+	if removed == nil {
+		return
+	}
 
-	// 系统组离开（提交到分布式池，与在线状态清理并行）
-	h.workerPool.TrySubmitDistributed(func() {
-		h.leaveSystemGroupsOnDisconnect(ctx, client)
-	})
+	// ⏰ 取消时间轮上的心跳超时任务（客户端已注销，不再需要超时检测）
+	h.cancelHeartbeatTimeout(client.ID)
 
-	// 调用断开回调（提交到回调池）
+	// 关键修复：验证客户端指针一致性
+	// TemporalHasher 在时间窗口内为相同用户+设备生成相同 ClientID，
+	// 断线重连时新客户端会覆盖旧客户端的注册表条目，
+	// 旧客户端的读协程退出时调用 Unregister 不应删除新客户端
+	if removed != client {
+		h.shardedRegistry.AddClient(removed)
+		h.logger.InfoContextKV(ctx, "客户端已被新连接替换，跳过旧客户端的注销",
+			"client_id", client.ID,
+			"user_id", client.UserID,
+		)
+		return
+	}
+
+	// Phase 2: 关闭通道与连接（幂等，重复调用无副作用）
+	h.closeClientChannel(client)
+	h.closeClientConnection(client)
+
+	h.logger.InfoContextKV(ctx, "客户端断开连接",
+		"client_id", client.ID,
+		"user_id", client.UserID,
+		"user_type", client.UserType,
+		"remaining_connections", h.shardedRegistry.GetClientCount(),
+	)
+
+	// Phase 3: 回调与记录落库（异步，不阻塞注销主流程）
+
+	// 调用断开回调（提交到回调池，不可丢弃）
 	if h.clientDisconnectCallback != nil {
+		cb := h.clientDisconnectCallback
 		h.workerPool.SubmitCallback(ctx, func() {
-			if err := h.clientDisconnectCallback(ctx, client, DisconnectReasonClientRequest); err != nil {
+			if err := cb(ctx, client, models.DisconnectReasonClientRequest); err != nil {
 				h.logger.ErrorContextKV(ctx, "客户端断开回调执行失败",
 					"client_id", client.ID,
 					"user_id", client.UserID,
 					"error", err,
 				)
-				if h.errorCallback != nil {
-					_ = h.errorCallback(ctx, err, ErrorSeverityWarning)
-				}
 			}
 		})
 	}
 
-	// 🚀 失效路由缓存
-	if h.routerCache != nil {
-		h.routerCache.InvalidateUser(ctx, client.UserID)
-	}
-}
-
-// cleanupHalfRegisteredClient 清理半注册连接（handleRegister panic 兜底）
-// 半注册状态：连接已加入注册表 + 心跳超时任务已调度，但读写协程未启动（注册流程中断）
-// 幂等安全：各清理步骤对"未执行到"的步骤均为无操作
-func (h *Hub) cleanupHalfRegisteredClient(client *Client) {
-	if client == nil {
-		return
-	}
-	// 移除注册表条目（未注册时无操作）
-	h.removeClientUnsafe(client)
-	// 撤销已调度的心跳超时任务（未调度时无操作），避免重复注销
-	h.cancelHeartbeatTimeout(client.ID)
-	// 关闭 SendChan 与底层连接（触发客户端立即重连，重连后走正常注册流程）
-	h.closeClientChannel(client)
-	h.closeClientConnection(client)
+	// 标记连接断开记录（提交到记录池，可丢弃）
+	h.workerPool.TrySubmitRecord(func() {
+		h.markConnectionDisconnected(ctx, client)
+	})
 }
 
 // ============================================================================
-// 多端登录策略处理
+// 多端登录策略处理（迁移自备份 registry.go，适配 AddClient 前置调用）
 // ============================================================================
 
 // handleMultiLoginPolicy 统一处理多端登录策略（内部方法）
-// 根据配置决定是否允许多端登录、是否限制连接数
-// 全程使用原子/O(1) 查询 + ForEachUserClient 持锁遍历，消除 GetUserClients 锁外遍历的数据竞争
-// newClient.Context 在升级时已注入 trace_id + 路由信封，内部用 newClient.Context 串联长连接生命周期
-// 多端登录策略按 appID+namespace 信封隔离：不同应用/命名空间的连接互不影响（app-A 的连接数不挤占 app-B 的配额）
-func (h *Hub) handleMultiLoginPolicy(newClient *Client) {
+// 根据配置决定是否允许多端登录、是否限制连接数：
+//   - AllowMultiLogin=false：踢掉该用户全部旧连接（同信封快速检查，无旧连接零开销）
+//   - MaxConnectionsPerUser>0：达到上限时踢掉最不活跃（最旧心跳）的旧连接
+//
+// 与备份实现的差异（适配新树调用点）：新树 handleRegister 已先 AddClient 再调本方法，
+// 故踢人时排除新连接自身（newClient），且不再需要备份中的 addNewClient / 同 clientID
+// 替换清理（同 clientID 覆盖已由 handleUnregister/removeClientUnsafe 的指针一致性校验保护）。
+// 多端登录策略按 appID+namespace 信封隔离：不同应用/命名空间的连接互不影响
+// （app-A 的连接数不挤占 app-B 的配额）
+func (h *Hub) handleMultiLoginPolicy(newClient *models.Client) {
 	ctx := newClient.Context
 	userID := newClient.UserID
 	appID, ns := routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx)
 
 	// O(1) 快速检查同信封下用户是否有现有客户端（原子计数器，无锁）
 	if !h.shardedRegistry.HasUser(userID, appID, ns) {
-		h.addNewClient(newClient)
 		return
 	}
 
@@ -370,24 +329,14 @@ func (h *Hub) handleMultiLoginPolicy(newClient *Client) {
 		"allow_multi_login", h.config.AllowMultiLogin,
 		"max_connections_per_user", h.config.MaxConnectionsPerUser)
 
-	// 检测断线重连：O(1) 查找相同 ClientID 的旧客户端（GetClient 持读锁）
-	if oldClient, exists := h.shardedRegistry.GetClient(newClient.ID); exists && oldClient.UserID == userID {
-		h.logger.InfoContextKV(ctx, "检测到相同ClientID的旧连接，执行断线重连替换",
-			"user_id", userID,
-			"client_id", newClient.ID,
-		)
-		// 清理旧客户端：关闭通道和连接，停止旧协程
-		// 注意：不调用 removeClientFromMaps，因为 addNewClient 会覆盖 map 条目
-		h.closeClientChannel(oldClient)
-		h.closeClientConnection(oldClient)
-	}
-
-	// 不允许多端登录：踢掉所有旧连接
+	// 不允许多端登录：踢掉所有旧连接（新连接已入表，排除自身）
 	if !h.config.AllowMultiLogin {
-		// 使用 ForEachUserClient 持读锁零拷贝收集客户端（消除 CopyClientsFromMap 锁外遍历数据竞争）
-		var clients []*Client
-		h.shardedRegistry.ForEachUserClient(userID, func(_ string, client *Client) bool {
-			clients = append(clients, client)
+		// 使用 ForEachUserClient 持读锁零拷贝收集客户端（消除锁外遍历数据竞争）
+		var clients []*models.Client
+		h.shardedRegistry.ForEachUserClient(userID, func(_ string, client *models.Client) bool {
+			if client != newClient {
+				clients = append(clients, client)
+			}
 			return true
 		})
 
@@ -395,338 +344,55 @@ func (h *Hub) handleMultiLoginPolicy(newClient *Client) {
 			"user_id", userID,
 			"old_connections", len(clients))
 
-		h.kickExistingClients(clients, DisconnectReasonForceOffline)
-		h.addNewClient(newClient)
+		h.kickExistingClients(clients)
 		return
 	}
 
-	// 允许多端登录，但有连接数限制
+	// 允许多端登录，但有连接数限制（计数含新连接：old+1 <= max 等价于备份的 old < max）
 	if h.config.MaxConnectionsPerUser > 0 {
 		currentCount := h.shardedRegistry.GetUserClientCount(userID)
-		maxAllowed := h.config.MaxConnectionsPerUser
 
-		// 如果未达到上限，直接添加
-		if currentCount < maxAllowed {
-			h.addNewClient(newClient)
+		// 未达上限，无需踢人
+		if currentCount <= h.config.MaxConnectionsPerUser {
 			return
 		}
 
-		// 达到上限：踢掉最早的连接
+		// 达到上限：踢掉最早的旧连接
 		h.logger.InfoContextKV(ctx, "达到连接数上限，踢掉最早的连接",
 			"user_id", userID,
 			"current_count", currentCount,
-			"max_allowed", maxAllowed)
+			"max_allowed", h.config.MaxConnectionsPerUser)
 
-		h.kickOldestConnection(userID)
-		h.addNewClient(newClient)
-		return
+		h.kickOldestConnection(userID, newClient)
 	}
-
-	// 允许多端登录且无限制，直接添加
-	h.addNewClient(newClient)
-}
-
-// ============================================================================
-// 踢人相关方法
-// ============================================================================
-
-// KickUser 踢出用户的所有连接
-// ctx 由调用方传入（通常为请求级 ctx 或 client.Context），用于全链路追踪踢人操作
-func (h *Hub) KickUser(ctx context.Context, userID string, reason string, sendNotification bool, notificationMsg string) *KickUserResult {
-	result := &KickUserResult{
-		UserID:   userID,
-		Reason:   reason,
-		KickedAt: time.Now(),
-	}
-
-	// 1. 获取用户的所有连接（按 ctx 路由信封 appID+namespace 隔离，避免跨 app/ns 误踢）
-	clients := h.GetConnectionsByUserID(ctx, userID)
-	if len(clients) == 0 {
-		result.Error = errorx.NewError(ErrTypeUserNotFound, userID)
-		result.Success = false
-		result.Reason = reason + " (用户不在线)"
-		h.logger.WarnContextKV(ctx, "踢出用户失败：用户不在线",
-			"user_id", userID,
-			"reason", reason,
-		)
-		return result
-	}
-
-	result.KickedConnections = len(clients)
-
-	// 2. 发送踢出通知消息（在断开连接之前）
-	// 批量操作：内部每个 client 用各自 client.Context 保留连接级 trace_id
-	if sendNotification {
-		notification := h.createKickNotification(userID, reason, notificationMsg, result.KickedAt)
-		result.NotificationSent = h.sendKickNotificationToClients(clients, notification)
-		// 消息已写入各客户端 SendChan，handleClientWrite 会异步发送
-		// 不再使用 time.Sleep 阻塞，后续 CloseAllClientsInMap 会触发连接关闭
-	}
-
-	// 3. 记录踢出操作
-	h.logger.InfoContextKV(ctx, "开始踢出用户",
-		"user_id", userID,
-		"reason", reason,
-		"connection_count", len(clients),
-		"notification_sent", result.NotificationSent,
-	)
-
-	// 4. 并发断开所有连接
-	// 每个 client 用自己的 client.Context，使断开回调日志携带各自 trace_id
-	syncx.ParallelForEachSlice(clients, func(i int, client *Client) {
-		h.disconnectKickedClient(client.Context, client, reason)
-	})
-
-	// 5. 设置成功标志并记录完成
-	result.Success = true
-	h.logger.InfoContextKV(ctx, "用户踢出完成",
-		"user_id", userID,
-		"reason", reason,
-		"kicked_connections", result.KickedConnections,
-		"notification_sent", result.NotificationSent,
-	)
-
-	return result
-}
-
-// KickUserWithMessage 踢出用户并发送自定义消息
-// ctx 由调用方传入（grpc/distributed 路径已恢复 trace_id），透传给 KickUser 实现全链路追踪
-func (h *Hub) KickUserWithMessage(ctx context.Context, userID string, reason string, message string) error {
-	result := h.KickUser(ctx, userID, reason, true, message)
-	return result.Error
-}
-
-// KickUserSimple 简单踢出用户（不发送通知）
-// ctx 由调用方传入（grpc/distributed 路径已恢复 trace_id），透传给 KickUser 实现全链路追踪
-func (h *Hub) KickUserSimple(ctx context.Context, userID string, reason string) int {
-	result := h.KickUser(ctx, userID, reason, false, "")
-	return result.KickedConnections
-}
-
-// ============================================================================
-// 内部辅助方法
-// ============================================================================
-
-// removeClientUnsafe 从注册表移除客户端（含指针一致性校验、时间轮取消、清理流程）
-// 主存储 + 分类索引（SSE/Observer/Agent）全部由 shardedRegistry.RemoveClient 内部原子完成
-// 已有 client 参数，内部用 client.Context 保留连接级 trace_id
-// 回调由调用方（handleUnregister）通过 workerPool 处理，避免重复
-func (h *Hub) removeClientUnsafe(client *Client) {
-	// 1. 从 shardedRegistry 移除主存储 + 分类索引（若不存在则直接返回）
-	removed := h.shardedRegistry.RemoveClient(client.ID, client.UserID)
-	if removed == nil {
-		return
-	}
-
-	// ⏰ 取消时间轮上的心跳超时任务（客户端已注销，不再需要超时检测）
-	h.cancelHeartbeatTimeout(client.ID)
-
-	// 关键修复：验证客户端指针是否一致
-	// TemporalHasher 在时间窗口内为相同用户+设备生成相同 ClientID，
-	// 断线重连时新客户端会覆盖旧客户端的注册表条目，
-	// 旧客户端的读协程退出时调用 Unregister 不应删除新客户端
-	if removed != client {
-		// 旧客户端已被新连接替换，重新添加新客户端并跳过旧客户端的注销
-		h.shardedRegistry.AddClient(removed)
-		h.logger.InfoContextKV(client.Context, "客户端已被新连接替换，跳过旧客户端的注销",
-			"client_id", client.ID,
-			"user_id", client.UserID,
-		)
-		return
-	}
-
-	// shutdown 路径：精简清理，只关闭连接（含 1001 close frame）
-	// Redis 在线状态、DB 连接记录、逐条日志由 SafeShutdown 统一批量处理
-	// 避免大量串行写 Redis/DB 导致 shutdown 超时
-	if h.shutdown.Load() {
-		h.closeClientChannel(client)
-		h.closeClientConnection(client)
-		return
-	}
-
-	// 正常路径：完整清理流程
-	// 2. 日志
-	h.logClientDisconnection(client)
-
-	// 3. Redis 同步（IO 操作，调用方应通过 workerPool 异步化）
-	h.syncClientRemovalToRedis(client)
-
-	// 4. 关闭 channel 和连接
-	h.closeClientChannel(client)
-	h.closeClientConnection(client)
-
-	// 5. 更新连接断开记录
-	h.updateConnectionOnDisconnect(client, DisconnectReasonClientRequest)
-}
-
-// logClientDisconnection 记录客户端断开日志
-// 已有 client 参数，内部用 client.Context 保留连接级 trace_id
-func (h *Hub) logClientDisconnection(client *Client) {
-	h.logger.InfoContextKV(client.Context, "客户端断开连接",
-		"client_id", client.ID,
-		"user_id", client.UserID,
-		"user_type", client.UserType,
-		"remaining_connections", h.shardedRegistry.GetClientCount(),
-	)
-}
-
-// syncClientRemovalToRedis 同步客户端移除到Redis
-// 已有 client 参数，内部用 client.Context 保留连接级 trace_id
-func (h *Hub) syncClientRemovalToRedis(client *Client) {
-	h.syncActiveConnectionsToRedis()
-	h.removeOnlineStatusFromRedis(client)
-}
-
-// syncActiveConnectionsToRedis 同步活跃连接数到Redis（使用防抖机制避免竞态条件）
-// 当多个客户端快速注册时，使用防抖延迟50ms执行，避免多个goroutine读取不同的连接数并乱序写入Redis
-// 聚合统计无具体 client 维度，用 h.ctx
-func (h *Hub) syncActiveConnectionsToRedis() {
-	if h.statsRepo == nil {
-		return
-	}
-
-	// 检查Hub是否正在关闭
-	if h.shutdown.Load() {
-		// Hub正在关闭，立即同步连接数为0
-		go contextx.WithTimeoutOrBackground(h.ctx, 2*time.Second, func(ctx context.Context) error {
-			return h.statsRepo.SetActiveConnections(ctx, h.nodeID, 0)
-		})
-		return
-	}
-
-	// 使用防抖机制
-	h.syncActiveConnMutex.Lock()
-	defer h.syncActiveConnMutex.Unlock()
-
-	// 取消之前的定时器
-	if h.syncActiveConnTimer != nil {
-		h.syncActiveConnTimer.Stop()
-	}
-
-	// 设置新的定时器，100ms后执行同步（增加延迟确保所有注册操作完成）
-	h.syncActiveConnTimer = time.AfterFunc(100*time.Millisecond, func() {
-		// 标记正在执行同步
-		if !h.syncActiveConnPending.CompareAndSwap(false, true) {
-			return // 已有同步任务在执行
-		}
-		defer h.syncActiveConnPending.Store(false)
-
-		syncx.Go(h.ctx).
-			WithTimeout(2 * time.Second).
-			OnPanic(func(r any) {
-				h.logger.ErrorContextKV(h.ctx, "同步活跃连接数到Redis崩溃", "panic", r, "stack", string(debug.Stack()))
-			}).
-			ExecWithContext(func(ctx context.Context) error {
-				// 再次检查shutdown
-				if h.shutdown.Load() {
-					return h.statsRepo.SetActiveConnections(ctx, h.nodeID, 0)
-				}
-				// 读取当前连接数（shardedRegistry 原子计数器，零锁开销）
-				return h.statsRepo.SetActiveConnections(ctx, h.nodeID, h.shardedRegistry.GetClientCount())
-			})
-	})
-}
-
-// removeOnlineStatusFromRedis 从Redis移除在线状态
-// 已有 client 参数，内部用 client.Context 保留连接级 trace_id
-// context.WithoutCancel 确保 Hub 关闭（h.ctx 取消）后仍能完成 Redis 清理
-func (h *Hub) removeOnlineStatusFromRedis(client *Client) {
-	if h.onlineStatusRepo == nil {
-		return
-	}
-	// 用 client.Context 派生（保留连接级 trace_id，全链路追踪下线清理）；
-	// context.WithoutCancel 确保 Hub 关闭（h.ctx 取消）后仍能完成 Redis 清理
-	syncx.Go(context.WithoutCancel(client.Context)).
-		WithTimeout(3 * time.Second).
-		OnError(func(err error) {
-			h.logger.ErrorContextKV(client.Context, "从Redis移除在线状态失败",
-				"user_id", client.UserID,
-				"client_id", client.ID,
-				"error", err,
-			)
-		}).
-		ExecWithContext(func(ctx context.Context) error {
-			return h.onlineStatusRepo.SetClientOffline(ctx, client)
-		})
-}
-
-// closeClientChannel 关闭客户端发送通道
-// 用 DoneCh 通知 handleClientWrite 退出，数据通道（SendChan/SSEMessageCh）永不 close：
-//  1. 消除 TrySend 的 chansend 与本函数 closechan 的数据竞态（-race 检出），
-//     TrySend 因此可无锁化（闭锁竞态源头不存在，recover 仅兜底外部直接 close 的测试场景）
-//  2. 不回收到对象池（竞态窗口内 racing sender 仍可能写入残留消息，复用会跨连接串消息）
-//  3. 不置 nil SendChan，避免与 handleClientWrite 的 select 读产生数据竞争
-func (h *Hub) closeClientChannel(client *Client) {
-	// 使用互斥锁保护关闭操作（防并发调用 double close DoneCh/SSECloseCh）
-	client.CloseMu.Lock()
-	defer client.CloseMu.Unlock()
-
-	// 标记为已关闭，防止其他goroutine继续发送
-	if client.IsClosed() {
-		return // 已经关闭过了
-	}
-	client.MarkClosed()
-
-	// 关闭生命周期信号（handleClientWrite / handleSSEWriteLoop select 到后退出）
-	if client.DoneCh != nil {
-		close(client.DoneCh)
-	}
-
-	// SSE 客户端关闭专用通道（handleSSEWriteLoop 已 select SSECloseCh，SSEMessageCh 无需 close）
-	if client.ConnectionType == ConnectionTypeSSE && client.SSECloseCh != nil {
-		close(client.SSECloseCh)
-	}
-}
-
-// closeClientConnection 关闭WebSocket连接
-// Hub 关闭（如 K8s 滚动更新）时先发送 1001 GoingAway 控制帧，
-// 让客户端识别为服务端主动离开并触发重连，而不是收到 1006 异常断开
-func (h *Hub) closeClientConnection(client *Client) {
-	if client.Conn == nil {
-		return
-	}
-
-	// Hub 正在关闭时，先发送 1001 GoingAway 控制帧通知客户端
-	// 说明：WriteControl 与写泵的 WriteMessage 并不互相同步（仅控制帧之间串行），
-	// 理论上存在极小概率的并发写窗口；但此时 closeClientChannel 已先执行（写泵即将退出），
-	// 且紧随其后 Conn.Close()，即使帧交错客户端也只是走异常断开重连，不影响正确性
-	if h.shutdown.Load() {
-		msg := websocket.FormatCloseMessage(websocket.CloseGoingAway, "server is shutting down")
-		_ = client.Conn.WriteControl(websocket.CloseMessage, msg, time.Now().Add(2*time.Second))
-	}
-
-	client.Conn.Close()
-}
-
-// addNewClient 添加新客户端到注册表
-// 主存储 + 分类索引（SSE/Observer/Agent）全部由 shardedRegistry.AddClient 内部原子完成
-func (h *Hub) addNewClient(client *Client) {
-	h.shardedRegistry.AddClient(client)
+	// 允许多端登录且无限制：无需处理
 }
 
 // kickExistingClients 踢掉现有客户端（接收切片，调用方负责通过 ForEachUserClient 持锁收集）
-// 已有 client 参数，内部循环每个 client 用各自 client.Context 保留连接级 trace_id
-func (h *Hub) kickExistingClients(clients []*Client, reason DisconnectReason) {
+// 逐连接用各自 client.Context 保留连接级 trace_id
+func (h *Hub) kickExistingClients(clients []*models.Client) {
 	for _, client := range clients {
-		h.kickClientWithNotification(client, reason, "您的账号在其他设备登录，当前连接将被断开")
+		h.kickClientWithNotification(client, models.DisconnectReasonForceOffline, "您的账号在其他设备登录，当前连接将被断开")
 
 		h.logger.InfoContextKV(client.Context, "踢出旧连接",
 			"user_id", client.UserID,
 			"client_id", client.ID,
-			"reason", reason,
+			"reason", models.DisconnectReasonForceOffline,
 		)
 	}
 }
 
-// kickOldestConnection 踢掉最不活跃的连接（基于最后心跳时间）
+// kickOldestConnection 踢掉最不活跃的旧连接（基于最后心跳时间，排除 exclude 指定的新连接）
 // 使用 ForEachUserClient 持读锁遍历，消除锁外遍历 map 的数据竞争
-// 找到 oldestClient 后用其 client.Context 保留连接级 trace_id
-func (h *Hub) kickOldestConnection(userID string) {
-	var oldestClient *Client
+func (h *Hub) kickOldestConnection(userID string, exclude *models.Client) {
+	var oldestClient *models.Client
 	var oldestTime time.Time
 
 	// 持读锁遍历找出最久没有心跳的客户端
-	h.shardedRegistry.ForEachUserClient(userID, func(_ string, client *Client) bool {
+	h.shardedRegistry.ForEachUserClient(userID, func(_ string, client *models.Client) bool {
+		if client == exclude {
+			return true
+		}
 		heartbeat := client.GetLastHeartbeat()
 		if oldestClient == nil || heartbeat.Before(oldestTime) {
 			oldestClient = client
@@ -746,78 +412,353 @@ func (h *Hub) kickOldestConnection(userID string) {
 		"connected_at", oldestClient.ConnectedAt,
 	)
 
-	h.kickClientWithNotification(oldestClient, DisconnectReasonForceOffline, "连接数已达上限，当前连接将被断开")
+	h.kickClientWithNotification(oldestClient, models.DisconnectReasonForceOffline, "连接数已达上限，当前连接将被断开")
 }
 
-// kickClientWithNotification 踢掉客户端并发送通知（公共方法）
-// 已有 client 参数，内部用 client.Context 保留连接级 trace_id
+// ============================================================================
+// 心跳处理（messaging.Host 端口 + 时间轮 O(1) 超时管理）
+// ============================================================================
+
+// HandleHeartbeat 处理心跳消息（连接域时间轮续期 + 统计刷新）
+// 流程：前置回调 → 续期 → Redis 异步续期通道 → 后置回调 → 统计
+func (h *Hub) HandleHeartbeat(client *models.Client) {
+	// 检查客户端是否已关闭（防止处理已断开客户端的心跳）
+	if client == nil || client.IsClosed() {
+		return
+	}
+
+	// 触发心跳前置回调，返回 false 则跳过后续心跳处理
+	if h.beforeHeartbeatCallback != nil {
+		if !h.beforeHeartbeatCallback(client) {
+			return
+		}
+	}
+
+	// 更新心跳请求时间（内存）+ O(1) 续期时间轮超时任务
+	h.touchHeartbeat(client, time.Now())
+
+	// 异步续期 Redis 在线索引与跨节点路由（不阻塞心跳主流程）
+	// 单 goroutine worker 消费 channel，满则丢弃（心跳下次还会来）
+	if h.onlineStatusRepo != nil {
+		select {
+		case h.heartbeatRedisCh <- client:
+		default:
+			// channel 满，跳过本次 Redis 更新
+		}
+	}
+
+	// 触发心跳后置回调
+	if h.afterHeartbeatCallback != nil {
+		h.afterHeartbeatCallback(client)
+	}
+
+	// 异步追踪心跳统计（不阻塞主流程）
+	h.statsMgr.TrackHeartbeatStats(client)
+}
+
+// touchHeartbeat 刷新客户端心跳（协议级 PING 与应用层心跳共用同一保活路径）
+// 更新内存时间戳 + O(1) 刷新时间轮超时任务（取消旧任务 + 调度新任务）
+func (h *Hub) touchHeartbeat(client *models.Client, now time.Time) {
+	client.SetLastHeartbeat(now)
+	client.SetLastSeen(now)
+
+	// WebSocket 客户端超时由时间轮管理；SSE 客户端由 checkHeartbeat 扫描兜底
+	if h.heartbeatTimer == nil || client.ConnectionType == models.ConnectionTypeSSE {
+		return
+	}
+	h.heartbeatTimer.Refresh(client.ID, h.config.ClientTimeout, h.makeHeartbeatTimeoutCallback(client))
+}
+
+// ============================================================================
+// 时间轮心跳超时管理（替代 O(N) 全量扫描）
+// ============================================================================
+
+// scheduleHeartbeatTimeout 在时间轮上调度客户端心跳超时任务
+// 仅用于 WebSocket 客户端；SSE 客户端由 checkHeartbeat 扫描兜底
+func (h *Hub) scheduleHeartbeatTimeout(client *models.Client) {
+	if h.heartbeatTimer == nil || client.ConnectionType == models.ConnectionTypeSSE {
+		return
+	}
+	h.heartbeatTimer.ScheduleWithKey(client.ID, h.config.ClientTimeout, h.makeHeartbeatTimeoutCallback(client))
+}
+
+// cancelHeartbeatTimeout 取消客户端心跳超时任务（注销时调用）
+func (h *Hub) cancelHeartbeatTimeout(clientID string) {
+	if h.heartbeatTimer == nil {
+		return
+	}
+	h.heartbeatTimer.CancelByKey(clientID)
+}
+
+// makeHeartbeatTimeoutCallback 创建心跳超时回调闭包
+func (h *Hub) makeHeartbeatTimeoutCallback(client *models.Client) func() {
+	return func() {
+		h.onHeartbeatTimeout(client)
+	}
+}
+
+// onHeartbeatTimeout 心跳超时处理：触发超时回调并异步注销客户端
+func (h *Hub) onHeartbeatTimeout(client *models.Client) {
+	// 客户端已关闭（正常断开），跳过
+	if client.IsClosed() {
+		return
+	}
+	// 触发心跳超时回调
+	if h.heartbeatTimeoutCallback != nil {
+		h.heartbeatTimeoutCallback(client.ID, client.UserID, client.GetLastHeartbeat())
+	}
+	// 异步注销客户端
+	h.Unregister(client)
+}
+
+// checkHeartbeat 检查 SSE 客户端心跳超时（兜底机制）
+// WebSocket 客户端由 heartbeatTimer O(1) 管理，此处仅扫描 SSE 客户端
+// SSE 客户端不发送 PING，无法通过时间轮 Refresh，需定期扫描 LastSeen 判断活跃度
 //
-// 🚦 强制下线通知走控制通道（CtrlCh）：SendChan 被业务洪峰填满时通知仍必达
-// （原 sendToClient 路径满即丢，客户端不知为何被断——语义缺陷已修复）
-func (h *Hub) kickClientWithNotification(client *Client, reason DisconnectReason, message string) {
-	// 发送强制下线通知（控制通道：KickOut/ForceOffline 必达级）
+// ⚠️ 死锁防御：遍历持有 shard 读锁，先收集超时客户端到本地 slice（mutex 保护
+// 并发 append），遍历结束后在锁外统一调用 Unregister
+func (h *Hub) checkHeartbeat() {
+	now := time.Now()
+
+	// Phase 1：并行持读锁收集 SSE 超时客户端
+	var mu sync.Mutex
+	var timeouts []*models.Client
+	var scanned int64
+
+	h.shardedRegistry.ForEachSSEClientParallel(0, func(_, _ string, client *models.Client) {
+		atomic.AddInt64(&scanned, 1)
+		// 原子读时间戳（并发安全，无数据竞争）
+		if now.Sub(client.GetLastSeen()) > h.config.ClientTimeout {
+			mu.Lock()
+			timeouts = append(timeouts, client)
+			mu.Unlock()
+		}
+	})
+
+	// Phase 2：锁外批量注销（Unregister 内部 go 异步，均安全）
+	for _, client := range timeouts {
+		lastActive := client.GetLastSeen()
+		h.logger.DebugContextKV(client.Context, "检测到SSE心跳超时，注销客户端",
+			"client_id", client.ID,
+			"user_id", client.UserID,
+			"user_type", client.UserType,
+			"last_active", lastActive,
+			"inactive_duration", now.Sub(lastActive).String(),
+			"timeout_threshold", h.config.ClientTimeout.String(),
+		)
+
+		h.Unregister(client)
+
+		if h.heartbeatTimeoutCallback != nil {
+			h.heartbeatTimeoutCallback(client.ID, client.UserID, lastActive)
+		}
+	}
+
+	if n := atomic.LoadInt64(&scanned); n > 0 || len(timeouts) > 0 {
+		h.logger.DebugContextKV(h.ctx, "SSE心跳检查完成",
+			"scanned", n,
+			"timeouts", len(timeouts),
+		)
+	}
+}
+
+// ============================================================================
+// 连接记录（构造 + 落库）
+// ============================================================================
+
+// createConnectionRecord 构造连接记录（内存对象，供异步保存 + 连接回调使用）
+func (h *Hub) createConnectionRecord(client *models.Client) *models.ConnectionRecord {
+	record := &models.ConnectionRecord{
+		ConnectionID: client.ID,
+		UserID:       client.UserID,
+		AppID:        client.GetAppID(),
+		Namespace:    client.GetNamespace(),
+		NodeID:       client.NodeID,
+		NodeIP:       client.NodeIP,
+		NodePort:     client.NodePort,
+		ClientIP:     client.GetClientIP(),
+		Protocol:     client.ConnectionType,
+		ClientType:   client.ClientType,
+		ConnectedAt:  client.ConnectedAt,
+		IsActive:     true,
+	}
+
+	// 设置 metadata（线程安全读取快照）
+	record.Metadata = sqlbuilder.MapAny(client.GetMetadataSnapshot())
+
+	return record
+}
+
+// saveConnectionRecord 保存或更新连接记录到数据库（仓储未注入时 no-op）
+// ctx 应为 client.Context（带 client 维度的 trace_id），实现异步保存的全链路追踪
+func (h *Hub) saveConnectionRecord(ctx context.Context, record *models.ConnectionRecord) {
+	if h.connectionStore == nil {
+		return
+	}
+	syncx.Go(ctx).
+		WithTimeout(10 * time.Second).
+		OnError(func(err error) {
+			h.logger.WarnContextKV(ctx, "保存连接记录失败",
+				"connection_id", record.ConnectionID,
+				"error", err,
+			)
+		}).
+		ExecWithContext(func(ctx context.Context) error {
+			return h.connectionStore.Upsert(ctx, record)
+		})
+}
+
+// markConnectionDisconnected 标记连接为已断开（仓储未注入时 no-op）
+func (h *Hub) markConnectionDisconnected(ctx context.Context, client *models.Client) {
+	if h.connectionStore == nil {
+		return
+	}
+	syncx.Go(ctx).
+		WithTimeout(10 * time.Second).
+		OnError(func(err error) {
+			h.logger.WarnContextKV(ctx, "标记连接断开失败",
+				"connection_id", client.ID,
+				"error", err,
+			)
+		}).
+		ExecWithContext(func(ctx context.Context) error {
+			return h.connectionStore.MarkDisconnected(ctx, client.ID, models.DisconnectReasonClientRequest, 0)
+		})
+}
+
+// ============================================================================
+// 内部辅助方法
+// ============================================================================
+
+// cleanupHalfRegisteredClient 清理半注册连接（handleRegister panic 兜底）
+// 半注册状态：连接已加入注册表 + 心跳超时任务已调度，但注册流程中断
+// 幂等安全：各清理步骤对"未执行到"的步骤均为无操作
+func (h *Hub) cleanupHalfRegisteredClient(client *models.Client) {
+	if client == nil {
+		return
+	}
+	// 移除注册表条目（未注册时无操作）
+	h.shardedRegistry.RemoveClient(client.ID, client.UserID)
+	// 撤销已调度的心跳超时任务（未调度时无操作），避免重复注销
+	h.cancelHeartbeatTimeout(client.ID)
+	// 关闭生命周期信号与底层连接（触发客户端立即重连）
+	h.closeClientChannel(client)
+	h.closeClientConnection(client)
+}
+
+// closeClientChannel 关闭客户端发送通道
+// 用 DoneCh 通知写循环退出，数据通道（SendChan/SSEMessageCh）永不 close：
+//  1. 消除 TrySend 的 chansend 与本函数 closechan 的数据竞态
+//  2. 不回收到对象池（竞态窗口内 racing sender 仍可能写入残留消息，复用会跨连接串消息）
+//  3. 不置 nil SendChan，避免与写循环的 select 读产生数据竞争
+func (h *Hub) closeClientChannel(client *models.Client) {
+	// 使用互斥锁保护关闭操作（防并发调用 double close DoneCh/SSECloseCh）
+	client.CloseMu.Lock()
+	defer client.CloseMu.Unlock()
+
+	// 标记为已关闭，防止其他 goroutine 继续发送
+	if client.IsClosed() {
+		return // 已经关闭过了
+	}
+	client.MarkClosed()
+
+	// 关闭生命周期信号（写循环 select 到后退出）
+	if client.DoneCh != nil {
+		close(client.DoneCh)
+	}
+
+	// SSE 客户端关闭专用通道（SSE 写循环已 select SSECloseCh，SSEMessageCh 无需 close）
+	if client.ConnectionType == models.ConnectionTypeSSE && client.SSECloseCh != nil {
+		close(client.SSECloseCh)
+	}
+}
+
+// closeClientConnection 关闭 WebSocket 连接
+// Hub 关闭（如 K8s 滚动更新）时先发送 1001 GoingAway 控制帧，
+// 让客户端识别为服务端主动离开并触发重连，而不是收到 1006 异常断开
+func (h *Hub) closeClientConnection(client *models.Client) {
+	if client.Conn == nil {
+		return
+	}
+
+	// Hub 正在关闭时，先发送 1001 GoingAway 控制帧通知客户端
+	// 此时 closeClientChannel 已先执行（写循环即将退出），紧随其后的
+	// Conn.Close() 保证即使帧交错客户端也只是走异常断开重连，不影响正确性
+	if h.shutdown.Load() {
+		msg := websocket.FormatCloseMessage(websocket.CloseGoingAway, "server is shutting down")
+		_ = client.Conn.WriteControl(websocket.CloseMessage, msg, time.Now().Add(2*time.Second))
+	}
+
+	client.Conn.Close()
+}
+
+// ============================================================================
+// 踢出与 shutdown 精简移除
+// ============================================================================
+
+// KickUserSimple 简单踢出用户全部连接（不发送通知），返回已触发注销的连接数
+// （Unregister 为异步执行，返回值不代表注销已完成）
+// ctx 由调用方传入（grpc/distributed 路径已恢复 trace_id），实现全链路追踪
+func (h *Hub) KickUserSimple(ctx context.Context, userID string, reason string) int {
+	clients, ok := h.shardedRegistry.GetUserClients(userID)
+	if !ok || len(clients) == 0 {
+		h.logger.WarnContextKV(ctx, "踢出用户失败：用户不在线",
+			"user_id", userID,
+			"reason", reason,
+		)
+		return 0
+	}
+
+	h.logger.InfoContextKV(ctx, "开始踢出用户",
+		"user_id", userID,
+		"reason", reason,
+		"connection_count", len(clients),
+	)
+
+	kicked := 0
+	for _, client := range clients {
+		h.Unregister(client)
+		kicked++
+	}
+	return kicked
+}
+
+// kickClientWithNotification 踢掉客户端并发送强制下线通知
+// 通知先于断开写入客户端发送通道，写循环异步发出；随后注销连接
+func (h *Hub) kickClientWithNotification(client *models.Client, reason models.DisconnectReason, message string) {
 	if client.Conn != nil {
 		forceOfflineMsg := models.NewHubMessage().
 			SetMessageType(models.MessageTypeForceOffline).
-			SetSender("system").
+			SetSender(models.UserTypeSystem.String()).
 			SetSenderType(models.UserTypeSystem).
 			SetReceiver(client.UserID).
 			SetReceiverType(client.UserType).
 			SetContent(message).
 			WithContentExtra("reason", reason)
-
-		// 用 client.Context 保留连接级 trace_id，强制下线消息日志可全链路追踪
-		// 控制通道满时降级：断链类消息直接 Conn.Close()（断链本就是目的）
-		h.SendControlMessage(client, forceOfflineMsg)
+		h.messagingMgr.SendToClient(client.Context, client, forceOfflineMsg)
 	}
 	h.Unregister(client)
 }
 
-// createKickNotification 创建踢人通知消息
-func (h *Hub) createKickNotification(userID, reason, customMsg string, kickedAt time.Time) *HubMessage {
-	content := mathx.IfEmpty(customMsg, "您已被踢出: "+reason)
-
-	return &HubMessage{
-		MessageType: MessageTypeKickOut,
-		Sender:      "system",
-		Receiver:    userID,
-		Content:     content,
-		CreateAt:    kickedAt,
-		Data: map[string]interface{}{
-			"reason":    reason,
-			"kicked_at": kickedAt.Unix(),
-		},
-	}
-}
-
-// sendKickNotificationToClients 发送踢人通知到客户端
-// 预序列化一次消息，所有客户端复用，消除逐客户端 json.Marshal 开销
-// 批量操作：循环内每个 client 用各自 client.Context 保留连接级 trace_id
-//
-// 🚦 踢人通知走控制通道（KickOut 必达级）：业务 SendChan 洪峰下仍必达
-func (h *Hub) sendKickNotificationToClients(clients []*Client, msg *HubMessage) bool {
-	if len(clients) == 0 {
-		return false
+// removeClientUnsafe 从注册表移除客户端（shutdown 路径专用精简清理）
+// 仅做：注册表移除 + 时间轮取消 + 指针一致性校验 + 关闭通道与连接；
+// 不触发回调与逐条记录落库（由 batchCleanupOnShutdown 统一批量处理，
+// 避免大量串行写 Redis/DB 导致 shutdown 超时）
+func (h *Hub) removeClientUnsafe(client *models.Client) {
+	removed := h.shardedRegistry.RemoveClient(client.ID, client.UserID)
+	if removed == nil {
+		return
 	}
 
-	// 预序列化一次（所有客户端复用）
-	preSerialized, _ := json.Marshal(msg)
+	// ⏰ 取消时间轮上的心跳超时任务
+	h.cancelHeartbeatTimeout(client.ID)
 
-	delivered := false
-	for _, client := range clients {
-		// KickOut 为断链类控制消息：CtrlCh 满时 SendControl 内部降级直接断链（语义达成）
-		if h.SendControl(client, preSerialized, msg) {
-			delivered = true
-		}
+	// 指针一致性校验：旧客户端已被新连接替换时不误删新客户端
+	if removed != client {
+		h.shardedRegistry.AddClient(removed)
+		return
 	}
-	return delivered
-}
 
-// CloseAllClientsInMap 关闭用户的所有客户端连接(并发)
-func (h *Hub) CloseAllClientsInMap(clientMap map[string]*Client) {
-	syncx.ParallelForEach(clientMap, func(_ string, client *Client) {
-		if client.Conn != nil {
-			client.Conn.Close()
-		}
-	})
+	h.closeClientChannel(client)
+	h.closeClientConnection(client)
 }

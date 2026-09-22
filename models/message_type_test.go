@@ -350,7 +350,7 @@ func TestMessageType_GetDefaultPriority(t *testing.T) {
 		{MessageTypeInfo, MessagePriorityLow},
 		{MessageTypeEdit, MessagePriorityLow},
 		{MessageTypeReaction, MessagePriorityLow},
-		{MessageTypeJson, MessagePriorityLow},
+		{MessageTypeJSON, MessagePriorityLow},
 		{MessageTypeCustom, MessagePriorityLow},
 		// 默认普通优先级
 		{MessageType("invalid"), MessagePriorityNormal},

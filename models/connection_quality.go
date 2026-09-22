@@ -30,10 +30,10 @@ type ConnectionQuality struct {
 	UserID       string `gorm:"column:user_id;size:64;index;comment:用户ID(冗余索引，便于按用户查质量)" json:"user_id"`
 
 	// ========== 多租户/命名空间隔离 ==========
-	// 与 connect 表 + Bitmap/ZSET 分桶维度一致，支持按 app+namespace 查连接质量
+	// 与 connect 表 + Bitmap 分桶维度一致，支持按 app+namespace 查连接质量
 	// 索引名与 connect 表区分（SQLite/PostgreSQL 索引名为库级作用域，重名会建表失败）
 	AppID     string `gorm:"column:app_id;size:64;index:idx_quality_app_namespace;comment:应用ID(与 connect 表一致,便于按租户查质量)" json:"app_id"`
-	Namespace string `gorm:"column:namespace;size:64;index:idx_quality_app_namespace;comment:命名空间(与 connect 表+Bitmap/ZSET 分桶一致)" json:"namespace"`
+	Namespace string `gorm:"column:namespace;size:64;index:idx_quality_app_namespace;comment:命名空间(与 connect 表+Bitmap 分桶一致)" json:"namespace"`
 
 	// ========== 质量指标 ==========
 	ReconnectCount   int     `gorm:"column:reconnect_count;default:0;comment:重连次数" json:"reconnect_count"`

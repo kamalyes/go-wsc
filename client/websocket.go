@@ -11,6 +11,7 @@
 package client
 
 import (
+	"github.com/kamalyes/go-wsc/models"
 	"net/http"
 	"sync"
 
@@ -150,6 +151,6 @@ func (ws *WebSocket) SendMessageForTest(msgType int, data []byte) error {
 	case ws.sendChan <- &ClientMessage{T: msgType, Msg: data}:
 		return nil
 	default:
-		return ErrSendChannelFull
+		return models.ErrSendChannelFull
 	}
 }

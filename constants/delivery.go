@@ -1,6 +1,6 @@
 /*
  * @Author: kamalyes 501893067@qq.com
- * @Date: 2026-09-09 20:00:00
+ * @Date: 2026-08-09 20:00:00
  * @LastEditors: kamalyes 501893067@qq.com
  * @LastEditTime: 2026-09-10 21:30:00
  * @FilePath: \go-wsc\constants\delivery.go
@@ -9,6 +9,8 @@
  * Copyright (c) 2026 by kamalyes, All Rights Reserved.
  */
 package constants
+
+import "time"
 
 // CtrlChanCapacity 控制通道（CtrlCh）默认容量
 // 控制消息量级低（连接生命周期事件），16 足以吸收瞬时突发；
@@ -46,3 +48,12 @@ const SlowConsumerConsecutiveThreshold = 3
 // DefaultMessageDeadline 普通级消息默认过期时间上限（0=不过期）
 // 入队前 deadline-aware 检查用；高频级由 latest-wins 合并天然去旧
 const DefaultMessageDeadline = "0s"
+
+// ClientWriteBatchSize 写泵单批最大帧数（writev 合批）
+// 首条直写（无积压时 1 次 syscall 低延迟）后非阻塞排空积压合并写出：
+// 突发 N 条 → 2 次 syscall（原 N 次）
+const ClientWriteBatchSize = 64
+
+// ClientWriteTimeout 写泵单批写超时（整批共享一次 deadline）
+// 突发场景 N 次期限设置收敛为 1 次
+const ClientWriteTimeout = 10 * time.Second

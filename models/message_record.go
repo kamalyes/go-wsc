@@ -20,20 +20,13 @@ import (
 
 // 数据库查询常量
 const (
-	QueryMessageIDWhere         = "message_id = ?"
+	QueryMessageIDWhere = "message_id = ?"
+	// QueryMessageIDReceiverWhere 复合键定位（P2P 同一 message_id 多 receiver 记录互不干扰）
 	QueryMessageIDReceiverWhere = "message_id = ? AND receiver = ?"
 	OrderByCreateTimeDesc       = "create_time DESC"
 	OrderByCreateTimeAsc        = "create_time ASC"
 	OrderByExpiresAtAsc         = "expires_at ASC"
 )
-
-// MessageRecordKey 发送记录定位键（message_id + receiver 复合维度）
-// P2P 场景同一 message_id 会为每个 receiver 各建一条记录，
-// 状态更新/重试/超时认领必须精确定位到 (message_id, receiver)，避免多 receiver 状态相互覆盖
-type MessageRecordKey struct {
-	MessageID string // 业务消息ID
-	Receiver  string // 接收者ID（广播类记录为空）
-}
 
 // MessageSendStatus 消息发送状态
 type MessageSendStatus string
@@ -85,13 +78,13 @@ type RetryAttempt struct {
 type MessageSendRecord struct {
 	ID            uint                           `gorm:"primaryKey;autoIncrement;comment:主键,唯一标识每条发送记录" json:"id"`                           // 主键(唯一)
 	SessionID     string                         `gorm:"column:session_id;size:255;not null;index;comment:会话ID" json:"session_id"`           // 会话ID
-	MessageID     string                         `gorm:"index;index:idx_message_id_receiver,priority:1;size:255;not null;comment:业务消息ID,用于关联业务系统" json:"message_id"` // 业务消息ID(可重复,支持多次发送记录)
+	MessageID     string                         `gorm:"index;size:255;not null;comment:业务消息ID,用于关联业务系统" json:"message_id"`                  // 业务消息ID(可重复,支持多次发送记录)
 	HubID         string                         `gorm:"index;size:255;not null;comment:Hub内部消息ID,用于ACK确认和日志追踪" json:"hub_id"`               // Hub内部消息ID(可重复)
 	Namespace     string                         `gorm:"index;size:128;not null;default:'';comment:命名空间,用于多租户/业务隔离" json:"namespace"`        // 命名空间
 	GroupID       string                         `gorm:"index;size:255;not null;default:'';comment:业务群组ID,P2P消息为空" json:"group_id"`          // 业务群组ID
 	MessageData   string                         `gorm:"type:text;comment:原始消息数据,类型为文本" json:"message_data"`                                 // 原始消息数据
 	Sender        string                         `gorm:"index;size:255;comment:发送者ID" json:"sender"`                                         // 发送者ID
-	Receiver      string                         `gorm:"index;index:idx_message_id_receiver,priority:2;size:255;comment:接收者ID" json:"receiver"` // 接收者ID
+	Receiver      string                         `gorm:"index;size:255;comment:接收者ID" json:"receiver"`                                       // 接收者ID
 	MessageType   MessageType                    `gorm:"index;size:50;comment:消息类型" json:"message_type"`                                     // 消息类型
 	Source        MessageSource                  `gorm:"index;size:20;not null;default:'online';comment:消息来源(online/offline)" json:"source"` // 消息来源
 	NodeIP        string                         `gorm:"index;size:100;comment:服务器节点IP地址" json:"node_ip"`                                    // 服务器节点IP地址

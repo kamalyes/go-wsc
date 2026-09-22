@@ -14,110 +14,109 @@ import (
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
 )
 
-// 错误类型定义，基于errorx.ErrorType
-type ErrorType = errorx.ErrorType
+// 错误类型定义，直接使用 errorx.ErrorType（不做 type alias）
 
 // WebSocket 通信错误码常量定义
 // 使用 8xxxx 区间，避免与其他包冲突（WSC = WebSocket Client）
 const (
 	// 基础错误恢复类型 (80000-80099) - error_recovery.go中使用
-	ErrorTypeConnection    ErrorType = 80000 // 连接错误
-	ErrorTypeMessage       ErrorType = 80001 // 消息错误
-	ErrorTypeSystem        ErrorType = 80002 // 系统错误
-	ErrorTypeNetwork       ErrorType = 80003 // 网络错误
-	ErrorTypeConcurrency   ErrorType = 80004 // 并发错误
-	ErrorTypeMemory        ErrorType = 80005 // 内存错误
-	ErrorTypeConfiguration ErrorType = 80006 // 配置错误
+	ErrorTypeConnection    errorx.ErrorType = 80000 // 连接错误
+	ErrorTypeMessage       errorx.ErrorType = 80001 // 消息错误
+	ErrorTypeSystem        errorx.ErrorType = 80002 // 系统错误
+	ErrorTypeNetwork       errorx.ErrorType = 80003 // 网络错误
+	ErrorTypeConcurrency   errorx.ErrorType = 80004 // 并发错误
+	ErrorTypeMemory        errorx.ErrorType = 80005 // 内存错误
+	ErrorTypeConfiguration errorx.ErrorType = 80006 // 配置错误
 
 	// 连接相关错误 (80100-80199) - 可重试
-	ErrTypeConnectionClosed   ErrorType = 80101 // 连接已关闭
-	ErrTypeConnectionReset    ErrorType = 80102 // 连接重置
-	ErrTypeConnectionTimeout  ErrorType = 80103 // 连接超时
-	ErrTypeNetworkUnreachable ErrorType = 80104 // 网络不可达
-	ErrTypeServiceUnavailable ErrorType = 80105 // 服务不可用
+	ErrTypeConnectionClosed   errorx.ErrorType = 80101 // 连接已关闭
+	ErrTypeConnectionReset    errorx.ErrorType = 80102 // 连接重置
+	ErrTypeConnectionTimeout  errorx.ErrorType = 80103 // 连接超时
+	ErrTypeNetworkUnreachable errorx.ErrorType = 80104 // 网络不可达
+	ErrTypeServiceUnavailable errorx.ErrorType = 80105 // 服务不可用
 
 	// 队列和缓冲区错误 (80200-80299) - 可重试
-	ErrTypeQueueFull           ErrorType = 80201 // 队列已满
-	ErrTypeMessageBufferFull   ErrorType = 80202 // 消息缓冲区已满
-	ErrTypePendingQueueFull    ErrorType = 80203 // 待处理队列已满
-	ErrTypeQueueAndPendingFull ErrorType = 80204 // 队列和待处理队列均已满
-	ErrTypeSendChannelFull     ErrorType = 80205 // 发送通道已满
+	ErrTypeQueueFull           errorx.ErrorType = 80201 // 队列已满
+	ErrTypeMessageBufferFull   errorx.ErrorType = 80202 // 消息缓冲区已满
+	ErrTypePendingQueueFull    errorx.ErrorType = 80203 // 待处理队列已满
+	ErrTypeQueueAndPendingFull errorx.ErrorType = 80204 // 队列和待处理队列均已满
+	ErrTypeSendChannelFull     errorx.ErrorType = 80205 // 发送通道已满
 
 	// 用户和认证错误 (80300-80399) - 不可重试
-	ErrTypeUserOffline          ErrorType = 80301 // 用户离线
-	ErrTypeUserNotFound         ErrorType = 80302 // 用户未找到
-	ErrTypePermissionDenied     ErrorType = 80303 // 权限被拒绝
-	ErrTypeAuthenticationFailed ErrorType = 80304 // 认证失败
-	ErrTypeUnauthorized         ErrorType = 80305 // 未经授权的访问
+	ErrTypeUserOffline          errorx.ErrorType = 80301 // 用户离线
+	ErrTypeUserNotFound         errorx.ErrorType = 80302 // 用户未找到
+	ErrTypePermissionDenied     errorx.ErrorType = 80303 // 权限被拒绝
+	ErrTypeAuthenticationFailed errorx.ErrorType = 80304 // 认证失败
+	ErrTypeUnauthorized         errorx.ErrorType = 80305 // 未经授权的访问
 
 	// 消息错误 (80400-80499) - 不可重试
-	ErrTypeInvalidMessageFormat   ErrorType = 80401 // 无效的消息格式
-	ErrTypeMessageTooLarge        ErrorType = 80402 // 消息过大
-	ErrTypeMessageTargetMissing   ErrorType = 80403 // 消息目标未指定
-	ErrTypeMessageFiltered        ErrorType = 80404 // 消息被规则过滤
-	ErrTypeMessageDeliveryTimeout ErrorType = 80405 // 消息投递超时
+	ErrTypeInvalidMessageFormat   errorx.ErrorType = 80401 // 无效的消息格式
+	ErrTypeMessageTooLarge        errorx.ErrorType = 80402 // 消息过大
+	ErrTypeMessageTargetMissing   errorx.ErrorType = 80403 // 消息目标未指定
+	ErrTypeMessageFiltered        errorx.ErrorType = 80404 // 消息被规则过滤
+	ErrTypeMessageDeliveryTimeout errorx.ErrorType = 80405 // 消息投递超时
 
 	// 客户端错误 (80500-80599) - 不可重试
-	ErrTypeClientNotFound     ErrorType = 80501 // 客户端未找到
-	ErrTypeClientDisconnected ErrorType = 80502 // 客户端已断开连接
-	ErrTypeNoAvailableAgents  ErrorType = 80503 // 没有可用的代理
+	ErrTypeClientNotFound     errorx.ErrorType = 80501 // 客户端未找到
+	ErrTypeClientDisconnected errorx.ErrorType = 80502 // 客户端已断开连接
+	ErrTypeNoAvailableAgents  errorx.ErrorType = 80503 // 没有可用的代理
 
 	// 集线器操作错误 (80600-80699) - 混合可重试性
-	ErrTypeHubStartupTimeout  ErrorType = 80601 // 集线器启动超时 - 可重试
-	ErrTypeHubShutdownTimeout ErrorType = 80602 // 集线器关闭超时 - 可重试
-	ErrTypeHubNotRunning      ErrorType = 80603 // 集线器未运行 - 不可重试
-	ErrTypeCircuitBreakerOpen ErrorType = 80604 // 电路断路器已打开 - 可重试
+	ErrTypeHubStartupTimeout  errorx.ErrorType = 80601 // 集线器启动超时 - 可重试
+	ErrTypeHubShutdownTimeout errorx.ErrorType = 80602 // 集线器关闭超时 - 可重试
+	ErrTypeHubNotRunning      errorx.ErrorType = 80603 // 集线器未运行 - 不可重试
+	ErrTypeCircuitBreakerOpen errorx.ErrorType = 80604 // 电路断路器已打开 - 可重试
 
 	// 记录管理错误 (80700-80799) - 不可重试
-	ErrTypeRecordManagerDisabled        ErrorType = 80701 // 记录管理器已禁用
-	ErrTypeMessageRecordNotFound        ErrorType = 80702 // 消息记录未找到
-	ErrTypeMessageAlreadySent           ErrorType = 80703 // 消息已成功发送
-	ErrTypeMaxRetriesExceeded           ErrorType = 80704 // 超过最大重试次数
-	ErrTypeRecordManagerNotInitialized  ErrorType = 80705 // 记录管理器未初始化
-	ErrTypeMaxRetriesExceededForMessage ErrorType = 80706 // 消息重试次数超过最大限制
-	ErrTypeRecordRepositoryNotSet       ErrorType = 80707 // 消息记录仓库未设置
-	ErrTypeOnlineStatusRepositoryNotSet ErrorType = 80708 // 在线状态仓库未设置
-	ErrTypeStatsRepositoryNotSet        ErrorType = 80709 // 统计仓库未设置
+	ErrTypeRecordManagerDisabled        errorx.ErrorType = 80701 // 记录管理器已禁用
+	ErrTypeMessageRecordNotFound        errorx.ErrorType = 80702 // 消息记录未找到
+	ErrTypeMessageAlreadySent           errorx.ErrorType = 80703 // 消息已成功发送
+	ErrTypeMaxRetriesExceeded           errorx.ErrorType = 80704 // 超过最大重试次数
+	ErrTypeRecordManagerNotInitialized  errorx.ErrorType = 80705 // 记录管理器未初始化
+	ErrTypeMaxRetriesExceededForMessage errorx.ErrorType = 80706 // 消息重试次数超过最大限制
+	ErrTypeRecordRepositoryNotSet       errorx.ErrorType = 80707 // 消息记录仓库未设置
+	ErrTypeOnlineStatusRepositoryNotSet errorx.ErrorType = 80708 // 在线状态仓库未设置
+	ErrTypeStatsRepositoryNotSet        errorx.ErrorType = 80709 // 统计仓库未设置
 
 	// 速率限制错误 (80800-80899) - 不可重试
-	ErrTypeRateLimitExceeded     ErrorType = 80801 // 超过速率限制
-	ErrTypeFrequencyLimitReached ErrorType = 80802 // 达到频率限制
+	ErrTypeRateLimitExceeded     errorx.ErrorType = 80801 // 超过速率限制
+	ErrTypeFrequencyLimitReached errorx.ErrorType = 80802 // 达到频率限制
 
 	// 操作错误 (80900-80999) - 可重试
-	ErrTypeOperationTimeout ErrorType = 80901 // 操作超时
-	ErrTypeTemporaryFailure ErrorType = 80902 // 临时故障
-	ErrTypeResourceBusy     ErrorType = 80903 // 资源繁忙
-	ErrTypeUnknownError     ErrorType = 80999 // 未知错误
+	ErrTypeOperationTimeout errorx.ErrorType = 80901 // 操作超时
+	ErrTypeTemporaryFailure errorx.ErrorType = 80902 // 临时故障
+	ErrTypeResourceBusy     errorx.ErrorType = 80903 // 资源繁忙
+	ErrTypeUnknownError     errorx.ErrorType = 80999 // 未知错误
 
 	// ACK相关错误 (81000-81099) - 混合可重试性
-	ErrTypeAckTimeout        ErrorType = 81001 // ACK超时 - 可重试
-	ErrTypeAckTimeoutRetries ErrorType = 81002 // ACK经重试后超时 - 不可重试
-	ErrTypeContextCancelled  ErrorType = 81003 // 上下文取消 - 不可重试
+	ErrTypeAckTimeout        errorx.ErrorType = 81001 // ACK超时 - 可重试
+	ErrTypeAckTimeoutRetries errorx.ErrorType = 81002 // ACK经重试后超时 - 不可重试
+	ErrTypeContextCancelled  errorx.ErrorType = 81003 // 上下文取消 - 不可重试
 
 	// 配置相关错误 (81100-81199) - 不可重试
-	ErrTypeConfigValidatorNotInitialized ErrorType = 81101 // 配置验证器未初始化
-	ErrTypeConfigValidationFailed        ErrorType = 81102 // 配置验证失败
-	ErrTypeConfigAutoFixFailed           ErrorType = 81103 // 配置自动修复失败
+	ErrTypeConfigValidatorNotInitialized errorx.ErrorType = 81101 // 配置验证器未初始化
+	ErrTypeConfigValidationFailed        errorx.ErrorType = 81102 // 配置验证失败
+	ErrTypeConfigAutoFixFailed           errorx.ErrorType = 81103 // 配置自动修复失败
 
 	// 安全相关错误 (81200-81299) - 不可重试
-	ErrTypeIPInBlacklist      ErrorType = 81201 // IP在黑名单中
-	ErrTypeBruteForceDetected ErrorType = 81202 // 检测到暴力攻击
-	ErrTypeThreatDetected     ErrorType = 81203 // 检测到威胁内容
-	ErrTypeAccessDeniedByRule ErrorType = 81204 // 被访问规则拒绝
+	ErrTypeIPInBlacklist      errorx.ErrorType = 81201 // IP在黑名单中
+	ErrTypeBruteForceDetected errorx.ErrorType = 81202 // 检测到暴力攻击
+	ErrTypeThreatDetected     errorx.ErrorType = 81203 // 检测到威胁内容
+	ErrTypeAccessDeniedByRule errorx.ErrorType = 81204 // 被访问规则拒绝
 
 	// PubSub相关错误 (81300-81399) - 不可重试
-	ErrTypePubSubNotSet           ErrorType = 81301 // PubSub未设置
-	ErrTypePubSubPublishFailed    ErrorType = 81302 // 事件发布失败
-	ErrTypeEventSerializeFailed   ErrorType = 81303 // 事件序列化失败
-	ErrTypeEventDeserializeFailed ErrorType = 81304 // 事件反序列化失败
+	ErrTypePubSubNotSet           errorx.ErrorType = 81301 // PubSub未设置
+	ErrTypePubSubPublishFailed    errorx.ErrorType = 81302 // 事件发布失败
+	ErrTypeEventSerializeFailed   errorx.ErrorType = 81303 // 事件序列化失败
+	ErrTypeEventDeserializeFailed errorx.ErrorType = 81304 // 事件反序列化失败
 
 	// 群组相关错误 (81400-81499) - 不可重试
-	ErrTypeGroupNotFound      ErrorType = 81401 // 群组未找到
-	ErrTypeGroupMemberExisted ErrorType = 81402 // 用户已是群组成员
-	ErrTypeGroupFull          ErrorType = 81403 // 群组已满
-	ErrTypeGroupRepoNotSet    ErrorType = 81404 // 群组仓库未设置
-	ErrTypeGroupExisted       ErrorType = 81405 // 群组已存在（同命名空间下 groupID 唯一）
-	ErrTypeGroupReserved      ErrorType = 81406 // 群组名为系统保留名（__ 前缀）
+	ErrTypeGroupNotFound      errorx.ErrorType = 81401 // 群组未找到
+	ErrTypeGroupMemberExisted errorx.ErrorType = 81402 // 用户已是群组成员
+	ErrTypeGroupFull          errorx.ErrorType = 81403 // 群组已满
+	ErrTypeGroupRepoNotSet    errorx.ErrorType = 81404 // 群组仓库未设置
+	ErrTypeGroupExisted       errorx.ErrorType = 81405 // 群组已存在（同命名空间下 groupID 唯一）
+	ErrTypeGroupReserved      errorx.ErrorType = 81406 // 群组名为系统保留名（__ 前缀）
 )
 
 // init 初始化所有错误类型注册
@@ -359,7 +358,7 @@ func IsRetryableError(err error) bool {
 }
 
 // IsRetryableErrorType 判断错误类型是否可以重试
-func IsRetryableErrorType(errType ErrorType) bool {
+func IsRetryableErrorType(errType errorx.ErrorType) bool {
 	switch errType {
 	// 可重试的错误类型
 	case ErrTypeConnectionTimeout, ErrTypeTemporaryFailure,

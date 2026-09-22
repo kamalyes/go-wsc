@@ -335,39 +335,31 @@ func (r *connectionRecordRepositoryImpl) MarkDisconnected(ctx context.Context, c
 }
 
 // BatchUpdateHeartbeats 批量更新心跳时间戳（connect 表 last_ping_at/last_pong_at）
-// 使用单事务包裹所有更新，将 N 次 BeginTx/Commit 压缩为 1 次
-// 单条失败不影响其他条目（continue 跳过），Ping 统计由 ConnectionQualityRepository 写 quality 表
+// 逐条独立执行，单条失败不影响其他条目（跳过），Ping 统计由 ConnectionQualityRepository 写 quality 表
+// 不用外层事务包裹：PG/CockroachDB 协议下事务内单条语句失败会使事务进入 aborted 状态，
+// 后续语句全部 25P02、commit 退化为 rollback，整批静默丢失（生产已观测 batch_size=43 全丢）
 func (r *connectionRecordRepositoryImpl) BatchUpdateHeartbeats(ctx context.Context, entries []*HeartbeatUpdateEntry) error {
 	if len(entries) == 0 {
 		return nil
 	}
 
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// 每条 entry 用全新会话（Session NewDB）：GORM 链式对象复用会累积 WHERE 条件，
-		// N 条 entry 拼成 WHERE connection_id='id1' AND connection_id='id2' AND ...（恒 false，rows=0）
-		for _, entry := range entries {
-			query := tx.Session(&gorm.Session{NewDB: true})
-			if r.tableName != "" {
-				query = query.Table(r.tableName)
-			} else {
-				query = query.Model(&models.ConnectionRecord{})
-			}
-			updates := make(map[string]any)
-			if entry.PingTime != nil {
-				updates["last_ping_at"] = entry.PingTime
-			}
-			if entry.PongTime != nil {
-				updates["last_pong_at"] = entry.PongTime
-			}
-			if len(updates) == 0 {
-				continue
-			}
-			if err := query.Where("connection_id = ?", entry.ConnectionID).Updates(updates).Error; err != nil {
-				continue // 单条失败不影响其他条目
-			}
+	for _, entry := range entries {
+		updates := make(map[string]any)
+		if entry.PingTime != nil {
+			updates["last_ping_at"] = entry.PingTime
 		}
-		return nil // 始终提交事务（单条失败已跳过）
-	})
+		if entry.PongTime != nil {
+			updates["last_pong_at"] = entry.PongTime
+		}
+		if len(updates) == 0 {
+			continue
+		}
+		// 每条从 getDB(ctx) 新建会话（root clone），链式条件互不累积
+		_ = r.getDB(ctx).
+			Where("connection_id = ?", entry.ConnectionID).
+			Updates(updates).Error // 单条失败不影响其他条目（含 CRDB 40001 冲突，下一心跳批次自然补齐）
+	}
+	return nil
 }
 
 // GetByConnectionID 根据连接ID获取连接记录

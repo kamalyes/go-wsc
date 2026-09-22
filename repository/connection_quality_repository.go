@@ -155,84 +155,68 @@ func (r *connectionQualityRepositoryImpl) Upsert(ctx context.Context, quality *m
 
 // BatchUpdateHeartbeats 批量更新 Ping 统计与活跃时间（quality 表）
 // 心跳时间戳(last_ping_at/last_pong_at)已切回 connect 表，由 ConnectionRecordRepository.BatchUpdateHeartbeats 写入
-// 单事务包裹，单条失败跳过（与 ConnectionRecordRepository 同语义）
+// 逐条独立执行，单条失败跳过（与 ConnectionRecordRepository 同语义）
 func (r *connectionQualityRepositoryImpl) BatchUpdateHeartbeats(ctx context.Context, entries []*HeartbeatUpdateEntry) error {
 	if len(entries) == 0 {
 		return nil
 	}
 
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// 每条 entry 必须用全新会话（Session NewDB）：
-		// GORM 链式对象复用会累积 WHERE 条件，N 条 entry 拼成
-		// WHERE connection_id='id1' AND connection_id='id2' AND ...（恒 false，rows=0）
-		for _, entry := range entries {
-			query := tx.Session(&gorm.Session{NewDB: true})
-			if r.tableName != "" {
-				query = query.Table(r.tableName)
-			} else {
-				query = query.Model(&models.ConnectionQuality{})
-			}
-			// 刷新活跃时间（供清理任务判断，心跳时间戳本身落 connect 表）
-			updates := make(map[string]any)
-			if entry.PingTime != nil {
-				updates["last_active_at"] = entry.PingTime
-			}
-			if len(updates) > 0 {
-				if err := query.Where("connection_id = ?", entry.ConnectionID).Updates(updates).Error; err != nil {
-					continue
-				}
-			}
+	// 🔥 逐条独立执行（无外层事务）：
+	// PostgreSQL/CockroachDB 协议下事务内任一语句失败会使整个事务进入 aborted 状态，
+	// 后续语句全部报 25P02（commands ignored）、commit 退化为 rollback——
+	// "事务内单条失败 continue"的模式会导致整批静默丢失（生产已观测 batch_size=43 全丢）。
+	// 逐条 autocommit 从根上消除污染，保持"单条失败不影响其他条目"语义；
+	// 每条从 getDB(ctx) 新建会话（root clone），链式条件互不累积
+	// 单条失败（含 CRDB Serializable 40001 冲突）跳过即可：心跳/统计为周期性幂等上报，下一批次自然补齐。
+	for _, entry := range entries {
+		// 刷新活跃时间（供清理任务判断，心跳时间戳本身落 connect 表）
+		if entry.PingTime != nil {
+			_ = r.getDB(ctx).
+				Where("connection_id = ?", entry.ConnectionID).
+				Updates(map[string]any{"last_active_at": entry.PingTime}).Error
+		}
 
-			// 更新 Ping 统计（移动平均，与原 ConnectionRecordRepository 实现一致）
-			if entry.PingMs > 0 {
-				pingUpdates := map[string]any{
+		// 更新 Ping 统计（移动平均，与原 ConnectionRecordRepository 实现一致）
+		if entry.PingMs > 0 {
+			_ = r.getDB(ctx).
+				Where("connection_id = ?", entry.ConnectionID).
+				Updates(map[string]any{
 					"average_ping_ms": gorm.Expr("CASE WHEN average_ping_ms > 0 THEN average_ping_ms * 0.7 + ? * 0.3 ELSE ? END", entry.PingMs, entry.PingMs),
 					"max_ping_ms":     gorm.Expr("CASE WHEN max_ping_ms = 0 OR max_ping_ms < ? THEN ? ELSE max_ping_ms END", entry.PingMs, entry.PingMs),
 					"min_ping_ms":     gorm.Expr("CASE WHEN min_ping_ms = 0 OR min_ping_ms > ? THEN ? ELSE min_ping_ms END", entry.PingMs, entry.PingMs),
-				}
-				query.Where("connection_id = ?", entry.ConnectionID).Updates(pingUpdates)
-			}
+				}).Error
 		}
-		return nil
-	})
+	}
+	return nil
 }
 
-// BatchIncrementStats 批量递增消息/字节统计（单事务）
+// BatchIncrementStats 批量递增消息/字节统计（逐条独立执行，理由同 BatchUpdateHeartbeats）
 func (r *connectionQualityRepositoryImpl) BatchIncrementStats(ctx context.Context, entries []*StatsIncrementEntry) error {
 	if len(entries) == 0 {
 		return nil
 	}
 
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// 每条 entry 用全新会话，理由同 BatchUpdateHeartbeats（复用会累积 WHERE 条件致 rows=0）
-		for _, entry := range entries {
-			query := tx.Session(&gorm.Session{NewDB: true})
-			if r.tableName != "" {
-				query = query.Table(r.tableName)
-			} else {
-				query = query.Model(&models.ConnectionQuality{})
-			}
-			updates := make(map[string]any)
-			if entry.MessagesSent > 0 {
-				updates["messages_sent"] = gorm.Expr("messages_sent + ?", entry.MessagesSent)
-			}
-			if entry.MessagesReceived > 0 {
-				updates["messages_received"] = gorm.Expr("messages_received + ?", entry.MessagesReceived)
-			}
-			if entry.BytesSent > 0 {
-				updates["bytes_sent"] = gorm.Expr("bytes_sent + ?", entry.BytesSent)
-			}
-			if entry.BytesReceived > 0 {
-				updates["bytes_received"] = gorm.Expr("bytes_received + ?", entry.BytesReceived)
-			}
-			if len(updates) > 0 {
-				if err := query.Where("connection_id = ?", entry.ConnectionID).Updates(updates).Error; err != nil {
-					continue
-				}
-			}
+	for _, entry := range entries {
+		updates := make(map[string]any)
+		if entry.MessagesSent > 0 {
+			updates["messages_sent"] = gorm.Expr("messages_sent + ?", entry.MessagesSent)
 		}
-		return nil
-	})
+		if entry.MessagesReceived > 0 {
+			updates["messages_received"] = gorm.Expr("messages_received + ?", entry.MessagesReceived)
+		}
+		if entry.BytesSent > 0 {
+			updates["bytes_sent"] = gorm.Expr("bytes_sent + ?", entry.BytesSent)
+		}
+		if entry.BytesReceived > 0 {
+			updates["bytes_received"] = gorm.Expr("bytes_received + ?", entry.BytesReceived)
+		}
+		if len(updates) > 0 {
+			_ = r.getDB(ctx).
+				Where("connection_id = ?", entry.ConnectionID).
+				Updates(updates).Error
+		}
+	}
+	return nil
 }
 
 // AddError 记录错误

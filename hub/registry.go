@@ -227,8 +227,15 @@ func (h *Hub) handleRegister(client *models.Client) {
 	// 状态全部在注入的共享存储（Redis 队列 + RDBMS），Deployment 滚动更新 / Pod 重新
 	// 调度下跨 Pod 可见；未注入离线处理器时域内 nil-safe 跳过。
 	// 有成功推送时触发应用回调（上游据此感知离线消息已送达）
+	//
+	// 🔒 首连门闩：回放是异步任务，期间新到的实时消息会被 replayGate 暂存，
+	// 回放完成后按序补投，保证用户收到的消息顺序 = 真实时序（无门闩时
+	// 实时消息会先于离线历史消息进入 sendChan，重连场景乱序）
 	if wasFirstConnection {
+		h.messagingMgr.BeginUserReplay(client.UserID)
 		h.workerPool.SubmitCallback(ctx, func() {
+			// defer 保证回放 panic 也必开闸，实时投递不会永久堆积
+			defer h.messagingMgr.EndUserReplay(client.UserID)
 			pushedIDs, failedIDs := h.messagingMgr.PushOfflineMessages(client.Context, client)
 			if len(pushedIDs) > 0 && h.offlineMessagePushCallback != nil {
 				h.offlineMessagePushCallback(client.UserID, pushedIDs, failedIDs)

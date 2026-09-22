@@ -59,6 +59,9 @@ type Manager struct {
 	// offlineHandler 离线消息处理器（spi.OfflineQueue 契约；混合实现见 HybridOfflineMessageHandler，
 	// 持久化全部经注入的共享存储，Pod 本地无状态）
 	offlineHandler spi.OfflineQueue
+	// replayGate 首连离线回放门闩（回放期间暂存实时投递，回放后按序补投，
+	// 消除重连场景"新消息先于离线历史消息到达"的乱序窗口；未注入时投递直通）
+	replayGate *replayGate
 	// idGenerator 消息 ID 生成器（雪花 ID）
 	idGenerator models.IDGenerator
 

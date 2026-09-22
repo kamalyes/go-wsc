@@ -154,7 +154,9 @@ func (m *Manager) sendToUser(ctx context.Context, toUserID string, msg *models.H
 	// SendToUserWithRetry 本身为阻塞调用，handleBroadcast 内仅做非阻塞的 TrySend
 	// （观察者通知走 batcher 异步、数据库记录已先行提交），不会显著拖慢发送路径；
 	// 此前用 `go` 异步派发会使并发 goroutine 竞争同一接收方 sendChan 导致消息乱序
-	m.handleBroadcast(msg)
+	// 🔒 首连门闩：接收方处于离线回放中时暂存本次投递，回放完成后按序补投
+	// （闭包捕获的 msg 为 sendToUser 入口克隆的独立副本，延迟执行无并发写风险）
+	m.HoldUserDelivery(toUserID, func() { m.handleBroadcast(msg) })
 	m.host.GetLogger().DebugContextKV(ctx, "[投递诊断] 本地投递已发起（含多端跨节点双投递场景）",
 		"message_id", msg.MessageID,
 		"from", msg.Sender,

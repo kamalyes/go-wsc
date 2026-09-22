@@ -699,28 +699,34 @@ func (m *Manager) broadcastToUserIDsNow(ctx context.Context, userIDs []string, m
 		// 使用 ForEachUserClientFiltered 叠加路由信封(appId+namespace)匹配：
 		//   - 群组消息：client 必须同 app/ns 且 client.groupID 在 msg.GroupIDs 中
 		//   - 避免新加入群的成员通过"旧 userIDs 列表"收到不匹配其 group 的历史消息（与项目约束一致）
+		// 🔒 首连门闩：成员处于离线回放中时暂存本次投递，回放完成后按序补投
+		// （闭包捕获 data/msg，data 为预序列化不可变字节；msg 仅被 SSE TrySend 引用
+		// 读取，无并发写）
 		for _, userID := range ids {
-			m.host.GetShardedRegistry().ForEachUserClientFiltered(userID, msg.AppID, msg.Namespace, msg.GroupIDs, func(_ string, client *models.Client) bool {
-				if client.IsClosed() {
-					return true
-				}
-				if client.ConnectionType == models.ConnectionTypeSSE {
-					// SSE 客户端发送 msg 对象
-					if client.TrySendSSE(msg) {
-						atomic.AddInt32(&successCount, 1)
+			deliver := func() {
+				m.host.GetShardedRegistry().ForEachUserClientFiltered(userID, msg.AppID, msg.Namespace, msg.GroupIDs, func(_ string, client *models.Client) bool {
+					if client.IsClosed() {
+						return true
 					}
-				} else {
-					// WebSocket 客户端发送预序列化数据
-					if client.TrySend(data) {
-						atomic.AddInt32(&successCount, 1)
-						m.host.TrackReceiverMessageStats(client.ID, client.UserType, dataLen)
+					if client.ConnectionType == models.ConnectionTypeSSE {
+						// SSE 客户端发送 msg 对象
+						if client.TrySendSSE(msg) {
+							atomic.AddInt32(&successCount, 1)
+						}
 					} else {
-						// 成员级分级兜底：普通/必达转离线（用户下次上线/重连时补发），高频语义丢弃
-						m.routeDeliveryFallback(msg, client, userID)
+						// WebSocket 客户端发送预序列化数据
+						if client.TrySend(data) {
+							atomic.AddInt32(&successCount, 1)
+							m.host.TrackReceiverMessageStats(client.ID, client.UserType, dataLen)
+						} else {
+							// 成员级分级兜底：普通/必达转离线（用户下次上线/重连时补发），高频语义丢弃
+							m.routeDeliveryFallback(msg, client, userID)
+						}
 					}
-				}
-				return true
-			})
+					return true
+				})
+			}
+			m.HoldUserDelivery(userID, deliver)
 		}
 	}
 

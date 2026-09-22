@@ -282,6 +282,7 @@ func NewHub(config *wscconfig.WSC) *Hub {
 		WithAckManager(ackManager).
 		WithAckTimeoutTimer(hub.ackTimeoutTimer).
 		WithWorkerPool(hub.workerPool).
+		WithReplayGate(messaging.NewReplayGate()).
 		WithIDGenerator(hub.idGenerator)
 	// 离线消息处理器不在此注入：依赖 Redis 队列 + RDBMS 双后端，业务侧在存储就绪后
 	// 经 WithOfflineMessageHandler（或 messaging.InitializeOfflineQueue 经 StoreTarget

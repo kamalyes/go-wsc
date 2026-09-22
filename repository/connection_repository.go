@@ -343,14 +343,15 @@ func (r *connectionRecordRepositoryImpl) BatchUpdateHeartbeats(ctx context.Conte
 	}
 
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		query := tx
-		if r.tableName != "" {
-			query = tx.Table(r.tableName)
-		} else {
-			query = tx.Model(&models.ConnectionRecord{})
-		}
-
+		// 每条 entry 用全新会话（Session NewDB）：GORM 链式对象复用会累积 WHERE 条件，
+		// N 条 entry 拼成 WHERE connection_id='id1' AND connection_id='id2' AND ...（恒 false，rows=0）
 		for _, entry := range entries {
+			query := tx.Session(&gorm.Session{NewDB: true})
+			if r.tableName != "" {
+				query = query.Table(r.tableName)
+			} else {
+				query = query.Model(&models.ConnectionRecord{})
+			}
 			updates := make(map[string]any)
 			if entry.PingTime != nil {
 				updates["last_ping_at"] = entry.PingTime

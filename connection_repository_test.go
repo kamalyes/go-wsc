@@ -341,7 +341,7 @@ func TestBatchUpdateHeartbeats(t *testing.T) {
 func TestBatchQualityUpdate_MultipleConnections(t *testing.T) {
 	tc := newTestConnectionRepoContext(t)
 
-	// 建立三条连接的 quality 行（模拟 batcher 攒批的多连接心跳上报）
+	// 建立三条连接的 quality 行 + connect 行（模拟 batcher 攒批的多连接心跳上报）
 	connIDs := make([]string, 3)
 	for i := range connIDs {
 		connIDs[i] = tc.generateConnectionID()
@@ -350,19 +350,38 @@ func TestBatchQualityUpdate_MultipleConnections(t *testing.T) {
 			UserID:       tc.generateUserID(),
 		})
 		require.NoError(t, err)
+		err = tc.repo.Upsert(tc.ctx, &models.ConnectionRecord{
+			ConnectionID: connIDs[i],
+			UserID:       tc.generateUserID(),
+			ConnectedAt:  time.Now(),
+			IsActive:     true,
+		})
+		require.NoError(t, err)
 	}
 
 	// 批量心跳：三条全部 PingMs=100（旧 bug 下第 2、3 条 AND 拼接后 rows=0）
 	heartbeatEntries := make([]*repository.HeartbeatUpdateEntry, len(connIDs))
 	for i, connID := range connIDs {
 		pingTime := time.Now()
+		pongTime := pingTime.Add(20 * time.Millisecond)
 		heartbeatEntries[i] = &repository.HeartbeatUpdateEntry{
 			ConnectionID: connID,
 			PingTime:     &pingTime,
+			PongTime:     &pongTime,
 			PingMs:       100,
 		}
 	}
-	err := tc.qualityRepo.BatchUpdateHeartbeats(tc.ctx, heartbeatEntries)
+	// connect 表批量心跳（last_ping_at/last_pong_at，旧 bug 同样只更新第 1 条）
+	err := tc.repo.BatchUpdateHeartbeats(tc.ctx, heartbeatEntries)
+	assert.NoError(t, err)
+	for i, connID := range connIDs {
+		saved, err := tc.repo.GetByConnectionID(tc.ctx, connID)
+		assert.NoError(t, err)
+		require.NotNil(t, saved.LastPingAt, "第 %d 条连接的 last_ping_at 应更新成功", i+1)
+		require.NotNil(t, saved.LastPongAt, "第 %d 条连接的 last_pong_at 应更新成功", i+1)
+	}
+	// quality 表批量心跳（Ping 统计）
+	err = tc.qualityRepo.BatchUpdateHeartbeats(tc.ctx, heartbeatEntries)
 	assert.NoError(t, err)
 	for i, connID := range connIDs {
 		saved, err := tc.qualityRepo.GetByConnectionID(tc.ctx, connID)

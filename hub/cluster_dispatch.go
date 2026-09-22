@@ -509,7 +509,7 @@ func (h *Hub) publishToTargetedNodes(ctx context.Context, dispatch *models.Distr
 				if retry, rerr := client.Publish(ctx, channels[i], data).Result(); rerr == nil && retry > 0 {
 					h.logger.InfoContextKV(ctx, "📡 [死节点探测] 心跳正常+订阅恢复，重试投递成功",
 						"target_node", targets[i],
-						"message_id", dispatch.Message.GetMessageID())
+						"message_id", dispatch.LogMessageID())
 					continue
 				}
 			}

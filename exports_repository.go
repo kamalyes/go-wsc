@@ -221,14 +221,14 @@ var NewRedisWorkloadRepository = repository.NewRedisWorkloadRepository
 // - CreateFromMessage(ctx, msg *HubMessage, maxRetry int, expiresAt *time.Time) (*MessageSendRecord, error): 从消息创建记录
 // - Update(ctx, record *MessageSendRecord) error: 更新消息记录
 // - FindByID(ctx, id uint) (*MessageSendRecord, error): 按ID查找
-// - FindByMessageID(ctx, messageID string) (*MessageSendRecord, error): 按消息ID查找
+// - FindByMessageID(ctx, key MessageRecordKey) (*MessageSendRecord, error): 按消息ID+接收者查找
 // - QueryRecords(ctx, filter *MessageRecordFilter) ([]*MessageSendRecord, error): 查询消息记录（支持按状态、发送者、接收者、节点IP、客户端IP等条件过滤）
 // - FindRetryable(ctx, limit int) ([]*MessageSendRecord, error): 查找可重试的记录
 // - DeleteExpired(ctx) (int64, error): 删除过期的记录
 // - Delete(ctx, id uint) error: 删除记录
 // - DeleteByMessageID(ctx, messageID string) error: 根据消息ID删除
-// - UpdateStatus(ctx, messageID string, status MessageSendStatus, reason FailureReason, errorMsg string) error: 更新状态
-// - IncrementRetry(ctx, messageID string, attempt RetryAttempt) error: 增加重试次数
+// - UpdateStatus(ctx, key MessageRecordKey, status MessageSendStatus, reason FailureReason, errorMsg string) error: 更新状态（按 message_id + receiver 精确定位）
+// - IncrementRetry(ctx, key MessageRecordKey, attempt RetryAttempt) error: 增加重试次数
 // - GetStatistics(ctx) (map[string]int64, error): 获取统计信息
 // - CleanupOld(ctx, before time.Time) (int64, error): 清理旧记录
 // - GetDB() *gorm.DB: 获取底层 GORM DB

@@ -82,9 +82,12 @@ func (h *Hub) SendToUserWithAck(ctx context.Context, toUserID string, msg *HubMe
 func (h *Hub) HandleAck(ackMsg *AckMessage) {
 	// 🔗 trace 恢复：AckMessage 协议结构不带 trace_id，从 ackManager 的 pending 消息
 	// （原始 HubMessage，信封携带 trace_id）恢复 ctx，使 ACK 确认与消息发送链路同一 trace 可查
+	// 同时取 pm.Message.Receiver 作为记录定位键（P2P 记录按 message_id+receiver 更新）
 	ctx := h.ctx
+	receiver := ""
 	if pm, ok := h.ackManager.GetPendingMessage(ackMsg.MessageID); ok && pm.Message != nil {
 		ctx = pm.Message.ContextFrom(h.ctx)
+		receiver = pm.Message.Receiver
 	}
 
 	// 记录ACK消息处理
@@ -100,13 +103,13 @@ func (h *Hub) HandleAck(ackMsg *AckMessage) {
 	if ackMsg.Status == AckStatusConfirmed && h.messageRecordRepo != nil {
 		// ⏰ O(1) 取消跨节点 ACK 超时任务（状态由 sending→success，避免冗余超时检查）
 		// 与 updateMessageStatusAsync 的取消语义对齐，详见 ack_timer.go
-		h.cancelAckTimeout(ackMsg.MessageID)
+		h.cancelAckTimeout(models.MessageRecordKey{MessageID: ackMsg.MessageID, Receiver: receiver})
 		go func() {
 			updateCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 			defer cancel()
-			if err := h.messageRecordRepo.UpdateStatus(updateCtx, ackMsg.MessageID, models.MessageSendStatusSuccess, "", ""); err != nil {
+			if err := h.messageRecordRepo.UpdateStatus(updateCtx, models.MessageRecordKey{MessageID: ackMsg.MessageID, Receiver: receiver}, models.MessageSendStatusSuccess, "", ""); err != nil {
 				h.logger.WarnContextKV(ctx, "ACK确认后更新消息状态失败",
-					"message_id", ackMsg.MessageID, "error", err)
+					"message_id", ackMsg.MessageID, "receiver", receiver, "error", err)
 			}
 		}()
 	}
@@ -199,6 +202,6 @@ func (h *Hub) recordAckRetryAttempt(ctx context.Context, msg *HubMessage, attemp
 		}).
 		ExecWithContext(func(retryCtx context.Context) error {
 			retryCtx = msg.ContextFrom(retryCtx)
-			return h.messageRecordRepo.IncrementRetry(retryCtx, msg.MessageID, retryAttempt)
+			return h.messageRecordRepo.IncrementRetry(retryCtx, models.MessageRecordKey{MessageID: msg.MessageID, Receiver: msg.Receiver}, retryAttempt)
 		})
 }

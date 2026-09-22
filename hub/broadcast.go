@@ -604,10 +604,10 @@ func (h *Hub) broadcastToFilteredNow(ctx context.Context, condition func(*Client
 	})
 	sseDuration := time.Since(sseStart)
 
-	// 消息记录状态只更新一次（同一 msgID）
+	// 消息记录状态只更新一次（同一 msgID；广播记录 receiver 为空）
 	totalSuccess := atomic.LoadInt32(&successCount)
 	if totalSuccess > 0 {
-		h.updateMessageStatusAsync(ctx, msgID, MessageSendStatusSuccess, "", "")
+		h.updateMessageStatusAsync(ctx, msgID, "", MessageSendStatusSuccess, "", "")
 	}
 
 	totalDuration := time.Since(start)
@@ -711,7 +711,7 @@ func (h *Hub) broadcastToUserIDsNow(ctx context.Context, userIDs []string, msg *
 
 	totalSuccess := atomic.LoadInt32(&successCount)
 	if totalSuccess > 0 {
-		h.updateMessageStatusAsync(ctx, msgID, MessageSendStatusSuccess, "", "")
+		h.updateMessageStatusAsync(ctx, msgID, "", MessageSendStatusSuccess, "", "")
 	}
 
 	// 📨 群组广播本地投递统计：Info 级保证生产可见（成员在线但 0 投递 = 本地无连接，跨节点由 clusterBatcher 负责）

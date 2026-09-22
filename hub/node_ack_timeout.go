@@ -89,26 +89,26 @@ func (h *Hub) timeoutStaleSendingRecords() {
 		return
 	}
 
-	staleIDs := make([]string, 0, len(stale))
+	staleKeys := make([]models.MessageRecordKey, 0, len(stale))
 	for _, record := range stale {
-		staleIDs = append(staleIDs, record.MessageID)
+		staleKeys = append(staleKeys, models.MessageRecordKey{MessageID: record.MessageID, Receiver: record.Receiver})
 	}
 
 	// ⚠️ 多节点并发去重：所有 Pod 的扫描器都面对同一张共享记录表，若直接
 	// BatchUpdateStatus + 转存离线，同一记录会被 N 个 Pod 各处理一次 → 用户上线收到 N 份重复推送。
-	// ClaimStaleSending 用状态守卫（status='sending' → ack_timeout）原子认领：
+	// ClaimStaleSending 用状态守卫（status='sending' → ack_timeout）按 (message_id, receiver) 原子认领：
 	// 仅认领成功（RowsAffected=1）的节点负责该记录的后续兜底动作
-	claimed, claimErr := h.messageRecordRepo.ClaimStaleSending(ctx, staleIDs, models.MessageSendStatusAckTimeout, models.FailureReasonAckTimeout, errNodeAckTimeout.Error())
+	claimed, claimErr := h.messageRecordRepo.ClaimStaleSending(ctx, staleKeys, models.MessageSendStatusAckTimeout, models.FailureReasonAckTimeout, errNodeAckTimeout.Error())
 	if claimErr != nil {
 		h.logger.WarnContextKV(h.ctx, "ACK超时扫描：认领超时记录失败",
-			"count", len(staleIDs), "claimed", len(claimed), "error", claimErr)
+			"count", len(staleKeys), "claimed", len(claimed), "error", claimErr)
 	}
 	if len(claimed) == 0 {
 		return
 	}
-	claimedSet := make(map[string]struct{}, len(claimed))
-	for _, id := range claimed {
-		claimedSet[id] = struct{}{}
+	claimedSet := make(map[models.MessageRecordKey]struct{}, len(claimed))
+	for _, key := range claimed {
+		claimedSet[key] = struct{}{}
 	}
 
 	h.logger.WarnContextKV(h.ctx, "跨节点消息ACK超时，已标记待重试",
@@ -120,7 +120,7 @@ func (h *Hub) timeoutStaleSendingRecords() {
 	// P2P 消息转存离线（用户上线时推送；转存成功后状态会被覆盖为 UserOffline）
 	// 广播类记录（Receiver 为空）不转存，仅标记状态供审计
 	for _, record := range stale {
-		if _, ok := claimedSet[record.MessageID]; !ok {
+		if _, ok := claimedSet[models.MessageRecordKey{MessageID: record.MessageID, Receiver: record.Receiver}]; !ok {
 			continue // 未被本节点认领（其他节点已处理或状态已变更）
 		}
 		if record.Receiver == "" {

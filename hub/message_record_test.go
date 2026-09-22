@@ -56,7 +56,7 @@ type fakeMessageRecordRepo struct {
 
 // batchUpdateCall 记录一次 BatchUpdateStatus 调用参数
 type batchUpdateCall struct {
-	IDs    []string
+	Keys   []models.MessageRecordKey
 	Status models.MessageSendStatus
 	Reason models.FailureReason
 	ErrMsg string
@@ -75,7 +75,7 @@ func (f *fakeMessageRecordRepo) Update(_ context.Context, record *models.Message
 func (f *fakeMessageRecordRepo) FindByID(_ context.Context, _ uint) (*models.MessageSendRecord, error) {
 	return nil, nil
 }
-func (f *fakeMessageRecordRepo) FindByMessageID(_ context.Context, _ string) (*models.MessageSendRecord, error) {
+func (f *fakeMessageRecordRepo) FindByMessageID(_ context.Context, _ models.MessageRecordKey) (*models.MessageSendRecord, error) {
 	return f.findByMessageIDResult, f.findByMessageIDErr
 }
 func (f *fakeMessageRecordRepo) QueryRecords(_ context.Context, filter *repository.MessageRecordFilter) ([]*models.MessageSendRecord, error) {
@@ -97,17 +97,17 @@ func (f *fakeMessageRecordRepo) DeleteByMessageID(_ context.Context, messageID s
 	f.lastDeletedMessage = messageID
 	return f.deleteByMessageIDErr
 }
-func (f *fakeMessageRecordRepo) UpdateStatus(_ context.Context, messageID string, status models.MessageSendStatus, _ models.FailureReason, _ string) error {
+func (f *fakeMessageRecordRepo) UpdateStatus(_ context.Context, key models.MessageRecordKey, status models.MessageSendStatus, _ models.FailureReason, _ string) error {
 	f.batchUpdateMu.Lock()
-	f.lastUpdateStatusID = messageID
+	f.lastUpdateStatusID = key.MessageID
 	f.lastUpdateStatus = status
 	f.batchUpdateMu.Unlock()
 	return f.updateStatusErr
 }
-func (f *fakeMessageRecordRepo) BatchUpdateStatus(_ context.Context, ids []string, status models.MessageSendStatus, reason models.FailureReason, errMsg string) error {
+func (f *fakeMessageRecordRepo) BatchUpdateStatus(_ context.Context, keys []models.MessageRecordKey, status models.MessageSendStatus, reason models.FailureReason, errMsg string) error {
 	f.batchUpdateMu.Lock()
 	f.batchUpdateCalls = append(f.batchUpdateCalls, batchUpdateCall{
-		IDs:    append([]string(nil), ids...),
+		Keys:   append([]models.MessageRecordKey(nil), keys...),
 		Status: status,
 		Reason: reason,
 		ErrMsg: errMsg,
@@ -121,23 +121,23 @@ func (f *fakeMessageRecordRepo) BatchUpdateStatus(_ context.Context, ids []strin
 
 // ClaimStaleSending 模拟真实状态守卫语义：仅 queryResult（fake 的"表"）中
 // 状态仍为 sending 的记录被认领并更新，用于验证多节点并发扫描去重
-func (f *fakeMessageRecordRepo) ClaimStaleSending(_ context.Context, ids []string, newStatus models.MessageSendStatus, reason models.FailureReason, errMsg string) ([]string, error) {
+func (f *fakeMessageRecordRepo) ClaimStaleSending(_ context.Context, keys []models.MessageRecordKey, newStatus models.MessageSendStatus, reason models.FailureReason, errMsg string) ([]models.MessageRecordKey, error) {
 	f.batchUpdateMu.Lock()
 	defer f.batchUpdateMu.Unlock()
-	claimed := make([]string, 0, len(ids))
-	for _, id := range ids {
+	claimed := make([]models.MessageRecordKey, 0, len(keys))
+	for _, key := range keys {
 		for _, record := range f.queryResult {
-			if record.MessageID == id && record.Status == models.MessageSendStatusSending {
+			if record.MessageID == key.MessageID && record.Receiver == key.Receiver && record.Status == models.MessageSendStatusSending {
 				record.Status = newStatus
 				record.FailureReason = reason
 				record.ErrorMessage = errMsg
-				claimed = append(claimed, id)
+				claimed = append(claimed, key)
 				break
 			}
 		}
 	}
 	f.batchUpdateCalls = append(f.batchUpdateCalls, batchUpdateCall{
-		IDs:    claimed,
+		Keys:   claimed,
 		Status: newStatus,
 		Reason: reason,
 		ErrMsg: errMsg,
@@ -147,7 +147,7 @@ func (f *fakeMessageRecordRepo) ClaimStaleSending(_ context.Context, ids []strin
 	}
 	return claimed, f.batchUpdateErr
 }
-func (f *fakeMessageRecordRepo) IncrementRetry(_ context.Context, _ string, _ models.RetryAttempt) error {
+func (f *fakeMessageRecordRepo) IncrementRetry(_ context.Context, _ models.MessageRecordKey, _ models.RetryAttempt) error {
 	return nil
 }
 func (f *fakeMessageRecordRepo) GetStatistics(_ context.Context) (map[string]int64, error) {
@@ -170,7 +170,7 @@ func TestMessageRecord_NoRepo(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("QueryMessageRecord", func(t *testing.T) {
-		_, err := hub.QueryMessageRecord(ctx, "m1")
+		_, err := hub.QueryMessageRecord(ctx, "m1", "")
 		assert.Equal(t, ErrRecordRepositoryNotSet, err)
 	})
 	t.Run("QueryMessageRecordsBySender", func(t *testing.T) {
@@ -198,7 +198,7 @@ func TestMessageRecord_NoRepo(t *testing.T) {
 		assert.Equal(t, ErrRecordRepositoryNotSet, err)
 	})
 	t.Run("UpdateMessageRecordStatus", func(t *testing.T) {
-		err := hub.UpdateMessageRecordStatus(ctx, "m1", models.MessageSendStatusSuccess, models.FailureReasonUnknown, "")
+		err := hub.UpdateMessageRecordStatus(ctx, "m1", "", models.MessageSendStatusSuccess, models.FailureReasonUnknown, "")
 		assert.Equal(t, ErrRecordRepositoryNotSet, err)
 	})
 	t.Run("UpdateMessageRecord", func(t *testing.T) {
@@ -229,7 +229,7 @@ func TestQueryMessageRecord_WithRepo(t *testing.T) {
 	repo := &fakeMessageRecordRepo{findByMessageIDResult: expected}
 	hub.SetMessageRecordRepository(repo)
 
-	got, err := hub.QueryMessageRecord(ctx, "m1")
+	got, err := hub.QueryMessageRecord(ctx, "m1", "")
 	require.NoError(t, err)
 	assert.Same(t, expected, got)
 }
@@ -336,7 +336,7 @@ func TestUpdateMessageRecordStatus_WithRepo(t *testing.T) {
 	repo := &fakeMessageRecordRepo{}
 	hub.SetMessageRecordRepository(repo)
 
-	err := hub.UpdateMessageRecordStatus(ctx, "m1", models.MessageSendStatusSuccess, models.FailureReasonUnknown, "")
+	err := hub.UpdateMessageRecordStatus(ctx, "m1", "", models.MessageSendStatusSuccess, models.FailureReasonUnknown, "")
 	require.NoError(t, err)
 	assert.Equal(t, "m1", repo.lastUpdateStatusID)
 	assert.Equal(t, models.MessageSendStatusSuccess, repo.lastUpdateStatus)
@@ -403,13 +403,13 @@ func TestMessageRecord_RepoError(t *testing.T) {
 	}
 	hub.SetMessageRecordRepository(repo)
 
-	_, err := hub.QueryMessageRecord(ctx, "m1")
+	_, err := hub.QueryMessageRecord(ctx, "m1", "")
 	assert.Equal(t, customErr, err)
 	_, err = hub.QueryMessageRecordsBySender(ctx, "s1", 1)
 	assert.Equal(t, customErr, err)
 	_, err = hub.QueryRetryableMessageRecords(ctx, 1)
 	assert.Equal(t, customErr, err)
-	err = hub.UpdateMessageRecordStatus(ctx, "m1", models.MessageSendStatusSuccess, models.FailureReasonUnknown, "")
+	err = hub.UpdateMessageRecordStatus(ctx, "m1", "", models.MessageSendStatusSuccess, models.FailureReasonUnknown, "")
 	assert.Equal(t, customErr, err)
 	err = hub.UpdateMessageRecord(ctx, &models.MessageSendRecord{})
 	assert.Equal(t, customErr, err)

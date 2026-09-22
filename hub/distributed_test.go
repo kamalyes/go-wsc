@@ -1193,8 +1193,8 @@ func hasBatchUpdate(repo *fakeMessageRecordRepo, msgID string, status MessageSen
 		if call.Status != status {
 			continue
 		}
-		for _, id := range call.IDs {
-			if id == msgID {
+		for _, key := range call.Keys {
+			if key.MessageID == msgID {
 				return true
 			}
 		}

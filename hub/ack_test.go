@@ -45,10 +45,10 @@ func newAckFakeMessageRecordRepo() *ackFakeMessageRecordRepo {
 	return &ackFakeMessageRecordRepo{}
 }
 
-func (f *ackFakeMessageRecordRepo) IncrementRetry(_ context.Context, messageID string, attempt models.RetryAttempt) error {
+func (f *ackFakeMessageRecordRepo) IncrementRetry(_ context.Context, key models.MessageRecordKey, attempt models.RetryAttempt) error {
 	atomic.AddInt32(&f.incrementRetryCalls, 1)
 	f.incrementRetryMu.Lock()
-	f.lastIncrementMsgID = messageID
+	f.lastIncrementMsgID = key.MessageID
 	f.lastIncrementNum = attempt.AttemptNumber
 	if attempt.Error != "" {
 		f.lastIncrementErr = attempt.Error

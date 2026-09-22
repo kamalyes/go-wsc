@@ -55,8 +55,8 @@ type MessageRecordRepository interface {
 	// FindByID 根据ID查找
 	FindByID(ctx context.Context, id uint) (*MessageSendRecord, error)
 
-	// FindByMessageID 根据消息ID查找
-	FindByMessageID(ctx context.Context, messageID string) (*MessageSendRecord, error)
+	// FindByMessageID 根据消息ID+接收者查找（P2P 同一 message_id 会为每个 receiver 各建一条记录）
+	FindByMessageID(ctx context.Context, key models.MessageRecordKey) (*MessageSendRecord, error)
 
 	// QueryRecords 查询消息记录（支持按状态、发送者、接收者、节点IP、客户端IP等条件过滤）
 	QueryRecords(ctx context.Context, filter *MessageRecordFilter) ([]*MessageSendRecord, error)
@@ -73,22 +73,22 @@ type MessageRecordRepository interface {
 	// DeleteByMessageID 根据消息ID删除
 	DeleteByMessageID(ctx context.Context, messageID string) error
 
-	// UpdateStatus 更新状态
-	UpdateStatus(ctx context.Context, messageID string, status MessageSendStatus, reason FailureReason, errorMsg string) error
+	// UpdateStatus 更新状态（按 message_id + receiver 精确定位，多 receiver 记录互不影响）
+	UpdateStatus(ctx context.Context, key models.MessageRecordKey, status MessageSendStatus, reason FailureReason, errorMsg string) error
 
 	// BatchUpdateStatus 批量更新消息状态
-	// 相同 status/reason/errorMsg 的消息用一条 SQL 批量更新（WHERE message_id IN (...)）
+	// 相同 status/reason/errorMsg 的记录用一条 SQL 批量更新（WHERE (message_id, receiver) IN (...)）
 	// 用于广播场景下大量消息同时成功/失败的状态更新，大幅减少 DB 压力
-	BatchUpdateStatus(ctx context.Context, messageIDs []string, status MessageSendStatus, reason FailureReason, errorMsg string) error
+	BatchUpdateStatus(ctx context.Context, keys []models.MessageRecordKey, status MessageSendStatus, reason FailureReason, errorMsg string) error
 
 	// ClaimStaleSending 原子认领超时的 sending 记录：仅当记录当前状态仍为 sending 时更新为 newStatus
-	// 返回实际认领成功的 messageID 列表（状态已被并发方更新则不认领）
+	// 返回实际认领成功的键列表（状态已被并发方更新则不认领）
 	// 多节点并发扫描共享记录表时，状态守卫（WHERE status='sending'）保证每条记录
 	// 只被一个节点认领成功，认领者负责后续兜底动作（如转存离线），消除 N Pod 重复处理
-	ClaimStaleSending(ctx context.Context, messageIDs []string, newStatus MessageSendStatus, reason FailureReason, errorMsg string) ([]string, error)
+	ClaimStaleSending(ctx context.Context, keys []models.MessageRecordKey, newStatus MessageSendStatus, reason FailureReason, errorMsg string) ([]models.MessageRecordKey, error)
 
-	// IncrementRetry 增加重试次数
-	IncrementRetry(ctx context.Context, messageID string, attempt RetryAttempt) error
+	// IncrementRetry 增加重试次数（按 message_id + receiver 精确定位）
+	IncrementRetry(ctx context.Context, key models.MessageRecordKey, attempt RetryAttempt) error
 
 	// GetStatistics 获取统计信息
 	GetStatistics(ctx context.Context) (map[string]int64, error)
@@ -152,10 +152,10 @@ func (r *MessageRecordGormRepository) FindByID(ctx context.Context, id uint) (*M
 	return &record, nil
 }
 
-// FindByMessageID 根据消息ID查找
-func (r *MessageRecordGormRepository) FindByMessageID(ctx context.Context, messageID string) (*MessageSendRecord, error) {
+// FindByMessageID 根据消息ID+接收者查找
+func (r *MessageRecordGormRepository) FindByMessageID(ctx context.Context, key models.MessageRecordKey) (*MessageSendRecord, error) {
 	var record MessageSendRecord
-	err := r.db.WithContext(ctx).Where(models.QueryMessageIDWhere, messageID).First(&record).Error
+	err := r.db.WithContext(ctx).Where(models.QueryMessageIDReceiverWhere, key.MessageID, key.Receiver).First(&record).Error
 	if err != nil {
 		return nil, err
 	}
@@ -241,12 +241,12 @@ func (r *MessageRecordGormRepository) DeleteByMessageID(ctx context.Context, mes
 	return r.db.WithContext(ctx).Where(models.QueryMessageIDWhere, messageID).Delete(&MessageSendRecord{}).Error
 }
 
-// UpdateStatus 更新状态
+// UpdateStatus 更新状态（按 message_id + receiver 精确定位，多 receiver 记录互不影响）
 //
 // 优化说明：原先通过两次 UPDATE 完成 first_send_time 的条件更新，在高并发 ACK 确认场景下
 // 会产生瞬时双倍磁盘写入 I/O现合并为单条 UPDATE，使用 CASE WHEN 表达式在数据库侧
 // 完成「仅在 first_send_time 为 NULL 时才写入」的条件更新，I/O 开销减半
-func (r *MessageRecordGormRepository) UpdateStatus(ctx context.Context, messageID string, status MessageSendStatus, reason FailureReason, errorMsg string) error {
+func (r *MessageRecordGormRepository) UpdateStatus(ctx context.Context, key models.MessageRecordKey, status MessageSendStatus, reason FailureReason, errorMsg string) error {
 	now := time.Now()
 
 	updates := map[string]interface{}{
@@ -272,7 +272,7 @@ func (r *MessageRecordGormRepository) UpdateStatus(ctx context.Context, messageI
 
 	// 单次 UPDATE 完成所有字段更新（含 first_send_time 的条件更新）
 	result := r.db.WithContext(ctx).Model(&MessageSendRecord{}).
-		Where(models.QueryMessageIDWhere, messageID).
+		Where(models.QueryMessageIDReceiverWhere, key.MessageID, key.Receiver).
 		Updates(updates)
 
 	// 🔥 如果没有找到记录（RowsAffected == 0），静默返回（记录可能尚未创建或不需要记录）
@@ -282,9 +282,9 @@ func (r *MessageRecordGormRepository) UpdateStatus(ctx context.Context, messageI
 	return nil
 }
 
-// BatchUpdateStatus 批量更新消息状态
-func (r *MessageRecordGormRepository) BatchUpdateStatus(ctx context.Context, messageIDs []string, status MessageSendStatus, reason FailureReason, errorMsg string) error {
-	if len(messageIDs) == 0 {
+// BatchUpdateStatus 批量更新消息状态（按 (message_id, receiver) 复合键批量定位）
+func (r *MessageRecordGormRepository) BatchUpdateStatus(ctx context.Context, keys []models.MessageRecordKey, status MessageSendStatus, reason FailureReason, errorMsg string) error {
+	if len(keys) == 0 {
 		return nil
 	}
 
@@ -307,8 +307,14 @@ func (r *MessageRecordGormRepository) BatchUpdateStatus(ctx context.Context, mes
 		updates["success_time"] = &now
 	}
 
+	// 行值 IN：(message_id, receiver) IN ((?,?),(?,?),...)，复合索引 idx_message_id_receiver 可命中
+	tuples := make([][]interface{}, len(keys))
+	for i, key := range keys {
+		tuples[i] = []interface{}{key.MessageID, key.Receiver}
+	}
+
 	result := r.db.WithContext(ctx).Model(&MessageSendRecord{}).
-		Where("message_id IN ?", messageIDs).
+		Where("(message_id, receiver) IN ?", tuples).
 		Updates(updates)
 
 	return result.Error
@@ -316,19 +322,19 @@ func (r *MessageRecordGormRepository) BatchUpdateStatus(ctx context.Context, mes
 
 // ClaimStaleSending 原子认领超时的 sending 记录（接口说明见 MessageRecordRepository）
 //
-// 实现说明：逐条带状态守卫的 UPDATE（WHERE message_id = ? AND status = 'sending'），
+// 实现说明：逐条带状态守卫的 UPDATE（WHERE message_id = ? AND receiver = ? AND status = 'sending'），
 // RowsAffected==1 即认领成功。虽是逐条更新（单轮扫描上限 200 条，30s 一次的后台任务），
 // 但这是唯一能在多节点并发下精确判定"哪条记录被哪个节点认领"的方式——
 // 单条批量 UPDATE 只能返回总命中行数，无法区分每条的认领归属
-func (r *MessageRecordGormRepository) ClaimStaleSending(ctx context.Context, messageIDs []string, newStatus MessageSendStatus, reason FailureReason, errorMsg string) ([]string, error) {
-	if len(messageIDs) == 0 {
+func (r *MessageRecordGormRepository) ClaimStaleSending(ctx context.Context, keys []models.MessageRecordKey, newStatus MessageSendStatus, reason FailureReason, errorMsg string) ([]models.MessageRecordKey, error) {
+	if len(keys) == 0 {
 		return nil, nil
 	}
 
 	now := time.Now()
-	claimed := make([]string, 0, len(messageIDs))
+	claimed := make([]models.MessageRecordKey, 0, len(keys))
 
-	for _, messageID := range messageIDs {
+	for _, key := range keys {
 		updates := map[string]interface{}{
 			"status":          newStatus,
 			"last_send_time":  &now,
@@ -342,13 +348,13 @@ func (r *MessageRecordGormRepository) ClaimStaleSending(ctx context.Context, mes
 		}
 
 		result := r.db.WithContext(ctx).Model(&MessageSendRecord{}).
-			Where(models.QueryMessageIDWhere+" AND status = ?", messageID, models.MessageSendStatusSending).
+			Where(models.QueryMessageIDReceiverWhere+" AND status = ?", key.MessageID, key.Receiver, models.MessageSendStatusSending).
 			Updates(updates)
 		if result.Error != nil {
 			return claimed, result.Error
 		}
 		if result.RowsAffected > 0 {
-			claimed = append(claimed, messageID)
+			claimed = append(claimed, key)
 		}
 	}
 
@@ -364,7 +370,7 @@ func (r *MessageRecordGormRepository) ClaimStaleSending(ctx context.Context, mes
 //   - 状态判定依据 attempt.Success 与 retry_count vs max_retry 列
 //
 // 数据库往返从 2 次降为 1 次，消除 SELECT 整行读取与 Go 侧 retry_history 反序列化
-func (r *MessageRecordGormRepository) IncrementRetry(ctx context.Context, messageID string, attempt RetryAttempt) error {
+func (r *MessageRecordGormRepository) IncrementRetry(ctx context.Context, key models.MessageRecordKey, attempt RetryAttempt) error {
 	now := time.Now()
 
 	// 序列化重试记录为 JSON，用于方言感知的 JSON 数组追加
@@ -387,7 +393,7 @@ func (r *MessageRecordGormRepository) IncrementRetry(ctx context.Context, messag
 	dialect := sqlbuilder.DetectDialect(r.db)
 	retryHistoryExpr := dialect.JsonArrayAppend("retry_history", "?")
 
-	// 单条 UPDATE 完成所有更新，WHERE message_id = ? 与 UpdateStatus 保持一致
+	// 单条 UPDATE 完成所有更新，WHERE message_id = ? AND receiver = ? 与 UpdateStatus 保持一致
 	result := r.db.WithContext(ctx).Exec(
 		`UPDATE `+MessageSendRecord{}.TableName()+` SET
 			retry_count = ?,
@@ -403,7 +409,7 @@ func (r *MessageRecordGormRepository) IncrementRetry(ctx context.Context, messag
 			failure_reason = CASE WHEN ? = 0 AND ? >= max_retry THEN ? ELSE failure_reason END,
 			error_message = CASE WHEN ? = 0 AND ? = 1 THEN ? ELSE error_message END,
 			updated_at = ?
-		WHERE message_id = ?`,
+		WHERE message_id = ? AND receiver = ?`,
 		attempt.AttemptNumber,
 		string(attemptJSON),
 		now,
@@ -415,7 +421,8 @@ func (r *MessageRecordGormRepository) IncrementRetry(ctx context.Context, messag
 		successFlag, attempt.AttemptNumber, models.FailureReasonMaxRetry,
 		successFlag, hasError, attempt.Error,
 		now,
-		messageID,
+		key.MessageID,
+		key.Receiver,
 	)
 
 	return result.Error

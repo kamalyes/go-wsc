@@ -48,8 +48,8 @@ func hasAckTimeoutUpdate(repo *fakeMessageRecordRepo, msgID string) bool {
 		if call.Status != models.MessageSendStatusAckTimeout {
 			continue
 		}
-		for _, id := range call.IDs {
-			if id == msgID {
+		for _, key := range call.Keys {
+			if key.MessageID == msgID {
 				return true
 			}
 		}

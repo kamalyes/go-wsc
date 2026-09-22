@@ -24,14 +24,16 @@ import (
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
+	"github.com/kamalyes/go-wsc/models"
 )
 
 // statusUpdateItem 消息状态更新项
 type statusUpdateItem struct {
-	msgID  string            // 消息 ID
-	status MessageSendStatus // 消息发送状态
-	reason FailureReason     // 失败原因
-	errMsg string            // 错误信息
+	msgID    string            // 消息 ID
+	receiver string            // 接收者 ID（广播类记录为空；与 msgID 共同精确定位一条记录）
+	status   MessageSendStatus // 消息发送状态
+	reason   FailureReason     // 失败原因
+	errMsg   string            // 错误信息
 }
 
 // MessageStatusUpdater 消息状态批量更新器
@@ -72,10 +74,10 @@ func (u *MessageStatusUpdater) flush(batch []*statusUpdateItem) {
 		reason FailureReason
 		errMsg string
 	}
-	groups := make(map[groupKey][]string, 4)
+	groups := make(map[groupKey][]models.MessageRecordKey, 4)
 	for _, item := range batch {
 		key := groupKey{item.status, item.reason, item.errMsg}
-		groups[key] = append(groups[key], item.msgID)
+		groups[key] = append(groups[key], models.MessageRecordKey{MessageID: item.msgID, Receiver: item.receiver})
 	}
 
 	// 用 context.Background() 而非 h.ctx
@@ -84,10 +86,10 @@ func (u *MessageStatusUpdater) flush(batch []*statusUpdateItem) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	for key, ids := range groups {
-		if err := u.hub.messageRecordRepo.BatchUpdateStatus(ctx, ids, key.status, key.reason, key.errMsg); err != nil {
+	for key, keys := range groups {
+		if err := u.hub.messageRecordRepo.BatchUpdateStatus(ctx, keys, key.status, key.reason, key.errMsg); err != nil {
 			u.hub.logger.DebugContextKV(u.hub.ctx, "批量更新消息状态失败",
-				"count", len(ids),
+				"count", len(keys),
 				"status", key.status,
 				"error", err,
 			)

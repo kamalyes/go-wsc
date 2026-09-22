@@ -21,6 +21,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-wsc/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -146,7 +147,7 @@ waitLoop:
 	time.Sleep(500 * time.Millisecond) // 等待异步记录完成
 
 	// 11. 验证 MySQL 中的消息记录
-	record, err := messageRecordRepo.FindByMessageID(ctx, msg.MessageID)
+	record, err := messageRecordRepo.FindByMessageID(ctx, models.MessageRecordKey{MessageID: msg.MessageID, Receiver: msg.Receiver})
 	if err == nil {
 		assert.Equal(t, msg.MessageID, record.MessageID)
 		assert.Equal(t, msg.Sender, record.Sender)
@@ -533,7 +534,7 @@ waitLoop:
 
 	t.Logf("📋 开始查询消息记录, MessageID: %s", msgID1)
 	// 验证发送成功时的字段
-	record1, err := messageRecordRepo.FindByMessageID(ctx, msgID1)
+	record1, err := messageRecordRepo.FindByMessageID(ctx, models.MessageRecordKey{MessageID: msgID1, Receiver: testUserID})
 	if assert.NoError(t, err) && assert.NotNil(t, record1, "消息记录不应为nil") {
 		// 由于状态更新是并发异步的，可能是 pending/sending/success 任一状态
 		assert.Contains(t, []MessageSendStatus{MessageSendStatusSuccess, MessageSendStatusSending, MessageSendStatusPending}, record1.Status, "状态应为Success/Sending/Pending之一")

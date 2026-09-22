@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-wsc/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -36,9 +37,10 @@ func TestHubUpdateMessageSendStatusRecordNotExist(t *testing.T) {
 	_, err := json.Marshal(msg)
 	require.NoError(t, err)
 
-	err = repo.UpdateStatus(ctx, msg.MessageID, MessageSendStatusSuccess, "", "")
+	recordKey := models.MessageRecordKey{MessageID: msg.MessageID, Receiver: msg.Receiver}
+	err = repo.UpdateStatus(ctx, recordKey, MessageSendStatusSuccess, "", "")
 	require.NoError(t, err) // 记录不存在时静默返回
 
-	_, err = repo.FindByMessageID(ctx, msg.MessageID)
+	_, err = repo.FindByMessageID(ctx, recordKey)
 	assert.Error(t, err)
 }

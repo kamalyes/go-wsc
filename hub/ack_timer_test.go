@@ -58,7 +58,7 @@ func TestAckTimeoutCallback_MarksAckTimeoutAndStoresOffline(t *testing.T) {
 	repo.findByMessageIDResult = record
 
 	// 直接执行超时回调（跳过 30s 调度延迟，聚焦回调逻辑）
-	h.makeAckTimeoutCallback("m-ack-cb")()
+	h.makeAckTimeoutCallback(models.MessageRecordKey{MessageID: "m-ack-cb", Receiver: "u-cb"})()
 
 	assert.True(t, hasAckTimeoutUpdate(repo, "m-ack-cb"), "超时回调应标记 ack_timeout")
 	require.Eventually(t, func() bool {
@@ -84,7 +84,7 @@ func TestAckTimeoutCallback_StatusAlreadyUpdated_Noop(t *testing.T) {
 	repo.queryResult = []*models.MessageSendRecord{record}
 	repo.findByMessageIDResult = record
 
-	h.makeAckTimeoutCallback("m-ack-done")()
+	h.makeAckTimeoutCallback(models.MessageRecordKey{MessageID: "m-ack-done", Receiver: "u-done"})()
 
 	// ClaimStaleSending 会被调用但认领结果为空（状态守卫），不标记 AckTimeout、不转存离线
 	assert.False(t, hasAckTimeoutUpdate(repo, "m-ack-done"), "状态已变更的记录不应被标记 ack_timeout")
@@ -108,7 +108,7 @@ func TestAckTimeoutCallback_BroadcastNotStoredOffline(t *testing.T) {
 	repo.queryResult = []*models.MessageSendRecord{record}
 	repo.findByMessageIDResult = record
 
-	h.makeAckTimeoutCallback("m-ack-bcast")()
+	h.makeAckTimeoutCallback(models.MessageRecordKey{MessageID: "m-ack-bcast"})()
 
 	assert.True(t, hasAckTimeoutUpdate(repo, "m-ack-bcast"), "超时广播记录仍应标记 ack_timeout 供审计")
 	time.Sleep(200 * time.Millisecond) // 转存是异步的，等待窗口
@@ -123,7 +123,7 @@ func TestAckTimeoutCallback_NoRepo(t *testing.T) {
 
 	// 不设置 messageRecordRepo（默认 nil）
 	assert.NotPanics(t, func() {
-		h.makeAckTimeoutCallback("m-no-repo")()
+		h.makeAckTimeoutCallback(models.MessageRecordKey{MessageID: "m-no-repo"})()
 	})
 }
 
@@ -141,7 +141,7 @@ func TestAckTimeoutCallback_ClaimErrorSafe(t *testing.T) {
 	repo.queryResult = []*models.MessageSendRecord{record}
 
 	assert.NotPanics(t, func() {
-		h.makeAckTimeoutCallback("m-claim-err")()
+		h.makeAckTimeoutCallback(models.MessageRecordKey{MessageID: "m-claim-err", Receiver: "u-err"})()
 	})
 }
 
@@ -166,7 +166,8 @@ func TestAckTimeoutTimer_FiresCallbackAndStoresOffline(t *testing.T) {
 	repo.findByMessageIDResult = record
 
 	// 直接在时间轮上用短延迟调度（绕过 scheduleAckTimeout 的 30s 常量，聚焦触发链路）
-	h.ackTimeoutTimer.ScheduleWithKey("m-fire", 200*time.Millisecond, h.makeAckTimeoutCallback("m-fire"))
+	fireKey := models.MessageRecordKey{MessageID: "m-fire", Receiver: "u-fire"}
+	h.ackTimeoutTimer.ScheduleWithKey(ackTimerKey(fireKey), 200*time.Millisecond, h.makeAckTimeoutCallback(fireKey))
 
 	// -race 全量套件下时间轮 worker 可能被并行测试拖慢，200ms 回调可能延迟到 2s 后才触发
 	require.Eventually(t, func() bool {
@@ -191,8 +192,9 @@ func TestAckTimeoutTimer_CancelPreventsFire(t *testing.T) {
 	repo.queryResult = []*models.MessageSendRecord{record}
 	repo.findByMessageIDResult = record
 
-	h.ackTimeoutTimer.ScheduleWithKey("m-cancel", 200*time.Millisecond, h.makeAckTimeoutCallback("m-cancel"))
-	h.ackTimeoutTimer.CancelByKey("m-cancel") // O(1) 惰性取消
+	cancelKey := models.MessageRecordKey{MessageID: "m-cancel", Receiver: "u-cancel"}
+	h.ackTimeoutTimer.ScheduleWithKey(ackTimerKey(cancelKey), 200*time.Millisecond, h.makeAckTimeoutCallback(cancelKey))
+	h.ackTimeoutTimer.CancelByKey(ackTimerKey(cancelKey)) // O(1) 惰性取消
 
 	time.Sleep(500 * time.Millisecond) // 等待超过触发窗口，确认回调未触发
 	assert.Zero(t, offline.getStoreCalled(), "取消后不应转存离线")
@@ -216,8 +218,9 @@ func TestAckTimeoutTimer_RefreshReplacesOldTask(t *testing.T) {
 	repo.findByMessageIDResult = record
 
 	// 旧任务短延迟，新任务长延迟：Refresh 后旧任务被惰性取消，仅新任务触发
-	h.ackTimeoutTimer.ScheduleWithKey("m-refresh", 100*time.Millisecond, h.makeAckTimeoutCallback("m-refresh"))
-	h.ackTimeoutTimer.Refresh("m-refresh", 400*time.Millisecond, h.makeAckTimeoutCallback("m-refresh"))
+	refreshKey := models.MessageRecordKey{MessageID: "m-refresh", Receiver: "u-refresh"}
+	h.ackTimeoutTimer.ScheduleWithKey(ackTimerKey(refreshKey), 100*time.Millisecond, h.makeAckTimeoutCallback(refreshKey))
+	h.ackTimeoutTimer.Refresh(ackTimerKey(refreshKey), 400*time.Millisecond, h.makeAckTimeoutCallback(refreshKey))
 
 	// 100ms 后旧任务本应触发，但已被 Refresh 惰性取消
 	time.Sleep(250 * time.Millisecond)
@@ -242,7 +245,7 @@ func TestScheduleAckTimeout_Wiring(t *testing.T) {
 
 	// scheduleAckTimeout 使用 nodeAckTimeout(30s) 调度，测试期间不会触发
 	before := h.ackTimeoutTimer.Stats().ActiveTasks
-	h.scheduleAckTimeout("m-wire")
+	h.scheduleAckTimeout(models.MessageRecordKey{MessageID: "m-wire"})
 	after := h.ackTimeoutTimer.Stats().ActiveTasks
 	assert.Equal(t, before+1, after, "scheduleAckTimeout 应在时间轮注册 1 个活跃任务")
 }
@@ -255,8 +258,8 @@ func TestScheduleCancelAckTimeout_NilTimerSafe(t *testing.T) {
 	h.SetMessageRecordRepository(&fakeMessageRecordRepo{})
 
 	assert.NotPanics(t, func() {
-		h.scheduleAckTimeout("m-nil")
-		h.cancelAckTimeout("m-nil")
+		h.scheduleAckTimeout(models.MessageRecordKey{MessageID: "m-nil"})
+		h.cancelAckTimeout(models.MessageRecordKey{MessageID: "m-nil"})
 	})
 }
 
@@ -268,8 +271,8 @@ func TestScheduleCancelAckTimeout_EmptyIDSafe(t *testing.T) {
 
 	before := h.ackTimeoutTimer.Stats().ActiveTasks
 	assert.NotPanics(t, func() {
-		h.scheduleAckTimeout("")
-		h.cancelAckTimeout("")
+		h.scheduleAckTimeout(models.MessageRecordKey{})
+		h.cancelAckTimeout(models.MessageRecordKey{})
 	})
 	assert.Equal(t, before, h.ackTimeoutTimer.Stats().ActiveTasks, "空 messageID 不应注册任务")
 }

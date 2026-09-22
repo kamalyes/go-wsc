@@ -729,9 +729,9 @@ func (h *Hub) doBroadcastMessage(ctx context.Context, msg *HubMessage) {
 	})
 	wsDuration := time.Since(wsStart)
 
-	// 消息记录状态只更新一次（同一 msgID，无需每客户端都更新）
+	// 消息记录状态只更新一次（同一 msgID，无需每客户端都更新；广播记录 receiver 为空）
 	if atomic.LoadInt32(&successCount) > 0 {
-		h.updateMessageStatusAsync(ctx, msgID, MessageSendStatusSuccess, "", "")
+		h.updateMessageStatusAsync(ctx, msgID, "", MessageSendStatusSuccess, "", "")
 	}
 
 	if atomic.LoadInt32(&failCount) > 0 {

@@ -11,25 +11,30 @@
 
 package hub
 
-import "context"
+import (
+	"context"
+
+	"github.com/kamalyes/go-wsc/models"
+)
 
 // ============================================================================
 // 消息记录查询接口
 // ============================================================================
 
-// QueryMessageRecord 根据消息ID查询消息记录
+// QueryMessageRecord 根据消息ID+接收者查询消息记录
 // 参数:
 //   - ctx: 上下文（用于超时控制和取消）
 //   - messageID: 消息ID
+//   - receiver: 接收者ID（广播类记录传空字符串）
 //
 // 返回:
 //   - *MessageSendRecord: 消息记录
 //   - error: 错误信息
-func (h *Hub) QueryMessageRecord(ctx context.Context, messageID string) (*MessageSendRecord, error) {
+func (h *Hub) QueryMessageRecord(ctx context.Context, messageID, receiver string) (*MessageSendRecord, error) {
 	if h.messageRecordRepo == nil {
 		return nil, ErrRecordRepositoryNotSet
 	}
-	return h.messageRecordRepo.FindByMessageID(ctx, messageID)
+	return h.messageRecordRepo.FindByMessageID(ctx, models.MessageRecordKey{MessageID: messageID, Receiver: receiver})
 }
 
 // QueryMessageRecordsBySender 根据发送者查询消息记录
@@ -111,14 +116,15 @@ func (h *Hub) QueryRetryableMessageRecords(ctx context.Context, limit int) ([]*M
 // 参数:
 //   - ctx: 上下文（用于超时控制和取消）
 //   - messageID: 消息ID
+//   - receiver: 接收者ID（广播类记录传空字符串；与 messageID 共同精确定位一条记录）
 //   - status: 新状态
 //   - reason: 失败原因（可选）
 //   - errorMsg: 错误消息（可选）
-func (h *Hub) UpdateMessageRecordStatus(ctx context.Context, messageID string, status MessageSendStatus, reason FailureReason, errorMsg string) error {
+func (h *Hub) UpdateMessageRecordStatus(ctx context.Context, messageID, receiver string, status MessageSendStatus, reason FailureReason, errorMsg string) error {
 	if h.messageRecordRepo == nil {
 		return ErrRecordRepositoryNotSet
 	}
-	return h.messageRecordRepo.UpdateStatus(ctx, messageID, status, reason, errorMsg)
+	return h.messageRecordRepo.UpdateStatus(ctx, models.MessageRecordKey{MessageID: messageID, Receiver: receiver}, status, reason, errorMsg)
 }
 
 // UpdateMessageRecord 更新消息记录

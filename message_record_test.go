@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/osx"
+	"github.com/kamalyes/go-wsc/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -70,10 +71,11 @@ func TestMessageRecordStatusUpdateFields(t *testing.T) {
 	require.NoError(t, err)
 
 	// 2. 更新为Sending状态，验证first_send_time被设置
-	err = tc.repo.UpdateStatus(ctx, msg.MessageID, MessageSendStatusSending, "", "")
+	recordKey := models.MessageRecordKey{MessageID: msg.MessageID, Receiver: msg.Receiver}
+	err = tc.repo.UpdateStatus(ctx, recordKey, MessageSendStatusSending, "", "")
 	assert.NoError(t, err)
 
-	record1, err := tc.repo.FindByMessageID(ctx, msg.MessageID)
+	record1, err := tc.repo.FindByMessageID(ctx, recordKey)
 	require.NoError(t, err)
 	assert.Equal(t, MessageSendStatusSending, record1.Status)
 	assert.NotNil(t, record1.FirstSendTime, "更新为Sending状态时应设置FirstSendTime")
@@ -84,10 +86,10 @@ func TestMessageRecordStatusUpdateFields(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// 3. 更新为Success状态，验证success_time被设置
-	err = tc.repo.UpdateStatus(ctx, msg.MessageID, MessageSendStatusSuccess, "", "")
+	err = tc.repo.UpdateStatus(ctx, recordKey, MessageSendStatusSuccess, "", "")
 	assert.NoError(t, err)
 
-	record2, err := tc.repo.FindByMessageID(ctx, msg.MessageID)
+	record2, err := tc.repo.FindByMessageID(ctx, recordKey)
 	require.NoError(t, err)
 	assert.Equal(t, MessageSendStatusSuccess, record2.Status)
 	assert.NotNil(t, record2.SuccessTime, "更新为Success状态时应设置SuccessTime")
@@ -139,7 +141,8 @@ func TestMessageRecordFailureFields(t *testing.T) {
 	require.NoError(t, err)
 
 	// 2. 更新为Sending状态
-	err = tc.repo.UpdateStatus(ctx, msgID, MessageSendStatusSending, "", "")
+	recordKey := models.MessageRecordKey{MessageID: msgID, Receiver: msg.Receiver}
+	err = tc.repo.UpdateStatus(ctx, recordKey, MessageSendStatusSending, "", "")
 	require.NoError(t, err)
 
 	time.Sleep(100 * time.Millisecond)
@@ -147,10 +150,10 @@ func TestMessageRecordFailureFields(t *testing.T) {
 	// 3. 更新为Failed状态，验证failure_reason和error_message被设置
 	testReason := FailureReasonConnError
 	testError := "connection timeout"
-	err = tc.repo.UpdateStatus(ctx, msgID, MessageSendStatusFailed, testReason, testError)
+	err = tc.repo.UpdateStatus(ctx, recordKey, MessageSendStatusFailed, testReason, testError)
 	assert.NoError(t, err)
 
-	record1, err := tc.repo.FindByMessageID(ctx, msgID)
+	record1, err := tc.repo.FindByMessageID(ctx, recordKey)
 	require.NoError(t, err)
 	assert.Equal(t, MessageSendStatusFailed, record1.Status)
 	assert.Equal(t, testReason, record1.FailureReason, "失败时应设置FailureReason")
@@ -189,10 +192,11 @@ func TestMessageRecordRetryFields(t *testing.T) {
 		Error:         "first retry error",
 		Success:       false,
 	}
-	err = tc.repo.IncrementRetry(ctx, msg.MessageID, attempt1)
+	recordKey := models.MessageRecordKey{MessageID: msg.MessageID, Receiver: msg.Receiver}
+	err = tc.repo.IncrementRetry(ctx, recordKey, attempt1)
 	assert.NoError(t, err)
 
-	record1, err := tc.repo.FindByMessageID(ctx, msg.MessageID)
+	record1, err := tc.repo.FindByMessageID(ctx, recordKey)
 	require.NoError(t, err)
 	assert.Equal(t, 1, record1.RetryCount, "重试次数应为1")
 	assert.Equal(t, MessageSendStatusRetrying, record1.Status, "状态应为Retrying")
@@ -211,10 +215,10 @@ func TestMessageRecordRetryFields(t *testing.T) {
 		Error:         "",
 		Success:       true,
 	}
-	err = tc.repo.IncrementRetry(ctx, msg.MessageID, attempt2)
+	err = tc.repo.IncrementRetry(ctx, recordKey, attempt2)
 	assert.NoError(t, err)
 
-	record2, err := tc.repo.FindByMessageID(ctx, msg.MessageID)
+	record2, err := tc.repo.FindByMessageID(ctx, recordKey)
 	require.NoError(t, err)
 	assert.Equal(t, 2, record2.RetryCount, "重试次数应为2")
 	assert.Equal(t, MessageSendStatusSuccess, record2.Status, "重试成功状态应为Success")

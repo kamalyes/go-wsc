@@ -75,7 +75,7 @@ func TestMessageStatusUpdater_SubmitAndFlush(t *testing.T) {
 	defer repo.batchUpdateMu.Unlock()
 	require.Len(t, repo.batchUpdateCalls, 1)
 	assert.Equal(t, MessageSendStatusSuccess, repo.batchUpdateCalls[0].Status)
-	assert.ElementsMatch(t, []string{"m1", "m2", "m3"}, repo.batchUpdateCalls[0].IDs)
+	assert.ElementsMatch(t, []models.MessageRecordKey{{MessageID: "m1"}, {MessageID: "m2"}, {MessageID: "m3"}}, repo.batchUpdateCalls[0].Keys)
 }
 
 // TestMessageStatusUpdater_GroupByStatus 验证不同 status 分组为多次调用
@@ -105,13 +105,13 @@ func TestMessageStatusUpdater_GroupByStatus(t *testing.T) {
 	assert.GreaterOrEqual(t, len(repo.batchUpdateCalls), 3)
 
 	// 按 status 收集结果
-	statusMap := make(map[MessageSendStatus][]string)
+	statusMap := make(map[MessageSendStatus][]models.MessageRecordKey)
 	for _, call := range repo.batchUpdateCalls {
-		statusMap[call.Status] = append(statusMap[call.Status], call.IDs...)
+		statusMap[call.Status] = append(statusMap[call.Status], call.Keys...)
 	}
-	assert.ElementsMatch(t, []string{"s1", "s2"}, statusMap[MessageSendStatusSuccess])
-	assert.ElementsMatch(t, []string{"f1"}, statusMap[MessageSendStatusFailed])
-	assert.ElementsMatch(t, []string{"o1"}, statusMap[MessageSendStatusUserOffline])
+	assert.ElementsMatch(t, []models.MessageRecordKey{{MessageID: "s1"}, {MessageID: "s2"}}, statusMap[MessageSendStatusSuccess])
+	assert.ElementsMatch(t, []models.MessageRecordKey{{MessageID: "f1"}}, statusMap[MessageSendStatusFailed])
+	assert.ElementsMatch(t, []models.MessageRecordKey{{MessageID: "o1"}}, statusMap[MessageSendStatusUserOffline])
 }
 
 // TestMessageStatusUpdater_BatchSizeTrigger 验证 batchSize 满时立即 flush
@@ -151,7 +151,7 @@ func TestMessageStatusUpdater_StopFlushes(t *testing.T) {
 	repo.batchUpdateMu.Lock()
 	defer repo.batchUpdateMu.Unlock()
 	require.Len(t, repo.batchUpdateCalls, 1)
-	assert.ElementsMatch(t, []string{"stop1", "stop2"}, repo.batchUpdateCalls[0].IDs)
+	assert.ElementsMatch(t, []models.MessageRecordKey{{MessageID: "stop1"}, {MessageID: "stop2"}}, repo.batchUpdateCalls[0].Keys)
 }
 
 // TestMessageStatusUpdater_QueueFull 验证队列满时 Submit 返回 false
@@ -244,7 +244,7 @@ func TestMessageStatusUpdater_ConcurrentSubmit(t *testing.T) {
 		defer repo.batchUpdateMu.Unlock()
 		totalIDs := 0
 		for _, call := range repo.batchUpdateCalls {
-			totalIDs += len(call.IDs)
+			totalIDs += len(call.Keys)
 		}
 		return totalIDs > 0
 	}, 3*time.Second, 10*time.Millisecond)
@@ -274,12 +274,12 @@ func TestMessageStatusUpdater_SameReasonGroups(t *testing.T) {
 	assert.GreaterOrEqual(t, len(repo.batchUpdateCalls), 2)
 
 	// 收集 reason → IDs
-	reasonMap := make(map[FailureReason][]string)
+	reasonMap := make(map[FailureReason][]models.MessageRecordKey)
 	for _, call := range repo.batchUpdateCalls {
-		reasonMap[call.Reason] = append(reasonMap[call.Reason], call.IDs...)
+		reasonMap[call.Reason] = append(reasonMap[call.Reason], call.Keys...)
 	}
-	assert.ElementsMatch(t, []string{"f1", "f2"}, reasonMap[FailureReasonQueueFull])
-	assert.ElementsMatch(t, []string{"f3"}, reasonMap[FailureReasonConnError])
+	assert.ElementsMatch(t, []models.MessageRecordKey{{MessageID: "f1"}, {MessageID: "f2"}}, reasonMap[FailureReasonQueueFull])
+	assert.ElementsMatch(t, []models.MessageRecordKey{{MessageID: "f3"}}, reasonMap[FailureReasonConnError])
 }
 
 // assertError 返回一个简单的 error 用于测试

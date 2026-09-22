@@ -132,7 +132,7 @@ func (f *fakeMessageRecordRepository) Update(_ context.Context, _ *repository.Me
 func (f *fakeMessageRecordRepository) FindByID(_ context.Context, _ uint) (*repository.MessageSendRecord, error) {
 	return nil, nil
 }
-func (f *fakeMessageRecordRepository) FindByMessageID(_ context.Context, _ string) (*repository.MessageSendRecord, error) {
+func (f *fakeMessageRecordRepository) FindByMessageID(_ context.Context, _ models.MessageRecordKey) (*repository.MessageSendRecord, error) {
 	return nil, nil
 }
 func (f *fakeMessageRecordRepository) QueryRecords(_ context.Context, _ *repository.MessageRecordFilter) ([]*repository.MessageSendRecord, error) {
@@ -146,16 +146,16 @@ func (f *fakeMessageRecordRepository) Delete(_ context.Context, _ uint) error   
 func (f *fakeMessageRecordRepository) DeleteByMessageID(_ context.Context, _ string) error {
 	return nil
 }
-func (f *fakeMessageRecordRepository) UpdateStatus(_ context.Context, _ string, _ models.MessageSendStatus, _ models.FailureReason, _ string) error {
+func (f *fakeMessageRecordRepository) UpdateStatus(_ context.Context, _ models.MessageRecordKey, _ models.MessageSendStatus, _ models.FailureReason, _ string) error {
 	return nil
 }
-func (f *fakeMessageRecordRepository) BatchUpdateStatus(_ context.Context, _ []string, _ models.MessageSendStatus, _ models.FailureReason, _ string) error {
+func (f *fakeMessageRecordRepository) BatchUpdateStatus(_ context.Context, _ []models.MessageRecordKey, _ models.MessageSendStatus, _ models.FailureReason, _ string) error {
 	return nil
 }
-func (f *fakeMessageRecordRepository) ClaimStaleSending(_ context.Context, _ []string, _ models.MessageSendStatus, _ models.FailureReason, _ string) ([]string, error) {
+func (f *fakeMessageRecordRepository) ClaimStaleSending(_ context.Context, _ []models.MessageRecordKey, _ models.MessageSendStatus, _ models.FailureReason, _ string) ([]models.MessageRecordKey, error) {
 	return nil, nil
 }
-func (f *fakeMessageRecordRepository) IncrementRetry(_ context.Context, _ string, _ models.RetryAttempt) error {
+func (f *fakeMessageRecordRepository) IncrementRetry(_ context.Context, _ models.MessageRecordKey, _ models.RetryAttempt) error {
 	return nil
 }
 func (f *fakeMessageRecordRepository) GetStatistics(_ context.Context) (map[string]int64, error) {

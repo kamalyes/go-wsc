@@ -270,7 +270,7 @@ func (h *Hub) decideUserNotFoundReroute(ctx context.Context, msg *HubMessage, us
 			"user_id", userID,
 			"rejected_nodes", missNode,
 		)
-		h.tryStoreOfflineOnDeliveryFailure(msg, errUserNotFoundAllRejected)
+		h.tryStoreOfflineOnDeliveryFailure(msg, errUserNotFoundAllRejected, false)
 		// 终态清理守卫条目
 		h.rerouteGuard.Delete(msg.MessageID)
 	}

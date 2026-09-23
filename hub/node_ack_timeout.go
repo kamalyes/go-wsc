@@ -136,6 +136,6 @@ func (h *Hub) timeoutStaleSendingRecords() {
 		}
 		// 🔗 trace 恢复：MessageData 序列化了完整 HubMessage（含信封 trace_id），
 		// tryStoreOfflineOnDeliveryFailure 内部经 msg.ContextFrom 恢复，转存离线日志可追溯原始发送链路
-		h.tryStoreOfflineOnDeliveryFailure(msg, errNodeAckTimeout)
+		h.tryStoreOfflineOnDeliveryFailure(msg, errNodeAckTimeout, false)
 	}
 }

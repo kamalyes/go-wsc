@@ -116,12 +116,22 @@ func (h *Hub) makeAckTimeoutCallback(key models.MessageRecordKey) func() {
 		// 🔗 trace 恢复：MessageData 序列化了完整 HubMessage（含信封 trace_id），
 		// 恢复到 ctx 后"已标记待重试"与转存离线日志可追溯原始发送链路
 		ctx = msg.ContextFrom(ctx)
-		h.logger.WarnContextKV(ctx, "跨节点消息ACK超时(时间轮)，已标记待重试",
-			"message_id", key.MessageID,
-			"timeout", nodeAckTimeout,
-			"node_id", h.nodeID,
-			"receiver", record.Receiver,
-		)
-		h.tryStoreOfflineOnDeliveryFailure(msg, errNodeAckTimeout)
+		// 📊 日志聚合网关（messageID 维度，见 ack_log_window.go）：广播消息 N 个 receiver 的
+		// 超时定时器同波次集中触发，逐 receiver 打 WARN+INFO 会产生 2N 行/消息的日志洪水；
+		// 窗口内仅首条放行，其余静默计数（离线转存照常执行），窗口滚动时携带上窗口聚合数
+		allowedLog, suppressedPrev := h.allowAckTimeoutLog(key.MessageID)
+		if allowedLog {
+			logKVs := []any{
+				"message_id", key.MessageID,
+				"timeout", nodeAckTimeout,
+				"node_id", h.nodeID,
+				"receiver", record.Receiver,
+			}
+			if suppressedPrev > 0 {
+				logKVs = append(logKVs, "suppressed_prev_window", suppressedPrev)
+			}
+			h.logger.WarnContextKV(ctx, "跨节点消息ACK超时(时间轮)，已标记待重试", logKVs...)
+		}
+		h.tryStoreOfflineOnDeliveryFailure(msg, errNodeAckTimeout, !allowedLog)
 	}
 }

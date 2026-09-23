@@ -281,7 +281,7 @@ func (h *Hub) SendToUserWithRetry(ctx context.Context, toUserID string, msg *Hub
 	// tryStoreOfflineOnDeliveryFailure 内部：转存成功覆盖状态为 UserOffline，失败保持 Failed
 	if finalErr != nil && !result.StoredOffline {
 		h.updateMessageStatusAsync(ctx, msg.MessageID, msg.Receiver, MessageSendStatusFailed, models.FailureReasonMaxRetry, finalErr.Error())
-		h.tryStoreOfflineOnDeliveryFailure(msg, finalErr)
+		h.tryStoreOfflineOnDeliveryFailure(msg, finalErr, false)
 	}
 
 	// 📨 终态汇总：与入口"[投递诊断] 用户在线检查"首尾呼应，一眼判断消息是否发出/卡在哪一步
@@ -740,7 +740,11 @@ func (h *Hub) updateMessageStatusAsync(ctx context.Context, msgID, receiver stri
 // 注意：多设备场景下若部分设备投递成功部分失败，失败设备仍会触发转存。
 // 这不会导致重复推送：用户上线 drain 时 pushAndDeleteOffline 成功后按 message_id 删 MySQL，
 // 客户端也可按 message_id 去重。
-func (h *Hub) tryStoreOfflineOnDeliveryFailure(msg *HubMessage, deliveryErr error) {
+//
+// quiet 静默模式（时间轮 ACK 超时聚合路径使用，见 ack_log_window.go）：
+// 抑制"已转存离线队列"INFO——广播消息该路径会按 receiver 产生 N 条内容重复的 INFO；
+// "转存离线也失败"WARN 不受静默影响（离线存储故障必须完整可见）
+func (h *Hub) tryStoreOfflineOnDeliveryFailure(msg *HubMessage, deliveryErr error, quiet bool) {
 	if h.offlineMessageHandler == nil || msg.Receiver == "" {
 		return
 	}
@@ -766,11 +770,13 @@ func (h *Hub) tryStoreOfflineOnDeliveryFailure(msg *HubMessage, deliveryErr erro
 			}
 			// 转存成功 → 覆盖状态为 UserOffline（消息已暂存，等用户上线推送）
 			h.updateMessageStatusAsync(storeCtx, msg.MessageID, msg.Receiver, MessageSendStatusUserOffline, FailureReasonUserOffline, "")
-			h.logger.InfoContextKV(storeCtx, "在线投递失败，消息已转存离线队列",
-				"message_id", msg.MessageID,
-				"user_id", msg.Receiver,
-				"delivery_error", deliveryErr.Error(),
-			)
+			if !quiet {
+				h.logger.InfoContextKV(storeCtx, "在线投递失败，消息已转存离线队列",
+					"message_id", msg.MessageID,
+					"user_id", msg.Receiver,
+					"delivery_error", deliveryErr.Error(),
+				)
+			}
 			return nil
 		})
 }
@@ -896,7 +902,7 @@ func (h *Hub) sendToClientSerialized(ctx context.Context, client *Client, msg *H
 		rejectErr := fmt.Errorf("admission rejected at %s", level)
 		h.updateMessageStatusAsync(ctx, msgID, receiver, MessageSendStatusFailed, FailureReasonQueueFull, rejectErr.Error())
 		// 转离线补发（P2P 离线上线推送 + SendToUserWithRetry/ACK 重试双保险）
-		h.tryStoreOfflineOnDeliveryFailure(msg, rejectErr)
+		h.tryStoreOfflineOnDeliveryFailure(msg, rejectErr, false)
 		return false
 	}
 
@@ -921,7 +927,7 @@ func (h *Hub) sendToClientSerialized(ctx context.Context, client *Client, msg *H
 		// SSE通道已满或已关闭，更新为失败状态
 		h.updateMessageStatusAsync(ctx, msgID, receiver, MessageSendStatusFailed, FailureReasonQueueFull, sseErr.Error())
 		// 🔥 在线投递失败 → 异步转存离线（P2P 场景，避免循环）
-		h.tryStoreOfflineOnDeliveryFailure(msg, sseErr)
+		h.tryStoreOfflineOnDeliveryFailure(msg, sseErr, false)
 		return false
 	}
 
@@ -968,7 +974,7 @@ func (h *Hub) sendToClientSerialized(ctx context.Context, client *Client, msg *H
 	// 发送通道已满或已关闭，更新为失败状态
 	h.updateMessageStatusAsync(ctx, msgID, receiver, MessageSendStatusFailed, FailureReasonQueueFull, queueErr.Error())
 	// 🔥 在线投递失败 → 异步转存离线（P2P 场景，避免循环）
-	h.tryStoreOfflineOnDeliveryFailure(msg, queueErr)
+	h.tryStoreOfflineOnDeliveryFailure(msg, queueErr, false)
 	return false
 }
 

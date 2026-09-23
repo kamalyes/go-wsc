@@ -362,6 +362,11 @@ type Hub struct {
 	// 条目懒过期（rerouteGuardTTL），ACK 超时终态时删除（见 ack_timer.go）
 	rerouteGuard sync.Map
 
+	// 跨节点 ACK 超时日志聚合窗口：messageID → *ackTimeoutLogWindow
+	// 广播消息 N 个 receiver 的超时定时器同波次集中触发，逐 receiver 打 WARN+INFO 会产生
+	// 2N 行/消息的日志洪水；按 messageID 开窗聚合，窗口内仅首条放行（见 ack_log_window.go）
+	ackTimeoutLogWindows sync.Map
+
 	// 📡 事件发布订阅
 	pubsub *cachex.PubSub
 

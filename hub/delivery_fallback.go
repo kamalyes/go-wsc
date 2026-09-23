@@ -95,7 +95,7 @@ func (h *Hub) routeDeliveryFallback(msg *models.HubMessage, client *Client, targ
 		offlineMsg.Receiver = userID
 	}
 
-	h.tryStoreOfflineOnDeliveryFailure(offlineMsg, errDeliveryFallback)
+	h.tryStoreOfflineOnDeliveryFailure(offlineMsg, errDeliveryFallback, false)
 	h.overloadMetrics.recordOfflineFallback(guarantee)
 	return FallbackOffline
 }

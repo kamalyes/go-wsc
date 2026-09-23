@@ -565,7 +565,7 @@ func (h *Hub) handleDeadNodesForP2P(ctx context.Context, msg *HubMessage, userID
 		"user_id", userID,
 		"dead_nodes", deadNodes,
 	)
-	h.tryStoreOfflineOnDeliveryFailure(msg, fmt.Errorf("目标节点 %v 订阅失活（Pod 挂掉或订阅断连），消息未送达", deadNodes))
+	h.tryStoreOfflineOnDeliveryFailure(msg, fmt.Errorf("目标节点 %v 订阅失活（Pod 挂掉或订阅断连），消息未送达", deadNodes), false)
 }
 
 // ============================================================================

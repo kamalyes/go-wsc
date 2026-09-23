@@ -179,6 +179,10 @@ func (h *Hub) Run() {
 		IfTicker(h.pubsub != nil,
 			rerouteGuardSweepInterval,
 			h.sweepRerouteGuard).
+		// ACK 超时日志聚合窗口清扫（防泄漏；条目量 = 保留期内活跃 messageID 数，见 ack_log_window.go）
+		IfTicker(h.messageRecordRepo != nil,
+			ackLogWindowSweepInterval,
+			h.sweepAckTimeoutLogWindows).
 		// 在线状态清理定时器：定期清理过期的在线状态数据
 		// 使用 OnlineStatus 配置中的 StatusRefreshInterval 和 EnableAutoCleanup
 		IfTicker(h.onlineStatusRepo != nil && h.config.RedisRepository.OnlineStatus != nil && h.config.RedisRepository.OnlineStatus.EnableAutoCleanup,

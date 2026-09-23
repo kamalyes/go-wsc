@@ -24,7 +24,6 @@ import (
 	"github.com/kamalyes/go-wsc/cluster"
 	"github.com/kamalyes/go-wsc/messaging"
 	"github.com/kamalyes/go-wsc/models"
-	"github.com/kamalyes/go-wsc/overload"
 	"github.com/kamalyes/go-wsc/spi"
 )
 
@@ -141,94 +140,85 @@ func (h *Hub) WithWelcomeProvider(provider models.WelcomeMessageProvider) *Hub {
 
 // ============================================================================
 // 应用层回调注入（构造期；运行期替换见 accessors.go 的 Set*Callback）
+//
+// hub 侧回调写入 h.callbacks（见 callbacks.go）；消息域回调（发送完成 /
+// 上行消息 / 错误处理）委托 messagingMgr，消费者在消息域内
 // ============================================================================
 
 // WithOfflineMessagePushCallback 注入离线消息推送完成回调（上游据此删除已推送消息）
 func (h *Hub) WithOfflineMessagePushCallback(cb OfflineMessagePushCallback) *Hub {
-	h.offlineMessagePushCallback = cb
+	h.callbacks.OfflineMessagePush = cb
 	return h
 }
 
-// WithMessageSendCallback 注入消息发送完成回调（含重试信息与最终错误）
+// WithMessageSendCallback 注入消息发送完成回调（含重试信息与最终错误，委托消息域）
 func (h *Hub) WithMessageSendCallback(cb messaging.MessageSendCallback) *Hub {
-	h.messageSendCallback = cb
-	return h
-}
-
-// WithQueueFullCallback 注入队列满回调
-func (h *Hub) WithQueueFullCallback(cb QueueFullCallback) *Hub {
-	h.queueFullCallback = cb
+	h.messagingMgr.WithMessageSendCallback(cb)
 	return h
 }
 
 // WithHeartbeatTimeoutCallback 注入心跳超时回调
 func (h *Hub) WithHeartbeatTimeoutCallback(cb HeartbeatTimeoutCallback) *Hub {
-	h.heartbeatTimeoutCallback = cb
+	h.callbacks.HeartbeatTimeout = cb
 	return h
 }
 
 // WithHeartbeatReportCallback 注入心跳上报回调
 func (h *Hub) WithHeartbeatReportCallback(cb HeartbeatReportCallback) *Hub {
-	h.heartbeatReportCallback = cb
+	h.callbacks.HeartbeatReport = cb
 	return h
 }
 
 // WithBeforeHeartbeatCallback 注入心跳处理前回调（返回 false 跳过后续心跳处理）
 func (h *Hub) WithBeforeHeartbeatCallback(cb BeforeHeartbeatCallback) *Hub {
-	h.beforeHeartbeatCallback = cb
+	h.callbacks.BeforeHeartbeat = cb
 	return h
 }
 
 // WithAfterHeartbeatCallback 注入心跳处理后回调
 func (h *Hub) WithAfterHeartbeatCallback(cb AfterHeartbeatCallback) *Hub {
-	h.afterHeartbeatCallback = cb
+	h.callbacks.AfterHeartbeat = cb
 	return h
 }
 
 // WithClientConnectCallback 注入客户端连接回调（权限验证 / 会话初始化等）
 func (h *Hub) WithClientConnectCallback(cb ClientConnectCallback) *Hub {
-	h.clientConnectCallback = cb
+	h.callbacks.ClientConnect = cb
 	return h
 }
 
 // WithClientDisconnectCallback 注入客户端断开回调（资源清理 / 在线状态更新等）
 func (h *Hub) WithClientDisconnectCallback(cb ClientDisconnectCallback) *Hub {
-	h.clientDisconnectCallback = cb
+	h.callbacks.ClientDisconnect = cb
 	return h
 }
 
-// WithMessageReceivedCallback 注入客户端上行消息回调（业务逻辑处理 / 消息路由）
+// WithMessageReceivedCallback 注入客户端上行消息回调（业务逻辑处理 / 消息路由，委托消息域）
 func (h *Hub) WithMessageReceivedCallback(cb messaging.MessageReceivedCallback) *Hub {
-	h.messageReceivedCallback = cb
+	h.messagingMgr.WithMessageReceivedCallback(cb)
 	return h
 }
 
-// WithErrorCallback 注入统一错误处理回调（日志记录 / 告警通知等）
+// WithErrorCallback 注入统一错误处理回调（日志记录 / 告警通知等，委托消息域）
 func (h *Hub) WithErrorCallback(cb messaging.ErrorCallback) *Hub {
-	h.errorCallback = cb
-	return h
-}
-
-// WithBatchSendFailureCallback 注入批量发送单条失败回调（重试 / 告警等）
-func (h *Hub) WithBatchSendFailureCallback(cb overload.BatchSendFailureCallback) *Hub {
-	h.batchSendFailureCallback = cb
+	h.messagingMgr.WithErrorCallback(cb)
 	return h
 }
 
 // WithGroupDisbandCallback 注入群组解散回调（DisbandGroup 成功后异步触发）
 func (h *Hub) WithGroupDisbandCallback(cb func(ctx context.Context, namespace, groupID string)) *Hub {
-	h.groupDisbandCallback = cb
+	h.callbacks.GroupDisband = cb
 	return h
 }
 
 // WithGroupMemberJoinCallback 注入群组成员加入回调（连接时自动加群成功后异步触发）
 func (h *Hub) WithGroupMemberJoinCallback(cb func(ctx context.Context, namespace, groupID string, userIDs []string)) *Hub {
-	h.groupMemberJoinCallback = cb
+	h.callbacks.GroupMemberJoin = cb
 	return h
 }
 
 // WithGroupMemberLeaveCallback 注入群组成员离开回调（RemoveGroupMembers 成功后异步触发）
 func (h *Hub) WithGroupMemberLeaveCallback(cb func(ctx context.Context, namespace, groupID string, userIDs []string)) *Hub {
-	h.groupMemberLeaveCallback = cb
+	h.callbacks.GroupMemberLeave = cb
 	return h
 }

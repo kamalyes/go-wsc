@@ -43,36 +43,10 @@ import (
 )
 
 // ============================================================================
-// 应用层回调类型（编排层注入，连接生命周期与群组生命周期触发）
-// ============================================================================
-
-// OfflineMessagePushCallback 离线消息推送回调
-type OfflineMessagePushCallback func(userID string, pushedMessageIDs []string, failedMessageIDs []string)
-
-// QueueFullCallback 队列满回调
-type QueueFullCallback func(msg *models.HubMessage, recipient string, queueType models.QueueType, err error)
-
-// HeartbeatTimeoutCallback 心跳超时回调
-type HeartbeatTimeoutCallback func(clientID string, userID string, lastHeartbeat time.Time)
-
-// HeartbeatReportCallback 心跳上报回调
-type HeartbeatReportCallback func(client *models.Client)
-
-// BeforeHeartbeatCallback 心跳处理前回调，返回 false 则跳过后续心跳处理
-type BeforeHeartbeatCallback func(client *models.Client) bool
-
-// AfterHeartbeatCallback 心跳处理后回调
-type AfterHeartbeatCallback func(client *models.Client)
-
-// ClientConnectCallback 客户端连接回调
-type ClientConnectCallback func(ctx context.Context, client *models.Client, record *models.ConnectionRecord) error
-
-// ClientDisconnectCallback 客户端断开回调
-type ClientDisconnectCallback func(ctx context.Context, client *models.Client, reason models.DisconnectReason) error
-
-// ============================================================================
 // Hub 核心结构 —— slim 编排层
 // ============================================================================
+//
+// 应用层回调类型与集合见 callbacks.go（HubCallbacks 单字段收敛）。
 
 // Hub WebSocket/SSE 连接管理中心（编排层）
 //
@@ -100,6 +74,12 @@ type Hub struct {
 
 	// ========== 连接域 ==========
 	shardedRegistry *connection.ShardedRegistry
+	// heartbeatMgr 心跳管理器（时间轮 O(1) 超时 + SSE 兜底扫描，时间轮为域内资产）
+	heartbeatMgr *connection.HeartbeatManager
+	// lifecycleMgr 连接生命周期管理器（多端登录治理 / 踢出断链 / 精简移除）
+	lifecycleMgr *connection.LifecycleManager
+	// recordMgr 连接记录管理器（记录构造 / 异步落库 / 停机批量终态）
+	recordMgr *connection.RecordManager
 
 	// ========== 集群域 ==========
 	nodeRegistry   *cluster.NodeRegistry
@@ -115,15 +95,11 @@ type Hub struct {
 	broadcastDelayQueue *overload.BroadcastDelayQueue
 	overloadMetrics     overload.OverloadMetrics
 
-	// ========== 批处理器（攒批落库/通知抑制写放大） ==========
-	messageRecordOutbox *batcher.MessageRecordOutbox
-	statusUpdater       *batcher.MessageStatusUpdater
-	heartbeatBatcher    *batcher.HeartbeatStatsUpdater
-	messageStatsBatcher *batcher.MessageStatsBatcher
-	observerBatcher     *batcher.ObserverNotificationBatcher
+	// ========== 批处理器域（攒批落库/通知抑制写放大，五组件归一管理） ==========
+	batcherMgr *batcher.Manager
 
 	// ========== 定时器（分片时间轮，O(1) 超时管理） ==========
-	heartbeatTimer  *syncx.HashedWheelTimer
+	// 心跳超时时间轮由连接域心跳管理器持有（见 heartbeatMgr）
 	ackTimeoutTimer *syncx.HashedWheelTimer
 
 	// ========== 工作池 ==========
@@ -141,23 +117,8 @@ type Hub struct {
 	// ========== 连接 Token 鉴权器（可选启用，nil 时走明文参数） ==========
 	connectionTokenDecoder spi.ConnectionAuthenticator
 
-	// ========== 应用层回调 ==========
-	offlineMessagePushCallback OfflineMessagePushCallback
-	messageSendCallback        messaging.MessageSendCallback
-	queueFullCallback          QueueFullCallback
-	heartbeatTimeoutCallback   HeartbeatTimeoutCallback
-	heartbeatReportCallback    HeartbeatReportCallback
-	beforeHeartbeatCallback    BeforeHeartbeatCallback
-	afterHeartbeatCallback     AfterHeartbeatCallback
-	clientConnectCallback      ClientConnectCallback
-	clientDisconnectCallback   ClientDisconnectCallback
-	messageReceivedCallback    messaging.MessageReceivedCallback
-	errorCallback              messaging.ErrorCallback
-	batchSendFailureCallback   overload.BatchSendFailureCallback
-	// 群组生命周期回调（结构类型，与 group.Host 端口返回类型一致）
-	groupDisbandCallback     func(ctx context.Context, namespace, groupID string)
-	groupMemberJoinCallback  func(ctx context.Context, namespace, groupID string, userIDs []string)
-	groupMemberLeaveCallback func(ctx context.Context, namespace, groupID string, userIDs []string)
+	// ========== 应用层回调（连接/心跳/离线推送/群组生命周期，见 callbacks.go） ==========
+	callbacks HubCallbacks
 
 	// ========== 生命周期 ==========
 	wg       sync.WaitGroup
@@ -264,6 +225,19 @@ func NewHub(config *wscconfig.WSC) *Hub {
 	// 分片注册表（替代单 mutex 的 clients/userToClients map）
 	hub.shardedRegistry = connection.NewShardedRegistry(config.EnableAgent, config.EnableObserver, registryCapacity)
 
+	// ⏰ 心跳管理器（连接域：内存时间戳 + 时间轮 O(1) 超时 + SSE 兜底扫描）
+	// 构造期初始化时间轮，确保 Schedule/Refresh/Cancel 在任何 goroutine 启动前可用
+	hub.heartbeatMgr = connection.NewHeartbeatManager(hub, hub.shardedRegistry, config.ClientTimeout, config.Timer.GetTimerOptions()...)
+
+	// 连接生命周期管理器（连接域：多端登录治理 + 踢出断链 + shutdown 精简移除）
+	hub.lifecycleMgr = connection.NewLifecycleManager(hub, hub.shardedRegistry, hub.heartbeatMgr, connection.MultiLoginPolicy{
+		AllowMultiLogin:       config.AllowMultiLogin,
+		MaxConnectionsPerUser: config.MaxConnectionsPerUser,
+	})
+
+	// 连接记录管理器（连接域：仓储经端口动态读取，支持运行期注入）
+	hub.recordMgr = connection.NewRecordManager(hub)
+
 	// WorkerPool（按任务类型分池控制并发）
 	hub.workerPool = messaging.NewHubWorkerPool(
 		mathx.IfNotZero(config.WorkerPool, wscconfig.DefaultWorkerPoolConfig()),
@@ -271,7 +245,7 @@ func NewHub(config *wscconfig.WSC) *Hub {
 	)
 
 	// ⏰ 定时器（构造期初始化，确保 Register/Refresh/Cancel 在任何 goroutine 启动前读到非 nil）
-	hub.heartbeatTimer = syncx.NewHashedWheelTimer(config.Timer.GetTimerOptions()...)
+	// 心跳时间轮已随连接域心跳管理器构造（见上），此处仅初始化 ACK 超时时间轮
 	hub.ackTimeoutTimer = syncx.NewHashedWheelTimer(config.Timer.GetTimerOptions()...)
 
 	// ACK 管理器
@@ -292,29 +266,12 @@ func NewHub(config *wscconfig.WSC) *Hub {
 	hub.statsMgr = stats.NewManager(hub)
 	hub.groupMgr = group.NewManager(hub)
 
-	// 批处理器参数（从 config 读取，nil/零值时使用默认值）
-	batcherCfg := config.Batcher
-
-	// 消息状态批量更新器
-	msgStatus := batcherCfg.GetMessageStatusParams()
-	hub.statusUpdater = batcher.NewMessageStatusUpdater(hub, msgStatus.QueueSize, msgStatus.BatchSize, msgStatus.FlushInterval)
-
-	// 消息记录攒批 outbox（write-ahead INSERT 攒批化，复用状态更新器的批参数）
-	// flush 成功后把 sending 记录交给消息域注册 ACK 超时（注册延后 50ms 量级，秒级超时语义无损）
-	hub.messageRecordOutbox = batcher.NewMessageRecordOutbox(hub, msgStatus.QueueSize, msgStatus.BatchSize, msgStatus.FlushInterval)
-	hub.messageRecordOutbox.OnFlushed(hub.messagingMgr.ScheduleAckTimeouts)
-
-	// 心跳统计批量更新器
-	hbStats := batcherCfg.GetHeartbeatStatsParams()
-	hub.heartbeatBatcher = batcher.NewHeartbeatStatsUpdater(hub, hbStats.QueueSize, hbStats.BatchSize, hbStats.FlushInterval)
-
-	// 消息统计批量更新器
-	msgStats := batcherCfg.GetMessageStatsParams()
-	hub.messageStatsBatcher = batcher.NewMessageStatsBatcher(hub, msgStats.QueueSize, msgStats.BatchSize, msgStats.FlushInterval)
-
-	// 观察者通知批量处理器
-	obsNotify := batcherCfg.GetObserverNotifyParams()
-	hub.observerBatcher = batcher.NewObserverNotificationBatcher(hub, obsNotify.QueueSize, obsNotify.BatchSize, obsNotify.FlushInterval)
+	// 批处理器域管理器（状态更新 / 记录 outbox / 心跳统计 / 消息统计 / 观察者通知）
+	// 观察者直投由消息域 Manager 提供（ObserverNotifier 端口，flush 直连域组件）
+	// 记录 outbox 复用状态更新攒批参数：flush 成功后把 sending 记录交给消息域
+	// 注册 ACK 超时（注册延后 50ms 量级，秒级超时语义无损）
+	hub.batcherMgr = batcher.NewManager(hub, hub.messagingMgr, config.Batcher)
+	hub.batcherMgr.RecordOutbox().OnFlushed(hub.messagingMgr.ScheduleAckTimeouts)
 
 	// 🚦 削峰填谷组件默认启用（开箱即用；SetOverloadPolicy 可覆盖/关闭）
 	hub.admission.Store(overload.NewAdmissionGate(0, 0, 0))

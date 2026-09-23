@@ -485,6 +485,6 @@ func (h *Hub) handleDistributedClientReclaim(ctx context.Context, distMsg *model
 	)
 	// kick 内部 Unregister → SetClientOffline 受 Lua 归属校验保护：
 	// owner 已是新节点，仅清本节点集合，不动新节点已接管的共享索引
-	h.kickClientWithNotification(client, models.DisconnectReasonKickOut, "连接已迁移到新节点，本地连接已回收")
+	h.lifecycleMgr.KickClient(client, models.DisconnectReasonKickOut, "连接已迁移到新节点，本地连接已回收")
 	return nil
 }

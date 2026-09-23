@@ -617,7 +617,7 @@ func (m *Manager) SendToGroupMembers(ctx context.Context, memberIDs []string, ms
 
 	// 通知观察者（群组级别统一通知，与 SendToGroup 对齐）
 	// handleBroadcast 对 GroupIDs 非空的消息跳过观察者通知，此处补齐
-	m.host.NotifyObservers(ctx, msg)
+	m.NotifyObservers(ctx, msg)
 
 	return result
 }

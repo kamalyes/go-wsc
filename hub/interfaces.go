@@ -19,18 +19,15 @@ package hub
 
 import (
 	"context"
-	"sync/atomic"
 	"time"
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
-	"github.com/kamalyes/go-toolbox/pkg/json"
 
 	"github.com/kamalyes/go-wsc/batcher"
 	"github.com/kamalyes/go-wsc/cluster"
 	"github.com/kamalyes/go-wsc/connection"
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/overload"
-	"github.com/kamalyes/go-wsc/routing"
 	"github.com/kamalyes/go-wsc/spi"
 )
 
@@ -156,16 +153,18 @@ func (h *Hub) SetOfflineMessageHandler(queue spi.OfflineQueue) {
 
 // GetMessageStatsBatcher 消息统计批量聚合器
 func (h *Hub) GetMessageStatsBatcher() *batcher.MessageStatsBatcher {
-	return h.messageStatsBatcher
+	return h.batcherMgr.MessageStats()
 }
 
 // GetHeartbeatBatcher 心跳统计批量聚合器
 func (h *Hub) GetHeartbeatBatcher() *batcher.HeartbeatStatsUpdater {
-	return h.heartbeatBatcher
+	return h.batcherMgr.HeartbeatStats()
 }
 
 // GetMessageStatusUpdater 消息状态批量更新器
-func (h *Hub) GetMessageStatusUpdater() *batcher.MessageStatusUpdater { return h.statusUpdater }
+func (h *Hub) GetMessageStatusUpdater() *batcher.MessageStatusUpdater {
+	return h.batcherMgr.StatusUpdater()
+}
 
 // ============================================================================
 // 集群域（messaging.Host；unexported 实现由集群域文件提供）
@@ -227,7 +226,9 @@ func (h *Hub) SubmitClusterDispatch(msg *models.HubMessage, opts cluster.Cluster
 // ============================================================================
 
 // GetMessageRecordOutbox 消息记录攒批 outbox（write-ahead INSERT 攒批化）
-func (h *Hub) GetMessageRecordOutbox() *batcher.MessageRecordOutbox { return h.messageRecordOutbox }
+func (h *Hub) GetMessageRecordOutbox() *batcher.MessageRecordOutbox {
+	return h.batcherMgr.RecordOutbox()
+}
 
 // CheckUserOnline 检查用户是否在线（跨节点汇总判定；对外诊断 API，
 // 消息发送热路径已合并为 GetUserNodes 单次往返，不再走此方法）
@@ -246,111 +247,101 @@ func (h *Hub) TrackConnectionError(ctx context.Context, connectionID string, use
 }
 
 // ============================================================================
-// 观察者通知（messaging.Host / batcher.ObserverNotifier）
+// 心跳子系统（messaging.Host 的 HandleHeartbeat + connection.HeartbeatHost 端口）
+//
+// 心跳逻辑（时间轮 O(1) 超时 + SSE 兜底扫描 + 回调链）在连接域
+// HeartbeatManager，此处仅做端口委托；回调 getter 返回 nil 表示
+// 业务方未注册，域内跳过（不可假定非空）
 // ============================================================================
+
+// HandleHeartbeat 处理心跳消息（messaging.Host 端口委托）
+// 协议级 PING 与应用层心跳共用同一保活入口，逻辑在连接域心跳管理器
+func (h *Hub) HandleHeartbeat(client *models.Client) {
+	h.heartbeatMgr.Handle(client)
+}
+
+// TrackHeartbeatStats 投递心跳统计（connection.HeartbeatHost 端口，stats 域漏斗）
+func (h *Hub) TrackHeartbeatStats(client *models.Client) {
+	h.statsMgr.TrackHeartbeatStats(client)
+}
+
+// EnqueueHeartbeatRenew 心跳 Redis 在线索引续期入队（connection.HeartbeatHost 端口）
+// 单 goroutine worker 消费 heartbeatRedisCh，满则丢弃（心跳下次还会来）
+func (h *Hub) EnqueueHeartbeatRenew(client *models.Client) {
+	if h.onlineStatusRepo == nil {
+		return
+	}
+	select {
+	case h.heartbeatRedisCh <- client:
+	default:
+		// channel 满，跳过本次 Redis 更新
+	}
+}
+
+// GetBeforeHeartbeatCallback 心跳前置回调（nil 表示业务方未注册，调用方须跳过）
+func (h *Hub) GetBeforeHeartbeatCallback() func(client *models.Client) bool {
+	return h.callbacks.BeforeHeartbeat
+}
+
+// GetHeartbeatReportCallback 心跳上报回调（nil 表示业务方未注册，调用方须跳过）
+func (h *Hub) GetHeartbeatReportCallback() func(client *models.Client) {
+	return h.callbacks.HeartbeatReport
+}
+
+// GetAfterHeartbeatCallback 心跳后置回调（nil 表示业务方未注册，调用方须跳过）
+func (h *Hub) GetAfterHeartbeatCallback() func(client *models.Client) {
+	return h.callbacks.AfterHeartbeat
+}
+
+// GetHeartbeatTimeoutCallback 心跳超时回调（nil 表示业务方未注册，调用方须跳过）
+func (h *Hub) GetHeartbeatTimeoutCallback() func(clientID string, userID string, lastHeartbeat time.Time) {
+	return h.callbacks.HeartbeatTimeout
+}
+
+// ============================================================================
+// 连接生命周期（connection.LifecycleHost 端口 + 对外踢人 API）
+//
+// 多端登录治理 / 踢出断链 / 精简移除逻辑在连接域 LifecycleManager，
+// 此处仅做端口委托：KickClient 的 ForceOffline 通知经 SendToClient 端口
+// 走消息域投递，保证踢出消息与普通消息同一写泵有序写出
+// ============================================================================
+
+// SendToClient 定向单发（connection.LifecycleHost 端口，委托消息域）
+// 踢出通知 / 注册确认等系统消息与业务消息共用同一投递路径
+func (h *Hub) SendToClient(ctx context.Context, client *models.Client, msg *models.HubMessage) {
+	h.messagingMgr.SendToClient(ctx, client, msg)
+}
+
+// KickUserSimple 按用户 ID 踢出其在本节点的全部连接（gRPC 踢人 / 分布式踢人共用入口）
+// 逐连接经连接域 LifecycleManager 踢出：发送 ForceOffline 通知后注销并清理
+func (h *Hub) KickUserSimple(ctx context.Context, userID, reason string) int {
+	return h.lifecycleMgr.KickUser(ctx, userID, reason)
+}
+
+// ============================================================================
+// 观察者通知与 SSE 通道（messaging 域实现，hub 对外 API 委托）
+//
+// 观察者投递（攒批入口 / 本地直投 / 跨节点广播）与 SSE 投递
+//（点对点 / 全量广播）逻辑在消息域 observer.go / sse.go，
+// 此处仅保留编排层对外入口的端口委托
+// ============================================================================
+
+// GetObserverNotifier 观察者通知批量处理器（messaging.Host 端口，
+// 消息域 NotifyObservers 攒批入口经此提交）
+func (h *Hub) GetObserverNotifier() *batcher.ObserverNotificationBatcher {
+	return h.batcherMgr.ObserverNotify()
+}
 
 // NotifyObservers 通知观察者（观察者未启用时为 no-op）
 // 从 ctx 提取 namespace+groupIDs 定位观察范围，提交批量处理器攒批投递
 func (h *Hub) NotifyObservers(ctx context.Context, msg *models.HubMessage) {
-	if msg == nil || !h.shardedRegistry.ObserverEnabled() {
-		return
-	}
-	namespace := routing.NamespaceFromContext(ctx)
-	groupIDs := routing.GroupIDsFromContext(ctx)
-	// msg 会在 Submit 内 Clone，避免调用方修改影响异步 flush
-	if !h.observerBatcher.Submit(msg, namespace, groupIDs) {
-		h.logger.DebugContextKV(ctx, "观察者通知队列已满，丢弃",
-			"message_id", msg.MessageID,
-			"namespace", namespace,
-			"group_ids", groupIDs,
-		)
-	}
+	h.messagingMgr.NotifyObservers(ctx, msg)
 }
 
 // NotifyObserversDirect 直接通知观察者（不经批处理队列，避免递归入队）
 // 由 observerBatcher flush 调用：本地观察者投递 + 跨节点广播，无 per-message goroutine
 func (h *Hub) NotifyObserversDirect(msg *models.HubMessage, namespace string, groupIDs []string) {
-	if msg == nil {
-		return
-	}
-	ctx := routing.NewRoute().WithAppID(msg.AppID).WithNamespace(namespace).WithGroupIDs(groupIDs).Inject(h.ctx)
-
-	// 快速检查：无观察者时仅跨节点广播 - O(1)
-	if h.shardedRegistry.GetObserverUserCount() == 0 {
-		h.broadcastObserverNotification(ctx, msg)
-		return
-	}
-
-	// 三级索引查找：合并所有 groupIDs 的观察者并去重
-	observers := h.shardedRegistry.GetObserversForMessage(namespace, groupIDs...)
-
-	// 预构建观察者专用消息（Clone + metadata），所有观察者共享同一份
-	observerMsg := msg.Clone()
-	observerMsg.WithMetadata("observer_mode", "true")
-	observerMsg.WithMetadata("original_sender", msg.Sender)
-	observerMsg.WithMetadata("original_receiver", msg.Receiver)
-
-	// 预序列化一次（所有观察者复用，消除逐个 Clone+Marshal 开销）
-	msgData, err := json.Marshal(observerMsg)
-	if err != nil {
-		h.logger.ErrorContextKV(ctx, "序列化观察者消息失败",
-			"message_id", msg.MessageID,
-			"error", err,
-		)
-		return
-	}
-
-	delivered := 0
-	for _, observer := range observers {
-		if observer.TrySend(msgData) {
-			delivered++
-		} else {
-			h.logger.WarnContextKV(ctx, "观察者缓冲区已满或已关闭，丢弃消息",
-				"observer_id", observer.UserID,
-				"client_id", observer.ID,
-				"message_id", observerMsg.MessageID,
-			)
-		}
-	}
-
-	h.logger.DebugContextKV(ctx, "已通知本地观察者",
-		"message_id", observerMsg.MessageID,
-		"total_devices", len(observers),
-		"delivered", delivered,
-	)
-
-	h.broadcastObserverNotification(ctx, msg)
-}
-
-// broadcastObserverNotification 广播观察者通知到其他节点
-// 统一走 routeToCluster 入口，由其集中决策 gRPC 直连与 PubSub 兜底
-func (h *Hub) broadcastObserverNotification(ctx context.Context, msg *models.HubMessage) {
-	// 单机模式：无 PubSub 且无 gRPC，不跨节点
-	if h.pubsub == nil && !h.IsGRPCEnabled() {
-		return
-	}
-
-	// 从传入 ctx 派生超时 ctx，保留 trace_id 等元数据
-	// 如果传入 ctx 已取消（如 Hub 关闭场景），fallback 到 Background 确保 dispatch 能完成
-	parentCtx := ctx
-	if parentCtx == nil || parentCtx.Err() != nil {
-		parentCtx = context.Background()
-	}
-	dispatchCtx, cancel := context.WithTimeout(parentCtx, 3*time.Second)
-	defer cancel()
-
-	opts := cluster.ClusterDispatchOptions{
-		Operation: models.OperationTypeObserverNotify,
-		Namespace: routing.NamespaceFromContext(ctx),
-		GroupIDs:  routing.GroupIDsFromContext(ctx),
-	}
-
-	if err := h.routeToCluster(dispatchCtx, msg, opts); err != nil {
-		h.logger.WarnContextKV(ctx, "广播观察者通知失败",
-			"error", err,
-			"message_id", msg.MessageID,
-		)
-	}
+	h.messagingMgr.NotifyObserversDirect(msg, namespace, groupIDs)
 }
 
 // ============================================================================
@@ -415,91 +406,19 @@ func (h *Hub) GetEphemeralCoalescer() *overload.Coalescer { return h.ephemeralCo
 func (h *Hub) GetOverloadMetrics() *overload.OverloadMetrics { return &h.overloadMetrics }
 
 // ============================================================================
-// SSE 通道（messaging.Host）
+// SSE 通道（messaging 域实现，hub 对外 API 委托）
 // ============================================================================
 
 // SendToUserViaSSE 经 SSE 通道向用户投递（SSE 未启用或用户无订阅时返回 false）
 // namespace 隔离：msg.Namespace 非空时仅投递给同 ns 的 SSE 设备，避免跨 ns 串扰
 func (h *Hub) SendToUserViaSSE(userID string, msg *models.HubMessage) bool {
-	if msg == nil {
-		return false
-	}
-	// 快速检查用户是否有 SSE 连接（O(1)）
-	if !h.shardedRegistry.HasSSEUser(userID) {
-		return false
-	}
-
-	// 持读锁零拷贝遍历发送
-	successCount := 0
-	totalDevices := 0
-	h.shardedRegistry.ForEachSSEUserClient(userID, func(clientID string, client *models.Client) bool {
-		// namespace 隔离：msg.Namespace 非空时仅投递给同 ns 的设备
-		if msg.Namespace != "" && client.Namespace != msg.Namespace {
-			return true
-		}
-		totalDevices++
-		if client.TrySendSSE(msg) {
-			client.SetLastSeen(time.Now())
-			successCount++
-		} else {
-			h.logger.WarnContextKV(msg.ContextFrom(h.ctx), "SSE消息队列已满",
-				"user_id", userID,
-				"client_id", clientID,
-				"message_id", msg.MessageID,
-				"message_type", msg.MessageType,
-			)
-		}
-		return true
-	})
-
-	if successCount > 0 {
-		h.logger.InfoContextKV(msg.ContextFrom(h.ctx), "SSE消息发送成功",
-			"user_id", userID,
-			"message_id", msg.MessageID,
-			"message_type", msg.MessageType,
-			"success_devices", successCount,
-			"total_devices", totalDevices,
-		)
-		return true
-	}
-	return false
+	return h.messagingMgr.SendToUserViaSSE(userID, msg)
 }
 
 // BroadcastToSSEClients 广播给全部 SSE 客户端（appId/namespace 信封隔离）
 // 通过 ForEachSSEClientParallel 并行分片读锁遍历（百万级优化）
 func (h *Hub) BroadcastToSSEClients(msg *models.HubMessage) {
-	if msg == nil {
-		return
-	}
-	// 路由信封 + trace_id 同步（与所有入口共用同一套逻辑，幂等，已有不覆盖）
-	msg.InjectRoute(h.ctx)
-
-	start := time.Now()
-	var sent, skipped int64
-	h.shardedRegistry.ForEachSSEClientParallel(0, func(_, clientID string, client *models.Client) {
-		if !connection.ClientMatchesEnvelope(client, msg.AppID, msg.Namespace, msg.GroupIDs) {
-			return
-		}
-		if client.TrySendSSE(msg) {
-			client.SetLastSeen(time.Now())
-			atomic.AddInt64(&sent, 1)
-		} else {
-			atomic.AddInt64(&skipped, 1)
-			h.logger.WarnContextKV(msg.ContextFrom(h.ctx), "SSE客户端消息通道已满，跳过",
-				"client_id", clientID,
-				"message_id", msg.MessageID,
-			)
-		}
-	})
-
-	h.logger.DebugContextKV(msg.ContextFrom(h.ctx), "SSE广播完成",
-		"message_id", msg.MessageID,
-		"namespace", msg.Namespace,
-		"total_sse_clients", h.shardedRegistry.GetSSEClientCount(),
-		"sent", atomic.LoadInt64(&sent),
-		"skipped", atomic.LoadInt64(&skipped),
-		"duration_ms", time.Since(start).Milliseconds(),
-	)
+	h.messagingMgr.BroadcastToSSEClients(msg)
 }
 
 // ============================================================================
@@ -519,17 +438,17 @@ func (h *Hub) TrySubmitCallback(task func()) bool {
 
 // GetGroupDisbandCallback 群组解散回调（nil 表示业务方未注册，调用方须跳过）
 func (h *Hub) GetGroupDisbandCallback() func(ctx context.Context, namespace, groupID string) {
-	return h.groupDisbandCallback
+	return h.callbacks.GroupDisband
 }
 
 // GetGroupMemberJoinCallback 群组成员加入回调（nil 表示业务方未注册，调用方须跳过）
 func (h *Hub) GetGroupMemberJoinCallback() func(ctx context.Context, namespace, groupID string, userIDs []string) {
-	return h.groupMemberJoinCallback
+	return h.callbacks.GroupMemberJoin
 }
 
 // GetGroupMemberLeaveCallback 群组成员离开回调（nil 表示业务方未注册，调用方须跳过）
 func (h *Hub) GetGroupMemberLeaveCallback() func(ctx context.Context, namespace, groupID string, userIDs []string) {
-	return h.groupMemberLeaveCallback
+	return h.callbacks.GroupMemberLeave
 }
 
 // SendConditional 条件广播：对满足条件的在线客户端各投递一份，返回投递数

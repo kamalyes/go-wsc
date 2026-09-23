@@ -48,3 +48,14 @@ type StorageBatchWriter interface {
 	// GetMessageRecordRepo 消息记录仓储（消息状态更新）
 	GetMessageRecordRepo() spi.MessageSink
 }
+
+// Host 批处理器域宿主端口（Manager 聚合构造五个批处理器所需的能力面）
+//
+// 由 hub 编排层实现：StorageBatchWriter 覆盖状态/消息统计/心跳统计三个更新器，
+// GetMessageSink 覆盖记录 outbox（MessageRecordSinkProvider 能力面）；
+// 观察者直投（ObserverNotifier）由消息域 Manager 实现并单独注入——
+// 观察者投递语义归 messaging 域，batcher flush 直连域组件不再绕编排层
+type Host interface {
+	StorageBatchWriter
+	GetMessageSink() spi.MessageSink
+}

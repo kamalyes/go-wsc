@@ -30,6 +30,8 @@ v4 起本域吸收三个旧包（裁决记录 #10）：
 | 概念 | 说明 |
 |------|------|
 | `dispatcher` / `mux` | 入站解码与两级路由（MessageType → Topic） |
+| 观察者投递 | `NotifyObservers` 攒批入口 → batcher 合并；`NotifyObserversDirect` 直投（三级索引查找 + 预序列化共享 + 跨节点广播），见 observer.go |
+| SSE 投递 | `SendToUserViaSSE` 点对点（O(1) 用户索引 + ns 隔离）；`BroadcastToSSEClients` 全量广播（并行分片 + 信封隔离），见 sse.go |
 | 上下文键 | `ContextKeySenderID` / `ContextKeyUserID`（连接归属，transport 注入）/ `ContextKeyOfflineBroadcastCollector`（扇出聚合器，context_keys.go） |
 | `AckManager` | 发送 → 时间轮插入 (msgID, deadline)；收到 ACK O(1) 取消；超时标记 AckTimeout |
 | `ackTimeoutSlack` | 跨节点 ACK 的抖动余量，防误判超时 |

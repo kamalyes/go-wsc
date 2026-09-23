@@ -88,6 +88,7 @@ type fakeMessageSink struct {
 
 	mu      sync.Mutex
 	batches []*fakeStatusBatch
+	created []*models.MessageSendRecord // CreateBatch 批量落库的记录
 
 	// block 非 nil 时在 BatchUpdateStatus 入口阻塞（测试队列满的确定性手段）
 	block func()
@@ -127,6 +128,20 @@ func (f *fakeMessageSink) snapshot() []*fakeStatusBatch {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]*fakeStatusBatch(nil), f.batches...)
+}
+
+// CreateBatch 批量落库记录（outbox flush 消费，记录条数供断言）
+func (f *fakeMessageSink) CreateBatch(_ context.Context, records []*models.MessageSendRecord) error {
+	f.mu.Lock()
+	f.created = append(f.created, records...)
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeMessageSink) createdSnapshot() []*models.MessageSendRecord {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]*models.MessageSendRecord(nil), f.created...)
 }
 
 // fakeBatchWriter StorageBatchWriter 替身

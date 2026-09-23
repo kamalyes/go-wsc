@@ -130,7 +130,8 @@ func (f *fakeHost) CheckAndRouteToNode(_ context.Context, _ string, _ *models.Hu
 	return false, nil, nil
 }
 
-func (f *fakeHost) NotifyObservers(_ context.Context, _ *models.HubMessage) {}
+// GetObserverNotifier 未注入观察者通知批处理器（NotifyObservers 攒批入口据此 no-op）
+func (f *fakeHost) GetObserverNotifier() *batcher.ObserverNotificationBatcher { return nil }
 
 // DeleteRerouteGuard makeAckTimeoutCallback 无条件终态清理，no-op
 func (f *fakeHost) DeleteRerouteGuard(_ string) {}
@@ -150,12 +151,6 @@ func (f *fakeHost) GetBroadcastShaper() *overload.Shaper { return nil }
 
 // GetStatsRepo 未注入统计仓储（handleDirectMessage 的 msgSentCount 分支据此跳过）
 func (f *fakeHost) GetStatsRepo() spi.HubStats { return nil }
-
-// SendToUserViaSSE 未启用 SSE 直发（handleDirectMessage sent==0 时据此走告警分支）
-func (f *fakeHost) SendToUserViaSSE(_ string, _ *models.HubMessage) bool { return false }
-
-// BroadcastToSSEClients 未启用 SSE 广播通道（doBroadcastMessage 的 SSE 扇出据此 no-op）
-func (f *fakeHost) BroadcastToSSEClients(_ *models.HubMessage) {}
 
 // HandleHeartbeat 心跳 no-op（连接域时间轮续期由连接层测试自行覆盖）
 func (f *fakeHost) HandleHeartbeat(_ *models.Client) {}

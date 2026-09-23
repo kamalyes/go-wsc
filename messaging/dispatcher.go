@@ -456,7 +456,7 @@ func (m *Manager) handleBroadcast(msg *models.HubMessage) {
 			})
 		}
 		observerCtx := routing.RouteFrom(ctx).WithNamespace(nsForObserver).WithGroupIDs(gidsForObserver).Inject(ctx)
-		m.host.NotifyObservers(observerCtx, msg)
+		m.NotifyObservers(observerCtx, msg)
 	}
 
 	if msg.BroadcastType == models.BroadcastTypeGlobal {
@@ -512,7 +512,7 @@ func (m *Manager) handleDirectMessage(ctx context.Context, msg *models.HubMessag
 			"delivered_clients", sent,
 			"receiver_client", msg.ReceiverClient,
 		)
-	} else if m.host.SendToUserViaSSE(msg.Receiver, msg) {
+	} else if m.SendToUserViaSSE(msg.Receiver, msg) {
 		m.host.GetLogger().DebugContextKV(ctx, "[投递诊断] 本地直连投递完成（SSE 通道）",
 			"message_id", msg.MessageID,
 			"receiver", msg.Receiver,
@@ -629,7 +629,7 @@ func (m *Manager) doBroadcastMessage(ctx context.Context, msg *models.HubMessage
 
 	// SSE 客户端通过专用通道发送
 	sseStart := time.Now()
-	m.host.BroadcastToSSEClients(msg)
+	m.BroadcastToSSEClients(msg)
 	sseDuration := time.Since(sseStart)
 
 	totalDuration := time.Since(start)

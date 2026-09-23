@@ -4,15 +4,18 @@
 
 ## 这个域干什么
 
-`batcher` 承接四类高频小写场景：消息状态回报、消息收发统计、心跳统计、
-观察者通知batcher.逐条写库在千万级连接下会打爆后端，本域用统一的
-`syncx.BatchProcessor` 攒批模型（攒满或到期 → flush）把 N 次写合并为 1 次批量操作batcher.
+`batcher` 承接五类高频小写场景：消息状态回报、消息记录落库（write-ahead
+outbox）、消息收发统计、心跳统计、观察者通知。逐条写库在千万级连接下会
+打爆后端，本域用统一的 `syncx.BatchProcessor` 攒批模型（攒满或到期 →
+flush）把 N 次写合并为 1 次批量操作
 
 ## 核心概念
 
 | 概念 | 说明 |
 |------|------|
+| `Manager` | 域管理器：持有五个攒批组件，统一构造（nil/零值参数兜底）与分段停机 |
 | `MessageStatusUpdater` | 消息状态攒批：按 status+reason+errMsg 分组，合并同组 SQL |
+| `MessageRecordOutbox` | 消息记录攒批 outbox：write-ahead INSERT 攒批化，早到状态更新合并进内存 |
 | `MessageStatsBatcher` | 消息统计攒批：按 connectionID 聚合收发条数与字节数 |
 | `HeartbeatStatsUpdater` | 心跳统计攒批：按 clientID 去重保留最新，批量刷连接质量表 |
 | `ObserverNotificationBatcher` | 观察者通知攒批：合并同窗口的观察者回调 |
@@ -30,15 +33,15 @@ Submit(item) ──► 队列(有界) ──► 攒满 batchSize / 到期 flushI
 package main
 
 import (
-    "time"
-
+    "github.com/kamalyes/go-config/pkg/wsc"
     "github.com/kamalyes/go-wsc/batcher"
 )
 
-// hub 已装配，业务侧通常只感知 Submit
-updater := batcher.NewMessageStatusUpdater(writer, 200, 8, 50*time.Millisecond)
+// 编排层组装：一个 Manager 持有五个组件，参数 nil/零值时默认值兜底
+mgr := batcher.NewManager(host, cfg.Batcher)
 
-if !updater.Submit(&batcher.StatusUpdateItem{
+// 业务侧通常只感知 Submit
+if !mgr.StatusUpdater().Submit(&batcher.StatusUpdateItem{
     MessageID: msgID,
     Receiver:  receiver,
     Status:    status,
@@ -46,13 +49,15 @@ if !updater.Submit(&batcher.StatusUpdateItem{
     // 队列满：降级处理（日志 + 丢弃）
 }
 
-updater.Stop() // 冲刷剩余批次
+mgr.StopTracking() // 连接清理前：心跳/消息统计/观察者通知冲刷余量
+mgr.StopRecords()  // 连接清理后：先 outbox 后状态更新，保 INSERT→UPDATE 顺序
 ```
 
 ## 端口与依赖
 
-- 消费者端口：`StorageBatchWriter`（消息状态/消息统计/心跳统计共用，hub 实现）、
-  `ObserverNotifier`（观察者通知，hub 实现）
+- 消费者端口：`Host`（Manager 聚合构造所需能力面，hub 实现）、
+  `StorageBatchWriter`（消息状态/消息统计/心跳统计共用）、
+  `ObserverNotifier`（观察者通知）、`MessageRecordSinkProvider`（记录 outbox）
 - 落库目标经 spi 契约注入：`MessageSink`（消息记录）、`ConnectionStore`（连接记录）、
   `ConnectionQualityStore`（连接质量）
 - 依赖 go-toolbox `syncx.BatchProcessor`（攒批骨架）与 `mathx`（分片计算）

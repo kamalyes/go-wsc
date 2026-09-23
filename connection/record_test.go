@@ -1,11 +1,11 @@
 /*
  * @Author: kamalyes 501893067@qq.com
- * @Date: 2026-09-11 21:57:03
+ * @Date: 2026-09-23 19:08:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-09-16 12:57:00
+ * @LastEditTime: 2026-09-23 19:08:00
  * @FilePath: \go-wsc\connection\record_test.go
- * @Description: 连接记录测试 - 记录构造字段映射 + 异步落库 + 断开更新顺序（先记录终评后）
- *
+ * @Description: 连接域连接记录管理器测试 - 快照构造 / 异步落库 / 停机批量终态
+
  * Copyright (c) 2026 by kamalyes, All Rights Reserved.
  */
 
@@ -24,166 +24,161 @@ import (
 	"github.com/kamalyes/go-wsc/spi"
 )
 
-// fakeConnectionStore 记录存储测试桩（嵌入接口，仅覆盖被测路径；未覆盖方法调用即 panic）
-type fakeConnectionStore struct {
-	spi.ConnectionStore
-	mu         sync.Mutex
-	upserts    []*models.ConnectionRecord
-	markDiscos []markDiscoCall
-	calls      chan string // 操作顺序流水
+// fakeRecordHost 连接记录端口测试桩：仓储可运行期切换（未注入 → 注入）
+type fakeRecordHost struct {
+	mu    sync.Mutex
+	store spi.ConnectionStore
 }
 
-type markDiscoCall struct {
+// GetLogger 返回 nil（构造器内部兜底默认日志器）
+func (f *fakeRecordHost) GetLogger() spi.Logger { return nil }
+
+func (f *fakeRecordHost) GetConnectionRecordRepo() spi.ConnectionStore {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.store
+}
+
+// markDisconnectedCall 记录一次 MarkDisconnected 调用参数
+type markDisconnectedCall struct {
 	connectionID string
-	reason       models.DisconnectReason
+	reason      models.DisconnectReason
+	code        int
 }
 
-func newFakeConnectionStore() *fakeConnectionStore {
-	return &fakeConnectionStore{calls: make(chan string, 8)}
+// fakeRecordStore 连接记录仓储桩：只覆盖记录语义相关方法（未覆盖方法 panic）
+type fakeRecordStore struct {
+	spi.ConnectionStore // 未覆盖的方法调用即 panic
+
+	mu           sync.Mutex
+	upserts      []*models.ConnectionRecord
+	disconnected []markDisconnectedCall
 }
 
-func (f *fakeConnectionStore) Upsert(ctx context.Context, record *models.ConnectionRecord) error {
+func (f *fakeRecordStore) Upsert(_ context.Context, record *models.ConnectionRecord) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.upserts = append(f.upserts, record)
-	f.calls <- "upsert"
 	return nil
 }
 
-func (f *fakeConnectionStore) MarkDisconnected(ctx context.Context, connectionID string, reason models.DisconnectReason, code int) error {
+func (f *fakeRecordStore) MarkDisconnected(_ context.Context, connectionID string, reason models.DisconnectReason, code int) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.markDiscos = append(f.markDiscos, markDiscoCall{connectionID: connectionID, reason: reason})
-	f.calls <- "mark"
+	f.disconnected = append(f.disconnected, markDisconnectedCall{connectionID, reason, code})
 	return nil
 }
 
-// fakeQualityStore 质量存储测试桩（嵌入接口，仅覆盖被测路径）
-type fakeQualityStore struct {
-	spi.ConnectionQualityStore
-	mu       sync.Mutex
-	upserts  []*models.ConnectionQuality
-	finalIDs []string
-	calls    chan string
-}
-
-func newFakeQualityStore() *fakeQualityStore {
-	return &fakeQualityStore{calls: make(chan string, 8)}
-}
-
-func (f *fakeQualityStore) Upsert(ctx context.Context, quality *models.ConnectionQuality) error {
+func (f *fakeRecordStore) upsertCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.upserts = append(f.upserts, quality)
-	f.calls <- "quality-upsert"
-	return nil
+	return len(f.upserts)
 }
 
-func (f *fakeQualityStore) FinalizeOnDisconnect(ctx context.Context, connectionID string) error {
+func (f *fakeRecordStore) disconnectCalls() []markDisconnectedCall {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.finalIDs = append(f.finalIDs, connectionID)
-	f.calls <- "finalize"
-	return nil
+	return append([]markDisconnectedCall(nil), f.disconnected...)
 }
 
-// waitCall 等待指定操作流水（异步落库同步点）
-func waitCall(t *testing.T, calls chan string, want string) {
+// newRecordManagerFixture 构造记录管理器与端口桩
+func newRecordManagerFixture(t *testing.T) (*RecordManager, *fakeRecordHost, *fakeRecordStore) {
 	t.Helper()
-	select {
-	case got := <-calls:
-		require.Equal(t, want, got, "异步落库应产生 %s 调用", want)
-	case <-time.After(3 * time.Second):
-		t.Fatalf("等待 %s 调用超时", want)
-	}
+	store := &fakeRecordStore{}
+	host := &fakeRecordHost{store: store}
+	return NewRecordManager(host), host, store
 }
 
-// TestCreateConnectionRecordFieldMapping 记录构造：Client → ConnectionRecord 字段精确映射
-func TestCreateConnectionRecordFieldMapping(t *testing.T) {
-	client := models.NewClient("conn-map-1", "u-7000", models.UserTypeAgent)
-	client.Context = context.Background()
-	client.NodeID = "node-1"
-	client.NodeIP = "10.0.0.1"
-	client.NodePort = 9090
-	client.SetMetadataValue("trace_id", "tr-123")
+// TestRecordCreateSnapshot 记录构造：Client 关键字段快照到 ConnectionRecord
+func TestRecordCreateSnapshot(t *testing.T) {
+	manager, _, _ := newRecordManagerFixture(t)
 
-	record := CreateConnectionRecord(client)
+	client := models.NewClient("rec-1", "u-13000", models.UserTypeCustomer)
+	client.NodeID = "node-a"
+	client.NodeIP = "10.0.0.1"
+	client.NodePort = 8080
+	client.ConnectionType = models.ConnectionTypeWebSocket
+	client.SetMetadataValue("device", "ios")
+
+	record := manager.Create(client)
 
 	assert.Equal(t, client.ID, record.ConnectionID)
-	assert.Equal(t, "u-7000", record.UserID)
-	assert.Equal(t, client.GetAppID(), record.AppID)
-	assert.Equal(t, client.GetNamespace(), record.Namespace)
-	assert.Equal(t, "node-1", record.NodeID)
+	assert.Equal(t, client.UserID, record.UserID)
+	assert.Equal(t, "node-a", record.NodeID)
 	assert.Equal(t, "10.0.0.1", record.NodeIP)
-	assert.Equal(t, 9090, record.NodePort)
-	assert.Equal(t, client.ConnectionType, record.Protocol)
-	assert.Equal(t, client.ClientType, record.ClientType)
-	assert.True(t, record.IsActive, "新建记录应标记活跃")
-	if traceID, ok := record.Metadata["trace_id"]; ok {
-		assert.Equal(t, "tr-123", traceID.(string), "metadata 快照应映射")
-	} else {
-		t.Fatal("metadata 快照应包含 trace_id")
+	assert.Equal(t, 8080, record.NodePort)
+	assert.Equal(t, models.ConnectionTypeWebSocket, record.Protocol)
+	assert.True(t, record.IsActive, "新建记录应为活跃状态")
+	assert.Equal(t, client.ConnectedAt, record.ConnectedAt)
+	assert.NotNil(t, record.Metadata, "metadata 快照应写入记录")
+}
+
+// TestRecordSaveUpsertsAsync 异步保存：经 syncx.Go 异步 Upsert（Eventually 等待）
+func TestRecordSaveUpsertsAsync(t *testing.T) {
+	manager, _, store := newRecordManagerFixture(t)
+
+	client := models.NewClient("rec-2", "u-13001", models.UserTypeCustomer)
+	record := manager.Create(client)
+
+	manager.Save(context.Background(), record)
+
+	require.Eventually(t, func() bool {
+		return store.upsertCount() == 1
+	}, 2*time.Second, 10*time.Millisecond, "记录应被异步 Upsert")
+}
+
+// TestRecordMarkDisconnectedAsync 异步标记断开：单连接路径 reason=ClientRequest、code=0
+func TestRecordMarkDisconnectedAsync(t *testing.T) {
+	manager, _, store := newRecordManagerFixture(t)
+
+	client := models.NewClient("rec-3", "u-13002", models.UserTypeCustomer)
+	manager.MarkDisconnected(context.Background(), client)
+
+	require.Eventually(t, func() bool {
+		return len(store.disconnectCalls()) == 1
+	}, 2*time.Second, 10*time.Millisecond, "断开标记应被异步写入")
+	call := store.disconnectCalls()[0]
+	assert.Equal(t, client.ID, call.connectionID)
+	assert.Equal(t, models.DisconnectReasonClientRequest, call.reason)
+	assert.Zero(t, call.code)
+}
+
+// TestRecordMarkDisconnectedBatch 停机批量终态：并行标记 reason=ServerShutdown、code=1001
+func TestRecordMarkDisconnectedBatch(t *testing.T) {
+	manager, _, store := newRecordManagerFixture(t)
+
+	clients := []*models.Client{
+		models.NewClient("rec-b1", "u-13003", models.UserTypeCustomer),
+		models.NewClient("rec-b2", "u-13003", models.UserTypeCustomer),
+		models.NewClient("rec-b3", "u-13003", models.UserTypeCustomer),
+	}
+
+	manager.MarkDisconnectedBatch(clients)
+
+	// 并行同步执行：调用返回时已全部完成
+	calls := store.disconnectCalls()
+	require.Len(t, calls, 3, "每个连接应被标记一次断开")
+	ids := make(map[string]bool, len(calls))
+	for _, call := range calls {
+		assert.Equal(t, models.DisconnectReasonServerShutdown, call.reason)
+		assert.Equal(t, 1001, call.code, "停机路径应携带 1001 GoingAway 关闭码")
+		ids[call.connectionID] = true
+	}
+	for _, client := range clients {
+		assert.True(t, ids[client.ID], "连接 %s 应被标记", client.ID)
 	}
 }
 
-// TestRecorderSaveRecordAndQuality 保存链路：记录 + 质量初始行异步落库
-func TestRecorderSaveRecordAndQuality(t *testing.T) {
-	records := newFakeConnectionStore()
-	qualities := newFakeQualityStore()
-	recorder := NewConnectionRecorder(records, qualities, nil)
+// TestRecordWithoutStoreNoOp 仓储未注入：全路径 no-op 降级不 panic
+func TestRecordWithoutStoreNoOp(t *testing.T) {
+	host := &fakeRecordHost{store: nil} // 未注入仓储
+	manager := NewRecordManager(host)
+	client := models.NewClient("rec-noop", "u-13004", models.UserTypeCustomer)
+	record := manager.Create(client)
 
-	client := models.NewClient("save-1", "u-8000", models.UserTypeCustomer)
-	client.Context = context.Background()
-
-	recorder.SaveConnectionRecord(client.Context, CreateConnectionRecord(client))
-	waitCall(t, records.calls, "upsert")
-	require.Len(t, records.upserts, 1)
-	assert.Equal(t, "save-1", records.upserts[0].ConnectionID)
-
-	recorder.SaveConnectionQuality(client.Context, client)
-	waitCall(t, qualities.calls, "quality-upsert")
-	require.Len(t, qualities.upserts, 1)
-	assert.Equal(t, "save-1", qualities.upserts[0].ConnectionID)
-	assert.Equal(t, "u-8000", qualities.upserts[0].UserID, "质量行应回填用户维度")
-}
-
-// TestRecorderUpdateOnDisconnectOrder 断开更新顺序：先 MarkDisconnected（写 duration）再 FinalizeOnDisconnect（读 duration 算终评）
-func TestRecorderUpdateOnDisconnectOrder(t *testing.T) {
-	records := newFakeConnectionStore()
-	qualities := newFakeQualityStore()
-	recorder := NewConnectionRecorder(records, qualities, nil)
-
-	client := models.NewClient("disc-1", "u-9000", models.UserTypeAgent)
-	client.Context = context.Background()
-
-	recorder.UpdateOnDisconnect(client, models.DisconnectReasonHeartbeatFail)
-	waitCall(t, records.calls, "mark")
-	waitCall(t, qualities.calls, "finalize")
-
-	require.Len(t, records.markDiscos, 1)
-	assert.Equal(t, "disc-1", records.markDiscos[0].connectionID)
-	assert.Equal(t, models.DisconnectReasonHeartbeatFail, records.markDiscos[0].reason)
-	require.Len(t, qualities.finalIDs, 1)
-	assert.Equal(t, "disc-1", qualities.finalIDs[0])
-}
-
-// TestRecorderNilStoresNoop 存储未注入（未启用 gorm 适配器）：静默跳过、零 panic、零成本
-func TestRecorderNilStoresNoop(t *testing.T) {
-	recorder := NewConnectionRecorder(nil, nil, nil)
-	client := models.NewClient("noop-1", "u-a", models.UserTypeVisitor)
-	client.Context = context.Background()
-
-	// 全部为 no-op，不 panic 即通过
-	recorder.SaveConnectionRecord(client.Context, CreateConnectionRecord(client))
-	recorder.SaveConnectionQuality(client.Context, client)
-	recorder.UpdateOnDisconnect(client, models.DisconnectReasonUnknown)
-
-	// 异步任务空转，给调度窗口后无任何副作用
-	time.Sleep(50 * time.Millisecond)
-}
-
-// TestRecorderImplementsSPI 存储桩满足 spi 端口契约（编译期回归防护）
-func TestRecorderImplementsSPI(t *testing.T) {
-	var _ spi.ConnectionStore = newFakeConnectionStore()
-	var _ spi.ConnectionQualityStore = newFakeQualityStore()
+	require.NotPanics(t, func() {
+		manager.Save(context.Background(), record)
+		manager.MarkDisconnected(context.Background(), client)
+		manager.MarkDisconnectedBatch([]*models.Client{client})
+	})
 }

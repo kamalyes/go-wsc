@@ -16,7 +16,7 @@ v4 起本域吸收原 `wiring/` 包（裁决记录 #12）：装配（Initialize 
 
 | 后缀 | 语义 | 契约 |
 |------|------|------|
-| `*Store` | 读写热点状态，失败可降级 | `OnlineStore` `GroupStore` `WorkloadStore` `ConnectionStore` `ConnectionQualityStore` `NodeRegistry` |
+| `*Store` | 读写热点状态，失败可降级 | `OnlineStore` `GroupStore` `WorkloadStore` `ConnectionStore` `ConnectionQualityStore` `HubStats` |
 | `*Sink` | 只写不读，记录 / 归档 | `MessageSink` `ArchiveSink` |
 | `*Queue` | 进出队 + ack 语义 | `OfflineQueue` `MessageQueue` |
 
@@ -25,17 +25,15 @@ v4 起本域吸收原 `wiring/` 包（裁决记录 #12）：装配（Initialize 
 | 契约 | 说明 |
 |------|------|
 | `ConnectionAuthenticator` | 认证：`Authenticate(r) (*ConnectionClaims, error)`；默认实现 AES-GCM 对称加解密，内置 transport 域（`transport.NewTokenAuthenticator`），第三方鉴权实现本契约后注入 |
-| `EventBus` | 事件发布订阅（events 域唯一依赖） |
-| `OutboxService` | Exactly-Once：Pending → Sending → Sent / DeadLetter 状态机 |
-| `Logger` / `HubStats` | 日志与统计契约 + 默认实现 |
+| `Logger` | 日志契约（KV 风格，hub 内默认实现） |
 | `StoreDeps` / `StoreHooks` / `StoreTarget` | wiring 装配的注入结构（原 wiring/ 并入） |
 
 ### 一等后端 → 契约映射（§7.1）
 
 | 一等后端 | 承担契约 |
 |---------|---------|
-| Redis | OnlineStore（bitmap）、NodeRegistry（租约）、路由缓存、OfflineQueue、分布式锁 |
-| NATS | MessageQueue（JetStream）、EventBus、跨节点兜底 |
+| Redis | OnlineStore（bitmap）、路由缓存、OfflineQueue、分布式锁 |
+| NATS | MessageQueue（JetStream）、跨节点兜底 |
 | ClickHouse | ArchiveSink（批量归档） |
 
 ## 怎么用

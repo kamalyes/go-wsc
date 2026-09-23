@@ -97,8 +97,8 @@ type Host interface {
 	TrackReceiverMessageStats(connectionID string, receiverType models.UserType, dataSize int)
 	// TrackConnectionError 记录连接错误（异常断开排查）
 	TrackConnectionError(ctx context.Context, connectionID string, userType models.UserType, err error)
-	// NotifyObservers 通知观察者（观察者未启用时为 no-op）
-	NotifyObservers(ctx context.Context, msg *models.HubMessage)
+	// GetObserverNotifier 观察者通知批量处理器（未注入时返回 nil，观察者通知降级 no-op）
+	GetObserverNotifier() *batcher.ObserverNotificationBatcher
 
 	// ========== 过载保护域 ==========
 
@@ -120,11 +120,4 @@ type Host interface {
 	GetMessageStatusUpdater() *batcher.MessageStatusUpdater
 	// GetAdmissionLevel 当前过载水位（闸门未启用时返回 LevelNormal）
 	GetAdmissionLevel() overload.OverloadLevel
-
-	// ========== SSE 通道 ==========
-
-	// SendToUserViaSSE 经 SSE 通道向用户投递（SSE 未启用或用户无订阅时返回 false）
-	SendToUserViaSSE(userID string, msg *models.HubMessage) bool
-	// BroadcastToSSEClients 广播给全部 SSE 客户端
-	BroadcastToSSEClients(msg *models.HubMessage)
 }

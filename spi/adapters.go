@@ -70,13 +70,3 @@ type StoreTarget interface {
 	SetConnectionQualityRepository(store ConnectionQualityStore)
 	SetOfflineMessageHandler(queue OfflineQueue)
 }
-
-// HubConfigProvider 适配器读取运行时配置的能力面
-//
-// 适配器需要知道 TTL / key 前缀 / 心跳间隔等运行时参数才能正确构造实现
-// 返回整个 config 对象而非逐个 getter：配置字段会随版本增删，逐个暴露
-// getter 会让 spi 跟着配置变更频繁改动，而这些参数本就是运维可调项，
-// 不存在「适配器不该看到」的敏感字段
-type HubConfigProvider interface {
-	WSCConfig() any
-}

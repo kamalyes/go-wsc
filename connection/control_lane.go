@@ -25,6 +25,7 @@
 package connection
 
 import (
+	"github.com/gorilla/websocket"
 	"github.com/kamalyes/go-toolbox/pkg/json"
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/spi"
@@ -126,4 +127,18 @@ func (l *ControlLane) SendControlMessage(client *models.Client, msg *models.HubM
 	}
 
 	return l.SendControl(client, data, msg)
+}
+
+// ClassifyCloseError 分类关闭错误
+func ClassifyCloseError(err error) (closeCode int, isNormal bool) {
+	closeCode = websocket.CloseAbnormalClosure // 默认异常关闭
+
+	// 遍历检查各种关闭错误
+	for code, info := range models.WsCloseCodeMap {
+		if websocket.IsCloseError(err, code) {
+			return code, info.IsNormal
+		}
+	}
+
+	return closeCode, false
 }

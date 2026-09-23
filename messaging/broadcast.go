@@ -270,7 +270,7 @@ func (m *Manager) deliverToGroupReliable(ctx context.Context, msg *models.HubMes
 	result.Failed = int(atomic.LoadInt64(&failed))
 
 	// � 通知观察者（ctx 已在上方 ContextWithRoute 注入路由，直接使用即可）
-	m.host.NotifyObservers(ctx, msg)
+	m.NotifyObservers(ctx, msg)
 
 	m.host.GetLogger().InfoContextKV(ctx, "群组消息投递完成",
 		"namespace", namespace,
@@ -355,7 +355,7 @@ func (m *Manager) deliverToGroupFireForget(ctx context.Context, msg *models.HubM
 	localCount := m.BroadcastToUserIDs(ctx, targetMembers, msg)
 
 	// 通知观察者（ctx 已注入路由，直接使用）
-	m.host.NotifyObservers(ctx, msg)
+	m.NotifyObservers(ctx, msg)
 
 	// 4. 跨节点广播：优先 gRPC 直连，降级 PubSub（ctx 已含完整路由）
 	m.crossNodeGroupBroadcast(ctx, msg, excludeSender)
@@ -395,7 +395,7 @@ func (m *Manager) deliverToNamespace(ctx context.Context, msg *models.HubMessage
 	}, msg)
 
 	// 通知观察者（命名空间级广播事件）
-	m.host.NotifyObservers(ctx, msg)
+	m.NotifyObservers(ctx, msg)
 
 	// 跨节点命名空间广播（提交到分布式池经 routeToCluster 投递）
 	opts := cluster.ClusterDispatchOptions{

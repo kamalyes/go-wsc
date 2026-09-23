@@ -83,8 +83,8 @@ func (h *Hub) Run() {
 	)
 
 	// 心跳统计批量更新器在构造时已自动启动（BatchProcessor 内部 worker）
-	// ⏰ 心跳/跨节点 ACK 超时时间轮已在 NewHub() 构造期无条件初始化
-	//（避免与并发 Register 产生数据竞争，见 hub.go）
+	// ⏰ 心跳时间轮已随连接域心跳管理器在 NewHub() 构造期初始化，跨节点 ACK
+	// 超时时间轮同样在构造期无条件初始化（避免与并发 Register 产生数据竞争，见 hub.go）
 
 	// 🚦 启动准入闸门水位评估循环（AIMD 升降级；NewHub 构造期已初始化默认水位）
 	if gate := h.admission.Load(); gate != nil {
@@ -179,8 +179,8 @@ func (h *Hub) Run() {
 	// 使用 EventLoop 管理事件循环
 	// 统一处理客户端注册/注销、消息广播和定时任务
 	syncx.NewEventLoop(h.ctx).
-		// 心跳检查定时器：SSE 客户端超时兜底（WebSocket 由 heartbeatTimer O(1) 管理）
-		OnTicker(h.config.HeartbeatInterval, h.checkHeartbeat).
+		// 心跳检查定时器：SSE 客户端超时兜底（WebSocket 由连接域心跳管理器时间轮 O(1) 管理）
+		OnTicker(h.config.HeartbeatInterval, h.heartbeatMgr.ScanSSETimeouts).
 		// 统计计数器定时刷写：将原子计数器累积的统计批量写入 Redis
 		OnTicker(30*time.Second, h.flushStatsCounters).
 		// 性能监控定时器：定期报告性能指标
@@ -491,32 +491,18 @@ func (h *Hub) SafeShutdown() error {
 
 	h.logger.InfoKV("🛑 开始安全关闭 Hub", "node_id", h.nodeID)
 
-	// 停止心跳统计批量更新器，刷写剩余数据（Stop 内部 flush 剩余数据并等待完成）
-	if h.heartbeatBatcher != nil {
-		h.heartbeatBatcher.Stop()
+	// 停止心跳统计 / 消息统计 / 观察者通知批处理器（Stop 内部 flush 剩余数据并等待完成）
+	if h.batcherMgr != nil {
+		h.batcherMgr.StopTracking()
 	}
 
-	// 停止心跳时间轮（停止所有 worker，不再触发超时注销）
-	if h.heartbeatTimer != nil {
-		h.heartbeatTimer.Stop()
-	}
+	// 停止心跳时间轮（连接域心跳管理器持有，停止所有 worker，不再触发超时注销）
+	h.heartbeatMgr.Stop()
 
 	// 停止跨节点 ACK 超时时间轮（停止所有 worker，pending 超时任务由 5min 兜底扫描接管）
 	if h.ackTimeoutTimer != nil {
 		h.ackTimeoutTimer.Stop()
 	}
-
-	// 停止消息统计批量更新器，刷写剩余数据
-	if h.messageStatsBatcher != nil {
-		h.messageStatsBatcher.Stop()
-	}
-
-	// 停止观察者通知批量处理器，flush 剩余通知
-	if h.observerBatcher != nil {
-		h.observerBatcher.Stop()
-	}
-
-	// （旧 clusterBatcher 已随跨节点分发域化移除：gRPC 直连 + PubSub 定向发布，无批量处理器）
 
 	// 停止准入闸门水位评估循环（写泵/投递埋点为 atomic add，无需 flush）
 	if gate := h.admission.Load(); gate != nil {
@@ -538,17 +524,12 @@ func (h *Hub) SafeShutdown() error {
 	h.logger.InfoKV("批量清理 Redis 在线状态和连接记录", "node_id", h.nodeID)
 	h.batchCleanupOnShutdown(allClients)
 
-	// 停止消息记录攒批 outbox，flush 剩余记录到 DB（先于状态更新器 Stop，保 INSERT→UPDATE 落库顺序）
-	if h.messageRecordOutbox != nil {
-		h.logger.InfoKV("flush 消息记录 outbox", "node_id", h.nodeID)
-		h.messageRecordOutbox.Stop()
-	}
-
-	// 停止消息状态批量更新器，flush 剩余状态更新到 DB
-	// 在 h.cancel() 之前调用，确保 flush 时 h.ctx 仍然有效
-	if h.statusUpdater != nil {
-		h.logger.InfoKV("flush 消息状态更新", "node_id", h.nodeID)
-		h.statusUpdater.Stop()
+	// 停止消息记录攒批 outbox 与状态更新器，flush 剩余数据到 DB
+	// 在 h.cancel() 之前调用，确保 flush 时 h.ctx 仍然有效；
+	// 先 outbox 后 statusUpdater，保 INSERT→UPDATE 落库顺序
+	if h.batcherMgr != nil {
+		h.logger.InfoKV("flush 消息记录 outbox 与状态更新", "node_id", h.nodeID)
+		h.batcherMgr.StopRecords()
 	}
 
 	// 🔗 停止节点间 gRPC 通信（注销节点、关闭服务端与客户端连接池）
@@ -668,7 +649,7 @@ func (h *Hub) shutdownAllClientsParallel(clients []*models.Client) {
 		return
 	}
 	syncx.ParallelForEachSlice(clients, func(i int, client *models.Client) {
-		h.removeClientUnsafe(client)
+		h.lifecycleMgr.RemoveUnsafe(client)
 	})
 }
 
@@ -702,20 +683,8 @@ func (h *Hub) batchCleanupOnShutdown(clients []*models.Client) {
 		})
 	}
 
-	// 批量更新连接记录为断开
-	if h.connectionStore != nil {
-		syncx.ParallelForEachSlice(clients, func(i int, client *models.Client) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := h.connectionStore.MarkDisconnected(ctx, client.ID, models.DisconnectReasonServerShutdown, 1001); err != nil {
-				h.logger.DebugContextKV(client.Context, "shutdown: 更新连接断开记录失败",
-					"client_id", client.ID,
-					"user_id", client.UserID,
-					"error", err,
-				)
-			}
-		})
-	}
+	// 批量更新连接记录为断开（连接域：ServerShutdown + 1001 并行终态）
+	h.recordMgr.MarkDisconnectedBatch(clients)
 
 	// 批量质量终评（读 connect.duration 算 FinalScore 写 quality_score）
 	if h.connectionQualityStore != nil {

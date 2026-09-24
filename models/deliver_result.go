@@ -83,3 +83,13 @@ func (r *DeliverResult) AddError(err error) {
 func (r *DeliverResult) HasError() bool {
 	return len(r.Errors) > 0
 }
+
+// KickUserResult 统一踢人结果（Hub.KickUser 单一入口返回）
+//
+// 幂等语义：踢人目标是"用户离线"，用户已无连接（收集数 0）即目标达成——
+// Success=true 且 KickedConnections=0 表示"本来就不在线"，调用方据此与"真踢到"（KickedConnections>0）区分（跨节点分发为异步，本结果仅反映本节点信封内踢出数）
+type KickUserResult struct {
+	Success           bool // 是否成功执行（幂等：用户已不在线亦为 true）
+	NotificationSent  bool // 踢出通知是否已写入发送通道（sendNotification=true 时）
+	KickedConnections int  // 本节点触发注销的连接数（0=用户已不在线，幂等达成）
+}

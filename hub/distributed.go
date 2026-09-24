@@ -428,19 +428,19 @@ func (h *Hub) handleSendFailure(ctx context.Context, userID string, msg *models.
 }
 
 // handleDistributedKickUser 处理跨节点踢人
-// 注入 distMsg 的 appID+namespace 到 ctx，确保 KickUserSimple 按 appID+namespace 隔离踢人
+// 注入 distMsg 的 appID+namespace 到 ctx，确保按信封隔离踢出同名用户连接
 func (h *Hub) handleDistributedKickUser(ctx context.Context, distMsg *models.DistributedMessage) error {
 	select {
 	case <-ctx.Done():
 		return fmt.Errorf("context cancelled: %w", ctx.Err())
 	default:
-		// 🔏 路由信封注入：跨节点 kick 必须按 appID+namespace 隔离，避免误踢同 userID 其他 app/ns 连接
+		// 🔏 路由信封注入：跨节点 kick 按 appID+namespace 隔离，避免误踢同 userID 其他 app/ns 连接
 		// kick 消息可能无 Message 体（distMsg.Message 为 nil），仅从 distMsg 外层信封取
-		appID := distMsg.AppID
-		appID, _ = routing.NormalizeRoute(appID, "")
-		namespace := distMsg.Namespace
-		ctx = routing.NewRoute().WithAppID(appID).WithNamespace(namespace).Inject(ctx)
-		h.KickUserSimple(ctx, distMsg.TargetID, distMsg.Reason)
+		appID, _ := routing.NormalizeRoute(distMsg.AppID, "")
+		ctx = routing.NewRoute().WithAppID(appID).WithNamespace(distMsg.Namespace).Inject(ctx)
+		// 远端 kick 指令：仅踢本节点连接（连接域统一实现），不再跨节点分发（防回环）；
+		// 静默踢出（kick 指令不携带通知文案，通知由发起节点发出）
+		h.lifecycleMgr.KickUser(ctx, distMsg.TargetID, distMsg.Reason, false, "")
 		return nil
 	}
 }

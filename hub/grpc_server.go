@@ -294,14 +294,18 @@ func (s *GRPCServer) NotifyObservers(ctx context.Context, req *wscpb.NotifyObser
 }
 
 // KickUser 踢出本节点上的用户
+// 路由信封从 gRPC incoming metadata 恢复（appID+namespace），按信封隔离踢出同名用户连接
 func (s *GRPCServer) KickUser(ctx context.Context, req *wscpb.KickUserRequest) (*wscpb.KickUserResponse, error) {
-	// 从 gRPC incoming metadata 恢复 trace_id 到 ctx（跨节点链路串联）
+	// 从 gRPC incoming metadata 恢复 trace_id + 路由元数据（跨节点链路串联 + 信封隔离踢人）
 	ctx = logger.RestoreTraceFromIncoming(ctx)
+	ctx = routing.RestoreFromIncomingMetadata(ctx)
 
-	kicked := s.hub.KickUserSimple(ctx, req.GetUserId(), req.GetReason())
+	// 远端 kick 指令：仅踢本节点连接（连接域统一实现），不再跨节点分发（防回环）；
+	// 静默踢出（kick 指令不携带通知文案，通知由发起节点发出）
+	result := s.hub.lifecycleMgr.KickUser(ctx, req.GetUserId(), req.GetReason(), false, "")
 	return &wscpb.KickUserResponse{
-		Success:           true,
-		KickedConnections: int32(kicked),
+		Success:           result.Success,
+		KickedConnections: int32(result.KickedConnections),
 	}, nil
 }
 

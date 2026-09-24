@@ -182,31 +182,77 @@ func (m *LifecycleManager) kickOldest(userID string, exclude *models.Client) {
 // 踢出
 // ============================================================================
 
-// KickUser 简单踢出用户全部连接（不发送通知），返回已触发注销的连接数
-// （Unregister 为异步执行，返回值不代表注销已完成）
+// KickUser 统一踢出用户全部连接（唯一踢人实现，按 ctx 路由信封 appID+namespace 隔离）
+//
+// 收集维度：按 ctx 路由信封过滤（与 P2P 投递同一隔离语义）——同名 userID 跨
+// app/namespace 多端在线时，仅踢出信封内的连接，不同应用/租户互不误踢；
+// gRPC/distributed 路径经路由信封恢复/注入后传入，本地路径继承调用方信封
+//
+// 幂等语义：用户已无连接（收集数 0）即"已离线"目标达成，结果 KickedConnections=0
+// 不视为失败；sendNotification=true 时先向全部连接写入 KickOut 通知再注销
+// （Guaranteed 级控制消息，断链前投递，notificationMsg 为通知文案）
+//
 // ctx 由调用方传入（grpc/distributed 路径已恢复 trace_id），实现全链路追踪
-func (m *LifecycleManager) KickUser(ctx context.Context, userID string, reason string) int {
-	clients, ok := m.registry.GetUserClients(userID)
-	if !ok || len(clients) == 0 {
-		m.logger.WarnContextKV(ctx, "踢出用户失败：用户不在线",
+func (m *LifecycleManager) KickUser(ctx context.Context, userID string, reason string, sendNotification bool, notificationMsg string) *models.KickUserResult {
+	// 🔏 按路由信封收集（appID+namespace 隔离）：appID 为空（无路由 ctx 的边界场景）
+	// 退化为全维度收集（与 ForEachUserClientFiltered 空值语义对称）
+	appID, ns := routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx)
+	var clients []*models.Client
+	m.registry.ForEachUserClientFiltered(userID, appID, ns, nil, func(_ string, client *models.Client) bool {
+		clients = append(clients, client)
+		return true
+	})
+
+	result := &models.KickUserResult{Success: true, KickedConnections: len(clients)}
+
+	// 幂等达成：用户已无信封内连接，无需踢出（0=已离线，非失败）
+	if len(clients) == 0 {
+		m.logger.InfoContextKV(ctx, "用户已不在线，踢出目标已达成",
 			"user_id", userID,
 			"reason", reason,
+			"app_id", appID,
+			"namespace", ns,
 		)
-		return 0
+		return result
 	}
 
-	m.logger.InfoContextKV(ctx, "开始踢出用户",
+	// 逐连接：可选通知 + 注销；通知先于断开写入发送通道（与 KickClient 同序）
+	// 通知消息仅构造一次，多端复用；经各自 client.Context 保留连接级 trace_id
+	var kickMsg *models.HubMessage
+	if sendNotification {
+		content := notificationMsg
+		if content == "" {
+			content = "您已被强制下线"
+		}
+		kickMsg = models.NewHubMessage().
+			SetMessageType(models.MessageTypeKickOut).
+			SetSender(models.UserTypeSystem.String()).
+			SetSenderType(models.UserTypeSystem).
+			SetReceiver(userID).
+			SetContent(content).
+			WithContentExtra("reason", reason).
+			WithContentExtra("kicked_at", time.Now().Unix())
+	}
+
+	for _, client := range clients {
+		// Conn 为 nil（SSE 半注册等）跳过通知直接注销，与 KickClient 同语义
+		if kickMsg != nil && client.Conn != nil {
+			m.host.SendToClient(client.Context, client, kickMsg)
+			result.NotificationSent = true
+		}
+		m.host.Unregister(client)
+	}
+
+	m.logger.InfoContextKV(ctx, "用户踢出完成",
 		"user_id", userID,
 		"reason", reason,
-		"connection_count", len(clients),
+		"app_id", appID,
+		"namespace", ns,
+		"kicked_connections", result.KickedConnections,
+		"notification_sent", result.NotificationSent,
 	)
 
-	kicked := 0
-	for _, client := range clients {
-		m.host.Unregister(client)
-		kicked++
-	}
-	return kicked
+	return result
 }
 
 // KickClient 踢掉客户端并发送强制下线通知

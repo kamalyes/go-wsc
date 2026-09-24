@@ -312,10 +312,36 @@ func (h *Hub) SendToClient(ctx context.Context, client *models.Client, msg *mode
 	h.messagingMgr.SendToClient(ctx, client, msg)
 }
 
-// KickUserSimple 按用户 ID 踢出其在本节点的全部连接（gRPC 踢人 / 分布式踢人共用入口）
-// 逐连接经连接域 LifecycleManager 踢出：发送 ForceOffline 通知后注销并清理
-func (h *Hub) KickUserSimple(ctx context.Context, userID, reason string) int {
-	return h.lifecycleMgr.KickUser(ctx, userID, reason)
+// Deliver 统一投递入口（P2P / 群组 / 广播决策树，委托消息域）
+// 路由维度（appID/namespace/groupIDs）经 routing.NewRoute() 链式构建器注入 ctx：
+//   - P2P：msg.Receiver 非空触发（在线投递 + 离线存储 + 重试）
+//   - 群组可靠投递：msg.RequireAck=true 触发（per-member 重试 + 离线存储）
+//   - 命名空间/全局广播：ctx 信封 namespace 决策（空=全局）
+//
+// excludeSender：群组/广播场景排除发送者自身连接
+func (h *Hub) Deliver(ctx context.Context, msg *models.HubMessage, excludeSender bool) *models.DeliverResult {
+	return h.messagingMgr.Deliver(ctx, msg, excludeSender)
+}
+
+// KickUser 统一踢出用户全部连接（踢人唯一入口，按 ctx 路由信封 appID+namespace 隔离）
+//
+// 本地：踢出本节点上该用户信封内全部连接；sendNotification=true 时断链前向全部
+// 连接写入 KickOut 通知（Guaranteed 级控制消息，notificationMsg 为通知文案）
+//
+// 幂等语义：用户已无连接（收集数 0）即"已离线"目标达成，KickedConnections=0
+// 不视为失败，调用方据此区分"真踢到"与"本来就不在线"
+//
+// 跨节点：经在线路由索引查询用户连接所在的远端节点，异步分发 kick 指令
+// （gRPC 直连优先、PubSub 兜底）；远端节点按同一信封隔离静默踢出
+// （kick 指令不携带通知文案，通知仅由本节点发出）
+func (h *Hub) KickUser(ctx context.Context, userID, reason string, sendNotification bool, notificationMsg string) *models.KickUserResult {
+	// 本地踢出（连接域统一实现：信封隔离收集 + 可选 KickOut 通知 + 注销）
+	result := h.lifecycleMgr.KickUser(ctx, userID, reason, sendNotification, notificationMsg)
+
+	// 跨节点分发：向远端节点的同名用户连接投递 kick 指令（异步，不阻塞调用方）
+	h.dispatchKickToRemoteNodes(ctx, userID, reason)
+
+	return result
 }
 
 // ============================================================================

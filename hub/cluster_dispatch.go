@@ -240,6 +240,64 @@ func resolveDispatchTargetID(opts cluster.ClusterDispatchOptions) string {
 	}
 }
 
+// dispatchKickToRemoteNodes 跨节点踢人分发：向用户连接所在的远端节点发送 kick 指令
+//
+// 经在线路由索引查询用户连接所在节点，排除本节点后定向分发（Hub.KickUser 调用）：
+//   - gRPC 直连：executeGRPCDispatch 的 KickUser 分支 → 专用 KickUser RPC
+//   - PubSub 兜底：DistributedMessage 信封（AppID/Namespace/Reason）→ handleDistributedKickUser
+//
+// 防回环：远端消费端（GRPCServer.KickUser / handleDistributedKickUser）直调
+// LifecycleManager.KickUser 仅踢本地，不再跨节点分发
+//
+// 单机模式（无 PubSub 且无 gRPC）/ 索引未注入 / 用户仅在本节点时为 no-op
+func (h *Hub) dispatchKickToRemoteNodes(ctx context.Context, userID, reason string) {
+	// 单机模式：无跨节点通道，无需分发
+	if h.pubsub == nil && !h.IsGRPCEnabled() {
+		return
+	}
+	// 在线路由索引未注入：无法定位远端节点（踢出本节点连接后即结束）
+	if h.onlineStatusRepo == nil {
+		return
+	}
+
+	nodes, err := h.queryUserNodes(ctx, userID)
+	if err != nil || len(nodes) == 0 {
+		return
+	}
+
+	// 排除本节点（本节点连接已由本地踢出路径处理）
+	appID, ns := routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx)
+	targetNodes := make([]string, 0, len(nodes))
+	for _, nodeID := range nodes {
+		if nodeID == "" || nodeID == h.nodeID {
+			continue
+		}
+		targetNodes = append(targetNodes, nodeID)
+	}
+	if len(targetNodes) == 0 {
+		return
+	}
+
+	h.logger.InfoContextKV(ctx, "跨节点踢人分发",
+		"user_id", userID,
+		"reason", reason,
+		"app_id", appID,
+		"namespace", ns,
+		"target_nodes", targetNodes,
+	)
+
+	// 空壳消息：路由信封经 opts 携带（routeToCluster 内提取），远端仅按信封踢人不投递消息体
+	opts := cluster.ClusterDispatchOptions{
+		Operation:     models.OperationTypeKickUser,
+		TargetUserID:  userID,
+		Reason:        reason,
+		TargetNodeIDs: targetNodes,
+		AppID:         appID,
+		Namespace:     ns,
+	}
+	h.SubmitClusterDispatch(models.NewHubMessage(), opts)
+}
+
 // ============================================================================
 // gRPC 直连
 // ============================================================================
@@ -337,10 +395,10 @@ func (h *Hub) executeGRPCDispatch(ctx context.Context, addr string, msgData []by
 
 	var err error
 	switch opts.Operation {
-	case models.OperationTypeSendMessage, models.OperationTypeKickUser:
+	case models.OperationTypeSendMessage:
 		resp, derr := grpcClient.SendToUser(ctx, addr, opts.TargetUserID, msgData)
 		// 🔥 必须检查响应体的 Success 字段：目标节点用户不在时返回 (Success=false, UserOnline=false, err=nil)，
-		// 此前只检查 err 会把"目标节点明确投递失败"误判为投递成功 → 上层 routed=true 直接返回 →
+		// 此前只检查 err 会把"目标节点明确投递失败"误判为投递成功 → 上层 routed=true 直接 return →
 		// 消息静默丢失（Redis 在线索引过期/用户已断线迁移的典型场景）
 		if derr == nil && resp != nil && !resp.GetSuccess() {
 			h.logger.InfoContextKV(ctx, "gRPC 目标节点明确用户不在，跳过该节点",
@@ -349,6 +407,20 @@ func (h *Hub) executeGRPCDispatch(ctx context.Context, addr string, msgData []by
 				"target_user", opts.TargetUserID,
 				"user_online", resp.GetUserOnline(),
 				"resp_error", resp.GetError(),
+			)
+			return grpcOutcomeUserMiss
+		}
+		err = derr
+
+	case models.OperationTypeKickUser:
+		// 踢人走专用 KickUser RPC（路由信封经 gRPC metadata 传播，远端按信封隔离踢出）
+		resp, derr := grpcClient.KickUser(ctx, addr, opts.TargetUserID, opts.Reason)
+		// 扑空（用户不在该节点）与 SendMessage 的 user_miss 同语义：跳过该节点 PubSub 兜底
+		if derr == nil && resp != nil && resp.GetKickedConnections() == 0 {
+			h.logger.InfoContextKV(ctx, "gRPC 目标节点明确用户不在，跳过该节点踢人兜底",
+				"operation", opts.Operation,
+				"target_addr", addr,
+				"target_user", opts.TargetUserID,
 			)
 			return grpcOutcomeUserMiss
 		}

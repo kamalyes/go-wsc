@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/kamalyes/go-wsc/models"
+	"github.com/kamalyes/go-wsc/routing"
 	"github.com/kamalyes/go-wsc/spi"
 )
 
@@ -149,8 +150,9 @@ func TestLifecycleEnforceMultiLoginNoExistingUser(t *testing.T) {
 	assert.Empty(t, host.sent)
 }
 
-// TestLifecycleKickUser 踢出用户全部连接：不发送通知，返回触发注销的连接数
-func TestLifecycleKickUser(t *testing.T) {
+// TestLifecycleKickUserSilent 统一踢出（静默）：sendNotification=false 时不发送 KickOut 通知，
+// 结果汇总连接数
+func TestLifecycleKickUserSilent(t *testing.T) {
 	registry := NewShardedRegistry(false, false, RegistryCapacity{TotalClients: 64})
 	manager, host := newLifecycleManagerFixture(t, registry, MultiLoginPolicy{})
 
@@ -159,22 +161,114 @@ func TestLifecycleKickUser(t *testing.T) {
 	registry.AddClient(clientA)
 	registry.AddClient(clientB)
 
-	kicked := manager.KickUser(context.Background(), "u-6000", "test-kick")
+	result := manager.KickUser(context.Background(), "u-6000", "test-kick", false, "")
 
-	assert.Equal(t, 2, kicked)
+	require.NotNil(t, result)
+	assert.True(t, result.Success)
+	assert.Equal(t, 2, result.KickedConnections)
+	assert.False(t, result.NotificationSent)
 	require.Len(t, host.unregistered, 2)
-	assert.Empty(t, host.sent, "KickUser 不发送强制下线通知")
+	assert.Empty(t, host.sent, "静默踢出不应写入任何通知")
 }
 
-// TestLifecycleKickUserOffline 用户不在线：返回 0 且无副作用
-func TestLifecycleKickUserOffline(t *testing.T) {
+// TestLifecycleKickUserIdempotent 幂等语义：用户不在线（收集数 0）= 已离线目标达成，
+// KickedConnections=0 不视为失败，无任何副作用
+func TestLifecycleKickUserIdempotent(t *testing.T) {
 	registry := NewShardedRegistry(false, false, RegistryCapacity{TotalClients: 64})
 	manager, host := newLifecycleManagerFixture(t, registry, MultiLoginPolicy{})
 
-	kicked := manager.KickUser(context.Background(), "u-not-exist", "test-kick")
+	result := manager.KickUser(context.Background(), "u-not-exist", "test-kick", true, "msg")
 
-	assert.Zero(t, kicked)
+	require.NotNil(t, result)
+	assert.True(t, result.Success, "幂等达成（已不在线）亦为成功")
+	assert.Zero(t, result.KickedConnections)
+	assert.False(t, result.NotificationSent)
 	assert.Empty(t, host.unregistered)
+	assert.Empty(t, host.sent)
+}
+
+// TestLifecycleKickUserWithNotification 统一踢出（带通知）：KickOut 通知先于注销投递到全部连接，
+// 结果汇总连接数与通知状态
+func TestLifecycleKickUserWithNotification(t *testing.T) {
+	registry := NewShardedRegistry(false, false, RegistryCapacity{TotalClients: 64})
+	manager, host := newLifecycleManagerFixture(t, registry, MultiLoginPolicy{})
+
+	serverA, _ := newWSConnPair(t)
+	defer serverA.Close()
+	serverB, _ := newWSConnPair(t)
+	defer serverB.Close()
+
+	clientA := models.NewClient("lc-dk-a", "u-8000", models.UserTypeCustomer)
+	clientA.Conn = serverA
+	clientB := models.NewClient("lc-dk-b", "u-8000", models.UserTypeCustomer)
+	clientB.Conn = serverB
+	registry.AddClient(clientA)
+	registry.AddClient(clientB)
+
+	result := manager.KickUser(context.Background(), "u-8000", "管理员强制下线", true, "账号存在安全风险")
+
+	require.NotNil(t, result)
+	assert.True(t, result.Success)
+	assert.Equal(t, 2, result.KickedConnections)
+	assert.True(t, result.NotificationSent)
+	require.Len(t, host.unregistered, 2, "两条连接均应被注销")
+	for _, kicked := range host.unregistered {
+		msg, ok := host.sent[kicked.ID]
+		require.True(t, ok, "踢出通知应先于注销写入发送通道")
+		assert.Equal(t, models.MessageTypeKickOut, msg.MessageType)
+		assert.Equal(t, "账号存在安全风险", msg.Content)
+		assert.Equal(t, "u-8000", msg.Receiver)
+	}
+}
+
+// TestLifecycleKickUserEnvelopeIsolation 路由信封隔离：同名 userID 跨 app/namespace 多端在线时，
+// 仅踢出信封内连接（appID 严格匹配；namespace 空值=该 app 全命名空间），互不误踢
+func TestLifecycleKickUserEnvelopeIsolation(t *testing.T) {
+	registry := NewShardedRegistry(false, false, RegistryCapacity{TotalClients: 64})
+	manager, host := newLifecycleManagerFixture(t, registry, MultiLoginPolicy{})
+
+	// 同一 userID 三条连接：app-a/ns-1、app-b/ns-1、app-a/ns-2
+	appANs1 := models.NewClient("lc-app-a-ns1", "u-9000", models.UserTypeCustomer)
+	appANs1.AppID, appANs1.Namespace = "app-a", "ns-1"
+	appBNs1 := models.NewClient("lc-app-b-ns1", "u-9000", models.UserTypeCustomer)
+	appBNs1.AppID, appBNs1.Namespace = "app-b", "ns-1"
+	appANs2 := models.NewClient("lc-app-a-ns2", "u-9000", models.UserTypeCustomer)
+	appANs2.AppID, appANs2.Namespace = "app-a", "ns-2"
+	registry.AddClient(appANs1)
+	registry.AddClient(appBNs1)
+	registry.AddClient(appANs2)
+
+	// 按 app-a/ns-1 信封踢出：仅 appANs1 被踢，app-b 与 ns-2 连接不受影响
+	ctx := routing.NewRoute().WithAppID("app-a").WithNamespace("ns-1").Inject(context.Background())
+	result := manager.KickUser(ctx, "u-9000", "test-kick", false, "")
+
+	require.NotNil(t, result)
+	assert.True(t, result.Success)
+	assert.Equal(t, 1, result.KickedConnections)
+	require.Len(t, host.unregistered, 1, "仅信封内连接被踢")
+	assert.Equal(t, appANs1.ID, host.unregistered[0].ID)
+
+	// 按 app-a 信封（namespace 空 = 全命名空间）踢出：剩余 app-a 连接（ns-2）被踢，
+	// app-b 连接仍不受影响（appID 严格隔离）
+	// 真实 Unregister 会移除注册表条目，fake host 仅记录，这里手动移除模拟注销完成
+	removed := registry.RemoveClient(appANs1.ID, appANs1.UserID)
+	require.NotNil(t, removed, "第一条连接应已从注册表移除")
+	host.unregistered = nil
+	ctx = routing.NewRoute().WithAppID("app-a").Inject(context.Background())
+	result = manager.KickUser(ctx, "u-9000", "test-kick", false, "")
+
+	require.NotNil(t, result)
+	assert.True(t, result.Success)
+	assert.Equal(t, 1, result.KickedConnections)
+	require.Len(t, host.unregistered, 1)
+	assert.Equal(t, appANs2.ID, host.unregistered[0].ID, "app-b 连接不应被跨 app 误踢")
+
+	// 第二次踢出也同步移除（fake host 仅记录），app-b 连接仍在注册表（未被误踢）
+	registry.RemoveClient(appANs2.ID, appANs2.UserID)
+	assert.Equal(t, 1, registry.GetUserClientCount("u-9000"))
+	appBClient, ok := registry.GetClient(appBNs1.ID)
+	require.True(t, ok, "app-b 连接应仍在注册表")
+	assert.Equal(t, appBNs1, appBClient)
 }
 
 // TestLifecycleKickClientNotifiesBeforeUnregister 踢出单连接：先投递 ForceOffline 通知再注销；

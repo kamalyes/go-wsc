@@ -168,11 +168,35 @@ func (p *GRPCClientPool) SendToUser(ctx context.Context, addr, userID string, ms
 		if err != nil {
 			return err
 		}
-		// 注入 trace_id 到 gRPC metadata（跨节点传播）
+		// 注入 trace_id + 路由元数据到 gRPC metadata（跨节点传播，远端按信封隔离投递）
 		ctx = logger.InjectTraceToOutgoing(ctx, logger.ExtractTraceID(ctx))
+		ctx = routing.InjectToOutgoingMetadata(ctx)
 		resp, err = client.SendToUser(ctx, &wscpb.SendToUserRequest{
 			UserId:      userID,
 			MessageData: msgData,
+		})
+		return err
+	})
+	return resp, err
+}
+
+// KickUser 向指定节点发送踢人指令
+// 路由信封（appID+namespace）经 gRPC metadata 传播，远端按信封隔离踢出同名用户连接
+// 带熔断保护：故障节点快速失败，由上层 PubSub 兜底补踢
+func (p *GRPCClientPool) KickUser(ctx context.Context, addr, userID, reason string) (*wscpb.KickUserResponse, error) {
+	cb := p.getOrCreateBreaker(addr)
+	var resp *wscpb.KickUserResponse
+	err := cb.Execute(func() error {
+		client, err := p.GetClient(addr)
+		if err != nil {
+			return err
+		}
+		// 注入 trace_id + 路由元数据到 gRPC metadata（跨节点传播 + 信封隔离踢人）
+		ctx = logger.InjectTraceToOutgoing(ctx, logger.ExtractTraceID(ctx))
+		ctx = routing.InjectToOutgoingMetadata(ctx)
+		resp, err = client.KickUser(ctx, &wscpb.KickUserRequest{
+			UserId: userID,
+			Reason: reason,
 		})
 		return err
 	})

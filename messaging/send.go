@@ -174,6 +174,14 @@ func (m *Manager) sendToUser(ctx context.Context, toUserID string, msg *models.H
 
 // SendToUserWithRetry 带重试机制的发送消息给指定用户
 func (m *Manager) SendToUserWithRetry(ctx context.Context, toUserID string, msg *models.HubMessage) *models.SendResult {
+	return m.sendToUserWithRetry(ctx, toUserID, msg, nil)
+}
+
+// sendToUserWithRetry 带重试机制的发送核心
+// presetNodes：扇出调用方（群组可靠投递/批量发送）批量预取的节点索引，本地 miss 时零回源复用；
+// nil 或未覆盖该用户时回退单元素批查（BatchGetUserNodes 传单元素切片，复用批量端口）
+// 仅首次尝试有效：重试时用户可能已迁移节点，仍传 nil 重新查询
+func (m *Manager) sendToUserWithRetry(ctx context.Context, toUserID string, msg *models.HubMessage, presetNodes []string) *models.SendResult {
 	// 立即创建消息副本，避免并发修改原始消息
 	msg = msg.Clone()
 
@@ -212,13 +220,15 @@ func (m *Manager) SendToUserWithRetry(ctx context.Context, toUserID string, msg 
 
 	// 在线判定与路由合并为单次 Redis 往返（热路径优化，消 CheckUserOnline 的 bitmap 查询）：
 	// 本地 registry 命中 → 在线，节点列表由 sendToUser 自查（多端跨节点仍需一次查询）；
-	// 本地 miss → 一次 GetUserNodes 同时得到在线判定（len>0）与跨节点路由目标
-	// （原路径：IsUserOnline bitmap + checkAndRouteToNode GetUserNodes = 2 次往返）
-	var presetNodes []string
+	// 本地 miss → 一次 BatchGetUserNodes 同时得到在线判定（len>0）与跨节点路由目标
+	// （原路径：IsUserOnline bitmap + checkAndRouteToNode 节点单查 = 2 次往返）
 	localOnline := m.host.GetShardedRegistry().HasUser(toUserID, routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx))
 	isOnline := localOnline
 	if !localOnline {
-		presetNodes = m.host.GetUserNodes(ctx, toUserID)
+		// presetNodes：扇出调用方批量预取的节点索引（零回源复用）；nil 或批量预取未覆盖该用户时回退单次查询
+		if presetNodes == nil {
+			presetNodes = m.host.BatchGetUserNodes(ctx, []string{toUserID})[toUserID]
+		}
 		isOnline = len(presetNodes) > 0
 	}
 	// 逐消息成功路径日志走 DEBUG（千万连接规模下逐消息 INFO 是吞吐反模式，
@@ -500,6 +510,52 @@ func (m *Manager) flushOfflineBroadcasts(ctx context.Context, collector *offline
 		})
 }
 
+// prefetchFanoutNodes 批量预取扇出目标中本地 miss 用户的节点索引（Pipeline 单次往返）
+//
+// 扇出路径优化：群组可靠投递/批量发送对每个本地 miss 成员都要一次节点查询
+// 判定在线与路由目标（N 个远端成员 = N 次 Redis 往返）；本方法在扇出前一次 Pipeline
+// 拿到全部 miss 成员的节点映射，扇出闭包内经 sendToUserWithRetry 的 presetNodes 注入实现零回源。
+//
+// 返回 nil 表示不适用（单机模式/目标过少/全部本地在线/批量查询失败），扇出回退原有逐用户查询路径。
+// 不修改调用方 msg：信封归一化在克隆副本上完成（与 SendToUserWithRetry 内部同序同参）
+func (m *Manager) prefetchFanoutNodes(ctx context.Context, msg *models.HubMessage, userIDs []string) map[string][]string {
+	// 目标过少批量预取无收益（1 个用户 Pipeline 与单次查询等价）；单机模式无跨节点索引
+	if len(userIDs) < 2 || (!m.host.HasPubsub() && !m.host.IsGRPCEnabled()) {
+		return nil
+	}
+	// 路由信封归一化（appID 归一 + namespace 归一 + 信封优先）：
+	// 与 SendToUserWithRetry 入口同一套逻辑，保证批量查询的 scoped key 与逐用户查询同信封；
+	// 在克隆副本上执行，不污染调用方原始 msg
+	routeCtx := msg.Clone().InjectRoute(routing.EnsureRouteDefaults(ctx))
+	appID, ns := routing.AppIDFromContext(routeCtx), routing.NamespaceFromContext(routeCtx)
+
+	// 过滤本地 miss 用户（HasUser O(1) 原子读，不产生网络往返），去重 userID
+	registry := m.host.GetShardedRegistry()
+	seen := make(map[string]struct{}, len(userIDs))
+	misses := make([]string, 0, len(userIDs))
+	for _, uid := range userIDs {
+		if uid == "" {
+			continue
+		}
+		if _, dup := seen[uid]; dup {
+			continue
+		}
+		seen[uid] = struct{}{}
+		if !registry.HasUser(uid, appID, ns) {
+			misses = append(misses, uid)
+		}
+	}
+	if len(misses) == 0 {
+		return nil
+	}
+
+	nodes := m.host.BatchGetUserNodes(routeCtx, misses)
+	if len(nodes) == 0 {
+		return nil // 批量查询失败（含全部 miss），扇出回退逐用户查询
+	}
+	return nodes
+}
+
 // SendToMultipleUsers 并发发送消息给多个用户
 // 使用 ParallelSliceExecutor 并行投递 + 预分配 slice + 索引写入，消除 mutex 竞争
 func (m *Manager) SendToMultipleUsers(ctx context.Context, userIDs []string, msg *models.HubMessage) map[string]error {
@@ -513,9 +569,11 @@ func (m *Manager) SendToMultipleUsers(ctx context.Context, userIDs []string, msg
 
 	ctx, collector := withOfflineBroadcastCollector(ctx)
 	defer m.flushOfflineBroadcasts(ctx, collector)
+	// 批量预取本地 miss 用户的节点索引（1 次 Pipeline 替代扇出内 N 次单查）
+	presetNodes := m.prefetchFanoutNodes(ctx, msg, userIDs)
 	newFanoutExecutor(userIDs, m.fanoutConcurrency()).
 		Execute(func(idx int, userID string) (*models.SendResult, error) {
-			result := m.SendToUserWithRetry(ctx, userID, msg)
+			result := m.sendToUserWithRetry(ctx, userID, msg, presetNodes[userID])
 			if result.FinalError != nil {
 				errList[idx] = result.FinalError // 索引写入，无需锁
 			}
@@ -575,6 +633,8 @@ func (m *Manager) SendToGroupMembers(ctx context.Context, memberIDs []string, ms
 
 	ctx, collector := withOfflineBroadcastCollector(ctx)
 	defer m.flushOfflineBroadcasts(ctx, collector)
+	// 批量预取本地 miss 成员的节点索引（1 次 Pipeline 替代扇出内 N 次单查）
+	presetNodes := m.prefetchFanoutNodes(ctx, msg, filteredIDs)
 	newFanoutExecutor(filteredIDs, m.fanoutConcurrency()).
 		OnComplete(func(results []*models.SendResult, errors []error) {
 			for i, sendResult := range results {
@@ -599,10 +659,10 @@ func (m *Manager) SendToGroupMembers(ctx context.Context, memberIDs []string, ms
 			}
 		}).
 		Execute(func(idx int, uid string) (*models.SendResult, error) {
-			// SendToUserWithRetry 内部已经处理了在线/离线逻辑
-			// - 在线用户：直接发送
+			// sendToUserWithRetry 内部已经处理了在线/离线逻辑
+			// - 在线用户：直接发送（presetNodes 批量预取，免逐成员单查）
 			// - 离线用户：自动存储到离线队列，上线后推送
-			sendResult := m.SendToUserWithRetry(ctx, uid, msg)
+			sendResult := m.sendToUserWithRetry(ctx, uid, msg, presetNodes[uid])
 			return sendResult, nil
 		})
 
@@ -635,12 +695,18 @@ func (m *Manager) SendToClientsWithRetry(ctx context.Context, clients []*models.
 
 	ctx, collector := withOfflineBroadcastCollector(ctx)
 	defer m.flushOfflineBroadcasts(ctx, collector)
+	// 批量预取本地 miss 用户的节点索引（客户端列表按 userID 去重后预取，多端同用户共享单条索引）
+	userIDs := make([]string, len(clients))
+	for i, client := range clients {
+		userIDs[i] = client.UserID
+	}
+	presetNodes := m.prefetchFanoutNodes(ctx, msg, userIDs)
 	newFanoutExecutor(clients, m.fanoutConcurrency()).
 		OnSuccess(func(idx int, client *models.Client, result *models.SendResult) {
 			resultsSlice[idx] = result // 各 goroutine 写不同索引，无需锁
 		}).
 		Execute(func(idx int, client *models.Client) (*models.SendResult, error) {
-			return m.SendToUserWithRetry(ctx, client.UserID, msg), nil
+			return m.sendToUserWithRetry(ctx, client.UserID, msg, presetNodes[client.UserID]), nil
 		})
 
 	// Execute 同步返回后，所有写入已完成，无竞争地转为 map

@@ -73,9 +73,10 @@ type Host interface {
 	IsGRPCEnabled() bool
 	// RouteToCluster 路由消息到集群其他节点
 	RouteToCluster(ctx context.Context, msg *models.HubMessage, opts cluster.ClusterDispatchOptions) error
-	// GetUserNodes 查询用户所在的全部节点（路由索引，routerCache 兜底 + 自愈回写）
-	// 在线判定与路由共享单次 Redis 往返（本地 miss 路径）：len(nodes)>0 即在线
-	GetUserNodes(ctx context.Context, userID string) []string
+	// BatchGetUserNodes 批量查询多个用户所在节点（Pipeline 单次往返，信封过滤与路由上下文一致）
+	// 单个用户查询传单元素切片复用本端口（不再保留单查方法）；
+	// 在线判定语义：len(nodes)>0 即在线；查询失败/未注入返回 nil，调用方回退逐用户查询
+	BatchGetUserNodes(ctx context.Context, userIDs []string) map[string][]string
 	// CheckAndRouteToNode 检查用户在线节点并按需跨节点投递
 	// presetNodes 非空时跳过节点查询（调用方已预取，消第二次 Redis 往返）
 	// 返回：是否命中跨节点路由、目标节点列表、错误

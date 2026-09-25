@@ -14,7 +14,7 @@
  *     deliverToNamespace / deliverGlobally（由 Deliver 按决策树调用）
  *   - 跨节点辅助（仅保留有真实调用者的 2 个）：
  *     · crossNodeGroupBroadcast — deliverToGroupFireForget 调用，单群组跨节点
- *     · batchGetGroupMembers — distributed.go 跨节点接收侧调用，Pipeline 批量取成员
+ *     · batchGetGroupMembers — 两个群组投递分派器调用，Pipeline 批量取成员
  *     （历史 crossNodeGroupsBroadcast / crossNodeMultiNamespaceGroupsBroadcast / resolveTargetGroups
  *      仅服务于已删除的 BroadcastToAllGroups/BroadcastToGroups，一并清理）
  *   - 内部广播：BroadcastToFiltered / BroadcastToUserIDs（预序列化 + 直接 TrySend）
@@ -68,10 +68,13 @@ import (
 func (m *Manager) Deliver(ctx context.Context, msg *models.HubMessage, excludeSender bool) *models.DeliverResult {
 	// 统一入口：Clone + InjectRoute（注入 trace_id + 路由信封，appID 归一化，namespace 保留原值）
 	// namespace 不在此归一化：空值在广播分支表示「全局广播」语义，需保留
-	// P2P/群组分支需要 ns 严格非空，由各分支内部 EnsureRouteDefaults 兜底
+	// P2P 分支由 sendToUserWithRetry 内部 EnsureRouteDefaults 兜底；
+	// 群组分支 ns 是必要参数（群组按 appID+ns 信封分桶定位），缺失直接报错不兜底
 	msg = msg.Clone()
 	ctx = msg.InjectRoute(ctx)
 
+	// 路由元数据已随 InjectRoute 注入 ctx 信封，此处提取仅用于模式判定与入口日志；
+	// 各分派器内部直接从 ctx 提取所需路由，不再显式传参（单一事实源：ctx）
 	appID := routing.AppIDFromContext(ctx)
 	namespace := routing.NamespaceFromContext(ctx)
 	groupIDs := routing.GroupIDsFromContext(ctx)
@@ -103,15 +106,15 @@ func (m *Manager) Deliver(ctx context.Context, msg *models.HubMessage, excludeSe
 
 	switch mode {
 	case models.DeliveryModeP2P:
-		return m.deliverP2P(ctx, msg, appID)
+		return m.deliverP2P(ctx, msg)
 	case models.DeliveryModeGroupReliable:
-		return m.deliverToGroupReliable(ctx, msg, excludeSender, appID, namespace, groupIDs)
+		return m.deliverToGroupReliable(ctx, msg, excludeSender)
 	case models.DeliveryModeGroupBroadcast:
-		return m.deliverToGroupFireForget(ctx, msg, excludeSender, appID, namespace, groupIDs)
+		return m.deliverToGroupFireForget(ctx, msg, excludeSender)
 	case models.DeliveryModeNamespace:
-		return m.deliverToNamespace(ctx, msg, appID, namespace)
+		return m.deliverToNamespace(ctx, msg)
 	default:
-		return m.deliverGlobally(ctx, msg, appID)
+		return m.deliverGlobally(ctx, msg)
 	}
 }
 
@@ -121,10 +124,10 @@ func (m *Manager) Deliver(ctx context.Context, msg *models.HubMessage, excludeSe
 
 // deliverP2P 点对点投递（msg.Receiver 非空）
 // 委托 SendToUserWithRetry（内部已 EnsureRouteDefaults + InjectRoute，处理在线/离线/重试）
-func (m *Manager) deliverP2P(ctx context.Context, msg *models.HubMessage, appID string) *models.DeliverResult {
+func (m *Manager) deliverP2P(ctx context.Context, msg *models.HubMessage) *models.DeliverResult {
 	result := &models.DeliverResult{
 		Mode:   models.DeliveryModeP2P,
-		AppID:  appID,
+		AppID:  routing.AppIDFromContext(ctx),
 		Errors: make([]error, 0),
 	}
 
@@ -156,10 +159,10 @@ func (m *Manager) deliverP2P(ctx context.Context, msg *models.HubMessage, appID 
 // 复用历史 SendToGroup 逻辑：per-member SendToUserWithRetry + 离线存储 + 重试
 // 在线成员通过 SendToUserWithRetry 投递（自动支持跨节点路由与重试）
 // 离线成员通过离线消息处理器存储，上线后自动推送
-func (m *Manager) deliverToGroupReliable(ctx context.Context, msg *models.HubMessage, excludeSender bool, appID, namespace string, groupIDs []string) *models.DeliverResult {
-	// 群组严格场景：EnsureRouteDefaults 归一化 namespace（空补 DefaultNamespace）
-	ctx = routing.EnsureRouteDefaults(ctx)
-	namespace = routing.NamespaceFromContext(ctx)
+func (m *Manager) deliverToGroupReliable(ctx context.Context, msg *models.HubMessage, excludeSender bool) *models.DeliverResult {
+	// 路由信封已注入 ctx（Deliver 入口 InjectRoute，appID 已归一化非空），直接提取单一事实源
+	appID, namespace := routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx)
+	groupIDs := routing.GroupIDsFromContext(ctx)
 
 	result := &models.DeliverResult{
 		Mode:      models.DeliveryModeGroupReliable,
@@ -167,6 +170,13 @@ func (m *Manager) deliverToGroupReliable(ctx context.Context, msg *models.HubMes
 		Namespace: namespace,
 		GroupIDs:  groupIDs,
 		Errors:    make([]error, 0),
+	}
+
+	// 群组按 appID+namespace 信封分桶隔离，ns 是定位群组成员的必要参数：
+	// 缺失说明调用方漏传路由，静默补默认值会投错命名空间维度（跨租户隐患），直接报错
+	if namespace == "" {
+		result.AddError(models.ErrRouteNamespaceMissing)
+		return result
 	}
 
 	if m.host.GetGroupRepo() == nil {
@@ -177,23 +187,17 @@ func (m *Manager) deliverToGroupReliable(ctx context.Context, msg *models.HubMes
 	// msg 已 Clone（Deliver 入口），同步路由信封（namespace 已归一化）
 	ctx = msg.ContextWithRoute(ctx, appID, namespace, groupIDs)
 
-	// 1. 遍历所有 groupIDs 获取成员列表，合并去重
-	seen := make(map[string]struct{}, len(groupIDs)*8)
-	members := make([]string, 0, len(groupIDs)*8)
-	for _, gid := range groupIDs {
-		gMembers, err := m.host.GetGroupRepo().GetMembers(ctx, appID, namespace, gid)
-		if err != nil {
-			result.AddError(err)
-			m.host.GetLogger().ErrorContextKV(ctx, "获取群组成员失败",
-				"namespace", namespace, "group_id", gid, "error", err)
-			continue
-		}
-		for _, uid := range gMembers {
-			if _, ok := seen[uid]; !ok {
-				seen[uid] = struct{}{}
-				members = append(members, uid)
-			}
-		}
+	// 1. Pipeline 批量获取所有群组成员并合并去重（多群组 N 次 GetMembers → 1 次 RTT）
+	memberSet, err := m.batchGetGroupMembers(ctx, groupIDs)
+	if err != nil {
+		result.AddError(err)
+		m.host.GetLogger().ErrorContextKV(ctx, "批量获取群组成员失败",
+			"namespace", namespace, "group_ids", groupIDs, "error", err)
+		return result
+	}
+	members := make([]string, 0, len(memberSet))
+	for uid := range memberSet {
+		members = append(members, uid)
 	}
 
 	result.TotalMembers = len(members)
@@ -232,9 +236,12 @@ func (m *Manager) deliverToGroupReliable(ctx context.Context, msg *models.HubMes
 
 	ctx, collector := withOfflineBroadcastCollector(ctx)
 	defer m.flushOfflineBroadcasts(ctx, collector)
+	// 批量预取本地 miss 成员的节点索引（1 次 Pipeline 替代扇出内 N 次单查，
+	// 远端成员为主的群组单条消息 N 次往返 → 1 次）
+	presetNodes := m.prefetchFanoutNodes(ctx, msg, filteredMembers)
 	newFanoutExecutor(filteredMembers, m.fanoutConcurrency()).
 		Execute(func(idx int, uid string) (*models.SendResult, error) {
-			sendResult := m.SendToUserWithRetry(ctx, uid, msg)
+			sendResult := m.sendToUserWithRetry(ctx, uid, msg, presetNodes[uid])
 
 			// 原子分类，无锁开销
 			if sendResult.StoredOffline {
@@ -269,7 +276,7 @@ func (m *Manager) deliverToGroupReliable(ctx context.Context, msg *models.HubMes
 	result.StoredOffline = int(atomic.LoadInt64(&storedOffline))
 	result.Failed = int(atomic.LoadInt64(&failed))
 
-	// � 通知观察者（ctx 已在上方 ContextWithRoute 注入路由，直接使用即可）
+	// 通知观察者（ctx 已在上方 ContextWithRoute 注入路由，直接使用即可）
 	m.NotifyObservers(ctx, msg)
 
 	m.host.GetLogger().InfoContextKV(ctx, "群组消息投递完成",
@@ -292,10 +299,10 @@ func (m *Manager) deliverToGroupReliable(ctx context.Context, msg *models.HubMes
 //
 // 复用历史 BroadcastToGroupMembers 逻辑：本地 BroadcastToUserIDs + 跨节点 crossNodeGroupBroadcast
 // 仅投递当前在线成员，不存储离线消息，无重试，性能最优
-func (m *Manager) deliverToGroupFireForget(ctx context.Context, msg *models.HubMessage, excludeSender bool, appID, namespace string, groupIDs []string) *models.DeliverResult {
-	// 群组严格场景：EnsureRouteDefaults 归一化 namespace（空补 DefaultNamespace）
-	ctx = routing.EnsureRouteDefaults(ctx)
-	namespace = routing.NamespaceFromContext(ctx)
+func (m *Manager) deliverToGroupFireForget(ctx context.Context, msg *models.HubMessage, excludeSender bool) *models.DeliverResult {
+	// 路由信封已注入 ctx（Deliver 入口 InjectRoute，appID 已归一化非空），直接提取单一事实源
+	appID, namespace := routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx)
+	groupIDs := routing.GroupIDsFromContext(ctx)
 
 	result := &models.DeliverResult{
 		Mode:      models.DeliveryModeGroupBroadcast,
@@ -303,6 +310,13 @@ func (m *Manager) deliverToGroupFireForget(ctx context.Context, msg *models.HubM
 		Namespace: namespace,
 		GroupIDs:  groupIDs,
 		Errors:    make([]error, 0),
+	}
+
+	// 群组按 appID+namespace 信封分桶隔离，ns 是定位群组成员的必要参数：
+	// 缺失说明调用方漏传路由，静默补默认值会投错命名空间维度（跨租户隐患），直接报错
+	if namespace == "" {
+		result.AddError(models.ErrRouteNamespaceMissing)
+		return result
 	}
 
 	if m.host.GetGroupRepo() == nil {
@@ -317,22 +331,16 @@ func (m *Manager) deliverToGroupFireForget(ctx context.Context, msg *models.HubM
 		msg.CreateAt = time.Now()
 	}
 
-	// 1. 遍历所有 groupIDs 获取成员列表，合并去重
-	seen := make(map[string]struct{}, len(groupIDs)*8)
-	members := make([]string, 0, len(groupIDs)*8)
-	for _, gid := range groupIDs {
-		gMembers, err := m.host.GetGroupRepo().GetMembers(ctx, appID, namespace, gid)
-		if err != nil {
-			m.host.GetLogger().ErrorContextKV(ctx, "群组广播：获取群组成员失败",
-				"namespace", namespace, "group_id", gid, "error", err)
-			continue
-		}
-		for _, uid := range gMembers {
-			if _, ok := seen[uid]; !ok {
-				seen[uid] = struct{}{}
-				members = append(members, uid)
-			}
-		}
+	// 1. Pipeline 批量获取所有群组成员并合并去重（多群组 N 次 GetMembers → 1 次 RTT）
+	memberSet, err := m.batchGetGroupMembers(ctx, groupIDs)
+	if err != nil {
+		m.host.GetLogger().ErrorContextKV(ctx, "群组广播：批量获取群组成员失败",
+			"namespace", namespace, "group_ids", groupIDs, "error", err)
+		return result
+	}
+	members := make([]string, 0, len(memberSet))
+	for uid := range memberSet {
+		members = append(members, uid)
 	}
 
 	result.TotalMembers = len(members)
@@ -378,7 +386,8 @@ func (m *Manager) deliverToGroupFireForget(ctx context.Context, msg *models.HubM
 //
 // 复用历史 BroadcastToNamespace 逻辑：本地 BroadcastToFiltered + 跨节点命名空间广播
 // 本地按命名空间过滤广播，跨节点提交到 clusterBatcher
-func (m *Manager) deliverToNamespace(ctx context.Context, msg *models.HubMessage, appID, namespace string) *models.DeliverResult {
+func (m *Manager) deliverToNamespace(ctx context.Context, msg *models.HubMessage) *models.DeliverResult {
+	appID, namespace := routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx)
 	result := &models.DeliverResult{
 		Mode:      models.DeliveryModeNamespace,
 		AppID:     appID,
@@ -415,10 +424,10 @@ func (m *Manager) deliverToNamespace(ctx context.Context, msg *models.HubMessage
 //
 // 复用历史 Broadcast 逻辑：设置 models.BroadcastTypeGlobal + 提交分布式池跨节点投递 + 本地 handleBroadcast
 // 全命名空间广播（不按命名空间过滤），跨节点经分布式池 → routeToCluster 分发
-func (m *Manager) deliverGlobally(ctx context.Context, msg *models.HubMessage, appID string) *models.DeliverResult {
+func (m *Manager) deliverGlobally(ctx context.Context, msg *models.HubMessage) *models.DeliverResult {
 	result := &models.DeliverResult{
 		Mode:   models.DeliveryModeGlobal,
-		AppID:  appID,
+		AppID:  routing.AppIDFromContext(ctx),
 		Errors: make([]error, 0),
 	}
 
@@ -485,19 +494,21 @@ func (m *Manager) crossNodeGroupBroadcast(ctx context.Context, msg *models.HubMe
 }
 
 // batchGetGroupMembers 批量获取多个群组成员并合并去重
+// appID/namespace 从 ctx 路由信封提取（上游已注入，不再显式传参）
 // 使用 Redis Pipeline 一次 RTT 获取所有群组成员，O(totalMembers) 去重
-// 相比逐群组 N 次 GetMembers（N 次 RTT），降为 1 次 RTT
-func (m *Manager) batchGetGroupMembers(ctx context.Context, appID, namespace string, groupIDs []string) map[string]struct{} {
+// 相比逐群组 N 次 GetMembers（N 次 RTT），降为 1 次 RTT（单群组等价）
+// 单个群组查询失败仅该 key 缺失，不影响其他群组（与历史逐群组 continue 语义一致）
+// 整体 Pipeline 失败才返回错误
+func (m *Manager) batchGetGroupMembers(ctx context.Context, groupIDs []string) (map[string]struct{}, error) {
 	memberSet := make(map[string]struct{})
 	if len(groupIDs) == 0 || m.host.GetGroupRepo() == nil {
-		return memberSet
+		return memberSet, nil
 	}
 
+	appID, namespace := routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx)
 	groupMembers, err := m.host.GetGroupRepo().GetMultiGroupMembers(ctx, appID, namespace, groupIDs)
 	if err != nil {
-		m.host.GetLogger().WarnContextKV(ctx, "批量获取群组成员失败",
-			"app_id", appID, "namespace", namespace, "group_count", len(groupIDs), "error", err)
-		return memberSet
+		return memberSet, err
 	}
 
 	for _, members := range groupMembers {
@@ -505,7 +516,7 @@ func (m *Manager) batchGetGroupMembers(ctx context.Context, appID, namespace str
 			memberSet[uid] = struct{}{}
 		}
 	}
-	return memberSet
+	return memberSet, nil
 }
 
 // ============================================================================

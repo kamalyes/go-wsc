@@ -175,13 +175,18 @@ func (h *Hub) RouteToCluster(ctx context.Context, msg *models.HubMessage, opts c
 	return h.routeToCluster(ctx, msg, opts)
 }
 
-// GetUserNodes 查询用户所在的全部节点（路由索引，供消息域在线判定与路由共享单次往返）
-func (h *Hub) GetUserNodes(ctx context.Context, userID string) []string {
-	if h.onlineStatusRepo == nil {
+// BatchGetUserNodes 批量查询多个用户所在节点（Pipeline 单次往返，信封过滤与路由上下文一致）
+// 消息域唯一节点查询端口（单用户传单元素切片复用）；查询失败返回 nil，调用方回退逐用户查询
+func (h *Hub) BatchGetUserNodes(ctx context.Context, userIDs []string) map[string][]string {
+	if h.onlineStatusRepo == nil || len(userIDs) == 0 {
 		return nil
 	}
-	nodes, err := h.queryUserNodes(ctx, userID)
+	nodes, err := h.onlineStatusRepo.BatchGetUserNodes(ctx, userIDs)
 	if err != nil {
+		h.logger.WarnContextKV(ctx, "批量查询用户节点失败",
+			"user_count", len(userIDs),
+			"error", err,
+		)
 		return nil
 	}
 	return nodes

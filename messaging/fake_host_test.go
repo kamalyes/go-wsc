@@ -122,8 +122,8 @@ func (f *fakeHost) GetMessageRecordOutbox() *batcher.MessageRecordOutbox {
 	return f.messageRecordOutbox
 }
 
-// GetUserNodes 单机模式无路由索引，返回 nil（本地 miss 即判定离线）
-func (f *fakeHost) GetUserNodes(_ context.Context, _ string) []string { return nil }
+// BatchGetUserNodes 单机模式无路由索引，返回 nil（本地 miss 即判定离线，扇出预取据此回退逐用户路径）
+func (f *fakeHost) BatchGetUserNodes(_ context.Context, _ []string) map[string][]string { return nil }
 
 // CheckAndRouteToNode 单机模式无跨节点路由（sendToUser 的分布式分支据此走本地投递）
 func (f *fakeHost) CheckAndRouteToNode(_ context.Context, _ string, _ *models.HubMessage, _ []string) (bool, []string, error) {

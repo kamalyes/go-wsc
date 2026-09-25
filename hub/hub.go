@@ -85,6 +85,8 @@ type Hub struct {
 	nodeRegistry   *cluster.NodeRegistry
 	grpcClientPool *cluster.GRPCClientPool
 	routerCache    *cluster.RouterCache
+	// nodeQueryFlight 用户节点查询 in-flight 合并器（热点用户并发扇入共享单次回源）
+	nodeQueryFlight nodeQueryFlight
 	// rerouteGuard user_not_found 重路由守卫：messageID → 已拒绝节点集合
 	rerouteGuard sync.Map
 

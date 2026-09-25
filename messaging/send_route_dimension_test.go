@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/kamalyes/go-wsc/constants"
+	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/routing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -86,4 +87,33 @@ func TestSendToUserWithRetry_P2PNotUseSenderGroup(t *testing.T) {
 	ns, groupID := log.lastKeyDimension()
 	assert.Equal(t, "ns-p2p", ns)
 	assert.Equal(t, constants.DefaultGroupID, groupID, "P2P 发送离线存储应补默认组维度")
+}
+
+// TestDeliverGroupNamespaceRequired 群组投递 ns 是必要参数：缺失直接报错，不做默认值兜底
+// 修复前：群组分支静默 EnsureRouteDefaults 补默认 ns，调用方漏传路由时消息悄悄投到 default 维度（跨租户隐患）
+func TestDeliverGroupNamespaceRequired(t *testing.T) {
+	m, host := newTestManager()
+	offline, log := newOfflineRecordingHandler()
+	m.offlineHandler = offline
+	host.groupRepo = newFakeGroupStore()
+
+	// 漏传必要路由参数：只给 groupIDs 不给 namespace
+	groupCtx := routing.NewRoute().WithAppID("").WithNamespace("").WithGroupIDs([]string{"g-any"}).Inject(context.Background())
+
+	// 可靠投递分支（RequireAck=true）与 fire-and-forget 分支（RequireAck=false）执行同一契约
+	msgReliable := makeGroupMessage("owner1")
+	msgReliable.RequireAck = true
+	resultReliable := m.Deliver(groupCtx, msgReliable, false)
+	require.NotNil(t, resultReliable)
+	require.Len(t, resultReliable.Errors, 1, "ns 缺失应报 ErrRouteNamespaceMissing")
+	assert.Equal(t, models.ErrRouteNamespaceMissing, resultReliable.Errors[0])
+	assert.Equal(t, 0, resultReliable.TotalMembers, "ns 缺失应短路在群组成员查询之前")
+
+	msgFireForget := makeGroupMessage("owner2")
+	resultFireForget := m.Deliver(groupCtx, msgFireForget, false)
+	require.NotNil(t, resultFireForget)
+	require.Len(t, resultFireForget.Errors, 1, "fire-and-forget 分支同样报 ErrRouteNamespaceMissing")
+	assert.Equal(t, models.ErrRouteNamespaceMissing, resultFireForget.Errors[0])
+
+	assert.Equal(t, 0, log.getStoreCalled(), "ns 缺失短路在成员获取之前，不应产生任何投递/离线转存")
 }

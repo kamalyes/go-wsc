@@ -13,6 +13,7 @@ package connection
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,7 +25,10 @@ import (
 )
 
 // fakeHeartbeatHost 心跳端口测试桩：记录端口调用并回放注册的回调
+// 记录字段由 mu 保护——超时任务在时间轮 goroutine 异步执行，
+// 与测试 goroutine 的断言/轮询读并发（-race 检测要求）
 type fakeHeartbeatHost struct {
+	mu           sync.Mutex
 	unregistered []*models.Client
 	tracked      []*models.Client
 	renewed      []*models.Client
@@ -41,15 +45,28 @@ func (f *fakeHeartbeatHost) Context() context.Context { return context.Backgroun
 func (f *fakeHeartbeatHost) GetLogger() spi.Logger { return nil }
 
 func (f *fakeHeartbeatHost) Unregister(client *models.Client) {
+	f.mu.Lock()
 	f.unregistered = append(f.unregistered, client)
+	f.mu.Unlock()
+}
+
+// unregisteredCount 线程安全读取注销记录数（时间轮 goroutine 写、测试 goroutine 轮询读）
+func (f *fakeHeartbeatHost) unregisteredCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.unregistered)
 }
 
 func (f *fakeHeartbeatHost) TrackHeartbeatStats(client *models.Client) {
+	f.mu.Lock()
 	f.tracked = append(f.tracked, client)
+	f.mu.Unlock()
 }
 
 func (f *fakeHeartbeatHost) EnqueueHeartbeatRenew(client *models.Client) {
+	f.mu.Lock()
 	f.renewed = append(f.renewed, client)
+	f.mu.Unlock()
 }
 
 func (f *fakeHeartbeatHost) GetBeforeHeartbeatCallback() func(*models.Client) bool {
@@ -138,8 +155,14 @@ func TestHeartbeatTimeoutTaskUnregisters(t *testing.T) {
 	registry := NewShardedRegistry(false, false, RegistryCapacity{TotalClients: 64})
 	manager, host := newHeartbeatManagerFixture(t, registry, 30*time.Millisecond)
 
-	var timeoutClientID string
-	host.timeout = func(clientID, _ string, _ time.Time) { timeoutClientID = clientID }
+	// timeoutClientID 由 mu 保护：超时回调在时间轮 goroutine 写、Eventually 在测试 goroutine 轮询读
+	var mu sync.Mutex
+	timeoutClientID := ""
+	host.timeout = func(clientID, _ string, _ time.Time) {
+		mu.Lock()
+		timeoutClientID = clientID
+		mu.Unlock()
+	}
 
 	client := models.NewClient("hb-4", "u-4000", models.UserTypeCustomer)
 	client.Context = context.Background()
@@ -147,7 +170,9 @@ func TestHeartbeatTimeoutTaskUnregisters(t *testing.T) {
 	defer manager.CancelTimeout(client.ID)
 
 	require.Eventually(t, func() bool {
-		return len(host.unregistered) == 1 && timeoutClientID == client.ID
+		mu.Lock()
+		defer mu.Unlock()
+		return host.unregisteredCount() == 1 && timeoutClientID == client.ID
 	}, 3*time.Second, 20*time.Millisecond, "超时任务应触发回调并注销客户端")
 }
 
@@ -162,7 +187,7 @@ func TestHeartbeatTimeoutClosedClientSkips(t *testing.T) {
 	client.MarkClosed()
 
 	time.Sleep(200 * time.Millisecond)
-	assert.Empty(t, host.unregistered, "已关闭客户端的超时任务应跳过注销")
+	assert.Equal(t, 0, host.unregisteredCount(), "已关闭客户端的超时任务应跳过注销")
 	manager.CancelTimeout(client.ID)
 }
 
@@ -206,5 +231,5 @@ func TestHeartbeatSSEBypassesWheel(t *testing.T) {
 	// ScheduleTimeout 对 SSE 客户端是 no-op：短暂等待不应触发任何注销
 	manager.ScheduleTimeout(sse)
 	time.Sleep(200 * time.Millisecond)
-	assert.Empty(t, host.unregistered, "SSE 客户端不应进入时间轮超时管理")
+	assert.Equal(t, 0, host.unregisteredCount(), "SSE 客户端不应进入时间轮超时管理")
 }

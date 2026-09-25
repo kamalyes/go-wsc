@@ -111,12 +111,13 @@ const (
 	ErrTypeEventDeserializeFailed errorx.ErrorType = 81304 // 事件反序列化失败
 
 	// 群组相关错误 (81400-81499) - 不可重试
-	ErrTypeGroupNotFound      errorx.ErrorType = 81401 // 群组未找到
-	ErrTypeGroupMemberExisted errorx.ErrorType = 81402 // 用户已是群组成员
-	ErrTypeGroupFull          errorx.ErrorType = 81403 // 群组已满
-	ErrTypeGroupRepoNotSet    errorx.ErrorType = 81404 // 群组仓库未设置
-	ErrTypeGroupExisted       errorx.ErrorType = 81405 // 群组已存在（同命名空间下 groupID 唯一）
-	ErrTypeGroupReserved      errorx.ErrorType = 81406 // 群组名为系统保留名（__ 前缀）
+	ErrTypeGroupNotFound         errorx.ErrorType = 81401 // 群组未找到
+	ErrTypeGroupMemberExisted    errorx.ErrorType = 81402 // 用户已是群组成员
+	ErrTypeGroupFull             errorx.ErrorType = 81403 // 群组已满
+	ErrTypeGroupRepoNotSet       errorx.ErrorType = 81404 // 群组仓库未设置
+	ErrTypeGroupExisted          errorx.ErrorType = 81405 // 群组已存在（同命名空间下 groupID 唯一）
+	ErrTypeGroupReserved         errorx.ErrorType = 81406 // 群组名为系统保留名（__ 前缀）
+	ErrTypeRouteNamespaceMissing errorx.ErrorType = 81407 // 路由信封缺少命名空间（群组投递必要参数）
 )
 
 // init 初始化所有错误类型注册
@@ -217,6 +218,7 @@ func init() {
 	errorx.RegisterError(ErrTypeGroupFull, "group is full: %s")
 	errorx.RegisterError(ErrTypeGroupRepoNotSet, "group repository is not set")
 	errorx.RegisterError(ErrTypeGroupExisted, "group already existed in namespace: %s")
+	errorx.RegisterError(ErrTypeRouteNamespaceMissing, "route namespace is missing: group delivery requires appID+namespace envelope")
 
 	// 注册消息记录仓库相关错误
 	errorx.RegisterError(ErrTypeRecordRepositoryNotSet, "message record repository is not set")
@@ -266,6 +268,7 @@ func init() {
 	ErrGroupRepoNotSet = errorx.NewError(ErrTypeGroupRepoNotSet)
 	ErrGroupExisted = errorx.NewError(ErrTypeGroupExisted)
 	ErrGroupReserved = errorx.NewError(ErrTypeGroupReserved)
+	ErrRouteNamespaceMissing = errorx.NewError(ErrTypeRouteNamespaceMissing)
 }
 
 // ============================================================================
@@ -339,12 +342,13 @@ var (
 
 // 群组相关错误变量
 var (
-	ErrGroupNotFound      errorx.BaseError
-	ErrGroupMemberExisted errorx.BaseError
-	ErrGroupFull          errorx.BaseError
-	ErrGroupRepoNotSet    errorx.BaseError
-	ErrGroupExisted       errorx.BaseError
-	ErrGroupReserved      errorx.BaseError
+	ErrGroupNotFound         errorx.BaseError
+	ErrGroupMemberExisted    errorx.BaseError
+	ErrGroupFull             errorx.BaseError
+	ErrGroupRepoNotSet       errorx.BaseError
+	ErrGroupExisted          errorx.BaseError
+	ErrGroupReserved         errorx.BaseError
+	ErrRouteNamespaceMissing errorx.BaseError
 )
 
 // IsRetryableError 判断错误是否可以重试

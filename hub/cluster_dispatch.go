@@ -316,6 +316,24 @@ func (h *Hub) dispatchKickToRemoteNodes(ctx context.Context, userID, reason stri
 func (h *Hub) dispatchViaGRPC(ctx context.Context, msg *models.HubMessage, opts cluster.ClusterDispatchOptions) clusterRouteResult {
 	result := clusterRouteResult{}
 
+	// 🔏 路由信封归一化（msg 优先，opts 兜底）：与 routeToCluster 构建 dispatch 信封口径一致
+	// 广播类 RPC（BroadcastGroup/NotifyObservers）在服务端反序列化 msg 前就用 AppIDFromContext
+	// 查成员/匹配，其路由仅来自 gRPC metadata，此处若 appID 为空会退 DefaultAppID → 跨租户隔离失效
+	// 故必须在进入 gRPC 前把归一化信封回填到 opts，保证 gRPC 直连与 PubSub 兜底两条路径信封一致
+	opts.AppID = constants.NormalizeAppID(mathx.IfEmpty(msg.AppID, opts.AppID))
+	opts.Namespace = mathx.IfEmpty(msg.Namespace, opts.Namespace)
+	if len(msg.GroupIDs) > 0 {
+		opts.GroupIDs = append([]string(nil), msg.GroupIDs...)
+	}
+
+	// 全局/命名空间广播（Broadcast）无定向目标节点：语义为广播到所有节点，走 Redis PubSub
+	// 广播频道（publishToCluster，targeted=false），不做 gRPC 定向直连。
+	// 历史缺陷：Broadcast 曾复用 BroadcastGroup RPC（groupID 空）→ 服务端查空成员返回 Delivered=0 且
+	// 无 error，发送端误判 grpcOutcomeDelivered 跳过 PubSub 兜底，导致跨节点广播静默丢失
+	if opts.Operation == models.OperationTypeBroadcast {
+		return result
+	}
+
 	if !h.IsGRPCEnabled() {
 		// gRPC 未启用：优先用调用方已知的目标节点列表（P2P 场景已从 Redis 在线索引查到 otherNodes），
 		// 否则 fallback 到 nodeRegistry 中的所有其他节点（群组/全局广播场景，nodeRegistry 由 gRPC 互连注册维护）
@@ -446,12 +464,6 @@ func (h *Hub) executeGRPCDispatch(ctx context.Context, addr string, msgData []by
 		// 单次调用注入全部 GroupIDs，服务端合并去重观察者后一次投递
 		observerCtx := routing.NewRoute().WithAppID(opts.AppID).WithNamespace(opts.Namespace).WithGroupIDs(opts.GroupIDs).Inject(ctx)
 		_, err = grpcClient.NotifyObservers(observerCtx, addr, msgData)
-
-	case models.OperationTypeBroadcast:
-		// 全局广播通过 gRPC SendToUser 的变体：向所有节点发送
-		// 复用 BroadcastGroup 的 namespace 过滤能力，groupID 留空表示全命名空间
-		broadcastCtx := routing.NewRoute().WithAppID(opts.AppID).WithNamespace(opts.Namespace).Inject(ctx)
-		_, err = grpcClient.BroadcastGroup(broadcastCtx, addr, msgData, false, "")
 
 	default:
 		h.logger.WarnContextKV(ctx, "未知集群操作类型，跳过 gRPC", "operation", opts.Operation)

@@ -44,7 +44,6 @@ func TestDispatchOperationRoundTrip(t *testing.T) {
 		models.OperationTypeGroupBroadcast,
 		models.OperationTypeGroupsBroadcast,
 		models.OperationTypeObserverNotify,
-		models.OperationTypeBroadcast,
 	}
 
 	for _, op := range ops {
@@ -66,6 +65,10 @@ func TestDispatchOperationRoundTrip(t *testing.T) {
 	// 未知领域操作 → UNSPECIFIED
 	assert.Equal(t, wscpb.DispatchOperation_DISPATCH_OPERATION_UNSPECIFIED,
 		ToProtoDispatchOperation(models.OperationTypeHeartbeat))
+	// 全局/命名空间广播在 dispatchViaGRPC 已短路走 PubSub，不再进入微批 gRPC 路径，
+	// 故不映射为任何 proto 枚举（落 UNSPECIFIED，服务端 default 跳过）
+	assert.Equal(t, wscpb.DispatchOperation_DISPATCH_OPERATION_UNSPECIFIED,
+		ToProtoDispatchOperation(models.OperationTypeBroadcast))
 }
 
 // ============================================================================

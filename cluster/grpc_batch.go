@@ -248,8 +248,6 @@ func ToProtoDispatchOperation(op models.OperationType) wscpb.DispatchOperation {
 		return wscpb.DispatchOperation_DISPATCH_GROUP_BROADCAST
 	case models.OperationTypeObserverNotify:
 		return wscpb.DispatchOperation_DISPATCH_OBSERVER_NOTIFY
-	case models.OperationTypeBroadcast:
-		return wscpb.DispatchOperation_DISPATCH_BROADCAST
 	default:
 		return wscpb.DispatchOperation_DISPATCH_OPERATION_UNSPECIFIED
 	}
@@ -267,8 +265,6 @@ func FromProtoDispatchOperation(op wscpb.DispatchOperation) models.OperationType
 		return models.OperationTypeGroupBroadcast
 	case wscpb.DispatchOperation_DISPATCH_OBSERVER_NOTIFY:
 		return models.OperationTypeObserverNotify
-	case wscpb.DispatchOperation_DISPATCH_BROADCAST:
-		return models.OperationTypeBroadcast
 	default:
 		return ""
 	}

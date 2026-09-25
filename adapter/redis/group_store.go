@@ -11,7 +11,8 @@
  *   - {prefix}members:{appID}:{namespace}:{groupID}     → Set 成员 userID 集合
  *   - {prefix}user:{appID}:{namespace}:{userID}         → Set 用户在该 (app,ns) 下加入的 groupID 集合（反向索引）
  *   - {prefix}ns:{appID}:{namespace}:groups             → Set (app,ns) 下所有 groupID 集合
- *   - {prefix}gns:{appID}:{groupID}                      → Set 该 groupID 存在实例的 namespace 集合（跨 ns 实例索引）
+ *   - {prefix}gns:{appID}:{groupID}                     → Set 该 groupID 存在实例的 namespace 集合（跨 ns 实例索引）
+ *   - {prefix}nss:{appID}                               → Set 该 app 下有群组的 namespace 集合（全命名空间广播定位索引）
  *
  * Copyright (c) 2026 by kamalyes, All Rights Reserved.
  */
@@ -21,7 +22,6 @@ package redisadapter
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
@@ -76,12 +76,18 @@ func (r *GroupStore) groupInstancesKey(appID, groupID string) string {
 	return r.keyPrefix + "gns:" + appID + ":" + groupID
 }
 
+// namespacesKey 命名空间显式索引 key：appID → 有群组的 namespace 集合（Set）
+// 全命名空间广播的定位来源，建组写入、解散收缩，O(成员数) 直查取代 keyspace SCAN
+func (r *GroupStore) namespacesKey(appID string) string {
+	return r.keyPrefix + "nss:" + appID
+}
+
 // ============================================================================
 // 群组元信息管理
 // ============================================================================
 
-// createGroupScript Lua 脚本：原子性地校验同 (appID, namespace) 下 groupID 唯一并写入元信息、命名空间索引与实例索引
-// KEYS[1]=info 三维元信息 / KEYS[2]=ns 归属索引 / KEYS[3]=gns 跨 ns 实例索引；ARGV[1]=元信息 JSON / ARGV[2]=groupID / ARGV[3]=namespace
+// createGroupScript Lua 脚本：原子性的校验同 (appID, namespace) 下 groupID 唯一并写入元信息、命名空间索引、实例索引与 nss 显式索引
+// KEYS[1]=info 三维元信息 / KEYS[2]=ns 归属索引 / KEYS[3]=gns 跨 ns 实例索引 / KEYS[4]=nss 命名空间显式索引；ARGV[1]=元信息 JSON / ARGV[2]=groupID / ARGV[3]=namespace
 // 返回 1 表示创建成功，0 表示群组已存在
 const createGroupScript = `
 if redis.call("exists", KEYS[1]) == 1 then
@@ -90,7 +96,22 @@ end
 redis.call("set", KEYS[1], ARGV[1])
 redis.call("sadd", KEYS[2], ARGV[2])
 redis.call("sadd", KEYS[3], ARGV[3])
+redis.call("sadd", KEYS[4], ARGV[3])
 return 1
+`
+
+// disbandNsIndexScript Lua 脚本：原子维护解散侧的命名空间索引
+// KEYS[1]=ns 归属索引 / KEYS[2]=nss 命名空间显式索引；ARGV[1]=groupID / ARGV[2]=namespace
+// ns 下已无群组（SCARD==0）时同步从 nss 显式索引移除，保证 GetAllNamespaces 零空残留
+// SCARD 判定必须与 SREM 同脚本原子：拆两步会留下"ns 已空但 nss 仍登记"的广播侧幻影租户
+// 返回 ns 剩余群组数（脚本必须显式 return，nil 返回会被 go-redis 转为 redis.Nil 错误）
+const disbandNsIndexScript = `
+redis.call("srem", KEYS[1], ARGV[1])
+local remaining = redis.call("scard", KEYS[1])
+if remaining == 0 then
+	redis.call("srem", KEYS[2], ARGV[2])
+end
+return remaining
 `
 
 // CreateGroup 创建业务群组
@@ -121,7 +142,7 @@ func (r *GroupStore) createGroupUnchecked(ctx context.Context, group *models.Gro
 		return errorx.WrapError("marshal group failed", err)
 	}
 	result, err := r.client.Eval(ctx, createGroupScript,
-		[]string{r.infoKey(appID, namespace, group.GroupID), r.namespaceGroupsKey(appID, namespace), r.groupInstancesKey(appID, group.GroupID)},
+		[]string{r.infoKey(appID, namespace, group.GroupID), r.namespaceGroupsKey(appID, namespace), r.groupInstancesKey(appID, group.GroupID), r.namespacesKey(appID)},
 		data, group.GroupID, namespace,
 	).Result()
 	if err != nil {
@@ -158,7 +179,7 @@ func (r *GroupStore) EnsureSystemGroup(ctx context.Context, appID, namespace, gr
 		return errorx.WrapError("marshal system group failed", err)
 	}
 	if _, err := r.client.Eval(ctx, createGroupScript,
-		[]string{r.infoKey(appID, namespace, groupID), r.namespaceGroupsKey(appID, namespace), r.groupInstancesKey(appID, groupID)},
+		[]string{r.infoKey(appID, namespace, groupID), r.namespaceGroupsKey(appID, namespace), r.groupInstancesKey(appID, groupID), r.namespacesKey(appID)},
 		data, groupID, namespace,
 	).Result(); err != nil {
 		return errorx.WrapError("ensure system group failed", err)
@@ -190,17 +211,24 @@ func (r *GroupStore) DisbandGroup(ctx context.Context, appID, namespace, groupID
 		return err
 	}
 
-	// Pipeline 批量删除：元信息 + 成员集合 + 命名空间索引 + 实例索引中该 ns 的记录 + 各成员反向索引
+	// Pipeline 批量删除：元信息 + 成员集合 + 实例索引中该 ns 的记录 + 各成员反向索引
 	pipe := r.client.Pipeline()
 	pipe.Del(ctx, r.infoKey(appID, namespace, groupID))
 	pipe.Del(ctx, r.membersKey(appID, namespace, groupID))
 	// 实例索引按 ns 移除（同 gid 其他租户实例不受影响），集合空后由 Redis 自动回收
 	pipe.SRem(ctx, r.groupInstancesKey(appID, groupID), namespace)
-	pipe.SRem(ctx, r.namespaceGroupsKey(appID, namespace), groupID)
 	for _, userID := range members {
 		pipe.SRem(ctx, r.userGroupsKey(appID, namespace, userID), groupID)
 	}
-	_, err = pipe.Exec(ctx)
+	if _, err = pipe.Exec(ctx); err != nil {
+		return err
+	}
+	// ns 归属索引与 nss 显式索引的收缩经 Lua 原子完成（SCARD==0 时同步从 nss 移除），
+	// 保证 GetAllNamespaces 零空残留
+	_, err = r.client.Eval(ctx, disbandNsIndexScript,
+		[]string{r.namespaceGroupsKey(appID, namespace), r.namespacesKey(appID)},
+		groupID, namespace,
+	).Result()
 	return err
 }
 
@@ -283,27 +311,11 @@ func (r *GroupStore) GetNamespaceGroups(ctx context.Context, appID, namespace st
 }
 
 // GetAllNamespaces 获取指定 appID 下所有有群组的命名空间ID
-// 通过 SCAN {prefix}ns:{appID}:*:groups 提取 namespace
+// 直查 nss:{appID} 显式索引（建组写入、解散原子收缩），O(成员数) 单次 RTT 取代 keyspace SCAN
+// 破坏性变更：老数据不迁移，冷启动索引为空，随建组逐步重建
 func (r *GroupStore) GetAllNamespaces(ctx context.Context, appID string) ([]string, error) {
 	appID = mathx.IfEmpty(appID, constants.DefaultAppID)
-	// pattern {prefix}ns:{appID}:*:groups，中段 * 匹配 namespace
-	pattern := r.keyPrefix + "ns:" + appID + ":*:groups"
-	var namespaces []string
-	iter := r.client.Scan(ctx, 0, pattern, 100).Iterator()
-	for iter.Next(ctx) {
-		key := iter.Val()
-		// 从 key {prefix}ns:{appID}:{namespace}:groups 中提取 namespace
-		// 先去前缀 {prefix}ns:{appID}: 再去后缀 :groups
-		trimmed := strings.TrimPrefix(key, r.keyPrefix+"ns:"+appID+":")
-		namespace := strings.TrimSuffix(trimmed, ":groups")
-		if namespace != "" {
-			namespaces = append(namespaces, namespace)
-		}
-	}
-	if err := iter.Err(); err != nil {
-		return nil, fmt.Errorf("scan namespaces failed: %w", err)
-	}
-	return namespaces, nil
+	return r.client.SMembers(ctx, r.namespacesKey(appID)).Result()
 }
 
 // GetMultiGroupMembers 批量获取多个群组的成员（跨 namespace 聚合，两段 Pipeline 共 2 次网络往返）

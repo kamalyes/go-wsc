@@ -565,6 +565,16 @@ func TestGetAllNamespaces(t *testing.T) {
 		require.NoError(t, err)
 		assert.Contains(t, namespaces, "tenantA", "tenantA 仍有 gA2，应保留")
 	})
+
+	t.Run("解散租户最后一个群组后该租户从索引移除", func(t *testing.T) {
+		// tenantA 此时仅剩 gA2，解散后 SCARD==0 触发 nss 显式索引同步收缩
+		require.NoError(t, repo.DisbandGroup(ctx, constants.DefaultAppID, "tenantA", "gA2"))
+
+		namespaces, err := repo.GetAllNamespaces(ctx, constants.DefaultAppID)
+		require.NoError(t, err)
+		assert.NotContains(t, namespaces, "tenantA", "tenantA 已无群组，应从 nss 索引移除，不残留幻影租户")
+		assert.ElementsMatch(t, []string{"tenantB", "default"}, namespaces)
+	})
 }
 
 // TestGetMultiGroupMembers 验证批量获取多个群组成员（跨 ns 聚合，gns 实例索引定位）

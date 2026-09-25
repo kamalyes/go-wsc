@@ -269,6 +269,9 @@ for i = 1, clientCount do
         redis.call('ZADD', unscopedUserClientsKey, expireTime, clientID)
         redis.call('EXPIRE', unscopedUserClientsKey, ttl)
         redis.call('ZADD', nodeClientsKey, expireTime, clientID)
+        -- node_clients 同步续 key TTL：活节点被心跳持续刷新永不过期，崩溃节点无人续期、
+        -- 整 key 在 ttl 后自动消失（CleanupExpired 只清存活节点自己的 key，崩溃节点无人认领）
+        redis.call('EXPIRE', nodeClientsKey, ttl)
         redis.call('ZADD', allUsersKey, expireTime, userID)
         redis.call('ZADD', typeKey, expireTime, userID)
         -- types 集合登记（CleanupExpired 据此遍历所有 type ZSET，幂等）
@@ -373,6 +376,8 @@ for i = 1, clientCount do
             redis.call('ZADD', unscopedUserClientsKey, expireTime, clientID)
             redis.call('EXPIRE', unscopedUserClientsKey, ttl)
             redis.call('ZADD', nodeClientsKey, expireTime, clientID)
+            -- node_clients key TTL 随心跳刷新（崩溃节点 ttl 后整 key 自动消失，防泄漏）
+            redis.call('EXPIRE', nodeClientsKey, ttl)
             redis.call('ZADD', allUsersKey, expireTime, userID)
             redis.call('ZADD', typeKey, expireTime, userID)
 

@@ -37,11 +37,10 @@ func RoutingFromContext(ctx context.Context) *RoutingContext {
 // appID 为必填维度（无广播语义），此处统一归一化：ctx 无路由或 appID 为空时返回 DefaultAppID
 // 调用方直接使用返回值即可，无需再 NormalizeAppID/NormalizeRoute 二次包装，消除散落归一化
 func AppIDFromContext(ctx context.Context) string {
-	var raw string
 	if rc := RoutingFromContext(ctx); rc != nil {
-		raw = rc.AppID
+		return constants.NormalizeAppID(rc.AppID)
 	}
-	return constants.NormalizeAppID(raw)
+	return constants.DefaultAppID
 }
 
 // NamespaceFromContext 从 context 提取命名空间
@@ -118,8 +117,7 @@ func RestoreFromIncomingMetadata(ctx context.Context) context.Context {
 
 	r := NewRoute()
 	if vals := md.Get(constants.MetadataKeyAppID); len(vals) > 0 {
-		appID, _ := NormalizeRoute(vals[0], "")
-		r.WithAppID(appID)
+		r.WithAppID(constants.NormalizeAppID(vals[0]))
 	}
 	if vals := md.Get(constants.MetadataKeyNamespace); len(vals) > 0 {
 		r.WithNamespace(vals[0])

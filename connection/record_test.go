@@ -42,8 +42,8 @@ func (f *fakeRecordHost) GetConnectionRecordRepo() spi.ConnectionStore {
 // markDisconnectedCall 记录一次 MarkDisconnected 调用参数
 type markDisconnectedCall struct {
 	connectionID string
-	reason      models.DisconnectReason
-	code        int
+	reason       models.DisconnectReason
+	code         int
 }
 
 // fakeRecordStore 连接记录仓储桩：只覆盖记录语义相关方法（未覆盖方法 panic）

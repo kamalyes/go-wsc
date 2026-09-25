@@ -33,6 +33,7 @@ import (
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/cluster"
+	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/routing"
 )
@@ -176,7 +177,7 @@ func (h *Hub) handleDistributedUserNotFound(ctx context.Context, distMsg *models
 
 	// 路由来源优先级与 handleDistributedSendMessage 一致：外层信封 > 内层信封
 	appID := mathx.IfEmpty(distMsg.AppID, msg.AppID)
-	appID, _ = routing.NormalizeRoute(appID, "")
+	appID = constants.NormalizeAppID(appID)
 	namespace := mathx.IfEmpty(distMsg.Namespace, msg.Namespace)
 
 	h.decideUserNotFoundReroute(ctx, msg, userID, distMsg.NodeID, appID, namespace)

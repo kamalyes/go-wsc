@@ -31,6 +31,7 @@ import (
 
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-wsc/cluster"
+	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/models"
 	wscpb "github.com/kamalyes/go-wsc/models/pb"
 	"github.com/kamalyes/go-wsc/routing"
@@ -87,7 +88,7 @@ func (h *Hub) routeToCluster(ctx context.Context, msg *models.HubMessage, opts c
 	}
 
 	// AppID：msg 信封优先，opts 兜底；空值归一化为 DefaultAppID（入口层策略一致）
-	appID, _ := routing.NormalizeRoute(mathx.IfEmpty(msg.AppID, opts.AppID), "")
+	appID := constants.NormalizeAppID(mathx.IfEmpty(msg.AppID, opts.AppID))
 
 	// 🔏 路由信封解析：msg 信封优先（入口层已注入，异步/跨节点链路持久化），opts 仅作兜底
 	// - Broadcast 操作：空 Namespace 表示全命名空间广播，不归一化为 "default"
@@ -613,7 +614,7 @@ func (h *Hub) handleDeadNodesForP2P(ctx context.Context, msg *models.HubMessage,
 	}
 
 	// 按投递信封归一化查询维度（与 decideUserNotFoundReroute 一致）
-	appID, _ := routing.NormalizeRoute(msg.AppID, "")
+	appID := constants.NormalizeAppID(msg.AppID)
 	queryCtx := routing.NewRoute().WithAppID(appID).WithNamespace(msg.Namespace).Inject(ctx)
 	nodeIDs, err := h.onlineStatusRepo.GetUserNodes(queryCtx, userID)
 	if err != nil || len(nodeIDs) == 0 {

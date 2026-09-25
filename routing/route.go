@@ -54,8 +54,9 @@ type RoutingContext struct {
 //
 // 返回归一化后的 (appID, namespace)，调用方按需取用：
 //
-//	appID, ns := routing.NormalizeRoute(appID, ns)       // 两个都要（严格场景）
-//	appID, _ := routing.NormalizeRoute(appID, "")        // 只需 appID（赋值给字段，namespace 按 Broadcast 语义保留）
+//	appID, ns := routing.NormalizeRoute(appID, ns)   // 两个都要（严格场景）
+//
+// 只需归一化 appID 单个维度时，直接用 constants.NormalizeAppID（不要传占位 ns 调本函数再丢弃返回值）
 func NormalizeRoute(appID, namespace string) (string, string) {
 	return constants.NormalizeAppID(appID), constants.NormalizeNamespace(namespace)
 }
@@ -128,7 +129,7 @@ func (r *Route) WithGroup(groupID string) *Route {
 //   - namespace 保持原值（广播场景 namespace="" 表示全命名空间，不归一化；严格场景调用方用 EnsureRouteDefaults 补默认）
 //   - groupIDs 保持原值（P2P 消息 nil 合法，存储层按需补 DefaultGroupID）
 func (r *Route) Inject(ctx context.Context) context.Context {
-	appID, _ := NormalizeRoute(r.appID, r.namespace) // appID 归一化，namespace 保持原值（兼容广播）
+	appID := constants.NormalizeAppID(r.appID) // appID 归一化，namespace 保持原值（兼容广播）
 	return context.WithValue(ctx, routingCtxKey{}, &RoutingContext{
 		AppID:     appID,
 		Namespace: r.namespace,

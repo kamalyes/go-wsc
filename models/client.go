@@ -22,7 +22,6 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/kamalyes/go-toolbox/pkg/json"
 	"github.com/kamalyes/go-wsc/constants"
-	"github.com/kamalyes/go-wsc/routing"
 )
 
 // Client 客户端连接（统一管理 WebSocket 和 SSE 连接）
@@ -307,7 +306,7 @@ func (c *Client) GetNamespace() string {
 func (c *Client) WithAppID(appID string) *Client {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.AppID, _ = routing.NormalizeRoute(appID, "")
+	c.AppID = constants.NormalizeAppID(appID)
 	return c
 }
 

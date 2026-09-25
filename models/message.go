@@ -17,6 +17,7 @@ import (
 
 	"github.com/kamalyes/go-logger"
 	"github.com/kamalyes/go-toolbox/pkg/json"
+	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/routing"
 )
 
@@ -619,7 +620,7 @@ func (m *HubMessage) InjectRoute(ctx context.Context) context.Context {
 		m.TraceID = logger.ExtractTraceID(ctx)
 	}
 	// 2-3. 路由信封注入（appID 归一化，namespace 保持 ctx 原值）
-	appID, _ := routing.NormalizeRoute(routing.AppIDFromContext(ctx), "")
+	appID := constants.NormalizeAppID(routing.AppIDFromContext(ctx))
 	ns := routing.NamespaceFromContext(ctx)
 	groupIDs := routing.GroupIDsFromContext(ctx)
 	if m.AppID == "" {
@@ -658,7 +659,7 @@ func (m *HubMessage) ContextWithRoute(parent context.Context, appID, ns string, 
 	if m.TraceID == "" {
 		m.TraceID = logger.ExtractTraceID(parent)
 	}
-	m.AppID, _ = routing.NormalizeRoute(appID, "")
+	m.AppID = constants.NormalizeAppID(appID)
 	m.Namespace = ns
 	if groupIDs == nil {
 		m.GroupIDs = nil

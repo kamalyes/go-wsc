@@ -27,6 +27,7 @@ import (
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/cluster"
+	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/models"
 	pb "github.com/kamalyes/go-wsc/models/pb"
 	"github.com/kamalyes/go-wsc/routing"
@@ -344,7 +345,7 @@ func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *models.
 	//   - 老节点未传 AppID 时归一化为 DefaultAppID，与新节点 client 默认 AppID 匹配
 	//   - namespace 保持原值（广播场景可空，严格匹配场景调用方负责归一化）
 	appID := mathx.IfEmpty(distMsg.AppID, distMsg.Message.AppID)
-	appID, _ = routing.NormalizeRoute(appID, "")
+	appID = constants.NormalizeAppID(appID)
 	namespace := mathx.IfEmpty(distMsg.Namespace, distMsg.Message.Namespace)
 
 	// 快速检查用户是否存在（按 appID+namespace 信封过滤，避免跨 app/ns 误判；避免无用户时序列化开销）
@@ -449,7 +450,7 @@ func (h *Hub) handleDistributedKickUser(ctx context.Context, distMsg *models.Dis
 	default:
 		// 🔏 路由信封注入：跨节点 kick 按 appID+namespace 隔离，避免误踢同 userID 其他 app/ns 连接
 		// kick 消息可能无 Message 体（distMsg.Message 为 nil），仅从 distMsg 外层信封取
-		appID, _ := routing.NormalizeRoute(distMsg.AppID, "")
+		appID := constants.NormalizeAppID(distMsg.AppID)
 		ctx = routing.NewRoute().WithAppID(appID).WithNamespace(distMsg.Namespace).Inject(ctx)
 		// 远端 kick 指令：仅踢本节点连接（连接域统一实现），不再跨节点分发（防回环）；
 		// 静默踢出（kick 指令不携带通知文案，通知由发起节点发出）

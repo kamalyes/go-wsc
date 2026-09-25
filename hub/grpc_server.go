@@ -33,6 +33,7 @@ import (
 	"github.com/kamalyes/go-toolbox/pkg/netx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/cluster"
+	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/models"
 	wscpb "github.com/kamalyes/go-wsc/models/pb"
 	"github.com/kamalyes/go-wsc/routing"
@@ -135,7 +136,7 @@ func (s *GRPCServer) SendToUser(ctx context.Context, req *wscpb.SendToUserReques
 		// 异步自愈清理指向本节点的死索引（与 PubSub 定向路径行为一致，见 distributed.go）
 		// 发送方收到 Success=false 响应即触发重路由决策（routeToCluster userMiss 分支），
 		// 无需像 PubSub 路径那样经回告频道绕圈
-		appID, _ := routing.NormalizeRoute(msg.AppID, "")
+		appID := constants.NormalizeAppID(msg.AppID)
 		s.hub.selfHealDeadIndexEntries(ctx, userID, appID, msg.Namespace)
 		return &wscpb.SendToUserResponse{
 			Success:    false,

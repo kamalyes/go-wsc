@@ -122,7 +122,7 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *model
 
 	// 3. 没有其他节点 → 本地发送
 	if len(otherNodes) == 0 {
-		h.logger.InfoContextKV(ctx, "📍 [投递诊断] 用户仅在本节点，走本地投递",
+		h.logger.DebugContextKV(ctx, "📍 [投递诊断] 用户仅在本节点，走本地投递",
 			"user_id", userID,
 			"message_id", msg.MessageID,
 			"node_id", h.nodeID,
@@ -131,7 +131,7 @@ func (h *Hub) checkAndRouteToNode(ctx context.Context, userID string, msg *model
 		return false, nil, nil
 	}
 
-	h.logger.InfoContextKV(ctx, "📍 [投递诊断] 用户在其他节点，发起跨节点路由",
+	h.logger.DebugContextKV(ctx, "📍 [投递诊断] 用户在其他节点，发起跨节点路由",
 		"message_id", msg.MessageID,
 		"user_id", userID,
 		"from_node", h.nodeID,
@@ -275,7 +275,7 @@ func (h *Hub) handleDistributedMessageTargeted(ctx context.Context, distMsg *mod
 	if distMsg.Message != nil {
 		inboundMsgID = distMsg.Message.MessageID
 	}
-	h.logger.InfoContextKV(ctx, "📥 收到跨节点消息",
+	h.logger.DebugContextKV(ctx, "📥 收到跨节点消息",
 		"type", distMsg.Type,
 		"from_node", distMsg.NodeID,
 		"message_id", inboundMsgID,
@@ -375,7 +375,7 @@ func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *models.
 		return nil
 	}
 
-	h.logger.InfoContextKV(ctx, "✅ [跨Pod] 消息命中本节点，准备投递给本地客户端",
+	h.logger.DebugContextKV(ctx, "✅ [跨Pod] 消息命中本节点，准备投递给本地客户端",
 		"user_id", distMsg.TargetID,
 		"message_id", distMsg.Message.MessageID,
 		"app_id", appID,
@@ -416,7 +416,7 @@ func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *models.
 		return fmt.Errorf("failed to send to any client: %s", distMsg.TargetID)
 	}
 
-	h.logger.InfoContextKV(ctx, "✅ [跨Pod] 消息已投递到本地客户端",
+	h.logger.DebugContextKV(ctx, "✅ [跨Pod] 消息已投递到本地客户端",
 		"message_id", distMsg.Message.MessageID,
 		"user_id", distMsg.TargetID,
 		"success_count", successCount,

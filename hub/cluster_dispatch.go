@@ -101,7 +101,7 @@ func (h *Hub) routeToCluster(ctx context.Context, msg *models.HubMessage, opts c
 		groupIDs = opts.GroupIDs
 	}
 
-	h.logger.InfoContextKV(ctx, "📨 [投递诊断] 跨节点路由发起",
+	h.logger.DebugContextKV(ctx, "📨 [投递诊断] 跨节点路由发起",
 		"operation", opts.Operation,
 		"app_id", appID,
 		"namespace", namespace,
@@ -148,7 +148,7 @@ func (h *Hub) routeToCluster(ctx context.Context, msg *models.HubMessage, opts c
 
 	// ② 所有节点 gRPC 成功，无需 PubSub
 	if len(result.pubsubFallback) == 0 && result.grpcDelivered > 0 {
-		h.logger.InfoContextKV(ctx, "📨 [投递诊断] 跨节点路由完成（gRPC 全覆盖）",
+		h.logger.DebugContextKV(ctx, "📨 [投递诊断] 跨节点路由完成（gRPC 全覆盖）",
 			"operation", opts.Operation,
 			"grpc_delivered", result.grpcDelivered,
 			"message_id", msg.GetMessageID(),
@@ -220,7 +220,7 @@ func (h *Hub) routeToCluster(ctx context.Context, msg *models.HubMessage, opts c
 			result.grpcDelivered, len(result.userMissNodes), len(result.pubsubFallback))
 	}
 
-	h.logger.InfoContextKV(ctx, "📨 [投递诊断] 跨节点路由完成（gRPC-only）",
+	h.logger.DebugContextKV(ctx, "📨 [投递诊断] 跨节点路由完成（gRPC-only）",
 		"operation", opts.Operation,
 		"grpc_delivered", result.grpcDelivered,
 		"pubsub_fallback", len(result.pubsubFallback),
@@ -402,7 +402,7 @@ func (h *Hub) executeGRPCDispatch(ctx context.Context, addr string, msgData []by
 		// 此前只检查 err 会把"目标节点明确投递失败"误判为投递成功 → 上层 routed=true 直接 return →
 		// 消息静默丢失（Redis 在线索引过期/用户已断线迁移的典型场景）
 		if derr == nil && resp != nil && !resp.GetSuccess() {
-			h.logger.InfoContextKV(ctx, "gRPC 目标节点明确用户不在，跳过该节点",
+			h.logger.DebugContextKV(ctx, "gRPC 目标节点明确用户不在，跳过该节点",
 				"operation", opts.Operation,
 				"target_addr", addr,
 				"target_user", opts.TargetUserID,
@@ -479,7 +479,7 @@ func (h *Hub) publishToCluster(ctx context.Context, dispatch *models.Distributed
 
 	channel := h.config.RedisRepository.PubSub.GetBroadcastChannel()
 	data := h.marshalDistributedMessage(ctx, dispatch)
-	h.logger.InfoContextKV(ctx, "📡 PubSub 广播频道发布",
+	h.logger.DebugContextKV(ctx, "📡 PubSub 广播频道发布",
 		"channel", channel,
 		"payload_size", len(data),
 		"message_id", messageID,
@@ -517,7 +517,7 @@ func (h *Hub) publishToTargetedNodes(ctx context.Context, dispatch *models.Distr
 
 	data := h.marshalDistributedMessage(ctx, dispatch)
 	prefix := h.config.RedisRepository.PubSub.GetNodeChannelPrefix()
-	h.logger.InfoContextKV(ctx, "📡 PubSub 定向发布",
+	h.logger.DebugContextKV(ctx, "📡 PubSub 定向发布",
 		"channel_prefix", prefix,
 		"target_nodes", nodeIDs,
 		"target_count", len(nodeIDs),

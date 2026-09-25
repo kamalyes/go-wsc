@@ -14,6 +14,7 @@ package redisadapter
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -208,32 +209,42 @@ func TestGroupMemberCache_OversizedEntrySkipped(t *testing.T) {
 
 // TestGroupMemberCache_LRUEviction 容量超限从队尾逐出，最近访问的条目保留
 func TestGroupMemberCache_LRUEviction(t *testing.T) {
-	cache, counting := setupCache(t, time.Minute, 2, 0) // 容量 2 条
+	// 容量 128 → 分片配额 2；白盒选三个同分片 gid，使配额在该分片内精确生效（分片配额语义）
+	cache, counting := setupCache(t, time.Minute, 128, 0)
 	ctx := context.Background()
 	app := constants.DefaultAppID
 
-	for _, gid := range []string{"g1", "g2", "g3"} {
+	gids := make([]string, 0, 3)
+	for i := 0; len(gids) < 3; i++ {
+		cand := "g" + strconv.Itoa(i)
+		if len(gids) == 0 || groupShardOf(app, cand) == groupShardOf(app, gids[0]) {
+			gids = append(gids, cand)
+		}
+	}
+	g1, g2, g3 := gids[0], gids[1], gids[2]
+
+	for _, gid := range gids {
 		require.NoError(t, cache.CreateGroup(ctx, &models.Group{GroupID: gid, Namespace: "tenantA", OwnerID: "o"}))
 		require.NoError(t, cache.AddMembers(ctx, app, "tenantA", gid, []string{"u-" + gid}))
 	}
 
 	// 回源填充 g1/g2，fill 顺序 g1 先 g2 后 → LRU 队尾为 g1
-	_, err := cache.GetMultiGroupMembers(ctx, app, []string{"g1", "g2"})
+	_, err := cache.GetMultiGroupMembers(ctx, app, []string{g1, g2})
 	require.NoError(t, err)
 	require.Equal(t, 1, counting.backfillCount())
 
 	// 命中 g1 并移到队首 → 队尾变为 g2
-	_, err = cache.GetMultiGroupMembers(ctx, app, []string{"g1"})
+	_, err = cache.GetMultiGroupMembers(ctx, app, []string{g1})
 	require.NoError(t, err)
 	require.Equal(t, 1, counting.backfillCount(), "g1 应命中")
 
 	// g3 入缓存 → 逐出队尾 g2
-	_, err = cache.GetMultiGroupMembers(ctx, app, []string{"g3"})
+	_, err = cache.GetMultiGroupMembers(ctx, app, []string{g3})
 	require.NoError(t, err)
 	assert.Equal(t, 2, counting.backfillCount(), "g3 未命中应回源")
 
 	// g2 被逐出 → miss；g1 保留 → hit
-	_, err = cache.GetMultiGroupMembers(ctx, app, []string{"g2", "g1"})
+	_, err = cache.GetMultiGroupMembers(ctx, app, []string{g2, g1})
 	require.NoError(t, err)
 	assert.Equal(t, 3, counting.backfillCount(), "仅 g2 miss 回源 1 次，g1 应命中不回源")
 }

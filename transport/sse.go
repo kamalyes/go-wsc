@@ -447,7 +447,8 @@ func (h *SSEHandler) SendToUserViaSSE(userID string, msg *models.HubMessage) boo
 	})
 
 	if successCount > 0 {
-		h.logger.InfoContextKV(msg.ContextFrom(h.hubCtx), "SSE消息发送成功",
+		// 每 SSE 消息必经，与 WS 消息日志同口径降为 Debug
+		h.logger.DebugContextKV(msg.ContextFrom(h.hubCtx), "SSE消息发送成功",
 			"user_id", userID,
 			"message_id", msg.MessageID,
 			"message_type", msg.MessageType,

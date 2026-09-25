@@ -98,7 +98,8 @@ func (m *Manager) Deliver(ctx context.Context, msg *models.HubMessage, excludeSe
 	default:
 		mode = models.DeliveryModeGlobal
 	}
-	m.host.GetLogger().InfoContextKV(ctx, "[投递诊断] Deliver 路由决策",
+	// 投递路由决策为每消息必经路径，100w 量级下 Info 级会产生海量日志 IO，降为 Debug（生产环境关闭）
+	m.host.GetLogger().DebugContextKV(ctx, "[投递诊断] Deliver 路由决策",
 		"message_id", msg.MessageID,
 		"mode", mode,
 		"receiver", msg.Receiver,
@@ -282,7 +283,8 @@ func (m *Manager) deliverToGroupReliable(ctx context.Context, msg *models.HubMes
 	// 通知观察者（ctx 已在上方 ContextWithRoute 注入路由，直接使用即可）
 	m.NotifyObservers(ctx, msg)
 
-	m.host.GetLogger().InfoContextKV(ctx, "群组消息投递完成",
+	// 每群组消息一条的常规完成统计，降为 Debug 与本地直连投递日志同级别（异常路径仍保留 Info）
+	m.host.GetLogger().DebugContextKV(ctx, "群组消息投递完成",
 		"namespace", namespace,
 		"group_ids", groupIDs,
 		"message_id", msg.MessageID,
@@ -372,7 +374,8 @@ func (m *Manager) deliverToGroupFireForget(ctx context.Context, msg *models.HubM
 	// 4. 跨节点广播：优先 gRPC 直连，降级 PubSub（ctx 已含完整路由）
 	m.crossNodeGroupBroadcast(ctx, msg, excludeSender)
 
-	m.host.GetLogger().InfoContextKV(ctx, "群组广播已发起",
+	// fire-and-forget 每群组消息必经的常规统计，降为 Debug（诊断需要时开 Debug 级即可）
+	m.host.GetLogger().DebugContextKV(ctx, "群组广播已发起",
 		"namespace", namespace,
 		"group_ids", groupIDs,
 		"message_id", msg.MessageID,
@@ -638,8 +641,8 @@ func (m *Manager) broadcastToFilteredNow(ctx context.Context, condition func(*mo
 	}
 
 	totalDuration := time.Since(start)
-	// 广播完成统计：Info 级保证生产可见（是否发出、发到多少客户端），分段耗时定位卡点
-	m.host.GetLogger().InfoContextKV(ctx, "[投递诊断] 过滤广播完成",
+	// 广播完成统计：每消息必经的常规统计，降为 Debug（发到多少客户端生产侧由指标观测，日志只做诊断）
+	m.host.GetLogger().DebugContextKV(ctx, "[投递诊断] 过滤广播完成",
 		"message_id", msg.MessageID,
 		"success", totalSuccess,
 		"data_bytes", dataLen,
@@ -778,8 +781,8 @@ func (m *Manager) broadcastToUserIDsNow(ctx context.Context, userIDs []string, m
 
 	totalSuccess := atomic.LoadInt32(&successCount)
 
-	// 群组广播本地投递统计：Info 级保证生产可见（成员在线但 0 投递 = 本地无连接，跨节点由 clusterBatcher 负责）
-	m.host.GetLogger().InfoContextKV(ctx, "[投递诊断] 群组广播本地投递完成",
+	// 群组广播本地投递统计：每群组消息必经的常规统计，降为 Debug（成员在线但 0 投递 = 本地无连接，跨节点由 clusterBatcher 负责）
+	m.host.GetLogger().DebugContextKV(ctx, "[投递诊断] 群组广播本地投递完成",
 		"message_id", msg.MessageID,
 		"user_count", len(userIDs),
 		"success", totalSuccess,

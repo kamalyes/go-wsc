@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"net"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,6 +40,7 @@ import (
 	"github.com/kamalyes/go-wsc/routing"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -323,6 +325,104 @@ func (s *GRPCServer) Ping(ctx context.Context, req *wscpb.PingRequest) (*wscpb.P
 	}, nil
 }
 
+// BatchDispatch 跨节点微批合帧投递（多条指令合并为单次 RPC）
+//
+// 逐条委托 dispatchBatchItem 处理，结果与请求 items 一一对应；
+// 单条失败不中断整批（结果经 DispatchResult.Error 回传，由发送端逐条降级 PubSub）
+func (s *GRPCServer) BatchDispatch(ctx context.Context, req *wscpb.BatchDispatchRequest) (*wscpb.BatchDispatchResponse, error) {
+	items := req.GetItems()
+	results := make([]*wscpb.DispatchResult, len(items))
+	for i, item := range items {
+		results[i] = s.dispatchBatchItem(ctx, item)
+	}
+	return &wscpb.BatchDispatchResponse{Results: results}, nil
+}
+
+// dispatchBatchItem 处理单条投递指令（微批最小单元）
+//
+// 路由信封（appID/namespace/groupIDs）与 trace_id 内嵌于指令体而非 gRPC metadata，
+// 因此先以指令字段写入 incoming metadata（路由 key + trace key），再复用现有
+// 单指令处理器逻辑（SendToUser/BroadcastGroup/NotifyObservers/KickUser），零重复实现
+func (s *GRPCServer) dispatchBatchItem(parentCtx context.Context, item *wscpb.DispatchItem) *wscpb.DispatchResult {
+	// 路由信封/trace 内嵌于指令体（不依赖 gRPC metadata），此处写入 incoming metadata，
+	// 复用下游处理器既有 RestoreFromIncomingMetadata / RestoreTraceFromIncoming 恢复逻辑，
+	// 与 unary 路径注入语义一致；
+	// 若仅注入 ctx，处理器恢复时会被 RestoreFromIncomingMetadata 用空 metadata 覆盖，导致隔离丢失
+	itemCtx := parentCtx
+	if md, ok := metadata.FromIncomingContext(parentCtx); ok {
+		md = md.Copy()
+		if traceID := item.GetTraceId(); traceID != "" {
+			md.Set(logger.ContextKeyTraceID, traceID)
+		}
+		if appID := item.GetAppId(); appID != "" {
+			md.Set(constants.MetadataKeyAppID, appID)
+		}
+		if ns := item.GetNamespace(); ns != "" {
+			md.Set(constants.MetadataKeyNamespace, ns)
+		}
+		if gids := item.GetGroupIds(); len(gids) > 0 {
+			md.Set(constants.MetadataKeyGroupIDs, strings.Join(gids, ","))
+		}
+		itemCtx = metadata.NewIncomingContext(parentCtx, md)
+	}
+
+	switch cluster.FromProtoDispatchOperation(item.GetOperation()) {
+	case models.OperationTypeSendMessage:
+		resp, err := s.SendToUser(itemCtx, &wscpb.SendToUserRequest{
+			UserId:      item.GetTargetUserId(),
+			MessageData: item.GetMessageData(),
+		})
+		if err != nil {
+			return &wscpb.DispatchResult{Error: err.Error()}
+		}
+		return &wscpb.DispatchResult{Success: resp.GetSuccess(), UserOnline: resp.GetUserOnline()}
+
+	case models.OperationTypeKickUser:
+		resp, err := s.KickUser(itemCtx, &wscpb.KickUserRequest{
+			UserId: item.GetTargetUserId(),
+			Reason: item.GetReason(),
+		})
+		if err != nil {
+			return &wscpb.DispatchResult{Error: err.Error()}
+		}
+		return &wscpb.DispatchResult{Success: resp.GetSuccess(), Count: resp.GetKickedConnections()}
+
+	case models.OperationTypeGroupBroadcast, models.OperationTypeGroupsBroadcast:
+		// 单群组广播（item 携带单个 groupID，由 dispatchNodeViaBatch 逐群组合帧）
+		resp, err := s.BroadcastGroup(itemCtx, &wscpb.BroadcastGroupRequest{
+			MessageData:   item.GetMessageData(),
+			ExcludeSender: item.GetExcludeSender(),
+			SenderId:      item.GetSenderId(),
+		})
+		if err != nil {
+			return &wscpb.DispatchResult{Error: err.Error()}
+		}
+		return &wscpb.DispatchResult{Success: true, Count: resp.GetDelivered()}
+
+	case models.OperationTypeObserverNotify:
+		resp, err := s.NotifyObservers(itemCtx, &wscpb.NotifyObserversRequest{
+			MessageData: item.GetMessageData(),
+		})
+		if err != nil {
+			return &wscpb.DispatchResult{Error: err.Error()}
+		}
+		return &wscpb.DispatchResult{Success: true, Count: resp.GetNotified()}
+
+	case models.OperationTypeBroadcast:
+		// 全局/命名空间广播：复用 BroadcastGroup 的 namespace 过滤能力，groupID 留空表示全命名空间
+		resp, err := s.BroadcastGroup(itemCtx, &wscpb.BroadcastGroupRequest{
+			MessageData: item.GetMessageData(),
+		})
+		if err != nil {
+			return &wscpb.DispatchResult{Error: err.Error()}
+		}
+		return &wscpb.DispatchResult{Success: true, Count: resp.GetDelivered()}
+
+	default:
+		return &wscpb.DispatchResult{Error: fmt.Sprintf("未知操作类型: %s", item.GetOperation())}
+	}
+}
+
 // ============================================================================
 // gRPC 生命周期管理（原 grpc_lifecycle.go 并入）
 // ============================================================================
@@ -352,6 +452,12 @@ func (h *Hub) InitNodeGRPC() {
 	// hub.go 不持有 grpcServer 字段，服务端引用存于包级 grpcServers 映射（见上）
 	grpcServers.Store(h, NewGRPCServer(h))
 	h.grpcClientPool = cluster.NewGRPCClientPool()
+	// 跨节点 gRPC 微批合帧分派器：复用连接池 + per-node 熔断器（窗口 >0 时启用）
+	h.grpcBatchDispatcher = cluster.NewGRPCBatchDispatcher(
+		h.grpcClientPool,
+		constants.DefaultGRPCBatchWindow,
+		constants.DefaultGRPCBatchMaxItems,
+	)
 
 	h.logger.InfoKV("节点 gRPC 通信组件已初始化",
 		"node_id", h.nodeID,
@@ -444,7 +550,12 @@ func (h *Hub) stopNodeGRPC() {
 		v.(*GRPCServer).Stop()
 	}
 
-	// 4. 关闭 gRPC 客户端连接池
+	// 4. 先排干并关闭微批分派器（在途批仍经连接池发出），再关闭连接池
+	if h.grpcBatchDispatcher != nil {
+		h.grpcBatchDispatcher.Close()
+	}
+
+	// 5. 关闭 gRPC 客户端连接池
 	if h.grpcClientPool != nil {
 		h.grpcClientPool.Close()
 	}

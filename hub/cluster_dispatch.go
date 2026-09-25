@@ -29,6 +29,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/kamalyes/go-logger"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-wsc/cluster"
 	"github.com/kamalyes/go-wsc/constants"
@@ -361,7 +362,7 @@ func (h *Hub) dispatchViaGRPC(ctx context.Context, msg *models.HubMessage, opts 
 		go func(i int, addr string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			outcomes[i] = h.executeGRPCDispatch(grpcCtx, addr, msgData, opts)
+			outcomes[i] = h.dispatchNode(grpcCtx, addr, msgData, opts)
 		}(i, addr)
 	}
 	wg.Wait()
@@ -421,7 +422,10 @@ func (h *Hub) executeGRPCDispatch(ctx context.Context, addr string, msgData []by
 
 	case models.OperationTypeKickUser:
 		// 踢人走专用 KickUser RPC（路由信封经 gRPC metadata 传播，远端按信封隔离踢出）
-		resp, derr := grpcClient.KickUser(ctx, addr, opts.TargetUserID, opts.Reason)
+		// 显式注入 opts 路由：routeToCluster 的 ctx 不含路由（仅 trace），
+		// 缺失注入会导致 metadata 为空、远端按 DefaultAppID/空 ns 踢人 → 跨租户误踢
+		kickCtx := routing.NewRoute().WithAppID(opts.AppID).WithNamespace(opts.Namespace).Inject(ctx)
+		resp, derr := grpcClient.KickUser(kickCtx, addr, opts.TargetUserID, opts.Reason)
 		// 扑空（用户不在该节点）与 SendMessage 的 user_miss 同语义：跳过该节点 PubSub 兜底
 		if derr == nil && resp != nil && resp.GetKickedConnections() == 0 {
 			h.logger.InfoContextKV(ctx, "gRPC 目标节点明确用户不在，跳过该节点踢人兜底",
@@ -464,6 +468,69 @@ func (h *Hub) executeGRPCDispatch(ctx context.Context, addr string, msgData []by
 	}
 
 	return grpcOutcomeDelivered
+}
+
+// ============================================================================
+// gRPC 微批合帧投递（跨消息/跨 goroutine 按节点合帧，RPC 次数 O(消息) → O(批)）
+// ============================================================================
+
+// dispatchNode 单节点投递分叉：微批器启用走合帧路径，否则回退单发（历史 unary 行为）
+func (h *Hub) dispatchNode(ctx context.Context, addr string, msgData []byte, opts cluster.ClusterDispatchOptions) grpcDispatchOutcome {
+	if h.grpcBatchDispatcher == nil || !h.grpcBatchDispatcher.Enabled() {
+		return h.executeGRPCDispatch(ctx, addr, msgData, opts)
+	}
+	return h.dispatchNodeViaBatch(ctx, addr, msgData, opts)
+}
+
+// dispatchNodeViaBatch 经微批分派器向单目标节点提交投递指令
+//
+// 群组广播（GroupBroadcast/GroupsBroadcast）逐 gid 拆分为单群组 item 提交
+// （服务端 BatchDispatch 复用单群组 BroadcastGroup 语义，见 dispatchBatchItem）；
+// 全部 gid 均提交（不可首条送达即短路，否则漏投后续群组），任一送达即视为该节点送达
+func (h *Hub) dispatchNodeViaBatch(ctx context.Context, addr string, msgData []byte, opts cluster.ClusterDispatchOptions) grpcDispatchOutcome {
+	if opts.Operation == models.OperationTypeGroupBroadcast || opts.Operation == models.OperationTypeGroupsBroadcast {
+		if len(opts.GroupIDs) == 0 {
+			return grpcOutcomeFallback
+		}
+		delivered := false
+		for _, gid := range opts.GroupIDs {
+			if h.grpcBatchDispatcher.Submit(ctx, addr, h.buildDispatchItem(ctx, opts, msgData, gid)) == cluster.OutcomeDelivered {
+				delivered = true
+			}
+		}
+		return mathx.IF(delivered, grpcOutcomeDelivered, grpcOutcomeFallback)
+	}
+
+	switch h.grpcBatchDispatcher.Submit(ctx, addr, h.buildDispatchItem(ctx, opts, msgData, "")) {
+	case cluster.OutcomeDelivered:
+		return grpcOutcomeDelivered
+	case cluster.OutcomeUserMiss:
+		return grpcOutcomeUserMiss
+	default:
+		return grpcOutcomeFallback
+	}
+}
+
+// buildDispatchItem 组装单条微批指令（路由信封取自 opts，与服务端 unary 等价维度）
+// gid 非空时 groupIDs 收敛为该单群组；否则透传 opts.GroupIDs（P2P/广播为 nil 或空合法）
+// traceID 从调用方 ctx 提取（微批逐条 item 各自携带，远端按 item 恢复全链路 trace）
+func (h *Hub) buildDispatchItem(ctx context.Context, opts cluster.ClusterDispatchOptions, msgData []byte, gid string) cluster.DispatchItem {
+	groupIDs := opts.GroupIDs
+	if gid != "" {
+		groupIDs = []string{gid}
+	}
+	return cluster.DispatchItem{
+		Operation:     opts.Operation,
+		AppID:         opts.AppID,
+		Namespace:     opts.Namespace,
+		GroupIDs:      groupIDs,
+		TargetUserID:  opts.TargetUserID,
+		Reason:        opts.Reason,
+		MessageData:   msgData,
+		ExcludeSender: opts.ExcludeSender,
+		SenderID:      opts.SenderID,
+		TraceID:       logger.ExtractTraceID(ctx),
+	}
 }
 
 // ============================================================================

@@ -3,7 +3,7 @@
 // @Date: 2026-07-18 00:00:00
 // @LastEditors: kamalyes 501893067@qq.com
 // @LastEditTime: 2026-07-18 00:00:00
-// @FilePath: \go-wsc\models\pb\node.pb.go
+// @FilePath: \go-wsc\proto\node.proto
 // @Description: 节点间 gRPC 通信协议定义
 //
 // 每个 WebSocket Hub 节点同时运行 gRPC 服务端与客户端，支持点对点直连通信
@@ -29,12 +29,11 @@
 package wscpb
 
 import (
+	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
+	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
-
-	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
-	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 )
 
 const (
@@ -43,6 +42,66 @@ const (
 	// Verify that runtime/protoimpl is sufficiently up-to-date.
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
+
+// DispatchOperation 微批投递操作类型（替代裸字符串，枚举语义 + 线型 varint 紧凑编码）
+// [EN] Micro-batch delivery operation type (enum instead of raw string).
+type DispatchOperation int32
+
+const (
+	DispatchOperation_DISPATCH_OPERATION_UNSPECIFIED DispatchOperation = 0 // 未指定（默认值，非法操作）| [EN] Unspecified (default, invalid)
+	DispatchOperation_DISPATCH_SEND_MESSAGE          DispatchOperation = 1 // 点对点投递 | [EN] Point-to-point delivery
+	DispatchOperation_DISPATCH_KICK_USER             DispatchOperation = 2 // 踢人 | [EN] Kick user
+	DispatchOperation_DISPATCH_GROUP_BROADCAST       DispatchOperation = 3 // 群组广播（单群组语义，多群组由发送端拆分为多条 item）| [EN] Group broadcast (single-group)
+	DispatchOperation_DISPATCH_OBSERVER_NOTIFY       DispatchOperation = 4 // 观察者通知 | [EN] Observer notification
+	DispatchOperation_DISPATCH_BROADCAST             DispatchOperation = 5 // 全局/命名空间广播 | [EN] Global/namespace broadcast
+)
+
+// Enum value maps for DispatchOperation.
+var (
+	DispatchOperation_name = map[int32]string{
+		0: "DISPATCH_OPERATION_UNSPECIFIED",
+		1: "DISPATCH_SEND_MESSAGE",
+		2: "DISPATCH_KICK_USER",
+		3: "DISPATCH_GROUP_BROADCAST",
+		4: "DISPATCH_OBSERVER_NOTIFY",
+		5: "DISPATCH_BROADCAST",
+	}
+	DispatchOperation_value = map[string]int32{
+		"DISPATCH_OPERATION_UNSPECIFIED": 0,
+		"DISPATCH_SEND_MESSAGE":          1,
+		"DISPATCH_KICK_USER":             2,
+		"DISPATCH_GROUP_BROADCAST":       3,
+		"DISPATCH_OBSERVER_NOTIFY":       4,
+		"DISPATCH_BROADCAST":             5,
+	}
+)
+
+func (x DispatchOperation) Enum() *DispatchOperation {
+	p := new(DispatchOperation)
+	*p = x
+	return p
+}
+
+func (x DispatchOperation) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (DispatchOperation) Descriptor() protoreflect.EnumDescriptor {
+	return file_node_proto_enumTypes[0].Descriptor()
+}
+
+func (DispatchOperation) Type() protoreflect.EnumType {
+	return &file_node_proto_enumTypes[0]
+}
+
+func (x DispatchOperation) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use DispatchOperation.Descriptor instead.
+func (DispatchOperation) EnumDescriptor() ([]byte, []int) {
+	return file_node_proto_rawDescGZIP(), []int{0}
+}
 
 // SendToUserRequest 发送消息请求
 // [EN] Send message request
@@ -670,6 +729,288 @@ func (x *PingResponse) GetHealthy() bool {
 	return false
 }
 
+// DispatchItem 单条跨节点投递指令（微批合帧最小单元）
+// 路由信封（app_id / namespace / group_ids）内嵌于指令体，
+// 不依赖 gRPC metadata，支持同批多租户 / 多群组异构合帧
+// [EN] A single inter-node delivery instruction (micro-batch unit). Routing envelope embedded.
+type DispatchItem struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Operation     DispatchOperation      `protobuf:"varint,1,opt,name=operation,proto3,enum=wscpb.DispatchOperation" json:"operation,omitempty"` // 操作类型 | [EN] Operation type
+	AppId         string                 `protobuf:"bytes,2,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`                          // 路由信封 appID（最上层隔离维度）| [EN] Routing envelope appID
+	Namespace     string                 `protobuf:"bytes,3,opt,name=namespace,proto3" json:"namespace,omitempty"`                               // 路由信封 namespace（空=全局/通配）| [EN] Routing envelope namespace
+	GroupIds      []string               `protobuf:"bytes,4,rep,name=group_ids,json=groupIds,proto3" json:"group_ids,omitempty"`                 // 路由信封 groupIDs（群组维度）| [EN] Routing envelope group IDs
+	TargetUserId  string                 `protobuf:"bytes,5,opt,name=target_user_id,json=targetUserId,proto3" json:"target_user_id,omitempty"`   // 目标用户（send_message/kick_user 使用）| [EN] Target user ID
+	Reason        string                 `protobuf:"bytes,6,opt,name=reason,proto3" json:"reason,omitempty"`                                     // 辅助信息（kick_user 踢人原因）| [EN] Auxiliary info (kick reason)
+	MessageData   []byte                 `protobuf:"bytes,7,opt,name=message_data,json=messageData,proto3" json:"message_data,omitempty"`        // 序列化后的 HubMessageProto | [EN] Serialized HubMessageProto
+	ExcludeSender bool                   `protobuf:"varint,8,opt,name=exclude_sender,json=excludeSender,proto3" json:"exclude_sender,omitempty"` // 群组广播是否排除发送者 | [EN] Whether to exclude sender
+	SenderId      string                 `protobuf:"bytes,9,opt,name=sender_id,json=senderId,proto3" json:"sender_id,omitempty"`                 // 发送者用户ID（用于排除）| [EN] Sender user ID (for exclusion)
+	TraceId       string                 `protobuf:"bytes,10,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`                   // 全链路追踪ID（每条 item 各自携带，跨节点串联日志）| [EN] Trace ID for full-link correlation
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DispatchItem) Reset() {
+	*x = DispatchItem{}
+	mi := &file_node_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DispatchItem) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DispatchItem) ProtoMessage() {}
+
+func (x *DispatchItem) ProtoReflect() protoreflect.Message {
+	mi := &file_node_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DispatchItem.ProtoReflect.Descriptor instead.
+func (*DispatchItem) Descriptor() ([]byte, []int) {
+	return file_node_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *DispatchItem) GetOperation() DispatchOperation {
+	if x != nil {
+		return x.Operation
+	}
+	return DispatchOperation_DISPATCH_OPERATION_UNSPECIFIED
+}
+
+func (x *DispatchItem) GetAppId() string {
+	if x != nil {
+		return x.AppId
+	}
+	return ""
+}
+
+func (x *DispatchItem) GetNamespace() string {
+	if x != nil {
+		return x.Namespace
+	}
+	return ""
+}
+
+func (x *DispatchItem) GetGroupIds() []string {
+	if x != nil {
+		return x.GroupIds
+	}
+	return nil
+}
+
+func (x *DispatchItem) GetTargetUserId() string {
+	if x != nil {
+		return x.TargetUserId
+	}
+	return ""
+}
+
+func (x *DispatchItem) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *DispatchItem) GetMessageData() []byte {
+	if x != nil {
+		return x.MessageData
+	}
+	return nil
+}
+
+func (x *DispatchItem) GetExcludeSender() bool {
+	if x != nil {
+		return x.ExcludeSender
+	}
+	return false
+}
+
+func (x *DispatchItem) GetSenderId() string {
+	if x != nil {
+		return x.SenderId
+	}
+	return ""
+}
+
+func (x *DispatchItem) GetTraceId() string {
+	if x != nil {
+		return x.TraceId
+	}
+	return ""
+}
+
+// DispatchResult 单条投递结果（与 DispatchItem 一一对应）
+// [EN] Per-item dispatch result
+type DispatchResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`                         // send_message: 是否投递成功; kick_user: 是否成功 | [EN] Whether succeeded
+	UserOnline    bool                   `protobuf:"varint,2,opt,name=user_online,json=userOnline,proto3" json:"user_online,omitempty"` // send_message 专用: 用户是否在线 | [EN] Whether user online (send only)
+	Count         int32                  `protobuf:"varint,3,opt,name=count,proto3" json:"count,omitempty"`                             // 投递数/踢出连接数/通知数 | [EN] delivered/kicked/notified count
+	Error         string                 `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`                              // 失败原因（成功时为空）| [EN] Failure reason (empty on success)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DispatchResult) Reset() {
+	*x = DispatchResult{}
+	mi := &file_node_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DispatchResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DispatchResult) ProtoMessage() {}
+
+func (x *DispatchResult) ProtoReflect() protoreflect.Message {
+	mi := &file_node_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DispatchResult.ProtoReflect.Descriptor instead.
+func (*DispatchResult) Descriptor() ([]byte, []int) {
+	return file_node_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *DispatchResult) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *DispatchResult) GetUserOnline() bool {
+	if x != nil {
+		return x.UserOnline
+	}
+	return false
+}
+
+func (x *DispatchResult) GetCount() int32 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
+}
+
+func (x *DispatchResult) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+// BatchDispatchRequest 微批投递请求（多条指令合帧）
+// [EN] Micro-batch dispatch request
+type BatchDispatchRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Items         []*DispatchItem        `protobuf:"bytes,1,rep,name=items,proto3" json:"items,omitempty"` // 待投递指令列表 | [EN] Dispatch instructions
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BatchDispatchRequest) Reset() {
+	*x = BatchDispatchRequest{}
+	mi := &file_node_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BatchDispatchRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BatchDispatchRequest) ProtoMessage() {}
+
+func (x *BatchDispatchRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_node_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BatchDispatchRequest.ProtoReflect.Descriptor instead.
+func (*BatchDispatchRequest) Descriptor() ([]byte, []int) {
+	return file_node_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *BatchDispatchRequest) GetItems() []*DispatchItem {
+	if x != nil {
+		return x.Items
+	}
+	return nil
+}
+
+// BatchDispatchResponse 微批投递响应（结果与请求 items 一一对应）
+// [EN] Micro-batch dispatch response
+type BatchDispatchResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Results       []*DispatchResult      `protobuf:"bytes,1,rep,name=results,proto3" json:"results,omitempty"` // 逐条结果 | [EN] Per-item results
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BatchDispatchResponse) Reset() {
+	*x = BatchDispatchResponse{}
+	mi := &file_node_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BatchDispatchResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BatchDispatchResponse) ProtoMessage() {}
+
+func (x *BatchDispatchResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_node_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BatchDispatchResponse.ProtoReflect.Descriptor instead.
+func (*BatchDispatchResponse) Descriptor() ([]byte, []int) {
+	return file_node_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *BatchDispatchResponse) GetResults() []*DispatchResult {
+	if x != nil {
+		return x.Results
+	}
+	return nil
+}
+
 var File_node_proto protoreflect.FileDescriptor
 
 const file_node_proto_rawDesc = "" +
@@ -712,7 +1053,36 @@ const file_node_proto_rawDesc = "" +
 	"\fPingResponse\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12-\n" +
 	"\x12active_connections\x18\x02 \x01(\x03R\x11activeConnections\x12\x18\n" +
-	"\ahealthy\x18\x03 \x01(\bR\ahealthy2\xb4\x03\n" +
+	"\ahealthy\x18\x03 \x01(\bR\ahealthy\"\xd8\x02\n" +
+	"\fDispatchItem\x126\n" +
+	"\toperation\x18\x01 \x01(\x0e2\x18.wscpb.DispatchOperationR\toperation\x12\x15\n" +
+	"\x06app_id\x18\x02 \x01(\tR\x05appId\x12\x1c\n" +
+	"\tnamespace\x18\x03 \x01(\tR\tnamespace\x12\x1b\n" +
+	"\tgroup_ids\x18\x04 \x03(\tR\bgroupIds\x12$\n" +
+	"\x0etarget_user_id\x18\x05 \x01(\tR\ftargetUserId\x12\x16\n" +
+	"\x06reason\x18\x06 \x01(\tR\x06reason\x12!\n" +
+	"\fmessage_data\x18\a \x01(\fR\vmessageData\x12%\n" +
+	"\x0eexclude_sender\x18\b \x01(\bR\rexcludeSender\x12\x1b\n" +
+	"\tsender_id\x18\t \x01(\tR\bsenderId\x12\x19\n" +
+	"\btrace_id\x18\n" +
+	" \x01(\tR\atraceId\"w\n" +
+	"\x0eDispatchResult\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x1f\n" +
+	"\vuser_online\x18\x02 \x01(\bR\n" +
+	"userOnline\x12\x14\n" +
+	"\x05count\x18\x03 \x01(\x05R\x05count\x12\x14\n" +
+	"\x05error\x18\x04 \x01(\tR\x05error\"A\n" +
+	"\x14BatchDispatchRequest\x12)\n" +
+	"\x05items\x18\x01 \x03(\v2\x13.wscpb.DispatchItemR\x05items\"H\n" +
+	"\x15BatchDispatchResponse\x12/\n" +
+	"\aresults\x18\x01 \x03(\v2\x15.wscpb.DispatchResultR\aresults*\xbe\x01\n" +
+	"\x11DispatchOperation\x12\"\n" +
+	"\x1eDISPATCH_OPERATION_UNSPECIFIED\x10\x00\x12\x19\n" +
+	"\x15DISPATCH_SEND_MESSAGE\x10\x01\x12\x16\n" +
+	"\x12DISPATCH_KICK_USER\x10\x02\x12\x1c\n" +
+	"\x18DISPATCH_GROUP_BROADCAST\x10\x03\x12\x1c\n" +
+	"\x18DISPATCH_OBSERVER_NOTIFY\x10\x04\x12\x16\n" +
+	"\x12DISPATCH_BROADCAST\x10\x052\x80\x04\n" +
 	"\vNodeService\x12A\n" +
 	"\n" +
 	"SendToUser\x12\x18.wscpb.SendToUserRequest\x1a\x19.wscpb.SendToUserResponse\x12S\n" +
@@ -720,7 +1090,8 @@ const file_node_proto_rawDesc = "" +
 	"\x0eBroadcastGroup\x12\x1c.wscpb.BroadcastGroupRequest\x1a\x1d.wscpb.BroadcastGroupResponse\x12P\n" +
 	"\x0fNotifyObservers\x12\x1d.wscpb.NotifyObserversRequest\x1a\x1e.wscpb.NotifyObserversResponse\x12;\n" +
 	"\bKickUser\x12\x16.wscpb.KickUserRequest\x1a\x17.wscpb.KickUserResponse\x12/\n" +
-	"\x04Ping\x12\x12.wscpb.PingRequest\x1a\x13.wscpb.PingResponseB,Z*github.com/kamalyes/go-wsc/models/pb;wscpbb\x06proto3"
+	"\x04Ping\x12\x12.wscpb.PingRequest\x1a\x13.wscpb.PingResponse\x12J\n" +
+	"\rBatchDispatch\x12\x1b.wscpb.BatchDispatchRequest\x1a\x1c.wscpb.BatchDispatchResponseB,Z*github.com/kamalyes/go-wsc/models/pb;wscpbb\x06proto3"
 
 var (
 	file_node_proto_rawDescOnce sync.Once
@@ -734,41 +1105,52 @@ func file_node_proto_rawDescGZIP() []byte {
 	return file_node_proto_rawDescData
 }
 
-var file_node_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_node_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_node_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_node_proto_goTypes = []any{
-	(*SendToUserRequest)(nil),        // 0: wscpb.SendToUserRequest
-	(*SendToUserResponse)(nil),       // 1: wscpb.SendToUserResponse
-	(*CheckUsersOnlineRequest)(nil),  // 2: wscpb.CheckUsersOnlineRequest
-	(*CheckUsersOnlineResponse)(nil), // 3: wscpb.CheckUsersOnlineResponse
-	(*BroadcastGroupRequest)(nil),    // 4: wscpb.BroadcastGroupRequest
-	(*BroadcastGroupResponse)(nil),   // 5: wscpb.BroadcastGroupResponse
-	(*NotifyObserversRequest)(nil),   // 6: wscpb.NotifyObserversRequest
-	(*NotifyObserversResponse)(nil),  // 7: wscpb.NotifyObserversResponse
-	(*KickUserRequest)(nil),          // 8: wscpb.KickUserRequest
-	(*KickUserResponse)(nil),         // 9: wscpb.KickUserResponse
-	(*PingRequest)(nil),              // 10: wscpb.PingRequest
-	(*PingResponse)(nil),             // 11: wscpb.PingResponse
-	nil,                              // 12: wscpb.CheckUsersOnlineResponse.OnlineUsersEntry
+	(DispatchOperation)(0),           // 0: wscpb.DispatchOperation
+	(*SendToUserRequest)(nil),        // 1: wscpb.SendToUserRequest
+	(*SendToUserResponse)(nil),       // 2: wscpb.SendToUserResponse
+	(*CheckUsersOnlineRequest)(nil),  // 3: wscpb.CheckUsersOnlineRequest
+	(*CheckUsersOnlineResponse)(nil), // 4: wscpb.CheckUsersOnlineResponse
+	(*BroadcastGroupRequest)(nil),    // 5: wscpb.BroadcastGroupRequest
+	(*BroadcastGroupResponse)(nil),   // 6: wscpb.BroadcastGroupResponse
+	(*NotifyObserversRequest)(nil),   // 7: wscpb.NotifyObserversRequest
+	(*NotifyObserversResponse)(nil),  // 8: wscpb.NotifyObserversResponse
+	(*KickUserRequest)(nil),          // 9: wscpb.KickUserRequest
+	(*KickUserResponse)(nil),         // 10: wscpb.KickUserResponse
+	(*PingRequest)(nil),              // 11: wscpb.PingRequest
+	(*PingResponse)(nil),             // 12: wscpb.PingResponse
+	(*DispatchItem)(nil),             // 13: wscpb.DispatchItem
+	(*DispatchResult)(nil),           // 14: wscpb.DispatchResult
+	(*BatchDispatchRequest)(nil),     // 15: wscpb.BatchDispatchRequest
+	(*BatchDispatchResponse)(nil),    // 16: wscpb.BatchDispatchResponse
+	nil,                              // 17: wscpb.CheckUsersOnlineResponse.OnlineUsersEntry
 }
 var file_node_proto_depIdxs = []int32{
-	12, // 0: wscpb.CheckUsersOnlineResponse.online_users:type_name -> wscpb.CheckUsersOnlineResponse.OnlineUsersEntry
-	0,  // 1: wscpb.NodeService.SendToUser:input_type -> wscpb.SendToUserRequest
-	2,  // 2: wscpb.NodeService.CheckUsersOnline:input_type -> wscpb.CheckUsersOnlineRequest
-	4,  // 3: wscpb.NodeService.BroadcastGroup:input_type -> wscpb.BroadcastGroupRequest
-	6,  // 4: wscpb.NodeService.NotifyObservers:input_type -> wscpb.NotifyObserversRequest
-	8,  // 5: wscpb.NodeService.KickUser:input_type -> wscpb.KickUserRequest
-	10, // 6: wscpb.NodeService.Ping:input_type -> wscpb.PingRequest
-	1,  // 7: wscpb.NodeService.SendToUser:output_type -> wscpb.SendToUserResponse
-	3,  // 8: wscpb.NodeService.CheckUsersOnline:output_type -> wscpb.CheckUsersOnlineResponse
-	5,  // 9: wscpb.NodeService.BroadcastGroup:output_type -> wscpb.BroadcastGroupResponse
-	7,  // 10: wscpb.NodeService.NotifyObservers:output_type -> wscpb.NotifyObserversResponse
-	9,  // 11: wscpb.NodeService.KickUser:output_type -> wscpb.KickUserResponse
-	11, // 12: wscpb.NodeService.Ping:output_type -> wscpb.PingResponse
-	7,  // [7:13] is the sub-list for method output_type
-	1,  // [1:7] is the sub-list for method input_type
-	1,  // [1:1] is the sub-list for extension type_name
-	1,  // [1:1] is the sub-list for extension extendee
-	0,  // [0:1] is the sub-list for field type_name
+	17, // 0: wscpb.CheckUsersOnlineResponse.online_users:type_name -> wscpb.CheckUsersOnlineResponse.OnlineUsersEntry
+	0,  // 1: wscpb.DispatchItem.operation:type_name -> wscpb.DispatchOperation
+	13, // 2: wscpb.BatchDispatchRequest.items:type_name -> wscpb.DispatchItem
+	14, // 3: wscpb.BatchDispatchResponse.results:type_name -> wscpb.DispatchResult
+	1,  // 4: wscpb.NodeService.SendToUser:input_type -> wscpb.SendToUserRequest
+	3,  // 5: wscpb.NodeService.CheckUsersOnline:input_type -> wscpb.CheckUsersOnlineRequest
+	5,  // 6: wscpb.NodeService.BroadcastGroup:input_type -> wscpb.BroadcastGroupRequest
+	7,  // 7: wscpb.NodeService.NotifyObservers:input_type -> wscpb.NotifyObserversRequest
+	9,  // 8: wscpb.NodeService.KickUser:input_type -> wscpb.KickUserRequest
+	11, // 9: wscpb.NodeService.Ping:input_type -> wscpb.PingRequest
+	15, // 10: wscpb.NodeService.BatchDispatch:input_type -> wscpb.BatchDispatchRequest
+	2,  // 11: wscpb.NodeService.SendToUser:output_type -> wscpb.SendToUserResponse
+	4,  // 12: wscpb.NodeService.CheckUsersOnline:output_type -> wscpb.CheckUsersOnlineResponse
+	6,  // 13: wscpb.NodeService.BroadcastGroup:output_type -> wscpb.BroadcastGroupResponse
+	8,  // 14: wscpb.NodeService.NotifyObservers:output_type -> wscpb.NotifyObserversResponse
+	10, // 15: wscpb.NodeService.KickUser:output_type -> wscpb.KickUserResponse
+	12, // 16: wscpb.NodeService.Ping:output_type -> wscpb.PingResponse
+	16, // 17: wscpb.NodeService.BatchDispatch:output_type -> wscpb.BatchDispatchResponse
+	11, // [11:18] is the sub-list for method output_type
+	4,  // [4:11] is the sub-list for method input_type
+	4,  // [4:4] is the sub-list for extension type_name
+	4,  // [4:4] is the sub-list for extension extendee
+	0,  // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_node_proto_init() }
@@ -781,13 +1163,14 @@ func file_node_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_node_proto_rawDesc), len(file_node_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   13,
+			NumEnums:      1,
+			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_node_proto_goTypes,
 		DependencyIndexes: file_node_proto_depIdxs,
+		EnumInfos:         file_node_proto_enumTypes,
 		MessageInfos:      file_node_proto_msgTypes,
 	}.Build()
 	File_node_proto = out.File

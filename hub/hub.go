@@ -82,9 +82,10 @@ type Hub struct {
 	recordMgr *connection.RecordManager
 
 	// ========== 集群域 ==========
-	nodeRegistry   *cluster.NodeRegistry
-	grpcClientPool *cluster.GRPCClientPool
-	routerCache    *cluster.RouterCache
+	nodeRegistry        *cluster.NodeRegistry
+	grpcClientPool      *cluster.GRPCClientPool
+	grpcBatchDispatcher *cluster.GRPCBatchDispatcher
+	routerCache         *cluster.RouterCache
 	// nodeQueryFlight 用户节点查询 in-flight 合并器（热点用户并发扇入共享单次回源）
 	nodeQueryFlight nodeQueryFlight
 	// rerouteGuard user_not_found 重路由守卫：messageID → 已拒绝节点集合

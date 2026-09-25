@@ -53,6 +53,10 @@ service NodeService {
   // Ping 节点健康检查
   // [EN] Node health check
   rpc Ping(PingRequest) returns (PingResponse);
+
+  // BatchDispatch 跨节点微批合帧投递（多条指令合并为单次 RPC）
+  // [EN] Micro-batch dispatch of multiple inter-node delivery instructions in a single RPC
+  rpc BatchDispatch(BatchDispatchRequest) returns (BatchDispatchResponse);
 }
 
 // SendToUserRequest 发送消息请求
@@ -136,4 +140,53 @@ message PingResponse {
   string node_id = 1;            // 响应方节点ID | [EN] Responder node ID
   int64 active_connections = 2;  // 活跃连接数 | [EN] Active connection count
   bool healthy = 3;              // 节点是否健康 | [EN] Whether node is healthy
+}
+
+// DispatchOperation 微批投递操作类型（替代裸字符串，枚举语义 + 线型 varint 紧凑编码）
+// [EN] Micro-batch delivery operation type (enum instead of raw string).
+enum DispatchOperation {
+  DISPATCH_OPERATION_UNSPECIFIED = 0; // 未指定（默认值，非法操作）| [EN] Unspecified (default, invalid)
+  DISPATCH_SEND_MESSAGE = 1;          // 点对点投递 | [EN] Point-to-point delivery
+  DISPATCH_KICK_USER = 2;             // 踢人 | [EN] Kick user
+  DISPATCH_GROUP_BROADCAST = 3;       // 群组广播（单群组语义，多群组由发送端拆分为多条 item）| [EN] Group broadcast (single-group)
+  DISPATCH_OBSERVER_NOTIFY = 4;       // 观察者通知 | [EN] Observer notification
+  DISPATCH_BROADCAST = 5;             // 全局/命名空间广播 | [EN] Global/namespace broadcast
+}
+
+// DispatchItem 单条跨节点投递指令（微批合帧最小单元）
+// 路由信封（app_id / namespace / group_ids）内嵌于指令体，
+// 不依赖 gRPC metadata，支持同批多租户 / 多群组异构合帧
+// [EN] A single inter-node delivery instruction (micro-batch unit). Routing envelope embedded.
+message DispatchItem {
+  DispatchOperation operation = 1; // 操作类型 | [EN] Operation type
+  string app_id = 2;               // 路由信封 appID（最上层隔离维度）| [EN] Routing envelope appID
+  string namespace = 3;            // 路由信封 namespace（空=全局/通配）| [EN] Routing envelope namespace
+  repeated string group_ids = 4;   // 路由信封 groupIDs（群组维度）| [EN] Routing envelope group IDs
+  string target_user_id = 5;       // 目标用户（send_message/kick_user 使用）| [EN] Target user ID
+  string reason = 6;               // 辅助信息（kick_user 踢人原因）| [EN] Auxiliary info (kick reason)
+  bytes message_data = 7;          // 序列化后的 HubMessageProto | [EN] Serialized HubMessageProto
+  bool exclude_sender = 8;         // 群组广播是否排除发送者 | [EN] Whether to exclude sender
+  string sender_id = 9;            // 发送者用户ID（用于排除）| [EN] Sender user ID (for exclusion)
+  string trace_id = 10;            // 全链路追踪ID（每条 item 各自携带，跨节点串联日志）| [EN] Trace ID for full-link correlation
+}
+
+// DispatchResult 单条投递结果（与 DispatchItem 一一对应）
+// [EN] Per-item dispatch result
+message DispatchResult {
+  bool success = 1;                // send_message: 是否投递成功; kick_user: 是否成功 | [EN] Whether succeeded
+  bool user_online = 2;            // send_message 专用: 用户是否在线 | [EN] Whether user online (send only)
+  int32 count = 3;                 // 投递数/踢出连接数/通知数 | [EN] delivered/kicked/notified count
+  string error = 4;                // 失败原因（成功时为空）| [EN] Failure reason (empty on success)
+}
+
+// BatchDispatchRequest 微批投递请求（多条指令合帧）
+// [EN] Micro-batch dispatch request
+message BatchDispatchRequest {
+  repeated DispatchItem items = 1; // 待投递指令列表 | [EN] Dispatch instructions
+}
+
+// BatchDispatchResponse 微批投递响应（结果与请求 items 一一对应）
+// [EN] Micro-batch dispatch response
+message BatchDispatchResponse {
+  repeated DispatchResult results = 1; // 逐条结果 | [EN] Per-item results
 }

@@ -76,3 +76,11 @@ const DefaultGroupMemberCacheNegativeTTL = 5 * time.Second
 // DefaultGroupInvalidationFlushInterval 群拓扑失效广播聚合窗口
 // 窗口内多次拓扑写（如上线风暴的注册入组）合并为单条批量广播，广播量 O(写次数) → O(群组数/窗口)
 const DefaultGroupInvalidationFlushInterval = 100 * time.Millisecond
+
+// DefaultGRPCBatchWindow 跨节点 gRPC 微批合帧窗口
+// 窗口内发往同一节点的多消息合并为单次 BatchDispatch RPC，RPC 次数 O(消息数) → O(批次数)；
+// 窗口越小排队延迟越低、越大合帧率越高；0 表示禁用微批（逐消息单发，延迟敏感场景）
+const DefaultGRPCBatchWindow = 2 * time.Millisecond
+
+// DefaultGRPCBatchMaxItems 跨节点 gRPC 微批单批累计上限（达到即触发立即 flush，优先于窗口）
+const DefaultGRPCBatchMaxItems = 32

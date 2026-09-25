@@ -3,7 +3,7 @@
 // @Date: 2026-07-18 00:00:00
 // @LastEditors: kamalyes 501893067@qq.com
 // @LastEditTime: 2026-07-18 00:00:00
-// @FilePath: \go-wsc\models\pb\node_grpc.pb.go
+// @FilePath: \go-wsc\proto\node.proto
 // @Description: 节点间 gRPC 通信协议定义
 //
 // 每个 WebSocket Hub 节点同时运行 gRPC 服务端与客户端，支持点对点直连通信
@@ -30,7 +30,6 @@ package wscpb
 
 import (
 	context "context"
-
 	grpc "google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
 	status "google.golang.org/grpc/status"
@@ -48,6 +47,7 @@ const (
 	NodeService_NotifyObservers_FullMethodName  = "/wscpb.NodeService/NotifyObservers"
 	NodeService_KickUser_FullMethodName         = "/wscpb.NodeService/KickUser"
 	NodeService_Ping_FullMethodName             = "/wscpb.NodeService/Ping"
+	NodeService_BatchDispatch_FullMethodName    = "/wscpb.NodeService/BatchDispatch"
 )
 
 // NodeServiceClient is the client API for NodeService service.
@@ -75,6 +75,9 @@ type NodeServiceClient interface {
 	// Ping 节点健康检查
 	// [EN] Node health check
 	Ping(ctx context.Context, in *PingRequest, opts ...grpc.CallOption) (*PingResponse, error)
+	// BatchDispatch 跨节点微批合帧投递（多条指令合并为单次 RPC）
+	// [EN] Micro-batch dispatch of multiple inter-node delivery instructions in a single RPC
+	BatchDispatch(ctx context.Context, in *BatchDispatchRequest, opts ...grpc.CallOption) (*BatchDispatchResponse, error)
 }
 
 type nodeServiceClient struct {
@@ -145,6 +148,16 @@ func (c *nodeServiceClient) Ping(ctx context.Context, in *PingRequest, opts ...g
 	return out, nil
 }
 
+func (c *nodeServiceClient) BatchDispatch(ctx context.Context, in *BatchDispatchRequest, opts ...grpc.CallOption) (*BatchDispatchResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BatchDispatchResponse)
+	err := c.cc.Invoke(ctx, NodeService_BatchDispatch_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // NodeServiceServer is the server API for NodeService service.
 // All implementations must embed UnimplementedNodeServiceServer
 // for forward compatibility.
@@ -170,6 +183,9 @@ type NodeServiceServer interface {
 	// Ping 节点健康检查
 	// [EN] Node health check
 	Ping(context.Context, *PingRequest) (*PingResponse, error)
+	// BatchDispatch 跨节点微批合帧投递（多条指令合并为单次 RPC）
+	// [EN] Micro-batch dispatch of multiple inter-node delivery instructions in a single RPC
+	BatchDispatch(context.Context, *BatchDispatchRequest) (*BatchDispatchResponse, error)
 	mustEmbedUnimplementedNodeServiceServer()
 }
 
@@ -197,6 +213,9 @@ func (UnimplementedNodeServiceServer) KickUser(context.Context, *KickUserRequest
 }
 func (UnimplementedNodeServiceServer) Ping(context.Context, *PingRequest) (*PingResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Ping not implemented")
+}
+func (UnimplementedNodeServiceServer) BatchDispatch(context.Context, *BatchDispatchRequest) (*BatchDispatchResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method BatchDispatch not implemented")
 }
 func (UnimplementedNodeServiceServer) mustEmbedUnimplementedNodeServiceServer() {}
 func (UnimplementedNodeServiceServer) testEmbeddedByValue()                     {}
@@ -327,6 +346,24 @@ func _NodeService_Ping_Handler(srv interface{}, ctx context.Context, dec func(in
 	return interceptor(ctx, in, info, handler)
 }
 
+func _NodeService_BatchDispatch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BatchDispatchRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(NodeServiceServer).BatchDispatch(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: NodeService_BatchDispatch_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(NodeServiceServer).BatchDispatch(ctx, req.(*BatchDispatchRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // NodeService_ServiceDesc is the grpc.ServiceDesc for NodeService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -357,6 +394,10 @@ var NodeService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Ping",
 			Handler:    _NodeService_Ping_Handler,
+		},
+		{
+			MethodName: "BatchDispatch",
+			Handler:    _NodeService_BatchDispatch_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

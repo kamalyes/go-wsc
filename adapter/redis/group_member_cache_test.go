@@ -41,17 +41,17 @@ func (s *countingGroupStore) GetMultiGroupMembers(ctx context.Context, appID str
 func (s *countingGroupStore) backfillCount() int { return int(atomic.LoadInt32(&s.backfills)) }
 
 // setupCache 构造「真实仓储 + 回源计数 + 拓扑缓存」三层装配
-func setupCache(t *testing.T, ttl time.Duration, maxEntries, maxMembers int) (*GroupMemberCache, *countingGroupStore) {
+func setupCache(t *testing.T, ttl, negativeTTL time.Duration, maxEntries, maxMembers int) (*GroupMemberCache, *countingGroupStore) {
 	t.Helper()
 	repo, cleanup := setupTestRepo(t)
 	t.Cleanup(cleanup)
 	counting := &countingGroupStore{GroupStore: repo}
-	return NewGroupMemberCache(counting, ttl, maxEntries, maxMembers), counting
+	return NewGroupMemberCache(counting, ttl, negativeTTL, maxEntries, maxMembers), counting
 }
 
 // TestGroupMemberCache_HitAvoidsBackfill 命中挡回源：首次读回源并缓存跨 ns 聚合结果，后续读零回源
 func TestGroupMemberCache_HitAvoidsBackfill(t *testing.T) {
-	cache, counting := setupCache(t, 0, 0, 0) // 全零值走默认参数
+	cache, counting := setupCache(t, 0, 0, 0, 0) // 全零值走默认参数
 	ctx := context.Background()
 
 	// g1 跨 ns 双实例（tenantA/tenantB），g2 单实例
@@ -94,7 +94,7 @@ func TestGroupMemberCache_HitAvoidsBackfill(t *testing.T) {
 
 // TestGroupMemberCache_WriteEvicts 写路径即时逐出：增删成员/解散后下一次读拿到最新拓扑
 func TestGroupMemberCache_WriteEvicts(t *testing.T) {
-	cache, counting := setupCache(t, time.Minute, 0, 0)
+	cache, counting := setupCache(t, time.Minute, 0, 0, 0)
 	ctx := context.Background()
 	app := constants.DefaultAppID
 
@@ -138,7 +138,7 @@ func TestGroupMemberCache_WriteEvicts(t *testing.T) {
 // TestGroupMemberCache_CreateEvictsNegativeEntry 建组逐出负缓存：
 // 先查未建 gid 写入负缓存后建组，新实例必须立即可见（否则 TTL 窗口内被误报为无实例、群组投递漏投）
 func TestGroupMemberCache_CreateEvictsNegativeEntry(t *testing.T) {
-	cache, counting := setupCache(t, time.Minute, 0, 0)
+	cache, counting := setupCache(t, time.Minute, 0, 0, 0)
 	ctx := context.Background()
 	app := constants.DefaultAppID
 
@@ -171,7 +171,7 @@ func TestGroupMemberCache_CreateEvictsNegativeEntry(t *testing.T) {
 
 // TestGroupMemberCache_TTLExpiry 条目过期后视作 miss 重新回源（跨节点写入的一致性兜底）
 func TestGroupMemberCache_TTLExpiry(t *testing.T) {
-	cache, counting := setupCache(t, 25*time.Millisecond, 0, 0)
+	cache, counting := setupCache(t, 25*time.Millisecond, 0, 0, 0)
 	ctx := context.Background()
 	app := constants.DefaultAppID
 
@@ -192,7 +192,7 @@ func TestGroupMemberCache_TTLExpiry(t *testing.T) {
 
 // TestGroupMemberCache_OversizedEntrySkipped 大群超成员预算不入缓存，每次读都回源透传
 func TestGroupMemberCache_OversizedEntrySkipped(t *testing.T) {
-	cache, counting := setupCache(t, time.Minute, 0, 2) // 单条目预算 2 人
+	cache, counting := setupCache(t, time.Minute, 0, 0, 2) // 单条目预算 2 人
 	ctx := context.Background()
 	app := constants.DefaultAppID
 
@@ -210,7 +210,7 @@ func TestGroupMemberCache_OversizedEntrySkipped(t *testing.T) {
 // TestGroupMemberCache_LRUEviction 容量超限从队尾逐出，最近访问的条目保留
 func TestGroupMemberCache_LRUEviction(t *testing.T) {
 	// 容量 128 → 分片配额 2；白盒选三个同分片 gid，使配额在该分片内精确生效（分片配额语义）
-	cache, counting := setupCache(t, time.Minute, 128, 0)
+	cache, counting := setupCache(t, time.Minute, 0, 128, 0)
 	ctx := context.Background()
 	app := constants.DefaultAppID
 
@@ -251,7 +251,7 @@ func TestGroupMemberCache_LRUEviction(t *testing.T) {
 
 // TestGroupMemberCache_AppIsolation 缓存 key 按 appID 隔离：同 gid 跨 app 互不串扰
 func TestGroupMemberCache_AppIsolation(t *testing.T) {
-	cache, counting := setupCache(t, time.Minute, 0, 0)
+	cache, counting := setupCache(t, time.Minute, 0, 0, 0)
 	ctx := context.Background()
 
 	require.NoError(t, cache.CreateGroup(ctx, &models.Group{GroupID: "g-iso", Namespace: "tenantA", OwnerID: "o"}))
@@ -284,7 +284,7 @@ func TestGroupMemberCache_AppIsolation(t *testing.T) {
 
 // TestGroupMemberCache_ConcurrentAccess 并发读写冒烟：混度读写无死锁/无竞态（-race 下验证）
 func TestGroupMemberCache_ConcurrentAccess(t *testing.T) {
-	cache, _ := setupCache(t, time.Minute, 0, 0)
+	cache, _ := setupCache(t, time.Minute, 0, 0, 0)
 	ctx := context.Background()
 	app := constants.DefaultAppID
 

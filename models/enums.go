@@ -301,6 +301,7 @@ const (
 	OperationTypeGroupsBroadcast OperationType = "groups_broadcast" // 跨节点批量群组广播
 	OperationTypeUserNotFound    OperationType = "user_not_found"   // 目标节点回告发送节点：用户不在该节点（索引死条目自愈信号）
 	OperationTypeClientReclaim   OperationType = "client_reclaim"   // 新节点回收旧节点同 clientID 幽灵连接（断线重连跨节点迁移）
+	OperationTypeGroupInvalidate OperationType = "group_invalidate" // 群拓扑失效广播：拓扑写路径经 100ms 聚合窗口批量发布，各节点逐出本地群成员缓存
 )
 
 // String 实现Stringer接口

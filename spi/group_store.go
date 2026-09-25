@@ -66,4 +66,13 @@ type GroupStore interface {
 	// EnsureSystemGroup 确保系统保留组存在（__ 前缀，agent/observer 自动加入前初始化）
 	// 幂等：不存在则创建，已存在则返回 nil
 	EnsureSystemGroup(ctx context.Context, appID, namespace, groupID string) error
+
+	// SetInvalidateNotifier 注入拓扑写路径失效回调（拓扑写本地逐出后触发，供跨节点失效广播聚合）
+	// 持本地缓存的实现（GroupMemberCache）存回调并在写路径统一触发；无本地缓存的裸仓储 no-op 丢弃
+	SetInvalidateNotifier(fn func(appID, groupID string))
+
+	// InvalidateTopology 逐出该群组的本地缓存拓扑（跨节点失效广播的消费入口）
+	// 纯逐出不写负缓存：失效原因是拓扑变更（含建组/增成员），写负缓存会把新实例误报为无实例；
+	// 无本地缓存的裸仓储 no-op
+	InvalidateTopology(appID, groupID string)
 }

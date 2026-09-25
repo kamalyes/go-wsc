@@ -324,6 +324,10 @@ func (h *Hub) handleDistributedMessageTargeted(ctx context.Context, distMsg *mod
 		// 历史遗漏：switch 曾只有复数 case，单群组 PubSub 兜底消息会进 default 丢失。
 		return h.handleDistributedGroupsBroadcast(ctx, distMsg)
 
+	case models.OperationTypeGroupInvalidate:
+		// 群拓扑失效广播：发布侧 100ms 聚合窗口合并，各节点纯逐出本地群成员缓存
+		return h.handleDistributedGroupInvalidate(ctx, distMsg)
+
 	case models.OperationTypeObserverNotify:
 		return h.handleDistributedObserverNotify(ctx, distMsg)
 
@@ -331,6 +335,24 @@ func (h *Hub) handleDistributedMessageTargeted(ctx context.Context, distMsg *mod
 		h.logger.WarnContextKV(ctx, "未知的分布式消息类型", "type", distMsg.Type)
 		return fmt.Errorf("unknown message type: %s", distMsg.Type)
 	}
+}
+
+// handleDistributedGroupInvalidate 处理群拓扑失效广播：纯逐出本地缓存条目
+// 统一走 GroupStore 契约的 InvalidateTopology；不写负缓存：失效原因是拓扑变更
+// （含建组/增成员），写负缓存会在窗口内把新实例误报为无实例
+func (h *Hub) handleDistributedGroupInvalidate(ctx context.Context, distMsg *models.DistributedMessage) error {
+	if h.groupStore == nil {
+		// 群组仓储未装配：本节点无本地缓存，无需逐出
+		return nil
+	}
+	for _, gid := range distMsg.GroupIDs {
+		h.groupStore.InvalidateTopology(distMsg.AppID, gid)
+	}
+	h.logger.DebugContextKV(ctx, "群拓扑失效广播已消费",
+		"app_id", distMsg.AppID,
+		"group_count", len(distMsg.GroupIDs),
+	)
+	return nil
 }
 
 // handleDistributedSendMessage 处理跨节点发送消息

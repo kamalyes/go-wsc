@@ -68,3 +68,11 @@ const DefaultGroupMemberCacheEntries = 1024
 // DefaultGroupMemberCacheMaxMembers 群组成员拓扑缓存单条目成员数预算默认上限
 // 超出则该群组不入缓存：100w 成员大群单条可达数十 MB，缓存反而挤爆内存，回源保持两段 Pipeline
 const DefaultGroupMemberCacheMaxMembers = 10000
+
+// DefaultGroupMemberCacheNegativeTTL 群组成员拓扑缓存负缓存（确认无实例条目）默认存活期
+// 短于正缓存：压缩"解散后误投"边界窗口的同时，控制无效群组的重复回源频率
+const DefaultGroupMemberCacheNegativeTTL = 5 * time.Second
+
+// DefaultGroupInvalidationFlushInterval 群拓扑失效广播聚合窗口
+// 窗口内多次拓扑写（如上线风暴的注册入组）合并为单条批量广播，广播量 O(写次数) → O(群组数/窗口)
+const DefaultGroupInvalidationFlushInterval = 100 * time.Millisecond

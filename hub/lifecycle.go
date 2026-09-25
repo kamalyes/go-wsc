@@ -107,6 +107,15 @@ func (h *Hub) Run() {
 			})
 	}
 
+	// 📢 启动群拓扑失效广播聚合循环（群组域组件，100ms 窗口合并拓扑写失效）
+	syncx.Go(h.ctx).
+		OnPanic(func(r any) {
+			h.logger.ErrorKV("群拓扑失效广播聚合循环 panic", "panic", r, "stack", string(debug.Stack()), "node_id", h.nodeID)
+		}).
+		Exec(func() {
+			h.groupInvalidator.Run(h.ctx)
+		})
+
 	// 🧹 启动高频合并器 drain ticker（latest-wins 快照周期投递）
 	if h.ephemeralCoalescer.Load() != nil {
 		h.startCoalescerDrain()

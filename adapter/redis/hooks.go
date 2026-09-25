@@ -65,8 +65,8 @@ func (h *hooks) Configure(_ context.Context, hub spi.StoreTarget, deps spi.Store
 
 	hub.SetOnlineStatusRepository(NewOnlineStore(deps.Redis, cfg.OnlineStatus))
 	hub.SetHubStatsRepository(NewHubStats(deps.Redis, cfg.Stats))
-	// 群组仓储套拓扑缓存：群消息投递热路径 0 回源（参数零值走 constants 默认值）
-	hub.SetGroupRepository(NewGroupMemberCache(NewGroupStore(deps.Redis, groupKeyPrefix(cfg)), 0, 0, 0))
+	// 群组仓储套拓扑缓存：群消息投递热路径 0 回源（参数零值走 constants 默认值，含负缓存短 TTL 分级）
+	hub.SetGroupRepository(NewGroupMemberCache(NewGroupStore(deps.Redis, groupKeyPrefix(cfg)), 0, 0, 0, 0))
 
 	// 客服负载：仅在启用时装配（未启用时 Hub 侧方法返回明确的未初始化错误）
 	if cfg.Workload != nil {

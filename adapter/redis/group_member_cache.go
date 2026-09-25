@@ -8,8 +8,8 @@
  *
  * 群消息投递热路径的 0 回源优化：稳态下投递只读本地聚合拓扑，Redis 两段 Pipeline
  * 仅在未命中/过期时回源缓存 key 为 (appID, groupID)，与跨 ns 聚合语义一致、
- * 不感知 namespace本地写路径（建组/增删成员/解散）即时逐出对应条目；跨节点写入由
- * TTL 兜底（失效广播暂缓）
+ * 不感知 namespace；本地写路径（建组/增删成员/解散）即时逐出并触发失效通知回调，
+ * 跨节点写入由失效广播（hub 侧 100ms 聚合窗口）逐出，TTL 兜底广播丢失场景
  *
  * 分片结构（与 ShardedRegistry/AckManager 的 FNV-1a 惯例同款）：64 个独立 shard
  * 各持私有 LRU+items，命中/回填/逐出均在 shard 内加锁，高并发群投递下锁竞争面
@@ -63,9 +63,14 @@ type groupMemberShard struct {
 type GroupMemberCache struct {
 	spi.GroupStore
 
-	ttl        time.Duration // 条目存活期（兜住跨节点写入的最终一致窗口）
-	maxEntries int           // 全局条目配额（按分片均摊，非精确全局上限）
-	maxMembers int           // 单条目成员数预算，超出不入缓存（防大群挤爆内存）
+	ttl         time.Duration // 正缓存存活期（兜住跨节点写入的最终一致窗口）
+	negativeTTL time.Duration // 负缓存存活期（确认无实例条目，短于正缓存以压缩误投窗口）
+	maxEntries  int           // 全局条目配额（按分片均摊，非精确全局上限）
+	maxMembers  int           // 单条目成员数预算，超出不入缓存（防大群挤爆内存）
+
+	// onInvalidate 拓扑写路径失效回调（hub 装配时经 SetInvalidateNotifier 注入）
+	// 本地逐出后触发，hub 侧聚合 100ms 窗口批量广播，本装饰器不感知传输细节
+	onInvalidate func(appID, groupID string)
 
 	shards [groupCacheShards]groupMemberShard
 }
@@ -73,8 +78,8 @@ type GroupMemberCache struct {
 // NewGroupMemberCache 创建群组成员拓扑缓存装饰器
 //
 // inner 为被装饰的群组仓储（必需，nil 直接 panic 暴露装配错误）
-// ttl/maxEntries/maxMembers 传零值时使用 constants 默认值（见 delivery.go）
-func NewGroupMemberCache(inner spi.GroupStore, ttl time.Duration, maxEntries, maxMembers int) *GroupMemberCache {
+// ttl/negativeTTL/maxEntries/maxMembers 传零值时使用 constants 默认值（见 delivery.go）
+func NewGroupMemberCache(inner spi.GroupStore, ttl, negativeTTL time.Duration, maxEntries, maxMembers int) *GroupMemberCache {
 	if inner == nil {
 		panic("GroupMemberCache: inner group store is required")
 	}
@@ -83,10 +88,11 @@ func NewGroupMemberCache(inner spi.GroupStore, ttl time.Duration, maxEntries, ma
 	}
 	quota := mathx.Max(maxEntries/groupCacheShards, 1)
 	c := &GroupMemberCache{
-		GroupStore: inner,
-		ttl:        mathx.IF(ttl > 0, ttl, constants.DefaultGroupMemberCacheTTL),
-		maxEntries: quota * groupCacheShards, // 回算全局口径，仅用于日志与观测
-		maxMembers: mathx.IF(maxMembers > 0, maxMembers, constants.DefaultGroupMemberCacheMaxMembers),
+		GroupStore:  inner,
+		ttl:         mathx.IF(ttl > 0, ttl, constants.DefaultGroupMemberCacheTTL),
+		negativeTTL: mathx.IF(negativeTTL > 0, negativeTTL, constants.DefaultGroupMemberCacheNegativeTTL),
+		maxEntries:  quota * groupCacheShards, // 回算全局口径，仅用于日志与观测
+		maxMembers:  mathx.IF(maxMembers > 0, maxMembers, constants.DefaultGroupMemberCacheMaxMembers),
 	}
 	for i := range c.shards {
 		c.shards[i].lru = list.New()
@@ -171,42 +177,61 @@ func (c *GroupMemberCache) GetMultiGroupMembers(ctx context.Context, appID strin
 	return result, nil
 }
 
-// AddMembers 添加成员后逐出该群组拓扑（本地写路径即时失效）
+// AddMembers 添加成员后逐出该群组拓扑并触发失效通知
 func (c *GroupMemberCache) AddMembers(ctx context.Context, appID, namespace, groupID string, userIDs []string) error {
 	err := c.GroupStore.AddMembers(ctx, appID, namespace, groupID, userIDs)
-	c.evict(appID, groupID)
+	c.invalidateLocal(appID, groupID) // 写失败也逐出：拓扑状态未知时失效更保守
 	return err
 }
 
-// RemoveMembers 移除成员后逐出该群组拓扑
+// RemoveMembers 移除成员后逐出该群组拓扑并触发失效通知
 func (c *GroupMemberCache) RemoveMembers(ctx context.Context, appID, namespace, groupID string, userIDs []string) error {
 	err := c.GroupStore.RemoveMembers(ctx, appID, namespace, groupID, userIDs)
-	c.evict(appID, groupID)
+	c.invalidateLocal(appID, groupID)
 	return err
 }
 
-// CreateGroup 建组后逐出该群组拓扑
+// CreateGroup 建组后逐出该群组拓扑并触发失效通知
 // 负缓存条目（确认无实例）必须在建组后失效，否则 TTL 窗口内新实例被误报为无实例、群组投递漏投
 func (c *GroupMemberCache) CreateGroup(ctx context.Context, group *models.Group) error {
 	err := c.GroupStore.CreateGroup(ctx, group)
 	if group != nil {
-		c.evict(group.AppID, group.GroupID)
+		c.invalidateLocal(group.AppID, group.GroupID)
 	}
 	return err
 }
 
-// EnsureSystemGroup 确保系统组后逐出该群组拓扑（与 CreateGroup 同因：负缓存不得挡住新实例）
+// EnsureSystemGroup 确保系统组后逐出该群组拓扑并触发失效通知（与 CreateGroup 同因：负缓存不得挡住新实例）
 func (c *GroupMemberCache) EnsureSystemGroup(ctx context.Context, appID, namespace, groupID string) error {
 	err := c.GroupStore.EnsureSystemGroup(ctx, appID, namespace, groupID)
-	c.evict(appID, groupID)
+	c.invalidateLocal(appID, groupID)
 	return err
 }
 
-// DisbandGroup 解散群组后逐出该群组拓扑
+// DisbandGroup 解散群组后逐出该群组拓扑并触发失效通知
 func (c *GroupMemberCache) DisbandGroup(ctx context.Context, appID, namespace, groupID string) error {
 	err := c.GroupStore.DisbandGroup(ctx, appID, namespace, groupID)
-	c.evict(appID, groupID)
+	c.invalidateLocal(appID, groupID)
 	return err
+}
+
+// SetInvalidateNotifier 注入拓扑写路径失效回调（GroupStore 契约能力，hub 装配时统一注入，接通失效广播聚合器）
+func (c *GroupMemberCache) SetInvalidateNotifier(fn func(appID, groupID string)) {
+	c.onInvalidate = fn
+}
+
+// InvalidateTopology 逐出该群组的聚合拓扑（GroupStore 契约统一能力，跨节点失效广播的消费入口）
+// 纯逐出不写负缓存：失效原因是拓扑变更（含建组/增成员），写负缓存会在窗口内把新实例误报为无实例
+func (c *GroupMemberCache) InvalidateTopology(appID, groupID string) {
+	c.evict(appID, groupID)
+}
+
+// invalidateLocal 本地逐出并触发失效通知（5 个写路径的统一收口：本地缓存即时失效 + 回调标记待广播）
+func (c *GroupMemberCache) invalidateLocal(appID, gid string) {
+	c.evict(appID, gid)
+	if c.onInvalidate != nil {
+		c.onInvalidate(appID, gid)
+	}
 }
 
 // fill 回填一条聚合拓扑到所属分片（已存在的条目原地刷新并移到队首，配额超限从队尾逐出）
@@ -216,17 +241,19 @@ func (c *GroupMemberCache) fill(appID, gid string, members []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := groupCacheKey{appID, gid}
+	// 负缓存（确认无实例）独立短 TTL：压缩解散后误投窗口，同时控制无效群组的重复回源频率
+	entryTTL := mathx.IF(members == nil, c.negativeTTL, c.ttl)
 	if el, ok := s.items[key]; ok {
 		e := el.Value.(*groupCacheEntry)
 		e.members = members
-		e.expireAt = time.Now().Add(c.ttl)
+		e.expireAt = time.Now().Add(entryTTL)
 		s.lru.MoveToFront(el)
 		return
 	}
 	for s.lru.Len() >= quota {
 		s.removeLocked(s.lru.Back())
 	}
-	s.items[key] = s.lru.PushFront(&groupCacheEntry{key: key, members: members, expireAt: time.Now().Add(c.ttl)})
+	s.items[key] = s.lru.PushFront(&groupCacheEntry{key: key, members: members, expireAt: time.Now().Add(entryTTL)})
 }
 
 // evict 逐出一个群组的聚合拓扑（写路径失效，appID 归一化与读路径同口径）

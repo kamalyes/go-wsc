@@ -411,6 +411,10 @@ func (g *fakeGroupStore) EnsureSystemGroup(_ context.Context, _, _, _ string) er
 	return nil
 }
 
+func (g *fakeGroupStore) SetInvalidateNotifier(_ func(appID, groupID string)) {}
+
+func (g *fakeGroupStore) InvalidateTopology(_, _ string) {}
+
 var _ spi.GroupStore = (*fakeGroupStore)(nil)
 
 // ============================================================================

@@ -90,6 +90,20 @@ func (h *Hub) GetGroupRepo() spi.GroupStore { return h.groupStore }
 // GetGroupStore 群组仓储（group.Host 端口名）
 func (h *Hub) GetGroupStore() spi.GroupStore { return h.groupStore }
 
+// PublishGroupInvalidations 实现群组域 Host 端口：批量发布群拓扑失效通知（聚合器的窗口出口）
+// 复用全局广播频道（订阅侧自带 NodeID 自忽略去重）；单机形态 pubsub 未部署时短路返回 nil
+func (h *Hub) PublishGroupInvalidations(ctx context.Context, appID string, groupIDs []string) error {
+	if h.pubsub == nil {
+		return nil
+	}
+	return h.publishToCluster(ctx, &models.DistributedMessage{
+		Type:     models.OperationTypeGroupInvalidate,
+		NodeID:   h.nodeID,
+		AppID:    appID,
+		GroupIDs: groupIDs,
+	})
+}
+
 // GetStatsRepo 节点统计仓储（兼作消息计数开关）
 func (h *Hub) GetStatsRepo() spi.HubStats { return h.statsRepo }
 
@@ -122,7 +136,13 @@ func (h *Hub) SetOnlineStatusRepository(store spi.OnlineStore) { h.onlineStatusR
 func (h *Hub) SetHubStatsRepository(store spi.HubStats) { h.statsRepo = store }
 
 // SetGroupRepository 注入群组仓储（StoreTarget 能力面）
-func (h *Hub) SetGroupRepository(store spi.GroupStore) { h.groupStore = store }
+// 统一注入拓扑失效回调（GroupStore 契约能力）：持本地缓存的实现（GroupMemberCache）
+// 写路径本地逐出后回调群组域聚合器标记 dirty，100ms 窗口批量广播，跨节点写一致性
+// 窗口 30s → ~100ms；无缓存的裸仓储 no-op 丢弃
+func (h *Hub) SetGroupRepository(store spi.GroupStore) {
+	h.groupStore = store
+	store.SetInvalidateNotifier(h.groupInvalidator.MarkDirty)
+}
 
 // SetWorkloadRepository 注入客服负载仓储（StoreTarget 能力面）
 func (h *Hub) SetWorkloadRepository(store spi.WorkloadStore) { h.workloadStore = store }

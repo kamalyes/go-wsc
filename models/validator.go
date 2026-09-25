@@ -189,6 +189,7 @@ var (
 		OperationTypeGroupsBroadcast,
 		OperationTypeUserNotFound,
 		OperationTypeClientReclaim,
+		OperationTypeGroupInvalidate,
 	)
 
 	// ClientTypeValidator 客户端类型验证器

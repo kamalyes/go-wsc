@@ -48,6 +48,10 @@ type Host interface {
 	// （群组成员关系是业务语义，静默 no-op 会让业务方以为入群成功）
 	GetGroupStore() spi.GroupStore
 
+	// PublishGroupInvalidations 批量发布群拓扑失效通知到集群广播频道（拓扑写路径失效的跨节点传播）
+	// 单机形态（pubsub 未部署）由实现侧短路返回 nil；事件信封封装与传输细节由编排层收口
+	PublishGroupInvalidations(ctx context.Context, appID string, groupIDs []string) error
+
 	// TrySubmitCallback 提交一个带超时保护的异步回调任务，队列满时返回 false。
 	// 群组生命周期回调走此处，避免每条连接一个 goroutine。
 	TrySubmitCallback(task func()) bool

@@ -391,5 +391,11 @@ func (r *GroupStore) GetMultiGroupMembers(ctx context.Context, appID string, gro
 	return result, nil
 }
 
+// SetInvalidateNotifier 拓扑写失效回调（裸仓储无本地缓存，no-op：hub 装配统一注入，本实现直接丢弃）
+func (s *GroupStore) SetInvalidateNotifier(fn func(appID, groupID string)) {}
+
+// InvalidateTopology 逐出本地缓存拓扑（裸仓储无本地缓存，no-op）
+func (s *GroupStore) InvalidateTopology(appID, groupID string) {}
+
 // 编译期断言：repository 实现必须满足 spi 契约（Phase 4 迁仓后适配器同样受此约束）
 var _ spi.GroupStore = (*GroupStore)(nil)

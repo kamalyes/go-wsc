@@ -116,6 +116,9 @@ type Hub struct {
 	connectionQualityStore spi.ConnectionQualityStore
 	workloadStore          spi.WorkloadStore
 
+	// ========== 群拓扑失效广播聚合器（群组域组件，见 group/invalidation.go） ==========
+	groupInvalidator *group.InvalidationBroadcaster
+
 	// ========== 连接 Token 鉴权器（可选启用，nil 时走明文参数） ==========
 	connectionTokenDecoder spi.ConnectionAuthenticator
 
@@ -267,6 +270,8 @@ func NewHub(config *wscconfig.WSC) *Hub {
 	// 统计域与群组域管理器
 	hub.statsMgr = stats.NewManager(hub)
 	hub.groupMgr = group.NewManager(hub)
+	// 群拓扑失效广播聚合器：interval 零值走 constants 默认（Run() 时启动聚合循环）
+	hub.groupInvalidator = group.NewInvalidationBroadcaster(hub, 0)
 
 	// 批处理器域管理器（状态更新 / 记录 outbox / 心跳统计 / 消息统计 / 观察者通知）
 	// 观察者直投由消息域 Manager 提供（ObserverNotifier 端口，flush 直连域组件）

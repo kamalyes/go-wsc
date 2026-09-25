@@ -57,3 +57,14 @@ const ClientWriteBatchSize = 64
 // ClientWriteTimeout 写泵单批写超时（整批共享一次 deadline）
 // 突发场景 N 次期限设置收敛为 1 次
 const ClientWriteTimeout = 10 * time.Second
+
+// DefaultGroupMemberCacheTTL 群组成员拓扑缓存默认存活期
+// 群消息投递热路径 0 回源的一致性窗口：本地写路径即时逐出，跨节点写最多滞后一个 TTL
+const DefaultGroupMemberCacheTTL = 30 * time.Second
+
+// DefaultGroupMemberCacheEntries 群组成员拓扑缓存默认条目上限（LRU 容量）
+const DefaultGroupMemberCacheEntries = 1024
+
+// DefaultGroupMemberCacheMaxMembers 群组成员拓扑缓存单条目成员数预算默认上限
+// 超出则该群组不入缓存：100w 成员大群单条可达数十 MB，缓存反而挤爆内存，回源保持两段 Pipeline
+const DefaultGroupMemberCacheMaxMembers = 10000

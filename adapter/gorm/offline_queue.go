@@ -97,8 +97,7 @@ func (r *OfflineStore) QueryMessages(ctx context.Context, filter *spi.OfflineMes
 
 	// 应用隔离过滤：空表示查询所有应用（由 AddFilterIfNotEmpty 处理）
 	query.AddFilterIfNotEmpty("app_id", filter.AppID)
-	// 命名空间过滤：空表示查询所有命名空间（由 AddFilterIfNotEmpty 处理）
-	query.AddFilterIfNotEmpty("namespace", filter.Namespace)
+	// 命名空间过滤见 ApplyFilters 之后：ns 非空时需同时命中通配群组消息（namespace=''）
 	if filter.GroupID != "" {
 		query.AddFilterIfNotEmpty("group_id", filter.GroupID)
 	}
@@ -129,6 +128,12 @@ func (r *OfflineStore) QueryMessages(ctx context.Context, filter *spi.OfflineMes
 	gormDB := r.db.WithContext(ctx)
 	gormDB = sqlbuilder.ApplyFilters(gormDB, query.Filters)
 
+	// 命名空间过滤：空表示查询所有命名空间（历史行为）；非空时同时命中通配群组消息——
+	// 群组离线消息 namespace=''（群组投递信封 ns 跨 ns 通配），用户在任何租户上线都应收到
+	if filter.Namespace != "" {
+		gormDB = gormDB.Where("namespace = ? OR namespace = ''", filter.Namespace)
+	}
+
 	// 分页游标：从 cursor 之后的消息开始读取（使用原生 GORM，因为需要子查询）
 	if filter.Cursor != "" {
 		tableName := models.OfflineMessageRecord{}.TableName()
@@ -154,32 +159,35 @@ func (r *OfflineStore) DeleteByMessageIDs(ctx context.Context, appID, namespace,
 		Delete(&models.OfflineMessageRecord{}).Error
 }
 
-// GetCountByReceiver 获取用户作为接收者的离线消息数量（按应用+命名空间隔离）
+// GetCountByReceiver 获取用户作为接收者的离线消息数量（按应用+命名空间隔离，含通配群组消息）
 func (r *OfflineStore) GetCountByReceiver(ctx context.Context, appID, namespace, receiverID string) (int64, error) {
 	var count int64
 	err := r.db.WithContext(ctx).
 		Model(&models.OfflineMessageRecord{}).
-		Where("app_id = ? AND namespace = ? AND receiver = ? AND expire_at > ?", appID, namespace, receiverID, time.Now()).
+		// namespace='' 为通配群组消息（跨 ns 投递语义），本租户计数需同时命中
+		Where("app_id = ? AND (namespace = ? OR namespace = '') AND receiver = ? AND expire_at > ?", appID, namespace, receiverID, time.Now()).
 		Where("status IN ?", models.PendingOfflineStatuses).
 		Count(&count).Error
 	return count, err
 }
 
-// GetCountBySender 获取用户作为发送者的离线消息数量（按应用+命名空间隔离）
+// GetCountBySender 获取用户作为发送者的离线消息数量（按应用+命名空间隔离，含通配群组消息）
 func (r *OfflineStore) GetCountBySender(ctx context.Context, appID, namespace, senderID string) (int64, error) {
 	var count int64
 	err := r.db.WithContext(ctx).
 		Model(&models.OfflineMessageRecord{}).
-		Where("app_id = ? AND namespace = ? AND sender = ? AND expire_at > ?", appID, namespace, senderID, time.Now()).
+		// namespace='' 为通配群组消息（跨 ns 投递语义），本租户计数需同时命中
+		Where("app_id = ? AND (namespace = ? OR namespace = '') AND sender = ? AND expire_at > ?", appID, namespace, senderID, time.Now()).
 		Where("status IN ?", models.PendingOfflineStatuses).
 		Count(&count).Error
 	return count, err
 }
 
-// ClearByReceiver 清空用户作为接收者的所有离线消息（按应用+命名空间隔离）
+// ClearByReceiver 清空用户作为接收者的所有离线消息（按应用+命名空间隔离，含通配群组消息）
 func (r *OfflineStore) ClearByReceiver(ctx context.Context, appID, namespace, receiverID string) error {
 	return r.db.WithContext(ctx).
-		Where("app_id = ? AND namespace = ? AND receiver = ?", appID, namespace, receiverID).
+		// namespace='' 为通配群组消息（跨 ns 投递语义），本租户清理需同时命中
+		Where("app_id = ? AND (namespace = ? OR namespace = '') AND receiver = ?", appID, namespace, receiverID).
 		Delete(&models.OfflineMessageRecord{}).Error
 }
 

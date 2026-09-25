@@ -11,7 +11,7 @@
  *   - {prefix}members:{appID}:{namespace}:{groupID}     → Set 成员 userID 集合
  *   - {prefix}user:{appID}:{namespace}:{userID}         → Set 用户在该 (app,ns) 下加入的 groupID 集合（反向索引）
  *   - {prefix}ns:{appID}:{namespace}:groups             → Set (app,ns) 下所有 groupID 集合
- *   - {prefix}group:{appID}:{groupID}                   → String 反向映射 groupID→namespace（仅 (app) 内唯一）
+ *   - {prefix}gns:{appID}:{groupID}                      → Set 该 groupID 存在实例的 namespace 集合（跨 ns 实例索引）
  *
  * Copyright (c) 2026 by kamalyes, All Rights Reserved.
  */
@@ -69,16 +69,19 @@ func (r *GroupStore) namespaceGroupsKey(appID, namespace string) string {
 	return r.keyPrefix + "ns:" + appID + ":" + namespace + ":groups"
 }
 
-// groupNamespaceKey 群组反向映射 key：(appID, groupID) → namespace（groupID 现在仅在 (appID, namespace) 内唯一）
-func (r *GroupStore) groupNamespaceKey(appID, groupID string) string {
-	return r.keyPrefix + "group:" + appID + ":" + groupID
+// groupInstancesKey 群组实例索引 key：(appID, groupID) → namespace 实例集合（Set）
+// 同一 groupID 可在多个 namespace 下各建一个实例（业务侧按租户各自建组，同 gid 跨 ns 不混，
+// members 桶仍按三维隔离）；投递时通过该索引一步拿到 gid 的全部 ns 实例再聚合成员，无需 SCAN
+func (r *GroupStore) groupInstancesKey(appID, groupID string) string {
+	return r.keyPrefix + "gns:" + appID + ":" + groupID
 }
 
 // ============================================================================
 // 群组元信息管理
 // ============================================================================
 
-// createGroupScript Lua 脚本：原子性地校验同 (appID, namespace) 下 groupID 唯一并写入元信息与命名空间索引
+// createGroupScript Lua 脚本：原子性地校验同 (appID, namespace) 下 groupID 唯一并写入元信息、命名空间索引与实例索引
+// KEYS[1]=info 三维元信息 / KEYS[2]=ns 归属索引 / KEYS[3]=gns 跨 ns 实例索引；ARGV[1]=元信息 JSON / ARGV[2]=groupID / ARGV[3]=namespace
 // 返回 1 表示创建成功，0 表示群组已存在
 const createGroupScript = `
 if redis.call("exists", KEYS[1]) == 1 then
@@ -86,6 +89,7 @@ if redis.call("exists", KEYS[1]) == 1 then
 end
 redis.call("set", KEYS[1], ARGV[1])
 redis.call("sadd", KEYS[2], ARGV[2])
+redis.call("sadd", KEYS[3], ARGV[3])
 return 1
 `
 
@@ -117,8 +121,8 @@ func (r *GroupStore) createGroupUnchecked(ctx context.Context, group *models.Gro
 		return errorx.WrapError("marshal group failed", err)
 	}
 	result, err := r.client.Eval(ctx, createGroupScript,
-		[]string{r.infoKey(appID, namespace, group.GroupID), r.namespaceGroupsKey(appID, namespace)},
-		data, group.GroupID,
+		[]string{r.infoKey(appID, namespace, group.GroupID), r.namespaceGroupsKey(appID, namespace), r.groupInstancesKey(appID, group.GroupID)},
+		data, group.GroupID, namespace,
 	).Result()
 	if err != nil {
 		return errorx.WrapError("create group failed", err)
@@ -126,10 +130,6 @@ func (r *GroupStore) createGroupUnchecked(ctx context.Context, group *models.Gro
 	n, ok := result.(int64)
 	if !ok || n == 0 {
 		return models.ErrGroupExisted
-	}
-	// 写入反向映射 ((appID, groupID)→namespace)，供只传 groupID 的批量广播反查命名空间
-	if err := r.client.Set(ctx, r.groupNamespaceKey(appID, group.GroupID), namespace, 0).Err(); err != nil {
-		return errorx.WrapError("set group namespace mapping failed", err)
 	}
 	return nil
 }
@@ -158,16 +158,12 @@ func (r *GroupStore) EnsureSystemGroup(ctx context.Context, appID, namespace, gr
 		return errorx.WrapError("marshal system group failed", err)
 	}
 	if _, err := r.client.Eval(ctx, createGroupScript,
-		[]string{r.infoKey(appID, namespace, groupID), r.namespaceGroupsKey(appID, namespace)},
-		data, groupID,
+		[]string{r.infoKey(appID, namespace, groupID), r.namespaceGroupsKey(appID, namespace), r.groupInstancesKey(appID, groupID)},
+		data, groupID, namespace,
 	).Result(); err != nil {
 		return errorx.WrapError("ensure system group failed", err)
 	}
-	// 写入反向映射 ((appID, groupID)→namespace)；幂等，已存在时也补写以兼容旧数据
-	if err := r.client.Set(ctx, r.groupNamespaceKey(appID, groupID), namespace, 0).Err(); err != nil {
-		return errorx.WrapError("set system group namespace mapping failed", err)
-	}
-	return nil // 0=已存在（幂等） 1=新建，均成功
+	return nil // 0=已存在（幂等，实例索引首建时已写入） 1=新建，均成功
 }
 
 // GetGroup 获取群组元信息
@@ -194,11 +190,12 @@ func (r *GroupStore) DisbandGroup(ctx context.Context, appID, namespace, groupID
 		return err
 	}
 
-	// Pipeline 批量删除：元信息 + 成员集合 + 命名空间索引 + 反向映射 + 各成员反向索引
+	// Pipeline 批量删除：元信息 + 成员集合 + 命名空间索引 + 实例索引中该 ns 的记录 + 各成员反向索引
 	pipe := r.client.Pipeline()
 	pipe.Del(ctx, r.infoKey(appID, namespace, groupID))
 	pipe.Del(ctx, r.membersKey(appID, namespace, groupID))
-	pipe.Del(ctx, r.groupNamespaceKey(appID, groupID))
+	// 实例索引按 ns 移除（同 gid 其他租户实例不受影响），集合空后由 Redis 自动回收
+	pipe.SRem(ctx, r.groupInstancesKey(appID, groupID), namespace)
 	pipe.SRem(ctx, r.namespaceGroupsKey(appID, namespace), groupID)
 	for _, userID := range members {
 		pipe.SRem(ctx, r.userGroupsKey(appID, namespace, userID), groupID)
@@ -309,69 +306,75 @@ func (r *GroupStore) GetAllNamespaces(ctx context.Context, appID string) ([]stri
 	return namespaces, nil
 }
 
-// GetMultiGroupMembers 批量获取多个群组的成员（Redis Pipeline 一次网络往返）
-// 相比逐群组 SMEMBERS，N 个群组从 N 次 RTT 降为 1 次 RTT
-// 返回 map[groupID][]memberIDs，单个群组查询失败时该 key 缺失
-func (r *GroupStore) GetMultiGroupMembers(ctx context.Context, appID, namespace string, groupIDs []string) (map[string][]string, error) {
+// GetMultiGroupMembers 批量获取多个群组的成员（跨 namespace 聚合，两段 Pipeline 共 2 次网络往返）
+//
+// 同一 groupID 可在多个 namespace 下各建实例（业务侧按租户建组，members 桶按三维隔离），
+// 投递按 (appID, groupIDs) 定位时跨 ns 聚合：第一段 Pipeline 查各 gid 的 ns 实例集合
+// （gns 索引），第二段 Pipeline 批量取所有 (gid, ns) 实例的成员并按 gid 合并去重
+// 相比逐实例 SMEMBERS，N 个实例从 N 次 RTT 降为 2 次
+// 返回 map[groupID][]memberIDs（已跨 ns 合并去重），无实例的 gid 该 key 缺失，单实例失败不影响其他
+func (r *GroupStore) GetMultiGroupMembers(ctx context.Context, appID string, groupIDs []string) (map[string][]string, error) {
 	if len(groupIDs) == 0 {
 		return nil, nil
 	}
+	appID = mathx.IfEmpty(appID, constants.DefaultAppID)
 
+	// 第一段：Pipeline 批量查各 gid 的 ns 实例集合（gns:{app}:{gid}）
 	pipe := r.client.Pipeline()
-	cmds := make([]*redis.StringSliceCmd, len(groupIDs))
+	instanceCmds := make([]*redis.StringSliceCmd, len(groupIDs))
 	for i, gid := range groupIDs {
-		cmds[i] = pipe.SMembers(ctx, r.membersKey(appID, namespace, gid))
+		instanceCmds[i] = pipe.SMembers(ctx, r.groupInstancesKey(appID, gid))
 	}
 	// Pipeline Exec 返回 redis.Nil 表示某些 key 不存在，不是错误
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		return nil, fmt.Errorf("pipeline get group instances failed: %w", err)
+	}
+
+	type groupInstance struct{ gid, ns string }
+	var instances []groupInstance
+	for i, cmd := range instanceCmds {
+		namespaces, err := cmd.Result()
+		if err != nil && err != redis.Nil {
+			continue // 单个 gid 实例索引查询失败跳过，不影响其他
+		}
+		for _, ns := range namespaces {
+			instances = append(instances, groupInstance{gid: groupIDs[i], ns: ns})
+		}
+	}
+	if len(instances) == 0 {
+		return map[string][]string{}, nil
+	}
+
+	// 第二段：Pipeline 批量取所有 (gid, ns) 实例的成员
+	pipe = r.client.Pipeline()
+	memberCmds := make([]*redis.StringSliceCmd, len(instances))
+	for i, inst := range instances {
+		memberCmds[i] = pipe.SMembers(ctx, r.membersKey(appID, inst.ns, inst.gid))
+	}
 	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
 		return nil, fmt.Errorf("pipeline get multi group members failed: %w", err)
 	}
 
+	// 按 gid 合并去重（同 gid 跨 ns 实例的成员可能交叉，重复出现只保留一份）
 	result := make(map[string][]string, len(groupIDs))
-	for i, cmd := range cmds {
-		members, err := cmd.Result()
+	dedup := make(map[string]map[string]struct{}, len(groupIDs))
+	for i, inst := range instances {
+		members, err := memberCmds[i].Result()
 		if err != nil && err != redis.Nil {
-			continue // 单个群组失败跳过，不影响其他群组
+			continue // 单个实例失败跳过，不影响其他实例
 		}
-		result[groupIDs[i]] = members
-	}
-	return result, nil
-}
-
-// GetGroupNamespace 通过 (appID, groupID) 反查命名空间ID（反向映射 group:{appID}:{groupID} → namespace）
-// 群组不存在返回 models.ErrGroupNotFound
-func (r *GroupStore) GetGroupNamespace(ctx context.Context, appID, groupID string) (string, error) {
-	namespace, err := r.client.Get(ctx, r.groupNamespaceKey(appID, groupID)).Result()
-	if err != nil {
-		if err == redis.Nil {
-			return "", models.ErrGroupNotFound
+		set, ok := dedup[inst.gid]
+		if !ok {
+			set = make(map[string]struct{}, len(members))
+			dedup[inst.gid] = set
+			result[inst.gid] = make([]string, 0, len(members))
 		}
-		return "", err
-	}
-	return namespace, nil
-}
-
-// GetMultiGroupNamespaces 批量反查 (appID, groupID) → namespace（Pipeline 一次网络往返）
-// 单个 groupID 不存在时该 key 缺失，不影响其他
-func (r *GroupStore) GetMultiGroupNamespaces(ctx context.Context, appID string, groupIDs []string) (map[string]string, error) {
-	if len(groupIDs) == 0 {
-		return nil, nil
-	}
-	pipe := r.client.Pipeline()
-	cmds := make([]*redis.StringCmd, len(groupIDs))
-	for i, gid := range groupIDs {
-		cmds[i] = pipe.Get(ctx, r.groupNamespaceKey(appID, gid))
-	}
-	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
-		return nil, fmt.Errorf("pipeline get multi group namespaces failed: %w", err)
-	}
-	result := make(map[string]string, len(groupIDs))
-	for i, cmd := range cmds {
-		namespace, err := cmd.Result()
-		if err != nil { // redis.Nil（不存在）或其他错误均跳过，不加入结果
-			continue
+		for _, uid := range members {
+			if _, dup := set[uid]; !dup {
+				set[uid] = struct{}{}
+				result[inst.gid] = append(result[inst.gid], uid)
+			}
 		}
-		result[groupIDs[i]] = namespace
 	}
 	return result, nil
 }

@@ -466,8 +466,13 @@ func (h *HybridOfflineMessageHandler) ClearOfflineMessages(ctx context.Context, 
 	var errs []error
 
 	// 1. 逐组清空 Redis 队列（Redis 按 appID:ns:group:userID 分区，P2P 的空 group 补 DefaultGroupID）
+	// 群组队列（gid≠""）用 ns=""：群组投递信封 ns 跨 ns 通配，队列 key 为 app::gid:uid（与存储/drain 对称）
 	for _, groupID := range groupIDs {
-		key := queueKey(appID, namespace, constants.NormalizeGroupID(groupID), userID)
+		clearNS := namespace
+		if groupID != "" {
+			clearNS = ""
+		}
+		key := queueKey(appID, clearNS, constants.NormalizeGroupID(groupID), userID)
 		if err := h.queueRepo.Clear(ctx, key); err != nil {
 			errs = append(errs, errorx.WrapError("redis", err))
 			h.logger.ErrorContextKV(ctx, "清空 Redis 离线消息队列失败",
@@ -658,7 +663,13 @@ func (m *Manager) PushOfflineMessages(ctx context.Context, client *models.Client
 
 	for _, gid := range groupIDs {
 		// 按组注入 (app, ns, group)，DrainOfflineQueue 据此定位 Redis 队列 app:ns:group:userID
-		groupCtx := routing.NewRoute().WithAppID(client.GetAppID()).WithNamespace(client.Namespace).WithGroup(gid).Inject(pushCtx)
+		// 群组队列（gid≠""）注入 ns=""：存储侧群组投递信封 ns 置空（跨 ns 通配），key 为
+		// app::gid:uid，drain 同 ns 保持对称；P2P 队列（gid=""）保持 client.Namespace（存储侧 P2P ns 非空）
+		drainNS := client.Namespace
+		if gid != "" {
+			drainNS = ""
+		}
+		groupCtx := routing.NewRoute().WithAppID(client.GetAppID()).WithNamespace(drainNS).WithGroup(gid).Inject(pushCtx)
 		msgs, err := m.offlineHandler.DrainOfflineQueue(groupCtx, userID, 0) // 0=一次取尽
 		if err != nil {
 			logger.WarnContextKV(groupCtx, "drain 离线队列失败",

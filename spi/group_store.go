@@ -58,17 +58,12 @@ type GroupStore interface {
 	// GetAllNamespaces 获取指定 appID 下所有有群组的命名空间ID（用于该 app 的全命名空间广播）
 	GetAllNamespaces(ctx context.Context, appID string) ([]string, error)
 
-	// GetMultiGroupMembers 批量获取多个群组的成员（Redis Pipeline 一次网络往返）
-	// 返回 map[groupID][]memberIDs，单个群组查询失败时该 key 缺失
-	GetMultiGroupMembers(ctx context.Context, appID, namespace string, groupIDs []string) (map[string][]string, error)
+	// GetMultiGroupMembers 批量获取多个群组的成员（跨 namespace 聚合，两段 Pipeline 共 2 次网络往返）
+	// 同一 groupID 可在多个 namespace 下各建实例（业务侧按租户建组），本方法按 (appID, groupIDs)
+	// 跨 ns 聚合所有实例的成员并合并去重；返回 map[groupID][]memberIDs，无实例的 gid 该 key 缺失
+	GetMultiGroupMembers(ctx context.Context, appID string, groupIDs []string) (map[string][]string, error)
 
 	// EnsureSystemGroup 确保系统保留组存在（__ 前缀，agent/observer 自动加入前初始化）
 	// 幂等：不存在则创建，已存在则返回 nil
 	EnsureSystemGroup(ctx context.Context, appID, namespace, groupID string) error
-
-	// GetGroupNamespace 通过 (appID, groupID) 反查命名空间ID（反向映射 group:{appID}:{groupID} → namespace）
-	GetGroupNamespace(ctx context.Context, appID, groupID string) (string, error)
-
-	// GetMultiGroupNamespaces 批量反查多个 (appID, groupID) 的命名空间ID（Pipeline 一次往返）
-	GetMultiGroupNamespaces(ctx context.Context, appID string, groupIDs []string) (map[string]string, error)
 }

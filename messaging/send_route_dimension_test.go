@@ -7,7 +7,7 @@
 * @Description: 发消息路由维度修复的回归测试
 
 * 覆盖三处维度约束（断言从离线队列 key 的 ns/group 段读取）：
-*   1. Deliver 群组路径注入 groupID，群组离线消息存 ns:groupID:userID 维度
+*   1. Deliver 群组路径注入 groupID，群组离线消息存 app::groupID:userID 维度（ns 置空全局语义）
 *   2. handleForwardableMessage P2P 转发存 P2P 维度（group 补默认组，不携带发送方群组）
 *   3. SendToUserWithRetry 直接 P2P 发送不携带 group
 
@@ -27,8 +27,9 @@ import (
 )
 
 // TestSendToGroup_InjectGroupForOfflineDimension 群组消息应注入 groupID
-// 保证离线成员消息存到 ns:groupID:userID 维度（而非 P2P 的 ns:默认组:userID）
-// 修复前：群组投递未注入 group，离线成员消息存 P2P 队列，group 归属丢失
+// 群组离线消息存 app::groupID:userID 维度，ns 段置空。
+// ns 置空是群组消息的全局语义：与投递信封 ns 通配对称，任意租户的成员上线均可 drain。
+// 修复前：群组投递未注入 group，离线成员消息存 P2P 队列，group 归属丢失。
 func TestSendToGroup_InjectGroupForOfflineDimension(t *testing.T) {
 	m, host := newTestManager()
 	offline, log := newOfflineRecordingHandler()
@@ -46,8 +47,8 @@ func TestSendToGroup_InjectGroupForOfflineDimension(t *testing.T) {
 
 	require.Equal(t, 1, log.getStoreCalled(), "离线成员应触发 StoreOfflineMessage")
 	ns, groupID := log.lastKeyDimension()
-	assert.Equal(t, "tenantA", ns, "namespace 应为 tenantA")
-	assert.Equal(t, "g-dim", groupID, "群组消息应注入 groupID，离线存群组维度 ns:groupID:userID")
+	assert.Equal(t, "", ns, "群组离线消息 ns 段置空（跨 ns 通配投递的存储对称，任意租户成员上线可 drain）")
+	assert.Equal(t, "g-dim", groupID, "群组消息应注入 groupID，离线存群组维度 app::groupID:userID")
 }
 
 // TestHandleForwardableMessage_P2PGroupNil P2P 转发应存 P2P 维度
@@ -142,4 +143,50 @@ func TestDeliverGroupExcludeSender_TotalMembersAlignment(t *testing.T) {
 	assert.Equal(t, 2, log.getStoreCalled(), "离线转存记账应恰好 2 次")
 	assert.Equal(t, result.OnlineMembers+result.OfflineMembers, result.TotalMembers,
 		"在线+离线分类应与 TotalMembers 对账（修复前 TotalMembers=3 与分类数 2 不齐）")
+}
+
+// TestDeliverGroup_CrossNamespaceMemberDelivery 群组投递跨 ns 成员实时送达
+// 同一 groupID 在 tenantA/tenantB 各建实例（业务侧按租户建组），调用方只传来源租户 tenantA。
+// 投递信封 ns 置空=通配：tenantB 实例的在线成员连接（本地 ns 标签 tenantB）也应收到消息。
+// 非成员即使同租户在线也不投递（成员定位来自聚合成员表，非连接扫描）。
+func TestDeliverGroup_CrossNamespaceMemberDelivery(t *testing.T) {
+	m, host := newTestManager()
+	host.groupRepo = newFakeGroupStore()
+
+	ctx := context.Background()
+	// g-cross 双实例：tenantA=[u-a]，tenantB=[u-b]
+	require.NoError(t, host.groupRepo.AddMembers(ctx, constants.DefaultAppID, "tenantA", "g-cross", []string{"u-a"}))
+	require.NoError(t, host.groupRepo.AddMembers(ctx, constants.DefaultAppID, "tenantB", "g-cross", []string{"u-b"}))
+
+	// 本地连接：tenantA 成员、tenantB 成员、tenantB 非成员
+	cA := makeTestClient("c-a", "u-a", "tenantA")
+	cB := makeTestClient("c-b", "u-b", "tenantB")
+	cNon := makeTestClient("c-non", "u-non", "tenantB")
+	host.GetShardedRegistry().AddClient(cA)
+	host.GetShardedRegistry().AddClient(cB)
+	host.GetShardedRegistry().AddClient(cNon)
+
+	msg := makeGroupMessage("owner1")
+	msg.RequireAck = true
+	// 调用方只传来源租户 tenantA（ns 必传记号），群组定位按 (appID, gid) 跨 ns 聚合
+	groupCtx := routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("tenantA").WithGroupIDs([]string{"g-cross"}).Inject(ctx)
+	result := m.Deliver(groupCtx, msg, false)
+	require.NotNil(t, result)
+
+	assert.Equal(t, 2, result.TotalMembers, "跨 ns 聚合应找到两个实例的成员")
+	assert.Equal(t, 2, result.OnlineMembers, "两个本地成员连接均应在线送达")
+	assert.Equal(t, 2, result.Sent, "tenantA 与 tenantB 成员各投递 1 条")
+
+	for _, c := range []*models.Client{cA, cB} {
+		select {
+		case <-c.SendChan:
+		default:
+			t.Fatalf("成员 %s 应收到消息（信封 ns 置空通配，跨 ns 连接实时送达）", c.UserID)
+		}
+	}
+	select {
+	case <-cNon.SendChan:
+		t.Fatal("非成员即使同租户在线也不应收到（投递目标来自聚合成员表）")
+	default:
+	}
 }

@@ -62,6 +62,9 @@ import (
 //  3. namespace != ""                             → 命名空间广播（BroadcastToFiltered + 跨节点 ns 广播）
 //  4. namespace == ""                             → 全局广播（handleBroadcast + clusterBatcher）
 //
+// 群组投递语义：ns 为来源租户记号（必传校验，81407），成员定位按 (appID, groupIDs) 跨 ns
+// 聚合（业务侧按租户建组、同 gid 多实例，投递信封 ns 置空=通配，跨 ns 成员实时送达）
+//
 // excludeSender 仅群组场景生效（P2P/广播场景 msg.Sender 不参与过滤）
 //
 // 返回非 nil *models.DeliverResult，错误收集到 result.Errors；按 result.Mode + 计数字段判断结果
@@ -69,7 +72,7 @@ func (m *Manager) Deliver(ctx context.Context, msg *models.HubMessage, excludeSe
 	// 统一入口：Clone + InjectRoute（注入 trace_id + 路由信封，appID 归一化，namespace 保留原值）
 	// namespace 不在此归一化：空值在广播分支表示「全局广播」语义，需保留
 	// P2P 分支由 sendToUserWithRetry 内部 EnsureRouteDefaults 兜底；
-	// 群组分支 ns 是必要参数（群组按 appID+ns 信封分桶定位），缺失直接报错不兜底
+	// 群组分支 ns 必传（来源租户记号，缺失报 81407），投递信封 ns 置空通配（见各分派器）
 	msg = msg.Clone()
 	ctx = msg.InjectRoute(ctx)
 
@@ -172,8 +175,8 @@ func (m *Manager) deliverToGroupReliable(ctx context.Context, msg *models.HubMes
 		Errors:    make([]error, 0),
 	}
 
-	// 群组按 appID+namespace 信封分桶隔离，ns 是定位群组成员的必要参数：
-	// 缺失说明调用方漏传路由，静默补默认值会投错命名空间维度（跨租户隐患），直接报错
+	// 群组投递 ns 为必要参数（来源租户记号）：缺失说明调用方漏传路由，直接报错不兜底；
+	// 成员定位按 (appID, groupIDs) 跨 ns 聚合，ns 不参与定位与过滤（业务侧按租户建组，同 gid 多实例全员送达）
 	if namespace == "" {
 		result.AddError(models.ErrRouteNamespaceMissing)
 		return result
@@ -184,13 +187,14 @@ func (m *Manager) deliverToGroupReliable(ctx context.Context, msg *models.HubMes
 		return result
 	}
 
-	// msg 已 Clone（Deliver 入口），同步路由信封（namespace 已校验非空，见上方校验）
-	ctx = msg.ContextWithRoute(ctx, appID, namespace, groupIDs)
+	// msg 已 Clone（Deliver 入口），同步路由信封：ns 置空=投递信封通配（跨 ns 成员的连接匹配
+	// 跳过 ns 过滤，实时送达，见 ClientMatchesEnvelope）；result.Namespace 保留原 ns 仅记账
+	ctx = msg.ContextWithRoute(ctx, appID, "", groupIDs)
 	if msg.CreateAt.IsZero() {
 		msg.CreateAt = time.Now()
 	}
 
-	// 1. Pipeline 批量获取所有群组成员并合并去重（多群组 N 次 GetMembers → 1 次 RTT）
+	// 1. 两段 Pipeline 跨 ns 聚合所有实例成员并合并去重（N 个实例 → 2 次 RTT）
 	memberSet, err := m.batchGetGroupMembers(ctx, groupIDs)
 	if err != nil {
 		result.AddError(err)
@@ -311,8 +315,8 @@ func (m *Manager) deliverToGroupFireForget(ctx context.Context, msg *models.HubM
 		Errors:    make([]error, 0),
 	}
 
-	// 群组按 appID+namespace 信封分桶隔离，ns 是定位群组成员的必要参数：
-	// 缺失说明调用方漏传路由，静默补默认值会投错命名空间维度（跨租户隐患），直接报错
+	// 群组投递 ns 为必要参数（来源租户记号）：缺失说明调用方漏传路由，直接报错不兜底；
+	// 成员定位按 (appID, groupIDs) 跨 ns 聚合，ns 不参与定位与过滤（业务侧按租户建组，同 gid 多实例全员送达）
 	if namespace == "" {
 		result.AddError(models.ErrRouteNamespaceMissing)
 		return result
@@ -324,13 +328,14 @@ func (m *Manager) deliverToGroupFireForget(ctx context.Context, msg *models.HubM
 		return result
 	}
 
-	// msg 已 Clone，同步路由信封（namespace 已校验非空，见上方校验）
-	ctx = msg.ContextWithRoute(ctx, appID, namespace, groupIDs)
+	// msg 已 Clone（Deliver 入口），同步路由信封：ns 置空=投递信封通配（跨 ns 成员的连接匹配
+	// 跳过 ns 过滤，实时送达，见 ClientMatchesEnvelope）；result.Namespace 保留原 ns 仅记账
+	ctx = msg.ContextWithRoute(ctx, appID, "", groupIDs)
 	if msg.CreateAt.IsZero() {
 		msg.CreateAt = time.Now()
 	}
 
-	// 1. Pipeline 批量获取所有群组成员并合并去重（多群组 N 次 GetMembers → 1 次 RTT）
+	// 1. 两段 Pipeline 跨 ns 聚合所有实例成员并合并去重（N 个实例 → 2 次 RTT）
 	memberSet, err := m.batchGetGroupMembers(ctx, groupIDs)
 	if err != nil {
 		m.host.GetLogger().ErrorContextKV(ctx, "群组广播：批量获取群组成员失败",
@@ -471,7 +476,8 @@ func (m *Manager) deliverGlobally(ctx context.Context, msg *models.HubMessage) *
 // 统一走 OperationTypeGroupsBroadcast 复数语义，信封携带全部 GroupIDs，
 // 单群组作为 GroupIDs=[groupID] 的特例；提交到分布式池经 routeToCluster
 // 投递（gRPC 直连优先 + PubSub 兜底），消除 per-message goroutine
-// namespace/groupIDs 从 ctx 提取
+// namespace/groupIDs 从 ctx 提取：群组分派器信封 ns 已置空（通配），
+// 原样传递到远端，远端成员聚合与连接匹配同样跨 ns 通配
 func (m *Manager) crossNodeGroupBroadcast(ctx context.Context, msg *models.HubMessage, excludeSender bool) {
 	if !m.host.HasPubsub() && !m.host.IsGRPCEnabled() {
 		return // 单机模式，无需跨节点
@@ -500,20 +506,18 @@ func (m *Manager) crossNodeGroupBroadcast(ctx context.Context, msg *models.HubMe
 	}
 }
 
-// batchGetGroupMembers 批量获取多个群组成员并合并去重
-// appID/namespace 从 ctx 路由信封提取（上游已注入，不再显式传参）
-// 使用 Redis Pipeline 一次 RTT 获取所有群组成员，O(totalMembers) 去重
-// 相比逐群组 N 次 GetMembers（N 次 RTT），降为 1 次 RTT（单群组等价）
-// 单个群组查询失败仅该 key 缺失，不影响其他群组（与历史逐群组 continue 语义一致）
-// 整体 Pipeline 失败才返回错误
+// batchGetGroupMembers 批量获取多个群组成员并合并去重（跨 ns 聚合）
+// appID 从 ctx 路由信封提取（上游已注入，不再显式传参）
+// 存储侧两段 Pipeline：先查各 gid 的 ns 实例集合（gns 索引），再批量取所有实例的成员，共 2 次 RTT
+// O(totalMembers) 合并去重；单个实例失败仅该实例缺失，不影响其他（整体 Pipeline 失败才返回错误）
 func (m *Manager) batchGetGroupMembers(ctx context.Context, groupIDs []string) (map[string]struct{}, error) {
 	memberSet := make(map[string]struct{})
 	if len(groupIDs) == 0 || m.host.GetGroupRepo() == nil {
 		return memberSet, nil
 	}
 
-	appID, namespace := routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx)
-	groupMembers, err := m.host.GetGroupRepo().GetMultiGroupMembers(ctx, appID, namespace, groupIDs)
+	appID := routing.AppIDFromContext(ctx)
+	groupMembers, err := m.host.GetGroupRepo().GetMultiGroupMembers(ctx, appID, groupIDs)
 	if err != nil {
 		return memberSet, err
 	}

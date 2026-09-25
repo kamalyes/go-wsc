@@ -196,7 +196,8 @@ func (s *GRPCServer) BroadcastGroup(ctx context.Context, req *wscpb.BroadcastGro
 		return &wscpb.BroadcastGroupResponse{Delivered: 0}, nil
 	}
 
-	appID, namespace := routing.NormalizeRoute(routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx))
+	// appID 归一化（群组投递信封 ns 为通配 ""，跨 ns 成员全员送达）
+	appID := constants.NormalizeAppID(routing.AppIDFromContext(ctx))
 	groupIDs := routing.GroupIDsFromContext(ctx)
 	// BroadcastGroup RPC 语义为单群组广播（cluster_dispatch 每次传单群组），取首元素
 	groupID := ""
@@ -204,11 +205,12 @@ func (s *GRPCServer) BroadcastGroup(ctx context.Context, req *wscpb.BroadcastGro
 		groupID = groupIDs[0]
 	}
 
-	// 获取群组成员列表（appID 隔离，跨 app 不串扰）
-	members, err := s.hub.groupStore.GetMembers(ctx, appID, namespace, groupID)
+	// 获取群组成员列表（两段 Pipeline 跨 ns 聚合该 gid 的所有实例成员；appID 隔离，跨 app 不串扰）
+	groupMembers, err := s.hub.groupStore.GetMultiGroupMembers(ctx, appID, []string{groupID})
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "获取群组成员失败: %v", err)
 	}
+	members := groupMembers[groupID]
 
 	if len(members) == 0 {
 		return &wscpb.BroadcastGroupResponse{Delivered: 0}, nil
@@ -227,10 +229,10 @@ func (s *GRPCServer) BroadcastGroup(ctx context.Context, req *wscpb.BroadcastGro
 	// BroadcastGroup 的 ctx 携带的是"业务群组ID"（如 g-srv），而 broadcastToFiltered →
 	// ClientMatchesEnvelope 会用 msg.GroupIDs 去匹配 client 的"连接级系统组"（如 __default_gp__），
 	// 两个维度不同，强行注入会导致群成员设备全部被过滤（delivered=0）。
-	// 群组成员过滤已由 groupStore.GetMembers + memberSet 完成，下面清除 ctx 的 groupIDs 后，
-	// 下游 BroadcastToFiltered 调 InjectRoute 时只会注入 appId+namespace（msg.GroupIDs 保持 nil），
-	// ClientMatchesEnvelope 仅做 appId+namespace 隔离，不再触碰系统组维度。
-	ctx = routing.RouteFrom(ctx).WithNamespace(namespace).WithGroupIDs(nil).Inject(ctx)
+	// 群组成员过滤已由 groupStore.GetMultiGroupMembers + memberSet 完成，下面清除 ctx 的 groupIDs 后，
+	// 下游 BroadcastToFiltered 调 InjectRoute 时只会注入 appId（msg.GroupIDs 保持 nil）；
+	// ns 保持通配空值（跨 ns 成员连接跳过 ns 过滤），ClientMatchesEnvelope 仅做 appID 隔离，不再触碰系统组维度
+	ctx = routing.RouteFrom(ctx).WithNamespace("").WithGroupIDs(nil).Inject(ctx)
 
 	// 构建成员集合用于 O(1) 过滤
 	memberSet := make(map[string]struct{}, len(members))

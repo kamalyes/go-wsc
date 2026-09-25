@@ -359,11 +359,29 @@ func (g *fakeGroupStore) GetMembers(_ context.Context, appID, namespace, groupID
 	return ids, nil
 }
 
-func (g *fakeGroupStore) GetMultiGroupMembers(_ context.Context, appID, namespace string, groupIDs []string) (map[string][]string, error) {
+// GetMultiGroupMembers 批量获取群组成员（跨 ns 聚合，与 Redis 实现语义一致）
+// 同一 gid 可在多个 ns 下各建实例（key=appID:ns:gid），此处按 (appID, gid) 聚合所有实例成员并去重
+func (g *fakeGroupStore) GetMultiGroupMembers(_ context.Context, appID string, groupIDs []string) (map[string][]string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	result := make(map[string][]string, len(groupIDs))
 	for _, gid := range groupIDs {
-		if members, err := g.GetMembers(context.Background(), appID, namespace, gid); err == nil {
-			result[gid] = members
+		merged := make(map[string]struct{})
+		for key, set := range g.members {
+			parts := strings.Split(key, ":")
+			if len(parts) != 3 || parts[0] != appID || parts[2] != gid {
+				continue
+			}
+			for uid := range set {
+				merged[uid] = struct{}{}
+			}
+		}
+		if len(merged) > 0 {
+			ids := make([]string, 0, len(merged))
+			for uid := range merged {
+				ids = append(ids, uid)
+			}
+			result[gid] = ids
 		}
 	}
 	return result, nil
@@ -391,14 +409,6 @@ func (g *fakeGroupStore) GetAllNamespaces(_ context.Context, _ string) ([]string
 
 func (g *fakeGroupStore) EnsureSystemGroup(_ context.Context, _, _, _ string) error {
 	return nil
-}
-
-func (g *fakeGroupStore) GetGroupNamespace(_ context.Context, _, _ string) (string, error) {
-	return "", nil
-}
-
-func (g *fakeGroupStore) GetMultiGroupNamespaces(_ context.Context, _ string, _ []string) (map[string]string, error) {
-	return nil, nil
 }
 
 var _ spi.GroupStore = (*fakeGroupStore)(nil)

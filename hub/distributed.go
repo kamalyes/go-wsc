@@ -584,11 +584,13 @@ func (h *Hub) handleDistributedGroupsBroadcast(ctx context.Context, distMsg *mod
 		return fmt.Errorf("groupIDs is empty in distributed message")
 	}
 
-	// appID/namespace 归一化（与源节点建群时 routeFromCtx 归一化一致，保证 Redis key 同分区，跨 app 不串扰）
-	appID, namespace := routing.NormalizeRoute(distMsg.AppID, distMsg.Namespace)
+	// appID 归一化（与源节点建群时一致，保证 Redis key 同分区，跨 app 不串扰）
+	// namespace 保留原值仅记账（群组投递信封 ns 为通配 ""，见 messaging 群组分派器）
+	appID := constants.NormalizeAppID(distMsg.AppID)
+	namespace := distMsg.Namespace
 
-	// Pipeline 批量获取所有群组成员并合并去重（用户跨群组只收一条）
-	groupMembers, err := h.groupStore.GetMultiGroupMembers(ctx, appID, namespace, groupIDs)
+	// 两段 Pipeline 跨 ns 聚合所有实例成员并合并去重（用户跨群组只收一条）
+	groupMembers, err := h.groupStore.GetMultiGroupMembers(ctx, appID, groupIDs)
 	if err != nil {
 		h.logger.WarnContextKV(ctx, "跨节点群组广播：批量获取群组成员失败",
 			"app_id", appID,

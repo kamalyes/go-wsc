@@ -5,7 +5,7 @@
  * @LastEditTime: 2026-07-22 14:52:49
  * @FilePath: \go-wsc\adapter\redis\group_store_test.go
  * @Description: 群组仓库测试 - 基于 miniredis 内存 Redis 验证群组元信息、成员管理、
- * 反向索引及命名空间隔离等行为
+ * 反向索引、跨 ns 实例索引及命名空间隔离等行为
  *
  * Copyright (c) 2026 by kamalyes, All Rights Reserved.
  */
@@ -567,54 +567,63 @@ func TestGetAllNamespaces(t *testing.T) {
 	})
 }
 
-// TestGetMultiGroupMembers 验证批量获取多个群组成员
+// TestGetMultiGroupMembers 验证批量获取多个群组成员（跨 ns 聚合，gns 实例索引定位）
 func TestGetMultiGroupMembers(t *testing.T) {
 	repo, cleanup := setupTestRepo(t)
 	defer cleanup()
 	ctx := context.Background()
 
-	// 创建 3 个群组并添加成员
-	require.NoError(t, repo.CreateGroup(ctx, &models.Group{GroupID: "g1", Namespace: "tenantA", OwnerID: "o"}))
-	require.NoError(t, repo.CreateGroup(ctx, &models.Group{GroupID: "g2", Namespace: "tenantA", OwnerID: "o"}))
+	// tenantA/tenantB 各建同名 g1/g2（同 gid 多实例），g3 为 tenantA 独有且无成员
+	for _, ns := range []string{"tenantA", "tenantB"} {
+		require.NoError(t, repo.CreateGroup(ctx, &models.Group{GroupID: "g1", Namespace: ns, OwnerID: "o"}))
+		require.NoError(t, repo.CreateGroup(ctx, &models.Group{GroupID: "g2", Namespace: ns, OwnerID: "o"}))
+	}
 	require.NoError(t, repo.CreateGroup(ctx, &models.Group{GroupID: "g3", Namespace: "tenantA", OwnerID: "o"}))
 
 	require.NoError(t, repo.AddMembers(ctx, constants.DefaultAppID, "tenantA", "g1", []string{"u1", "u2"}))
+	require.NoError(t, repo.AddMembers(ctx, constants.DefaultAppID, "tenantB", "g1", []string{"u9", "u2"}))
 	require.NoError(t, repo.AddMembers(ctx, constants.DefaultAppID, "tenantA", "g2", []string{"u2", "u3"}))
-	// g3 无成员
+	require.NoError(t, repo.AddMembers(ctx, constants.DefaultAppID, "tenantB", "g2", []string{"u8"}))
 
-	t.Run("批量返回所有群组成员", func(t *testing.T) {
-		result, err := repo.GetMultiGroupMembers(ctx, constants.DefaultAppID, "tenantA", []string{"g1", "g2", "g3"})
+	t.Run("跨 ns 聚合同一 gid 各实例成员并去重", func(t *testing.T) {
+		result, err := repo.GetMultiGroupMembers(ctx, constants.DefaultAppID, []string{"g1", "g2", "g3"})
 		require.NoError(t, err)
-		assert.Len(t, result, 3, "应返回 3 个群组的成员")
+		assert.Len(t, result, 3, "应返回 3 个群组的聚合成员")
 
-		assert.ElementsMatch(t, []string{"u1", "u2"}, result["g1"])
-		assert.ElementsMatch(t, []string{"u2", "u3"}, result["g2"])
-		assert.Empty(t, result["g3"], "g3 无成员应返回空切片")
+		// g1：tenantA[u1,u2] + tenantB[u9,u2]，u2 跨实例重复只保留一份
+		assert.ElementsMatch(t, []string{"u1", "u2", "u9"}, result["g1"])
+		// g2：tenantA[u2,u3] + tenantB[u8]
+		assert.ElementsMatch(t, []string{"u2", "u3", "u8"}, result["g2"])
+		// g3：tenantA 独有且无成员，实例存在故 key 存在、成员为空
+		assert.Empty(t, result["g3"])
 	})
 
 	t.Run("空 groupIDs 返回 nil", func(t *testing.T) {
-		result, err := repo.GetMultiGroupMembers(ctx, constants.DefaultAppID, "tenantA", []string{})
+		result, err := repo.GetMultiGroupMembers(ctx, constants.DefaultAppID, []string{})
 		require.NoError(t, err)
 		assert.Nil(t, result)
 	})
 
-	t.Run("包含不存在的群组时该 key 返回空切片", func(t *testing.T) {
-		result, err := repo.GetMultiGroupMembers(ctx, constants.DefaultAppID, "tenantA", []string{"g1", "not-exist"})
+	t.Run("无实例的 gid 该 key 缺失", func(t *testing.T) {
+		result, err := repo.GetMultiGroupMembers(ctx, constants.DefaultAppID, []string{"g1", "not-exist"})
 		require.NoError(t, err)
 		assert.Contains(t, result, "g1")
-		// 不存在的群组：miniredis 对 SMEMBERS 不存在的 key 返回空切片
-		if members, ok := result["not-exist"]; ok {
-			assert.Empty(t, members)
-		}
+		_, ok := result["not-exist"]
+		assert.False(t, ok, "从未创建的群组无实例索引记录，key 应缺失")
 	})
 
-	t.Run("跨命名空间隔离：查 tenantB 的群组应返回空", func(t *testing.T) {
-		result, err := repo.GetMultiGroupMembers(ctx, constants.DefaultAppID, "tenantB", []string{"g1", "g2"})
+	t.Run("跨 app 隔离：其他 app 同 gid 实例不串扰", func(t *testing.T) {
+		// other-app 下建同名 g1 并塞成员
+		require.NoError(t, repo.CreateGroup(ctx, &models.Group{GroupID: "g1", AppID: "other-app", Namespace: "tenantC", OwnerID: "o"}))
+		require.NoError(t, repo.AddMembers(ctx, "other-app", "tenantC", "g1", []string{"u77"}))
+
+		result, err := repo.GetMultiGroupMembers(ctx, constants.DefaultAppID, []string{"g1"})
 		require.NoError(t, err)
-		// tenantB 下无这些群组，成员应为空
-		for _, members := range result {
-			assert.Empty(t, members, "tenantB 下不应有 tenantA 的群组成员")
-		}
+		assert.ElementsMatch(t, []string{"u1", "u2", "u9"}, result["g1"], "默认 app 聚合不应混入 other-app 的成员")
+
+		otherResult, err := repo.GetMultiGroupMembers(ctx, "other-app", []string{"g1"})
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{"u77"}, otherResult["g1"], "other-app 聚合只有自己的实例成员")
 	})
 }
 
@@ -714,107 +723,50 @@ func TestEnsureSystemGroup(t *testing.T) {
 }
 
 // ============================================================================
-// 反向映射测试（groupID → namespace）
+// 实例索引测试（gns:{app}:{gid} → namespace 集合，同 gid 跨 ns 实例定位）
 // ============================================================================
 
-func TestGetGroupNamespace(t *testing.T) {
+// TestGroupInstanceIndexLifecycle 验证实例索引随建组/解散的生命周期维护：
+// 建组 SADD、解散按 ns SREM（同 gid 其他租户实例不受影响）、全部实例解散后索引回收
+func TestGroupInstanceIndexLifecycle(t *testing.T) {
 	repo, cleanup := setupTestRepo(t)
 	defer cleanup()
 	ctx := context.Background()
 
-	// 创建群组
-	require.NoError(t, repo.CreateGroup(ctx, &models.Group{
-		GroupID:    "group-1",
-		Namespace:  "tenantA",
-		OwnerID:    "owner-1",
-		MaxMembers: 100,
-	}))
+	// tenantA/tenantB 各建同名 to-delete（同 gid 两实例）
+	require.NoError(t, repo.CreateGroup(ctx, &models.Group{GroupID: "to-delete", Namespace: "tenantA", OwnerID: "owner", MaxMembers: 100}))
+	require.NoError(t, repo.CreateGroup(ctx, &models.Group{GroupID: "to-delete", Namespace: "tenantB", OwnerID: "owner", MaxMembers: 100}))
+	require.NoError(t, repo.AddMembers(ctx, constants.DefaultAppID, "tenantA", "to-delete", []string{"u1"}))
+	require.NoError(t, repo.AddMembers(ctx, constants.DefaultAppID, "tenantB", "to-delete", []string{"u2"}))
 
-	t.Run("反查存在的群组", func(t *testing.T) {
-		namespace, err := repo.GetGroupNamespace(ctx, constants.DefaultAppID, "group-1")
+	t.Run("建组后聚合可见两实例成员", func(t *testing.T) {
+		result, err := repo.GetMultiGroupMembers(ctx, constants.DefaultAppID, []string{"to-delete"})
 		require.NoError(t, err)
-		assert.Equal(t, "tenantA", namespace)
+		assert.ElementsMatch(t, []string{"u1", "u2"}, result["to-delete"], "实例索引应记录两个 ns 实例并聚合成员")
 	})
 
-	t.Run("反查不存在的群组返回 models.ErrGroupNotFound", func(t *testing.T) {
-		_, err := repo.GetGroupNamespace(ctx, constants.DefaultAppID, "nonexistent")
+	t.Run("解散 tenantA 实例仅移除该 ns 记录", func(t *testing.T) {
+		require.NoError(t, repo.DisbandGroup(ctx, constants.DefaultAppID, "tenantA", "to-delete"))
+
+		// tenantA 元信息已删，tenantB 实例不受影响
+		_, err := repo.GetGroup(ctx, constants.DefaultAppID, "tenantA", "to-delete")
 		assert.ErrorIs(t, err, models.ErrGroupNotFound)
-	})
-
-	t.Run("跨命名空间同名群组各自反查正确", func(t *testing.T) {
-		// tenantB 也创建 group-1（同命名空间唯一，跨命名空间可重复）
-		require.NoError(t, repo.CreateGroup(ctx, &models.Group{
-			GroupID:    "group-1",
-			Namespace:  "tenantB",
-			OwnerID:    "owner-2",
-			MaxMembers: 100,
-		}))
-		// 反查会返回其中一个（取决于谁后写入），这里只验证能查到
-		namespace, err := repo.GetGroupNamespace(ctx, constants.DefaultAppID, "group-1")
+		got, err := repo.GetGroup(ctx, constants.DefaultAppID, "tenantB", "to-delete")
 		require.NoError(t, err)
-		assert.Contains(t, []string{"tenantA", "tenantB"}, namespace)
-	})
-}
+		assert.Equal(t, "tenantB", got.GetNamespace())
 
-func TestGetMultiGroupNamespaces(t *testing.T) {
-	repo, cleanup := setupTestRepo(t)
-	defer cleanup()
-	ctx := context.Background()
-
-	// 创建多个群组
-	for _, g := range []struct {
-		namespace, groupID string
-	}{
-		{"tenantA", "g1"},
-		{"tenantA", "g2"},
-		{"tenantB", "g3"},
-	} {
-		require.NoError(t, repo.CreateGroup(ctx, &models.Group{
-			GroupID: g.groupID, Namespace: g.namespace, OwnerID: "owner", MaxMembers: 100,
-		}))
-	}
-
-	t.Run("批量反查全部存在", func(t *testing.T) {
-		result, err := repo.GetMultiGroupNamespaces(ctx, constants.DefaultAppID, []string{"g1", "g2", "g3"})
+		// 聚合只剩 tenantB 实例成员（索引按 ns 移除，未误删整个 gid）
+		result, err := repo.GetMultiGroupMembers(ctx, constants.DefaultAppID, []string{"to-delete"})
 		require.NoError(t, err)
-		assert.Equal(t, "tenantA", result["g1"])
-		assert.Equal(t, "tenantA", result["g2"])
-		assert.Equal(t, "tenantB", result["g3"])
+		assert.ElementsMatch(t, []string{"u2"}, result["to-delete"], "解散一个实例后聚合应只剩另一实例成员")
 	})
 
-	t.Run("批量反查部分不存在", func(t *testing.T) {
-		result, err := repo.GetMultiGroupNamespaces(ctx, constants.DefaultAppID, []string{"g1", "nonexistent"})
+	t.Run("全部实例解散后 gid 从聚合结果缺失", func(t *testing.T) {
+		require.NoError(t, repo.DisbandGroup(ctx, constants.DefaultAppID, "tenantB", "to-delete"))
+
+		result, err := repo.GetMultiGroupMembers(ctx, constants.DefaultAppID, []string{"to-delete"})
 		require.NoError(t, err)
-		assert.Equal(t, "tenantA", result["g1"])
-		_, ok := result["nonexistent"]
-		assert.False(t, ok, "不存在的 groupID 不应在结果中")
+		_, ok := result["to-delete"]
+		assert.False(t, ok, "全部实例解散后索引应回收，key 缺失")
 	})
-
-	t.Run("空输入返回 nil", func(t *testing.T) {
-		result, err := repo.GetMultiGroupNamespaces(ctx, constants.DefaultAppID, nil)
-		require.NoError(t, err)
-		assert.Nil(t, result)
-	})
-}
-
-func TestDisbandGroupDeletesReverseMapping(t *testing.T) {
-	repo, cleanup := setupTestRepo(t)
-	defer cleanup()
-	ctx := context.Background()
-
-	require.NoError(t, repo.CreateGroup(ctx, &models.Group{
-		GroupID: "to-delete", Namespace: "tenantA", OwnerID: "owner", MaxMembers: 100,
-	}))
-
-	// 确认反查可用
-	namespace, err := repo.GetGroupNamespace(ctx, constants.DefaultAppID, "to-delete")
-	require.NoError(t, err)
-	assert.Equal(t, "tenantA", namespace)
-
-	// 删除群组
-	require.NoError(t, repo.DisbandGroup(ctx, constants.DefaultAppID, "tenantA", "to-delete"))
-
-	// 反查应返回 models.ErrGroupNotFound（反向映射已清理）
-	_, err = repo.GetGroupNamespace(ctx, constants.DefaultAppID, "to-delete")
-	assert.ErrorIs(t, err, models.ErrGroupNotFound, "删除群组后反向映射应同步清理")
 }

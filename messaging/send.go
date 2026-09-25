@@ -97,10 +97,9 @@ func (m *Manager) sendToUser(ctx context.Context, toUserID string, msg *models.H
 	msg.Receiver = mathx.IfEmpty(msg.Receiver, toUserID) // 确保 Receiver 非空（离线消息反序列化后可能丢失）
 	msg.CreateAt = mathx.IfNotZero(msg.CreateAt, time.Now())
 
-	// P2P 严格场景：EnsureRouteDefaults 归一化 namespace + InjectRoute 注入信封（防御性，与入口一致）
-	// sendToUser 可被 ack 重试/离线推送等路径直接调用，msg 可能未经过入口归一化；
-	// EnsureRouteDefaults + InjectRoute 幂等，SendToUserWithRetry 路径再调一次无副作用
-	ctx = routing.EnsureRouteDefaults(ctx)
+	// 信封注入（幂等）：sendToUser 可被 ack 重试/离线推送等路径直接调用，msg 可能未经入口注入；
+	// InjectRoute 仅归一化 appID、ns 保留 ctx 原值（P2P 路径公开入口已归一化，
+	// 群组可靠投递扇出路径 ns="" 为跨 ns 通配语义，此处不得归一化）
 	ctx = msg.InjectRoute(ctx)
 	// trace 恢复：ctx 无 trace 时从消息信封恢复（如 workerPool/离线回放等异步路径 ctx 已丢失），
 	// sendToUser 是所有投递路径的漏斗点，在此恢复保证下游 SendToClientSerialized 的
@@ -173,7 +172,11 @@ func (m *Manager) sendToUser(ctx context.Context, toUserID string, msg *models.H
 // ============================================================================
 
 // SendToUserWithRetry 带重试机制的发送消息给指定用户
+// 公开 P2P 入口：先 EnsureRouteDefaults 归一化 appID/namespace（P2P 严格契约，空补默认值），
+// 内部路径（sendToUserWithRetry/sendToUser）不再归一化——群组可靠投递的 per-member 扇出
+// 走同一管道，信封 ns="" 为跨 ns 通配语义（见 Deliver 群组分派器），归一化会破坏通配
 func (m *Manager) SendToUserWithRetry(ctx context.Context, toUserID string, msg *models.HubMessage) *models.SendResult {
+	ctx = routing.EnsureRouteDefaults(ctx)
 	return m.sendToUserWithRetry(ctx, toUserID, msg, nil)
 }
 
@@ -185,9 +188,8 @@ func (m *Manager) sendToUserWithRetry(ctx context.Context, toUserID string, msg 
 	// 立即创建消息副本，避免并发修改原始消息
 	msg = msg.Clone()
 
-	// P2P 严格场景：先 EnsureRouteDefaults 归一化 namespace（空补 DefaultNamespace），再 InjectRoute
-	// InjectRoute 只归一化 appID（namespace 保持 ctx 原值兼容全局广播），故 P2P 入口需显式归一化 namespace
-	ctx = routing.EnsureRouteDefaults(ctx)
+	// InjectRoute 注入信封（appID 幂等归一化，ns 保留 ctx 原值：P2P 路径公开入口已归一化，
+	// 群组可靠投递扇出路径 ns="" 为跨 ns 通配语义，此处不得归一化）
 	ctx = msg.InjectRoute(ctx)
 
 	result := &models.SendResult{
@@ -517,16 +519,16 @@ func (m *Manager) flushOfflineBroadcasts(ctx context.Context, collector *offline
 // 拿到全部 miss 成员的节点映射，扇出闭包内经 sendToUserWithRetry 的 presetNodes 注入实现零回源。
 //
 // 返回 nil 表示不适用（单机模式/目标过少/全部本地在线/批量查询失败），扇出回退原有逐用户查询路径。
-// 不修改调用方 msg：信封归一化在克隆副本上完成（与 SendToUserWithRetry 内部同序同参）
+// 不修改调用方 msg：信封注入在克隆副本上完成（与 sendToUserWithRetry 内部同序同参）
 func (m *Manager) prefetchFanoutNodes(ctx context.Context, msg *models.HubMessage, userIDs []string) map[string][]string {
 	// 目标过少批量预取无收益（1 个用户 Pipeline 与单次查询等价）；单机模式无跨节点索引
 	if len(userIDs) < 2 || (!m.host.HasPubsub() && !m.host.IsGRPCEnabled()) {
 		return nil
 	}
-	// 路由信封归一化（appID 归一 + namespace 归一 + 信封优先）：
-	// 与 SendToUserWithRetry 入口同一套逻辑，保证批量查询的 scoped key 与逐用户查询同信封；
+	// 路由信封注入（不归一化，保留调用方 ctx 原值）：群组扇出路径信封 ns="" 为跨 ns 通配语义，
+	// HasUser 跳过 ns 过滤判定在线、BatchGetUserNodes 走 unscoped 桶 + appID 过滤定位节点；
 	// 在克隆副本上执行，不污染调用方原始 msg
-	routeCtx := msg.Clone().InjectRoute(routing.EnsureRouteDefaults(ctx))
+	routeCtx := msg.Clone().InjectRoute(ctx)
 	appID, ns := routing.AppIDFromContext(routeCtx), routing.NamespaceFromContext(routeCtx)
 
 	// 过滤本地 miss 用户（HasUser O(1) 原子读，不产生网络往返），去重 userID

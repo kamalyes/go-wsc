@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -184,6 +185,9 @@ return {-1, offset}
 //  3. SETBIT scoped/global bitmap 并 EXPIRE 续期（全量路径无条件写，保证缺失位补齐）
 //  4. offset 超限时跳过 SETBIT(只写 ZSET,查询走 ZSET 兜底)
 //  5. uid_map/all_users/type 按 bucket 段分桶（Go 侧 keyBucket 预计算传入，防亿级单 key 热点）
+//  6. 节点桶写入（单桶 nodes:{app}:{uid}），member="<ns>:<nodeID>"、score=expireTime,
+//     跨节点定位直查免 client GET + JSON 解压；注销路径不 ZREM（同节点多端无引用计数，
+//     盲删会误删同节点其他活跃端），死条目靠 score 过期自愈（读取侧 ZRangeByScore 过滤 + EXPIRE 兜底）
 //
 // KEYS[1] = keyPrefix (用于构建所有 key)
 //
@@ -285,6 +289,16 @@ for i = 1, clientCount do
             redis.call('EXPIRE', globalBitmapKey, bitmapTTL)
         end
 
+        -- 6. 节点桶写入（单桶，跨节点定位直查：GetUserNodes/BatchGetUserNodes 免 client GET + JSON 解压）
+        --    member="<ns>:<nodeID>"（ns 复合编码，单 key 双语义：scoped 前缀过滤 / 通配取后段）、
+        --    score=expireTime：同 (ns,node) 多端共用条目、任一端心跳续命；
+        --    注销路径不 ZREM（无引用计数，盲删会误删同节点其他活跃端），死条目靠 score 过期自愈；
+        --    先清理已过期死条目（注册低频路径，与 user_clients 第 2 步同模式）
+        local userNodesKey = keyPrefix .. "nodes:" .. appID .. ":" .. userID
+        redis.call('ZREMRANGEBYSCORE', userNodesKey, '-inf', currentTime)
+        redis.call('ZADD', userNodesKey, expireTime, ns .. ":" .. nodeID)
+        redis.call('EXPIRE', userNodesKey, ttl)
+
         successCount = successCount + 1
     end
 end
@@ -328,6 +342,7 @@ local maxOffset = tonumber(ARGV[5])
 local expireTime = currentTime + ttl
 local missing = {}
 local bmRefreshed = {}
+local nodesExpired = {}
 
 for i = 1, clientCount do
     local data = ARGV[5 + i]
@@ -383,6 +398,17 @@ for i = 1, clientCount do
 
             -- 3. types 集合登记（CleanupExpired 据此遍历所有 type ZSET，幂等）
             redis.call('SADD', keyPrefix .. "types", userType)
+
+            -- 3.5 节点桶续期（score 前移至本次心跳过期点 + 桶 key TTL 刷新，member="<ns>:<nodeID>"）
+            --     批内同 key EXPIRE 去重（同用户多端同批心跳，与 bmRefreshed 同模式摊薄命令数）；
+            --     ZADD 幂等（同批 now 相同 → expireTime 相同，重复写同 member 无害）；
+            --     不做 ZREMRANGEBYSCORE：死条目由读取侧 ZRangeByScore 过滤，心跳高频路径命令数压到最低
+            local userNodesKey = keyPrefix .. "nodes:" .. appID .. ":" .. userID
+            redis.call('ZADD', userNodesKey, expireTime, ns .. ":" .. nodeID)
+            if not nodesExpired[userNodesKey] then
+                redis.call('EXPIRE', userNodesKey, ttl)
+                nodesExpired[userNodesKey] = true
+            end
 
             -- 4. bitmap 续期（摊薄刷新：TTL 剩余超过半程且本批未刷新过则跳过，
             --    bit 已为 1（上线路径写入），跳过仅推迟 EXPIRE，不影响判否正确性）
@@ -665,6 +691,14 @@ func (r *OnlineStore) GetScopedUserClientsKey(userID, appID, ns string) string {
 		ns = constants.DefaultNamespace
 	}
 	return r.keyPrefix + "user_clients:" + appID + ":" + ns + ":" + userID
+}
+
+// GetUserNodesKey 用户节点桶 key：跨节点定位直查（单桶，1 用户 1 key）
+// 完整 key: <keyPrefix>nodes:<appID>:<userID>，ZSET member="<ns>:<nodeID>"、score=expireTime
+// ns 编码进 member（复合段）：scoped 查询取 ns 前缀段过滤、跨 ns 通配取冒号后段，
+// 单 key 双语义（精确/通配）免双桶（100w 在线下双桶 350MB → 单桶 175MB）
+func (r *OnlineStore) GetUserNodesKey(appID, userID string) string {
+	return r.keyPrefix + "nodes:" + appID + ":" + userID
 }
 
 // GetScopedBitmapKey 获取信封范围的 bitmap key
@@ -1234,156 +1268,94 @@ func (r *OnlineStore) GetOnlineUsersByType(ctx context.Context, userType models.
 // 分布式节点查询
 // ============================================================================
 
+// parseNodeMembers 从节点桶 member 段解析节点列表（GetUserNodes/BatchGetUserNodes 共用）
+// member 格式 "<ns>:<nodeID>"；nsPrefix 非空时只保留该 ns 的条目（前缀过滤后取后段），
+// 空时取每段冒号后段（跨 ns 通配）；member 天然按 (ns,node) 去重，无需二次去重
+func parseNodeMembers(members []string, nsPrefix string) []string {
+	nodes := make([]string, 0, len(members))
+	for _, m := range members {
+		if nsPrefix != "" {
+			if !strings.HasPrefix(m, nsPrefix) {
+				continue
+			}
+			nodes = append(nodes, m[len(nsPrefix):])
+			continue
+		}
+		if i := strings.IndexByte(m, ':'); i >= 0 {
+			nodes = append(nodes, m[i+1:])
+		}
+	}
+	return nodes
+}
+
 // GetUserNodes 获取用户所在的所有节点（支持多设备）
 //
-// 路由隔离：通过 GetUserClients 继承 appID+namespace 过滤，只返回当前路由信封下
-// 用户在线的节点（同名 userID 跨 app/ns 在不同节点在线时，不会返回其他信封的节点）
+// 🔥 节点桶直查：单次 ZRangeByScore 拿活跃节点（score=expireTime，过滤已过期死条目），
+// 替代旧路径 GetUserClients 的 ZRANGE clientIDs + N×GET client + JSON 解压（多端多次往返且 CPU 密集）
+//
+// 路由隔离：有信封且 ns 非空时按 "<ns>:" 前缀过滤（同名 userID 跨信封在其他节点在线不误返）；
+// 信封 ns=""（群组投递通配）或无信封时取全部条目（无信封归一化 DefaultAppID，
+// 较旧路径的跨 app 全量更严格，消除跨 app 节点泄漏）
 func (r *OnlineStore) GetUserNodes(ctx context.Context, userID string) ([]string, error) {
-	clients, err := r.GetUserClients(ctx, userID)
+	if userID == "" {
+		return nil, errorx.WrapError("userID cannot be empty")
+	}
+	ns := routing.NamespaceFromContext(ctx)
+	scoped := routing.RoutingFromContext(ctx) != nil && ns != ""
+	key := r.GetUserNodesKey(constants.NormalizeAppID(routing.AppIDFromContext(ctx)), userID)
+	members, err := r.client.ZRangeArgs(ctx, redis.ZRangeArgs{
+		Key:     key,
+		Start:   time.Now().Unix(), // score=expireTime，仅取未过期条目（死条目自愈关键）
+		Stop:    "+inf",
+		ByScore: true,
+	}).Result()
 	if err != nil {
 		return nil, err
 	}
-
-	// 去重节点ID
-	nodeSet := make(map[string]struct{})
-	for _, client := range clients {
-		if client.NodeID != "" {
-			nodeSet[client.NodeID] = struct{}{}
-		}
-	}
-
-	nodes := make([]string, 0, len(nodeSet))
-	for nodeID := range nodeSet {
-		nodes = append(nodes, nodeID)
-	}
-
-	return nodes, nil
+	return parseNodeMembers(members, mathx.IF(scoped, ns+":", "")), nil
 }
 
 // BatchGetUserNodes 批量获取多个用户所在的所有节点
-// 使用 Redis Pipeline 批量查询，将 N 次网络往返压缩为 1 次（Pipeline 模式）
-// 对每个 userID：ZRANGE 拿 clientIDs → GET 拿 NodeID → 去重
+// 🔥 节点桶 Pipeline 直查：单次往返拿到全部用户的活跃节点（score=expireTime 过滤死条目），
+// 替代旧两段路径 ZRANGE clientIDs + 全量 GET client + JSON 解压（2 RTT + O(连接数) 解压 CPU）
 //
-// 有路由信封且 ns 非空时每个用户用 scoped key（ZSET 已分桶，无需逐客户端过滤），
-// 信封 ns=""（全局广播）或无路由信封走 unscoped（需逐客户端按 appID 过滤）
+// 路由隔离：有信封且 ns 非空按 "<ns>:" 前缀过滤（P2P 精确路由），
+// 信封 ns=""（群组投递通配）或无信封取全部条目（跨 ns 聚合；无信封归一化 DefaultAppID）
 func (r *OnlineStore) BatchGetUserNodes(ctx context.Context, userIDs []string) (map[string][]string, error) {
 	if len(userIDs) == 0 {
 		return make(map[string][]string), nil
 	}
 
-	appID, ns := routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx)
-	hasRoute := routing.RoutingFromContext(ctx) != nil
-	scoped := hasRoute && ns != ""
-	normalizedAppID := constants.NormalizeAppID(appID)
+	ns := routing.NamespaceFromContext(ctx)
+	nsPrefix := mathx.IF(routing.RoutingFromContext(ctx) != nil && ns != "", ns+":", "")
+	normalizedAppID := constants.NormalizeAppID(routing.AppIDFromContext(ctx))
+	now := time.Now().Unix()
 
-	// needFilter[i]=true 表示该用户命中 unscoped ZSET，需按信封过滤（广播按 appID 匹配）
-	// scoped 命中时为 false（ZSET 已分桶，无需逐客户端过滤）
-	needFilter := make([]bool, len(userIDs))
-	if !scoped && hasRoute {
-		for i := range needFilter {
-			needFilter[i] = true
-		}
-	}
-
-	// Phase 1: Pipeline 并发 ZRANGE 拿到每个用户的 clientIDs
-	pipe1 := r.client.Pipeline()
-	zrangeCmds := make([]*redis.StringSliceCmd, len(userIDs))
+	pipe := r.client.Pipeline()
+	cmds := make([]*redis.StringSliceCmd, len(userIDs))
 	for i, userID := range userIDs {
-		if scoped {
-			zrangeCmds[i] = pipe1.ZRange(ctx, r.GetScopedUserClientsKey(userID, normalizedAppID, ns), 0, -1)
-		} else {
-			zrangeCmds[i] = pipe1.ZRange(ctx, r.GetUserClientsKey(userID), 0, -1)
-		}
-	}
-	if _, err := pipe1.Exec(ctx); err != nil && err != redis.Nil {
-		return nil, err
-	}
-
-	// userClientIDs[idx] = 该用户的 clientIDs
-	userClientIDs := make([][]string, len(userIDs))
-	for i, cmd := range zrangeCmds {
-		clientIDs, err := cmd.Result()
-		if err != nil || len(clientIDs) == 0 {
-			userClientIDs[i] = nil
-			continue
-		}
-		userClientIDs[i] = clientIDs
-	}
-
-	// 收集所有需要 GET 的 clientID → (userID, idx) 映射
-	type clientRef struct {
-		userID string
-		idx    int // 在 userIDs 中的索引
-	}
-	allClientIDs := make([]string, 0, len(userIDs)*2)
-	clientRefMap := make(map[string]clientRef, len(userIDs)*2)
-	for i, clientIDs := range userClientIDs {
-		if len(clientIDs) == 0 {
-			continue
-		}
-		for _, cid := range clientIDs {
-			if _, exists := clientRefMap[cid]; !exists {
-				clientRefMap[cid] = clientRef{userID: userIDs[i], idx: i}
-				allClientIDs = append(allClientIDs, cid)
-			}
-		}
-	}
-
-	if len(allClientIDs) == 0 {
-		return make(map[string][]string), nil
-	}
-
-	// Phase 2: Pipeline 并发 GET 拿到每个 client 的数据（含 NodeID）
-	pipe2 := r.client.Pipeline()
-	getCmds := make([]*redis.StringCmd, len(allClientIDs))
-	for i, cid := range allClientIDs {
-		getCmds[i] = pipe2.Get(ctx, r.GetClientKey(cid))
+		cmds[i] = pipe.ZRangeArgs(ctx, redis.ZRangeArgs{
+			Key:     r.GetUserNodesKey(normalizedAppID, userID),
+			Start:   now, // score=expireTime，仅取未过期条目（死条目自愈关键）
+			Stop:    "+inf",
+			ByScore: true,
+		})
 	}
 	// pipeline.Exec 返回 redis.Nil 是正常的（某些 key 可能已过期）
-	if _, err := pipe2.Exec(ctx); err != nil && err != redis.Nil {
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
 		return nil, err
 	}
 
-	// 解析结果，按 userID 聚合去重 NodeID
 	result := make(map[string][]string, len(userIDs))
-	userNodeSets := make([]map[string]struct{}, len(userIDs))
-	for i := range userIDs {
-		userNodeSets[i] = make(map[string]struct{})
+	for i, cmd := range cmds {
+		members, err := cmd.Result()
+		if err != nil || len(members) == 0 {
+			continue // 该用户无活跃节点：结果 key 缺失（与旧实现语义一致）
+		}
+		if nodes := parseNodeMembers(members, nsPrefix); len(nodes) > 0 {
+			result[userIDs[i]] = nodes
+		}
 	}
-
-	for i, cmd := range getCmds {
-		data, err := cmd.Result()
-		if err != nil {
-			continue // key 不存在或已过期，跳过
-		}
-		client, err := zipx.ZlibSmartDecompressObject[*models.Client]([]byte(data))
-		if err != nil {
-			continue
-		}
-		if client.NodeID == "" {
-			continue
-		}
-		ref := clientRefMap[allClientIDs[i]]
-		// needFilter=true 表示该用户命中 unscoped（或 scoped fallback），ZSET 未分桶需按信封过滤；
-		// needFilter=false 表示 scoped 命中，ZSET 已分桶，直接收集
-		if needFilter[ref.idx] && !clientMatchesRouteEnvelope(client, appID, ns) {
-			continue
-		}
-		userNodeSets[ref.idx][client.NodeID] = struct{}{}
-	}
-
-	// 转换 map[string]struct{} → []string
-	for i, nodeSet := range userNodeSets {
-		if len(nodeSet) == 0 {
-			continue
-		}
-		nodes := make([]string, 0, len(nodeSet))
-		for nodeID := range nodeSet {
-			nodes = append(nodes, nodeID)
-		}
-		result[userIDs[i]] = nodes
-	}
-
 	return result, nil
 }
 

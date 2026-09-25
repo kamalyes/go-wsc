@@ -211,10 +211,11 @@ func TestOnlineRepoIsolation_NoRouteCtx_BackwardCompat(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, online, "无路由信封应返回在线（向后兼容）")
 
-	// GetUserNodes 无路由信封 → 返回全部节点
+	// GetUserNodes 无路由信封 → 收敛 DefaultAppID 域（两个连接均非 Default app，返回空）
+	// 节点桶按 app 维度编码后天然收紧：旧语义返回跨 app 全部节点是隔离泄漏面，生产调用方均有信封
 	nodes, err := repo.GetUserNodes(context.Background(), "shared-user")
 	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{"node-1", "node-2"}, nodes, "无路由信封应返回全部节点（向后兼容）")
+	assert.Empty(t, nodes, "无路由信封应收敛 DefaultAppID 域，非 Default app 连接不返回（隔离收紧）")
 }
 
 // TestOnlineRepoIsolation_NamespaceBroadcast 验证 namespace 空值=全局广播语义

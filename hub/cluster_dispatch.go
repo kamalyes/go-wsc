@@ -132,6 +132,9 @@ func (h *Hub) routeToCluster(ctx context.Context, msg *models.HubMessage, opts c
 
 	// ① 尝试 gRPC 直连
 	result := h.dispatchViaGRPC(ctx, msg, opts)
+	if result.grpcDelivered > 0 {
+		h.overloadMetrics.RecordClusterGRPC(result.grpcDelivered)
+	}
 
 	// ①' gRPC 目标节点明确用户不在（user_not_found 的 gRPC 等价信号，无需经 PubSub 回告绕圈）：
 	// 触发秒级重路由决策——重查索引发现用户已迁移时向新节点定向补投（返回 rerouted=true），
@@ -191,6 +194,9 @@ func (h *Hub) routeToCluster(ctx context.Context, msg *models.HubMessage, opts c
 			}
 			return pubErr
 		}
+
+		// PubSub 兜底成功发布口径计数（gRPC 未覆盖节点时的降级频率，观测降级压力）
+		h.overloadMetrics.RecordClusterPubSubFallback()
 
 		// 🚨 死节点秒级兜底：定向频道无人订阅（Pod 挂掉/订阅断连重连中），消息未送达这些节点。
 		// P2P 场景重查在线索引：用户所有连接所在节点均失活 → 实时投递无望，立即转离线

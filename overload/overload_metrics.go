@@ -4,12 +4,17 @@
  * @LastEditors: kamalyes 501893067@qq.com
  * @LastEditTime: 2026-09-10 21:00:00
  * @FilePath: \go-wsc\overload\overload_metrics.go
- * @Description: 过载观测指标 —— 送达漏斗（全 atomic 零锁计数）
+ * @Description: 过载观测指标 —— 送达漏斗与投递路由分支（全 atomic 零锁计数）
  *
  * 送达漏斗（per Guarantee 分级）：
  *   admitted（准入放行） → realtime（实时送达）/ offline（转离线补发）
  *   ephemeral-merged（latest-wins 合并）/ ephemeral-dropped（高频语义丢弃）
  *   unrecoverable（无兜底可用时的最终丢失——仅离线 handler 未配置的部署问题）
+ *
+ * 投递路由分支（Deliver 决策树五模式 + 跨节点通道）：
+ *   deliver_modes：P2P / 群组可靠 / 群组广播 / 命名空间 / 全局（消息级日志降 Debug 后的观测补位）
+ *   cluster_grpc：跨节点 gRPC 直连投递（消息数与累计节点数，均扇出 = nodes/messages）
+ *   cluster_pubsub_fallbacks：PubSub 兜底发布次数（gRPC 未覆盖时的降级频率）
  *
  * 守恒不变量（送达保证的量化验收，测试断言）：
  *   必达/普通级：realtime + offline + unrecoverable == admitted
@@ -61,7 +66,22 @@ type OverloadMetrics struct {
 
 	// evictedSlow 慢消费者驱逐计数（驱逐前消息已保全）
 	evictedSlow atomic.Int64
+
+	// deliverModes Deliver 决策树分支计数（P2P/群组可靠/群组广播/命名空间/全局，消息数维度）
+	// 消息级路由日志降 Debug 后的观测补位：各分支占比与跨节点降级频率可量化
+	deliverModes deliverMetricBuckets
+
+	// clusterGRPCMessages / clusterGRPCNodes 跨节点 gRPC 直连投递
+	// （消息数与累计节点数，均扇出 = nodes/messages）
+	clusterGRPCMessages atomic.Int64
+	clusterGRPCNodes    atomic.Int64
+
+	// clusterPubSubFallbacks PubSub 兜底发布次数（gRPC 未覆盖节点时的降级路径，成功发布口径）
+	clusterPubSubFallbacks atomic.Int64
 }
+
+// deliverMetricBuckets Deliver 路由分支计数桶（决策树五模式，下标对齐 DeliveryMode 枚举顺序）
+type deliverMetricBuckets [5]atomic.Int64
 
 // bucketIndex DeliveryGuarantee → 计数桶下标
 // GuaranteeUnset(0) 映射到桶 3（汇总桶：实际投递时 Unset 已被 Resolve 归一到具体分级，
@@ -135,6 +155,39 @@ func (m *OverloadMetrics) RecordSlowEvict() {
 	m.evictedSlow.Add(1)
 }
 
+// deliverModeIndex DeliveryMode → 计数桶下标（决策树五模式，枚举顺序即桶顺序 0..4）
+func deliverModeIndex(mode models.DeliveryMode) int {
+	switch mode {
+	case models.DeliveryModeP2P:
+		return 0
+	case models.DeliveryModeGroupReliable:
+		return 1
+	case models.DeliveryModeGroupBroadcast:
+		return 2
+	case models.DeliveryModeNamespace:
+		return 3
+	default:
+		return 4 // DeliveryModeGlobal 及未知值兜底（Deliver 入口已穷举，正常不走）
+	}
+}
+
+// RecordDeliverMode Deliver 路由分支埋点（入口决策树分类后调用，消息数维度）
+func (m *OverloadMetrics) RecordDeliverMode(mode models.DeliveryMode) {
+	m.deliverModes[deliverModeIndex(mode)].Add(1)
+}
+
+// RecordClusterGRPC 跨节点 gRPC 直连投递埋点（nodes = 本次成功直连的节点数）
+// 一次 routeToCluster 成功直连 ≥1 节点即计 1 条跨节点消息；均扇出 = nodes/messages
+func (m *OverloadMetrics) RecordClusterGRPC(nodes int) {
+	m.clusterGRPCMessages.Add(1)
+	m.clusterGRPCNodes.Add(int64(nodes))
+}
+
+// RecordClusterPubSubFallback PubSub 兜底发布埋点（gRPC 未覆盖节点时的成功发布口径）
+func (m *OverloadMetrics) RecordClusterPubSubFallback() {
+	m.clusterPubSubFallbacks.Add(1)
+}
+
 // OverloadStats 送达漏斗与过载指标快照（map 形态，并入现有 stats 查询体系）
 func (m *OverloadMetrics) OverloadStats() map[string]any {
 	read := func(b *guaranteeMetricBuckets) map[string]int64 {
@@ -158,20 +211,33 @@ func (m *OverloadMetrics) OverloadStats() map[string]any {
 		"write_batch_total": m.writeBatchTotal.Load(),
 		"write_batch_count": m.writeBatchCount.Load(),
 		"slow_evicted":      m.evictedSlow.Load(),
+		"deliver_modes": map[string]int64{
+			"p2p":             m.deliverModes[0].Load(),
+			"group_reliable":  m.deliverModes[1].Load(),
+			"group_broadcast": m.deliverModes[2].Load(),
+			"namespace":       m.deliverModes[3].Load(),
+			"global":          m.deliverModes[4].Load(),
+		},
+		"cluster_grpc_messages":    m.clusterGRPCMessages.Load(),
+		"cluster_grpc_nodes":       m.clusterGRPCNodes.Load(),
+		"cluster_pubsub_fallbacks": m.clusterPubSubFallbacks.Load(),
 	}
 }
 
 // MetricsSnapshot 标量计数快照（测试/自检断言用；分桶计数见 OverloadStats）
 func (m *OverloadMetrics) MetricsSnapshot() map[string]int64 {
 	return map[string]int64{
-		"ephemeral_merged":  m.ephemeralMerged.Load(),
-		"ephemeral_dropped": m.ephemeralDropped.Load(),
-		"admission_delayed": m.admissionDelayed.Load(),
-		"admission_offline": m.admissionOffline.Load(),
-		"shaper_denied":     m.shaperDenied.Load(),
-		"slow_evicted":      m.evictedSlow.Load(),
-		"write_batch_total": m.writeBatchTotal.Load(),
-		"write_batch_count": m.writeBatchCount.Load(),
+		"ephemeral_merged":         m.ephemeralMerged.Load(),
+		"ephemeral_dropped":        m.ephemeralDropped.Load(),
+		"admission_delayed":        m.admissionDelayed.Load(),
+		"admission_offline":        m.admissionOffline.Load(),
+		"shaper_denied":            m.shaperDenied.Load(),
+		"slow_evicted":             m.evictedSlow.Load(),
+		"write_batch_total":        m.writeBatchTotal.Load(),
+		"write_batch_count":        m.writeBatchCount.Load(),
+		"cluster_grpc_messages":    m.clusterGRPCMessages.Load(),
+		"cluster_grpc_nodes":       m.clusterGRPCNodes.Load(),
+		"cluster_pubsub_fallbacks": m.clusterPubSubFallbacks.Load(),
 	}
 }
 

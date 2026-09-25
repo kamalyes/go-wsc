@@ -98,6 +98,9 @@ func (m *Manager) Deliver(ctx context.Context, msg *models.HubMessage, excludeSe
 	default:
 		mode = models.DeliveryModeGlobal
 	}
+	// 路由分支埋点补位（消息级日志降 Debug 后，各分支占比与降级频率经此处量化）
+	m.host.GetOverloadMetrics().RecordDeliverMode(mode)
+
 	// 投递路由决策为每消息必经路径，100w 量级下 Info 级会产生海量日志 IO，降为 Debug（生产环境关闭）
 	m.host.GetLogger().DebugContextKV(ctx, "[投递诊断] Deliver 路由决策",
 		"message_id", msg.MessageID,

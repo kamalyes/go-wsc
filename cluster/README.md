@@ -30,7 +30,6 @@
 
 | 概念 | 说明 |
 |------|------|
-| `RouterCache` | 三层路由缓存：进程内 LRU → Redis → 全节点广播查询 |
 | `GRPCClientPool` | 连接池 + 每节点独立熔断（半开探测恢复） |
 | 投递语义 | at-least-once，幂等由业务 messageID 保证 |
 
@@ -60,11 +59,6 @@ nr := cluster.NewNodeRegistry(nodeID, grpcAddr, redisClient)
 nr.Register(ctx)
 defer nr.Unregister(ctx)   // 优雅退出时主动摘除
 
-// 路由缓存
-rc := cluster.NewRouterCache(redisClient)
-rc.SetUser(ctx, "user-1001", []string{"node-a"})   // 写 user→node
-nodes, _ := rc.GetUser(ctx, "user-1001")           // 查：LRU → Redis → 广播
-
 // gRPC 客户端池（跨节点直连投递）
 pool := cluster.NewGRPCClientPool(opts...)
 ```
@@ -83,6 +77,6 @@ pool := cluster.NewGRPCClientPool(opts...)
 
 ## 后端绑定
 
-- Redis（一等）：节点发现租约 + 三层路由缓存的共享层
+- Redis（一等）：节点发现租约
 - NATS（一等）：兜底投递通道（JetStream 持久化 + Explicit ack）
 - 不启用时：单节点模式，cluster 域空转（零连接、零租约）

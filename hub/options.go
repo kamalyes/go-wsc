@@ -120,12 +120,6 @@ func (h *Hub) WithGRPCClientPool(pool *cluster.GRPCClientPool) *Hub {
 	return h
 }
 
-// WithRouterCache 注入路由缓存（KVCache 三层兜底：本地 map → Redis Hash → 回源）
-func (h *Hub) WithRouterCache(cache *cluster.RouterCache) *Hub {
-	h.routerCache = cache
-	return h
-}
-
 // WithConnectionTokenDecoder 注入连接 Token 鉴权器（nil 时握手走明文参数）
 func (h *Hub) WithConnectionTokenDecoder(decoder spi.ConnectionAuthenticator) *Hub {
 	h.connectionTokenDecoder = decoder

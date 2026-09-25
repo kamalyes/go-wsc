@@ -37,46 +37,18 @@ import (
 // 用户消息跨节点路由
 // ============================================================================
 
-// queryUserNodes 查询用户所在节点（in-flight 合并 + routerCache 兜底 + 自愈回写）
+// queryUserNodes 查询用户所在节点（in-flight 合并 + 唯一回源 truth）
 // 同一 (appID, namespace, userID) 的并发查询经 nodeQueryFlight 共享单次回源，
-// 回源细节（routerCache 兜底 / 空结果直查 source of truth）见 loadUserNodes
+// 回源直接查 onlineStatusRepo（source of truth，已按信封过滤）
 func (h *Hub) queryUserNodes(ctx context.Context, userID string) ([]string, error) {
 	// 🔥 in-flight 合并：同一 (appID, namespace, userID) 的并发查询共享单次回源
 	// （热点用户被多发送方并发命中 / 消息路由与踢人分发同用户并发时 N 次 RTT → 1 次）。
-	// 合并器无 TTL、不缓存结果，语义与逐次直查完全一致（routerCache 负缓存的
-	// 陈旧空列表风险不引入）；信封三元组作 key，跨 app/ns 查询互不共享
+	// 合并器无 TTL、不缓存结果，语义与逐次直查完全一致（不引入本地路由缓存
+	// 负缓存的陈旧空列表风险）；信封三元组作 key，跨 app/ns 查询互不共享
 	appID, ns := routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx)
 	return h.nodeQueryFlight.Do(appID+"|"+ns+"|"+userID, func() ([]string, error) {
-		return h.loadUserNodes(ctx, userID, appID)
+		return h.onlineStatusRepo.GetUserNodes(ctx, userID)
 	})
-}
-
-// loadUserNodes 直查用户所在节点（in-flight 合并器的回源函数）
-// 有路由信封时跳过 routerCache（缓存 key 未含 appID/ns，跨信封会泄漏），
-// 直接查 onlineStatusRepo（已按信封过滤）；无路由信封时走 routerCache 兜底
-//
-// 🔥 空结果兜底直查 onlineStatus_repo（source of truth）：
-// routerCache 负缓存（空切片按 TTL 缓存，默认 5min）叠加失效广播丢失（PubSub 至多一次投递）
-// 会让缓存持续返回过期空列表 → 本应跨节点投递的消息只走本地（必然扑空），
-// 实时投递丢失直到缓存 TTL 自然过期。直查消除缓存与 Redis 的"双源不一致"（跨节点漏发根源）
-func (h *Hub) loadUserNodes(ctx context.Context, userID, appID string) ([]string, error) {
-	var nodeIDs []string
-	var err error
-	if appID == "" && h.routerCache != nil {
-		nodeIDs, err = h.routerCache.GetUserNodes(ctx, userID)
-		if err != nil {
-			// 缓存查询失败不直接短路：降级直查 source of truth
-			nodeIDs = nil
-		}
-	}
-	if len(nodeIDs) == 0 {
-		nodeIDs, err = h.onlineStatusRepo.GetUserNodes(ctx, userID)
-		// 回写缓存自愈过期条目：仅无路由信封时回写（有信封时 key 未含 scope，回写会跨信封污染）
-		if err == nil && appID == "" && h.routerCache != nil {
-			_ = h.routerCache.SetUserNodes(ctx, userID, nodeIDs)
-		}
-	}
-	return nodeIDs, err
 }
 
 // checkAndRouteToNode 检查用户是否在其他节点，如果是则路由过去

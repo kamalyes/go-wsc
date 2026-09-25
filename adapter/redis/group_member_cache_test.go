@@ -134,6 +134,40 @@ func TestGroupMemberCache_WriteEvicts(t *testing.T) {
 	})
 }
 
+// TestGroupMemberCache_CreateEvictsNegativeEntry 建组逐出负缓存：
+// 先查未建 gid 写入负缓存后建组，新实例必须立即可见（否则 TTL 窗口内被误报为无实例、群组投递漏投）
+func TestGroupMemberCache_CreateEvictsNegativeEntry(t *testing.T) {
+	cache, counting := setupCache(t, time.Minute, 0, 0)
+	ctx := context.Background()
+	app := constants.DefaultAppID
+
+	// 两个 gid 均未建组，各查一次写入负缓存并验证命中不回源
+	_, err := cache.GetMultiGroupMembers(ctx, app, []string{"g-late", "__observer__"})
+	require.NoError(t, err)
+	require.Equal(t, 1, counting.backfillCount())
+	_, err = cache.GetMultiGroupMembers(ctx, app, []string{"g-late", "__observer__"})
+	require.NoError(t, err)
+	require.Equal(t, 1, counting.backfillCount(), "负缓存命中不应回源")
+
+	t.Run("CreateGroup 后新实例立即可见", func(t *testing.T) {
+		require.NoError(t, cache.CreateGroup(ctx, &models.Group{GroupID: "g-late", Namespace: "tenantA", OwnerID: "o"}))
+		require.NoError(t, cache.AddMembers(ctx, app, "tenantA", "g-late", []string{"u1"}))
+		result, err := cache.GetMultiGroupMembers(ctx, app, []string{"g-late"})
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{"u1"}, result["g-late"], "负缓存不得挡住建组后的查询")
+		assert.Equal(t, 2, counting.backfillCount(), "建组逐出负缓存后应回源")
+	})
+
+	t.Run("EnsureSystemGroup 后系统组立即可见", func(t *testing.T) {
+		require.NoError(t, cache.EnsureSystemGroup(ctx, app, "", "__observer__"))
+		require.NoError(t, cache.AddMembers(ctx, app, "", "__observer__", []string{"u-sys"}))
+		result, err := cache.GetMultiGroupMembers(ctx, app, []string{"__observer__"})
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{"u-sys"}, result["__observer__"], "负缓存不得挡住系统组建立后的查询")
+		assert.Equal(t, 3, counting.backfillCount(), "建系统组逐出负缓存后应回源")
+	})
+}
+
 // TestGroupMemberCache_TTLExpiry 条目过期后视作 miss 重新回源（跨节点写入的一致性兜底）
 func TestGroupMemberCache_TTLExpiry(t *testing.T) {
 	cache, counting := setupCache(t, 25*time.Millisecond, 0, 0)

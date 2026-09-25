@@ -8,7 +8,7 @@
  *
  * 群消息投递热路径的 0 回源优化：稳态下投递只读本地聚合拓扑，Redis 两段 Pipeline
  * 仅在未命中/过期时回源缓存 key 为 (appID, groupID)，与跨 ns 聚合语义一致、
- * 不感知 namespace本地写路径（增删成员/解散）即时逐出对应条目；跨节点写入由
+ * 不感知 namespace本地写路径（建组/增删成员/解散）即时逐出对应条目；跨节点写入由
  * TTL 兜底（失效广播暂缓）
  *
  * Copyright (c) 2026 by kamalyes, All Rights Reserved.
@@ -24,6 +24,7 @@ import (
 
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-wsc/constants"
+	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/spi"
 )
 
@@ -42,8 +43,9 @@ type groupCacheEntry struct {
 
 // GroupMemberCache 群组成员拓扑缓存装饰器（LRU + TTL + 大群条目预算）
 //
-// 装饰 spi.GroupStore：仅覆盖成员聚合读（GetMultiGroupMembers）与成员变更写
-// （AddMembers/RemoveMembers/DisbandGroup，写后逐出），其余方法经嵌入原样透传
+// 装饰 spi.GroupStore：覆盖成员聚合读（GetMultiGroupMembers）与拓扑变更写
+// （CreateGroup/EnsureSystemGroup/AddMembers/RemoveMembers/DisbandGroup，写后逐出，
+// 建组逐出负缓存防新实例被误报为无实例），其余方法经嵌入原样透传
 type GroupMemberCache struct {
 	spi.GroupStore
 
@@ -142,6 +144,23 @@ func (c *GroupMemberCache) AddMembers(ctx context.Context, appID, namespace, gro
 // RemoveMembers 移除成员后逐出该群组拓扑
 func (c *GroupMemberCache) RemoveMembers(ctx context.Context, appID, namespace, groupID string, userIDs []string) error {
 	err := c.GroupStore.RemoveMembers(ctx, appID, namespace, groupID, userIDs)
+	c.evict(appID, groupID)
+	return err
+}
+
+// CreateGroup 建组后逐出该群组拓扑
+// 负缓存条目（确认无实例）必须在建组后失效，否则 TTL 窗口内新实例被误报为无实例、群组投递漏投
+func (c *GroupMemberCache) CreateGroup(ctx context.Context, group *models.Group) error {
+	err := c.GroupStore.CreateGroup(ctx, group)
+	if group != nil {
+		c.evict(group.AppID, group.GroupID)
+	}
+	return err
+}
+
+// EnsureSystemGroup 确保系统组后逐出该群组拓扑（与 CreateGroup 同因：负缓存不得挡住新实例）
+func (c *GroupMemberCache) EnsureSystemGroup(ctx context.Context, appID, namespace, groupID string) error {
+	err := c.GroupStore.EnsureSystemGroup(ctx, appID, namespace, groupID)
 	c.evict(appID, groupID)
 	return err
 }

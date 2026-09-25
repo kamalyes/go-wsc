@@ -117,3 +117,29 @@ func TestDeliverGroupNamespaceRequired(t *testing.T) {
 
 	assert.Equal(t, 0, log.getStoreCalled(), "ns 缺失短路在成员获取之前，不应产生任何投递/离线转存")
 }
+
+// TestDeliverGroupExcludeSender_TotalMembersAlignment excludeSender 场景 TotalMembers 与各计数同口径
+func TestDeliverGroupExcludeSender_TotalMembersAlignment(t *testing.T) {
+	m, host := newTestManager()
+	offline, log := newOfflineRecordingHandler()
+	m.offlineHandler = offline
+	host.groupRepo = newFakeGroupStore()
+
+	ctx := context.Background()
+	// 群内 3 人：发送者本人在群 + 2 个离线成员
+	require.NoError(t, host.groupRepo.AddMembers(ctx, constants.DefaultAppID, "tenantA", "g-align", []string{"u-sender", "u-off-1", "u-off-2"}))
+
+	msg := makeGroupMessage("u-sender")
+	msg.RequireAck = true
+	groupCtx := routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("tenantA").WithGroupIDs([]string{"g-align"}).Inject(ctx)
+	result := m.Deliver(groupCtx, msg, true) // excludeSender=true：发送者不计入投递目标
+
+	require.NotNil(t, result)
+	assert.Equal(t, 2, result.TotalMembers, "TotalMembers 应为过滤发送者后的目标数（3 成员 - 发送者本人）")
+	assert.Equal(t, 0, result.OnlineMembers, "无本地在线成员")
+	assert.Equal(t, 2, result.OfflineMembers, "2 个离线成员应分类为离线")
+	assert.Equal(t, 2, result.StoredOffline, "2 个离线成员应转存成功")
+	assert.Equal(t, 2, log.getStoreCalled(), "离线转存记账应恰好 2 次")
+	assert.Equal(t, result.OnlineMembers+result.OfflineMembers, result.TotalMembers,
+		"在线+离线分类应与 TotalMembers 对账（修复前 TotalMembers=3 与分类数 2 不齐）")
+}

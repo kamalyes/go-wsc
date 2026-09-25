@@ -184,8 +184,11 @@ func (m *Manager) deliverToGroupReliable(ctx context.Context, msg *models.HubMes
 		return result
 	}
 
-	// msg 已 Clone（Deliver 入口），同步路由信封（namespace 已归一化）
+	// msg 已 Clone（Deliver 入口），同步路由信封（namespace 已校验非空，见上方校验）
 	ctx = msg.ContextWithRoute(ctx, appID, namespace, groupIDs)
+	if msg.CreateAt.IsZero() {
+		msg.CreateAt = time.Now()
+	}
 
 	// 1. Pipeline 批量获取所有群组成员并合并去重（多群组 N 次 GetMembers → 1 次 RTT）
 	memberSet, err := m.batchGetGroupMembers(ctx, groupIDs)
@@ -200,12 +203,7 @@ func (m *Manager) deliverToGroupReliable(ctx context.Context, msg *models.HubMes
 		members = append(members, uid)
 	}
 
-	result.TotalMembers = len(members)
-	if result.TotalMembers == 0 {
-		return result
-	}
-
-	// 2. 过滤发送者（如需）
+	// 2. 过滤发送者（如需）；TotalMembers 语义为投递目标数，须与下方各计数同口径（过滤后）
 	filteredMembers := members
 	if excludeSender && msg.Sender != "" {
 		filteredMembers = mathx.FilterSlice(members, func(id string) bool {
@@ -219,7 +217,8 @@ func (m *Manager) deliverToGroupReliable(ctx context.Context, msg *models.HubMes
 			"excluded_sender", msg.Sender,
 		)
 	}
-	if len(filteredMembers) == 0 {
+	result.TotalMembers = len(filteredMembers)
+	if result.TotalMembers == 0 {
 		return result
 	}
 
@@ -325,7 +324,7 @@ func (m *Manager) deliverToGroupFireForget(ctx context.Context, msg *models.HubM
 		return result
 	}
 
-	// msg 已 Clone，同步路由信封（namespace 已归一化）
+	// msg 已 Clone，同步路由信封（namespace 已校验非空，见上方校验）
 	ctx = msg.ContextWithRoute(ctx, appID, namespace, groupIDs)
 	if msg.CreateAt.IsZero() {
 		msg.CreateAt = time.Now()
@@ -343,23 +342,23 @@ func (m *Manager) deliverToGroupFireForget(ctx context.Context, msg *models.HubM
 		members = append(members, uid)
 	}
 
-	result.TotalMembers = len(members)
-	if len(members) == 0 {
-		return result
-	}
-
-	// 2. 排除发送者后得到目标成员列表
+	// 2. 排除发送者后得到目标成员列表；TotalMembers 语义为投递目标数，须与 LocalDelivered 同口径（过滤后）
 	targetMembers := members
 	if excludeSender && msg.Sender != "" {
 		targetMembers = mathx.FilterSlice(members, func(id string) bool {
 			return id != msg.Sender
 		})
 	}
-	if len(targetMembers) == 0 {
+	result.TotalMembers = len(targetMembers)
+	if result.TotalMembers == 0 {
 		return result
 	}
 
 	// 3. 按成员ID查找本地连接并投递（O(m)，m=成员数，不遍历全部连接）
+	// 增加广播发送统计（原子计数器，由 flushStatsCounters 定时刷写到 Redis；与全局广播同口径）
+	if m.host.GetStatsRepo() != nil {
+		m.broadcastSentCount.Add(1)
+	}
 	localCount := m.BroadcastToUserIDs(ctx, targetMembers, msg)
 
 	// 通知观察者（ctx 已注入路由，直接使用）
@@ -372,7 +371,7 @@ func (m *Manager) deliverToGroupFireForget(ctx context.Context, msg *models.HubM
 		"namespace", namespace,
 		"group_ids", groupIDs,
 		"message_id", msg.MessageID,
-		"total_members", len(members),
+		"total_members", result.TotalMembers,
 		"local_delivered", localCount,
 		"grpc_enabled", m.host.IsGRPCEnabled(),
 		"pubsub_enabled", m.host.HasPubsub(),
@@ -397,6 +396,14 @@ func (m *Manager) deliverToNamespace(ctx context.Context, msg *models.HubMessage
 
 	// msg 已 Clone + InjectRoute，信封已含 ns（非空）；ContextWithRoute 二次同步保证 msg.Namespace 与 ctx 一致
 	ctx = msg.ContextWithRoute(ctx, appID, namespace, nil)
+	if msg.CreateAt.IsZero() {
+		msg.CreateAt = time.Now()
+	}
+
+	// 增加广播发送统计（原子计数器，由 flushStatsCounters 定时刷写到 Redis；与全局广播同口径）
+	if m.host.GetStatsRepo() != nil {
+		m.broadcastSentCount.Add(1)
+	}
 
 	// 本地按命名空间过滤广播（BroadcastToFiltered 内部 combinedCondition 会叠加路由信封匹配，此处 condition 仅作业务兜底）
 	count := m.BroadcastToFiltered(ctx, func(c *models.Client) bool {

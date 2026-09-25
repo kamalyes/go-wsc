@@ -9,204 +9,170 @@
 [![GitHub Stars](https://img.shields.io/github/stars/kamalyes/go-wsc)](https://github.com/kamalyes/go-wsc/stargazers)
 [![codecov](https://codecov.io/gh/kamalyes/go-wsc/branch/master/graph/badge.svg)](https://codecov.io/gh/kamalyes/go-wsc)
 
-**go-wsc** 是一个企业级 Go WebSocket 框架，专注于高性能实时通信。提供智能重连、消息确认(ACK)、连接池管理等关键特性，内置削峰填谷与消息分级送达（必达/普通/高频三级语义）、慢消费者治理、writev 合帧批量写，内置 gRPC 集群直连与四层跨节点自愈容错，支持百万级并发连接。
+**go-wsc** 是一个企业级 Go WebSocket/SSE 实时通信框架，面向百万级并发连接设计。核心能力：`Hub.Deliver` 统一投递入口（P2P / 群组 / 广播决策树）、appID+namespace 多租户隔离、群组拓扑常驻内存缓存（稳态群消息扇出 0 Redis RTT）、gRPC 集群直连 + PubSub 兜底 + 四层跨节点自愈、削峰填谷与消息分级送达（必达/普通/高频）、慢消费者治理、writev 合帧批量写。
 
 ## 🏗️ 系统架构
 
 ```mermaid
 graph TB
-    subgraph "客户端层 Client Layer"
-        direction LR
-        WSC[WebSocket 客户端<br/>go-wsc]
-        TSC[TypeScript 客户端<br/>Advanced WebSocket]
-        React[React Hook]
-        Vue[Vue.js 组合式 API]
-        Angular[Angular Service]
+    %% ==================== 客户端层 ====================
+    subgraph "客户端层"
+        WSC["go-wsc SDK<br/>WebSocket 客户端"]
+        TSC["TypeScript 客户端"]
+        React["React Hook"]
+        Vue["Vue 组合式 API"]
+        Angular["Angular Service"]
+        SSEClient["SSE 客户端<br/>降级通道"]
     end
 
-    subgraph "负载均衡层 Load Balancer Layer"
-        direction LR
-        LB[K8s Service / Ingress<br/>流量接入]
-        Gateway[API 网关<br/>认证/限流]
+    %% ==================== 接入层 ====================
+    subgraph "接入层"
+        LB["K8s Service / Ingress<br/>流量接入"]
+        Upgrader["transport.Upgrader<br/>WS / SSE 升级握手<br/>AES-256-GCM Token 解密"]
     end
 
-    subgraph "分布式 Hub 集群 Distributed Hub Cluster"
-        direction LR
-        Hub1[Hub Node 1<br/>192.168.1.101:8080]
-        Hub2[Hub Node 2<br/>192.168.1.102:8080]
-        Hub3[Hub Node 3<br/>192.168.1.103:8080]
-        HubN[Hub Node N<br/>192.168.1.10N:8080]
+    %% ==================== 分布式 Hub 集群 ====================
+    subgraph "分布式 Hub 集群 · 多副本对等组网"
+        Hub1["Hub Node 1"]
+        Hub2["Hub Node 2"]
+        HubN["Hub Node N"]
     end
 
-    subgraph "核心服务层 Core Services Layer"
-        direction LR
+    %% ==================== 核心服务层 ====================
+    subgraph "核心服务层"
 
-        subgraph "连接管理"
-            ConnRegistry[连接注册中心]
-            NodeDiscovery[节点发现]
+        subgraph "连接注册 · 三层在线存储"
+            Registry["ShardedRegistry<br/>64 分片注册表<br/>O(1) 注册 / 查找 / 注销"]
+            OnlineStore["节点桶 nodes:app:uid<br/>ZSET 单 RTT 直查<br/>Lua 注册 / 心跳续期"]
+            NodeClients["节点连接表<br/>node_clients:nodeID<br/>崩溃 TTL 自愈"]
         end
 
-        subgraph "消息路由"
-            MsgRouter[消息路由器]
-            CrossNodeRouter[跨节点路由]
+        subgraph "统一投递 Deliver"
+            Deliver["Deliver 决策树<br/>P2P / 群组可靠 / 群组广播<br/>命名空间 / 全局"]
+            TopoCache["群拓扑缓存<br/>64 分片 LRU + TTL<br/>稳态 0 Redis RTT"]
+            GroupStore["群组三维分桶<br/>members:app:ns:gid<br/>gns / nss 双索引"]
         end
 
-        subgraph "过载保护（削峰填谷）"
-            AdmissionGate[准入闸门<br/>水位线 + AIMD 升降级]
-            TokenBucket[GCRA 令牌桶<br/>广播出向整形]
-            Coalescer[高频消息合并器<br/>latest-wins]
-            DelayQueue[延迟队列<br/>低谷补投填谷]
-            SlowGov[慢消费者治理<br/>记录 → 告警 → 驱逐]
-            CtrlLane[控制通道双 lane<br/>必达级独立投递]
+        subgraph "过载保护 · 削峰填谷"
+            AdmissionGate["准入闸门<br/>水位线 + AIMD 升降级"]
+            TokenBucket["GCRA 令牌桶<br/>广播出向整形"]
+            Coalescer["高频合并器<br/>latest-wins"]
+            DelayQueue["延迟队列<br/>低谷补投填谷"]
+            SlowGov["慢消费者治理<br/>记录 → 告警 → 驱逐"]
+            CtrlLane["控制通道双 lane<br/>必达级独立投递"]
         end
 
-        subgraph "分布式通信"
-            GRPCDirect[节点间 gRPC 直连<br/>点对点投递]
-            PubSub[Redis PubSub<br/>兜底消息总线]
-            BroadcastMgr[全局广播]
-        end
-    end
-
-    subgraph "可靠性层 Reliability Layer"
-        direction LR
-
-        subgraph "消息确认"
-            ACKMgr[ACK 管理器]
-            MsgRecord[消息记录]
+        subgraph "集群分发"
+            GRPCDirect["gRPC 直连<br/>点对点并行投递"]
+            PubSub["Redis PubSub<br/>Pipeline 定向兜底"]
         end
 
-        subgraph "失败处理"
-            RetryEngine[重试引擎]
-            FailureRouter[失败路由器]
-        end
-
-        subgraph "离线处理"
-            OfflineHandler[离线处理器]
-            QueueHandler[队列处理器]
+        subgraph "高性能写路径"
+            FrameBatcher["writev 合帧<br/>突发 N 条 → 2 次 syscall"]
+            JsonEngine["JSON 引擎收口<br/>sonic JIT 可选"]
         end
     end
 
-    subgraph "性能与监控层 Performance & Monitoring Layer"
-        direction LR
-
-        subgraph "性能优化"
-            AtomicOps[原子操作]
-            WorkerPool[协程池]
-            FrameBatcher[writev 合帧<br/>批量写优化]
-            JsonEngine[JSON 引擎收口<br/>sonic JIT 可选]
-        end
-
-        subgraph "监控告警"
-            MetricsCol[指标收集]
-            AlertMgr[告警管理]
-        end
-
-        subgraph "配置管理"
-            ConfigMgr[配置中心]
-            NodeConfig[节点配置]
-        end
+    %% ==================== 可靠性层 ====================
+    subgraph "可靠性层"
+        ACKMgr["ACK 管理器<br/>跨节点时间轮超时扫描"]
+        RetryEngine["重试引擎<br/>go-toolbox 指数退避"]
+        FailureRouter["失败路由器<br/>5 类专业化处理器"]
+        OfflineHandler["离线处理器<br/>用户首连自动回放"]
+        Outbox["outbox 攒批<br/>离线消息异步刷写"]
     end
 
-    subgraph "存储层 Storage Layer"
-        direction LR
-        RedisCluster[(Redis Cluster<br/>缓存/队列/PubSub)]
-        Database[(Database<br/>离线消息/状态)]
-        LogStore[(日志存储<br/>审计追踪)]
+    %% ==================== 自愈与可观测 ====================
+    subgraph "自愈与可观测"
+        SelfHeal["四层自愈<br/>死节点感知 / 重路由 /<br/>ACK 兜底 / 幽灵回收"]
+        Stats["统计域<br/>bitmap 在线状态 O(1)<br/>指标 + 健康上报"]
+        Batcher["批处理域<br/>消息记录 / 状态攒批写"]
     end
 
-    %% 客户端到负载均衡
-    WSC -.->|WebSocket| LB
-    TSC -.->|WebSocket| LB
+    %% ==================== 存储层 ====================
+    subgraph "存储层"
+        Redis[("Redis<br/>节点桶 / 群组桶 / PubSub<br/>离线队列 / 集群统计")]
+        Database[("MySQL / GORM<br/>离线消息 / 消息归档<br/>连接记录 / 连接质量")]
+    end
+
+    %% ==================== 流量进入 ====================
     React --> TSC
     Vue --> TSC
     Angular --> TSC
+    WSC -.->|"WebSocket"| LB
+    TSC -.->|"WebSocket"| LB
+    SSEClient -.->|"SSE 长连接"| LB
+    LB --> Upgrader
+    Upgrader -->|"Token 解密通过 · 连接注册"| Hub1
+    Upgrader --> Hub2
+    Upgrader --> HubN
 
-    %% 负载均衡到 Hub 集群
-    LB --> Gateway
-    Gateway --> Hub1
-    Gateway --> Hub2
-    Gateway --> Hub3
-    Gateway --> HubN
+    %% ==================== 连接注册路径 ====================
+    Hub1 --> Registry
+    Hub2 --> Registry
+    HubN --> Registry
+    Registry -->|"注册 / 心跳 Lua 双写"| OnlineStore
+    OnlineStore --> NodeClients
 
-    %% Hub 到核心服务
-    Hub1 --> ConnRegistry
-    Hub2 --> ConnRegistry
-    Hub3 --> ConnRegistry
-    HubN --> ConnRegistry
+    %% ==================== 消息投递主链 ====================
+    Registry -->|"客户端消息"| Deliver
+    Deliver --> TopoCache
+    TopoCache -.->|"miss 两段 Pipeline 回源"| GroupStore
+    Deliver --> FrameBatcher
+    FrameBatcher --> JsonEngine
 
-    ConnRegistry --> MsgRouter
-    NodeDiscovery --> MsgRouter
-    MsgRouter --> CrossNodeRouter
-
-    %% 过载保护（削峰填谷）
-    MsgRouter --> AdmissionGate
+    %% ==================== 过载保护链 ====================
+    Deliver --> AdmissionGate
     AdmissionGate --> TokenBucket
-    TokenBucket --> BroadcastMgr
     AdmissionGate --> DelayQueue
-    DelayQueue -.->|低谷补投| BroadcastMgr
+    DelayQueue -.->|"低谷补投"| TokenBucket
     AdmissionGate --> SlowGov
-    MsgRouter --> Coalescer
-    MsgRouter --> CtrlLane
+    Deliver --> Coalescer
+    Deliver --> CtrlLane
 
-    %% 分布式通信
-    CrossNodeRouter --> GRPCDirect
-    CrossNodeRouter --> PubSub
-    BroadcastMgr --> PubSub
-    Hub1 <-.->|gRPC 直连| Hub2
-    Hub2 <-.->|gRPC 直连| Hub3
-    Hub1 <-.->|订阅/发布| PubSub
-    Hub2 <-.->|订阅/发布| PubSub
-    Hub3 <-.->|订阅/发布| PubSub
-    HubN <-.->|订阅/发布| PubSub
+    %% ==================== 跨节点投递 ====================
+    Deliver -->|"本地 miss"| GRPCDirect
+    GRPCDirect -.->|"失败降级"| PubSub
+    GRPCDirect -.->|"远端节点投递"| Hub2
 
-    %% 可靠性流程
-    MsgRouter --> ACKMgr
-    ACKMgr --> MsgRecord
-    MsgRouter --> RetryEngine
+    %% ==================== 可靠性链 ====================
+    Deliver --> ACKMgr
+    Deliver --> RetryEngine
+    ACKMgr -->|"超时转存"| FailureRouter
     RetryEngine --> FailureRouter
     FailureRouter --> OfflineHandler
-    FailureRouter --> QueueHandler
+    OfflineHandler --> Outbox
 
-    %% 性能与监控
-    MsgRouter --> AtomicOps
-    MsgRouter --> WorkerPool
-    MsgRouter --> FrameBatcher
-    MsgRouter --> JsonEngine
-    Hub1 --> MetricsCol
-    Hub2 --> MetricsCol
-    Hub3 --> MetricsCol
-    HubN --> MetricsCol
-    MetricsCol --> AlertMgr
-    ConfigMgr --> RetryEngine
-    ConfigMgr --> NodeConfig
+    %% ==================== 自愈与可观测连线 ====================
+    SelfHeal -->|"死索引清理 / reroute 守卫"| Registry
+    Stats -.->|"集群统计聚合"| Redis
+    Batcher -->|"攒批落库"| Database
 
-    %% 存储连接
-    PubSub -.->|消息总线| RedisCluster
-    ACKMgr -.->|缓存| RedisCluster
-    ConnRegistry -.->|映射| RedisCluster
-    NodeDiscovery -.->|注册| RedisCluster
-    OfflineHandler --> Database
-    QueueHandler --> Database
-    MsgRecord --> LogStore
+    %% ==================== 存储连线 ====================
+    OnlineStore -.-> Redis
+    GroupStore -.-> Redis
+    PubSub -.-> Redis
+    OfflineHandler -->|"离线双写"| Database
+    Outbox -->|"异步刷写"| Database
 
-    %% 样式定义
+    %% ==================== 样式定义 ====================
     classDef clientStyle fill:#e1f5fe,stroke:#01579b,stroke-width:2px
     classDef lbStyle fill:#fff9c4,stroke:#f57f17,stroke-width:2px
     classDef hubStyle fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
     classDef coreStyle fill:#e8eaf6,stroke:#283593,stroke-width:2px
-    classDef reliabilityStyle fill:#ffebee,stroke:#c62828,stroke-width:2px
-    classDef perfStyle fill:#e0f7fa,stroke:#006064,stroke-width:2px
     classDef overloadStyle fill:#fce4ec,stroke:#880e4f,stroke-width:2px
+    classDef reliabilityStyle fill:#ffebee,stroke:#c62828,stroke-width:2px
+    classDef opsStyle fill:#e0f7fa,stroke:#006064,stroke-width:2px
     classDef storageStyle fill:#e8f5e8,stroke:#1b5e20,stroke-width:2px
 
-    class WSC,TSC,React,Vue,Angular clientStyle
-    class LB,Gateway lbStyle
-    class Hub1,Hub2,Hub3,HubN hubStyle
-    class ConnRegistry,NodeDiscovery,MsgRouter,CrossNodeRouter,GRPCDirect,PubSub,BroadcastMgr coreStyle
+    class WSC,TSC,React,Vue,Angular,SSEClient clientStyle
+    class LB,Upgrader lbStyle
+    class Hub1,Hub2,HubN hubStyle
+    class Registry,OnlineStore,NodeClients,Deliver,TopoCache,GroupStore,GRPCDirect,PubSub,FrameBatcher,JsonEngine coreStyle
     class AdmissionGate,TokenBucket,Coalescer,DelayQueue,SlowGov,CtrlLane overloadStyle
-    class ACKMgr,MsgRecord,RetryEngine,FailureRouter,OfflineHandler,QueueHandler reliabilityStyle
-    class AtomicOps,WorkerPool,FrameBatcher,JsonEngine,MetricsCol,AlertMgr,ConfigMgr,NodeConfig perfStyle
-    class RedisCluster,Database,LogStore storageStyle
+    class ACKMgr,RetryEngine,FailureRouter,OfflineHandler,Outbox reliabilityStyle
+    class SelfHeal,Stats,Batcher opsStyle
+    class Redis,Database storageStyle
 ```
 
 ### 📦 模块分层
@@ -217,67 +183,108 @@ graph TB
 | --- | --- |
 | [hub](./hub/README.md) | 编排层：组装各域、实现消费者端口、生命周期与集群分发，对外唯一入口 |
 | [client](./client/README.md) | 客户端 SDK：建连、认证、收发消息、心跳保活、断线自动重连（WS 优先、SSE 降级） |
-| [connection](./connection/README.md) | 连接域：百万连接的注册/查找/容量/质量，64 分片注册表 |
+| [connection](./connection/README.md) | 连接域：百万连接的注册/查找/容量/质量，64 分片注册表 + 统一踢人 |
 | [transport](./transport/README.md) | 接入层：WS/SSE 升级握手、AES-256-GCM Token 解密、连接预检，标准 net/http 签名 |
-| [messaging](./messaging/README.md) | 消息域：入站分发、路由收敛、P2P/广播投递、ACK、失败转离线 |
+| [messaging](./messaging/README.md) | 消息域：Deliver 统一投递决策树、P2P/群组/广播投递、ACK、失败转离线 |
 | [batcher](./batcher/README.md) | 批处理域：消息记录/状态/统计/观察者通知的攒批写，写放大治理 |
 | [stats](./stats/README.md) | 统计域：bitmap 在线状态 O(1) 点查询 + 指标 + 健康上报 |
-| [group](./group/README.md) | 群组域：三层订阅索引 + VIP 分级 + 观察者，定向广播收敛的数据源 |
+| [group](./group/README.md) | 群组域：成员生命周期（连接入组/系统组）、VIP 分级、观察者、客服负载 |
 | [overload](./overload/README.md) | 过载域：AIMD 准入闸门 + GCRA 整形 + 高频合并 + 慢消费者治理 |
 | [cluster](./cluster/README.md) | 分布式域：节点发现、跨节点投递、自愈、防乒乓（多 Pod 对等组网，无选主） |
 | [constants](./constants/README.md) | 常量域：协议常量与默认值的唯一定义源，零依赖 |
 | [models](./models/README.md) | 数据层：全部域共享的数据结构，纯 struct 零依赖 |
-| [routing](./routing/README.md) | 路由域：路由信封（appID/namespace/groupIDs）的构建与传播 |
+| [routing](./routing/README.md) | 路由域：路由信封（appID/namespace/groupIDs）的链式构建与跨节点传播 |
 | [spi](./spi/README.md) | 契约层：核心与后端之间的接口边界（Store/Sink/Queue 三分法） |
-| [adapter/redis](./adapter/redis/README.md) | Redis 适配器：在线状态、集群统计、群组、客服负载、离线队列 |
+| [adapter/redis](./adapter/redis/README.md) | Redis 适配器：节点桶在线定位、群组三维分桶、拓扑缓存、离线队列、集群统计 |
 | [adapter/gorm](./adapter/gorm/README.md) | GORM 适配器：连接记录、连接质量、消息归档、离线消息持久化 |
-
-### 架构特点
-
-- **领域分层**: 14 个域包 + 2 个适配器包（batcher、client、cluster、connection、constants、group、messaging、models、overload、routing、spi、stats、transport、hub 编排层），每域以 `interfaces.go` 定义消费者端口，hub 编排层实现各域 Host 端口做委托
-- **分布式集群**: 多节点 Hub 集群 + gRPC 直连 + Redis PubSub 兜底 + 自动节点发现
-- **K8s Deployment 部署**: 多副本对等组网，滚动更新靠优雅停机排空 + 跨节点自愈 + 离线回放，消息不丢
-- **跨节点通信**:
-  - 同节点通信: 内存直达，延迟 < 1ms
-  - 跨节点通信: gRPC 点对点直连（低延迟、强类型、并行投递）
-  - PubSub 兜底: gRPC 未启用/失败时降级 Redis PubSub，Pipeline 批量定向发布
-  - 全局广播: 自动同步到所有节点
-- **高可靠性**: ACK 确认机制 + 消息记录 + 离线处理 + 智能重试
-- **削峰填谷**: 准入闸门（水位线 + AIMD 升降级）+ GCRA 令牌桶广播整形 + 延迟队列低谷补投
-- **消息分级送达**: 必达/普通/高频三级语义，洪峰下分级保护（必达走控制通道，高频 latest-wins 合并）
-- **慢消费者治理**: 三段式渐进处置（记录 → 告警 → 驱逐），驱逐前排空积压移交 ACK 链路兜底
-- **高性能写路径**: writev 合帧批量写（突发 N 条 → 2 次 syscall）+ JSON 引擎收口（构建标签启用 sonic JIT，大消息场景数倍提速）
-- **跨节点自愈**: 死节点秒级感知 + user_not_found 重路由 + 死索引清理 + 幽灵连接回收
-- **全链路追踪**: trace_id 贯穿 gRPC/PubSub/离线推送全链路
-- **多租户隔离**: appID + namespace 应用级消息隔离
-- **失败处理**: 5类专业化失败处理器 + go-toolbox重试引擎
-- **配置统一**: go-config/wsc 统一管理重试参数、错误分类和节点配置
-- **高性能**: 原子操作 + 动态队列 + 协程池优化
-- **可观测**: 全链路监控 + 实时告警 + 可视化面板
-- **水平扩展**: 无状态设计 + 弹性伸缩 + 节点自动注册/心跳
-- **高可用**: 节点故障自动恢复 + 客户端自动重连 + 会话保持
 
 ## ✨ 核心特性
 
-### 🎯 客户端能力
+### 🎯 连接与投递
 
-- **智能重连**：指数退避 + 抖动算法
-- **消息类型**：文本/二进制/Ping/Pong等103种
-- **状态管理**：连接生命周期跟踪
-- **缓冲机制**：可配置消息队列
+- **统一投递**: `Hub.Deliver` 唯一入口，P2P / 群组可靠 / 群组广播 / 命名空间 / 全局五模式决策树
+- **三层在线存储**: 64 分片注册表 O(1) 定位 + 节点桶单 RTT 直查 + 节点连接表 TTL 自愈，全 key 显式定位、零 SCAN/KEYS
+- **群拓扑常驻内存**: 64 分片 LRU+TTL 拓扑缓存，稳态群消息扇出 0 Redis RTT
+- **统一踢人**: `Hub.KickUser` 全库唯一实现，appID+namespace 信封隔离 + 幂等语义
+- **高性能写路径**: writev 合帧（突发 N 条 → 2 次 syscall）+ JSON 引擎收口（`-tags sonic` 启用 JIT，大消息场景数倍提速）
+- **ACK 可靠投递**: 消息确认 + 跨节点 ACK 时间轮超时兜底 + 失败转离线
 
-### 🏢 服务端能力
+### 🏢 分布式与可靠性
 
-- **高并发**：百万级连接支持
-- **消息路由**：点对点/群组/广播
-- **集群投递**：gRPC 直连优先 + PubSub 兜底 + 死节点秒级感知
-- **削峰填谷**：准入闸门 + 令牌桶整形 + 延迟队列填谷，洪峰不丢必达消息
-- **消息分级**：必达/普通/高频三级送达语义，差异化路由与兜底
-- **慢消费者治理**：背压保护 + 三段式渐进处置，防止单连接拖垮全局
-- **ACK 确认**：可靠消息传输 + 跨节点 ACK 超时兜底
-- **全链路追踪**：trace_id 贯穿发送/投递/ACK/离线全链路
-- **多租户隔离**：appID + namespace 应用级消息隔离
-- **性能监控**：实时指标统计
+- **零侵入部署**: 库形态嵌入业务进程，标准 `net/http` 签名接入，多副本 Deployment 即集群，自动服务注册与发现
+- **跨节点通信**: 同节点内存直达（<1ms）；跨节点 gRPC 点对点直连优先（并行投递，单死节点不拖累整批），PubSub Pipeline 定向发布兜底
+- **四层容错自愈**: 死节点秒级感知 / user_not_found 重路由 / ACK 超时兜底 / 幽灵连接回收，详见下文
+- **Deployment 语义**: 优雅停机排空 + 跨节点自愈接管 + 离线消息回放，滚动更新消息不丢
+- **多租户隔离**: appID + namespace 应用级消息隔离，跨租户消息互不可见
+- **智能重试**: go-toolbox 重试引擎（指数退避）+ 5 类专业化失败处理器，参数经 go-config/wsc 统一管理
+- **全链路追踪**: trace_id 贯穿 gRPC / PubSub / 离线推送全链路
+
+### 🌊 过载保护（削峰填谷）
+
+- **准入闸门**: 在途积压水位 + AIMD 升降级（L0 正常 → L4 只读），三态裁决（放行/延迟/离线）
+- **消息分级**: 必达/普通/高频三级送达语义，必达走控制通道双 lane 恒放行，高频 latest-wins 合并
+- **广播整形**: GCRA 令牌桶 + 延迟队列低谷补投（填谷）
+- **慢消费者治理**: 记录 → 告警 → 驱逐 三段式渐进处置，驱逐前排空积压移交 ACK 链路兜底
+
+### 📱 客户端 SDK
+
+- **智能重连**: 指数退避 + 抖动算法；WS 优先、SSE 降级
+- **连接保活**: 心跳检测 + 可配置消息缓冲队列 + 连接生命周期状态管理
+
+### 🎯 统一投递
+
+`Hub.Deliver` 是唯一投递入口，按 ctx 路由信封 + 消息字段决策路由模式：
+
+| 模式 | 触发条件 | 投递路径 |
+| --- | --- | --- |
+| P2P | `msg.Receiver` 非空 | 在线投递（本地直达 / 跨节点直连）+ 离线存储 + 重试 |
+| 群组可靠 | 信封 groupIDs 非空 + `RequireAck=true` | per-member 路由去重 + 重试 + 失败转离线 |
+| 群组广播 | 信封 groupIDs 非空 + `RequireAck=false` | fire-forget 扇出（拓扑缓存稳态 0 Redis RTT） |
+| 命名空间 | 信封 namespace 非空 | appID+namespace 下全部连接 |
+| 全局广播 | 其余（namespace 为空） | appID 下全部连接 |
+
+路由信封（appID / namespace / groupIDs）经链式构建器注入 ctx，跨节点经 gRPC metadata / PubSub 信封字段自动传播，下游全程从 ctx 提取、不重复传参：
+
+```go
+ctx = routing.NewRoute().
+    WithAppID("hitgame").
+    WithNamespace("tenant-01").
+    WithGroupIDs([]string{"platform-a"}).
+    Inject(ctx)
+
+h.Deliver(ctx, msg, true) // excludeSender：群组/广播场景排除发送者自身连接
+```
+
+### 👢 统一踢人
+
+全库唯一踢人实现（connection 域 LifecycleManager）与唯一公开入口（`Hub.KickUser`），按路由信封 appID+namespace 隔离（同 userID 跨租户互不误踢）；本地踢出 + 跨节点异步分发（gRPC 直连优先、PubSub 兜底）：
+
+```go
+result := h.KickUser(ctx, "user-123", "多端顶号", true, "您的账号在其他设备登录")
+
+// result.Success           操作结果（幂等：用户已离线视为目标达成，不报错）
+// result.KickedConnections 真踢到 vs 本来就不在线的区分依据
+```
+
+### 🗄️ 在线存储与 Redis Key 布局
+
+面向 100w 用户量级的三层结构，全 key 显式定位、零 SCAN/KEYS：
+
+| 层 | 存储载体 | key 布局 | 语义 |
+| --- | --- | --- | --- |
+| 本地 | 64 分片注册表（ShardedRegistry） | — | appID+ns+uid 分片定位，O(1) 注册/查找/注销 |
+| 跨节点定位 | 节点桶 | `nodes:{app}:{uid}` | ZSET：member=`<ns>:<nodeID>`、score=过期时间；ZRangeByScore 单 RTT 直查（免 GET+JSON 解压）；注册/心跳 Lua 双写续期，注销靠 score 过期自愈 |
+| 节点连接明细 | 节点连接表 | `node_clients:{nodeID}` | ZSET + EXPIRE：活节点持续续命，崩溃节点 TTL 后整键自动消失（无人认领即自愈） |
+
+群组三维分桶 + 双显式索引：
+
+| key | 结构 | 语义 |
+| --- | --- | --- |
+| `members:{app}:{ns}:{gid}` | Set | 群组成员桶，三维隔离（同 groupID 跨租户实例不混淆） |
+| `gns:{app}:{gid}` | Set | 实例索引：记录 gid 在哪些 namespace 有实例，跨 ns 聚合两段 Pipeline 2 RTT |
+| `nss:{app}` | Set | 命名空间显式索引：SMEMBERS 单 RTT 枚举，取代 keyspace SCAN |
+
+**群拓扑缓存**（GroupMemberCache）：装饰 GroupStore 的 64 分片 LRU + TTL 30s + 负缓存 + 大群预算缓存；本地写路径（建组/增删成员/解散）即时逐出，跨节点写入 TTL 兜底——稳态群消息扇出 0 Redis RTT。
 
 ### 🛡️ 跨节点可靠性与自愈
 
@@ -292,7 +299,7 @@ graph TB
 
 配套机制：
 
-- **死索引自愈**：目标节点扑空时异步清理指向本节点的死索引条目
+- **死索引自愈**：目标节点扑空时异步清理指向本节点的死索引条目；reroute 守卫（attempted/rejected 防抖，全拒立即转离线）防止重路由风暴
 - **owner 归属校验**：Lua 脚本保证索引清理不误删其他节点已接管的条目
 - **节点重注册**：周期性完整重注册（含 gRPC 地址），Redis key 被删/TTL 过期后自动恢复上报
 
@@ -332,28 +339,6 @@ h.SetOverloadPolicy(
 ```
 
 > 消息分级通过 `HubMessage` 的 `Guarantee` 字段声明（`models.GuaranteeGuaranteed` / `GuaranteeStandard` / `GuaranteeEphemeral`），未声明时按决策树推导：消息类型默认表 → 分类评分 → 关键优先级 → 兜底普通档。
-
-### 🔄 失败处理与重试
-
-- **智能重试**：基于 go-toolbox 的重试引擎，支持指数退避
-- **失败分类**：5类专业化失败处理器（通用/队列满/离线/连接错误/超时）
-- **配置驱动**：通过 go-config/wsc 统一管理重试参数
-- **详细记录**：完整的重试尝试历史和性能指标
-
-### 📊 配置管理
-
-- **统一配置**：go-config/wsc 包统一管理所有 WebSocket 相关配置
-- **重试参数**：MaxRetries、BaseDelay、BackoffFactor 灵活配置
-- **错误分类**：RetryableErrors 和 NonRetryableErrors 智能分类
-- **热更新**：支持运行时配置更新和生效
-
-## 📚 文档导航
-
-### 📖 核心文档
-
-- [📦 安装配置](#-安装) - 依赖和环境要求
-- [🚀 快速开始](#-快速开始) - 5分钟上手指南
-- [⚡ 性能表现](#-性能表现) - 基准测试结果
 
 ## 📦 安装
 
@@ -431,34 +416,18 @@ err = messaging.InitializeOfflineQueue(h, messaging.OfflineDeps{
 - **吞吐量**: 720万条消息/秒
 - **客户端注册**: ~2,430 ns/op
 - **消息发送**: ~138 ns/op
+- **群消息扇出**: 稳态 0 Redis RTT（拓扑缓存命中）；跨 ns 聚合 2 RTT（两段 Pipeline）
+- **跨节点定位**: 节点桶单 RTT 直查（免 GET + JSON 解压）
 - **序列化引擎**: sonic JIT（`-tags sonic`）大消息场景 ~4x 提速，默认标准库零依赖
 - **批量写**: writev 合帧，突发 N 条消息从 N 次 syscall 降为 2 次
 - **并发连接**: 百万级支持
 
-## 💼 企业特性
-
-### 生产环境支持
+## 💼 生产环境支持
 
 - **监控集成**: Prometheus/Grafana 指标导出
-- **日志标准**: 结构化日志 (JSON) 输出
-- **优雅关闭**: 平滑连接迁移和资源清理
+- **日志分级**: 结构化日志（JSON）输出；消息级日志 Debug、连接生命周期 Info，百万连接下日志量可控
+- **优雅关闭**: 平滑连接排空和资源清理
 - **健康检查**: HTTP 端点支持负载均衡器探测
-
-### 分布式架构
-
-- **零侵入部署**: 库形态嵌入业务进程，标准 `net/http` 签名接入；多副本 Deployment 即集群，自动服务注册与发现
-- **节点发现**: 自动服务注册、心跳检测、周期性重注册（Redis key 删除/TTL 过期自动恢复上报）
-- **智能路由**:
-  - 同节点通信: 内存直达，延迟 < 1ms
-  - 跨节点通信: gRPC 点对点直连优先（并行投递，单死节点不拖累整批），PubSub Pipeline 定向发布兜底
-  - 自动路由到用户所在节点
-- **全局广播**: 自动同步到所有节点的所有客户端
-- **多租户隔离**: appID + namespace 应用级消息隔离，跨应用消息互不可见
-- **Deployment 语义**: 优雅停机排空连接 + 跨节点自愈接管 + 离线消息回放，滚动更新消息不丢
-- **故障转移**: 死节点秒级感知（PUBLISH 订阅数检测）+ user_not_found 秒级重路由 + 客户端自动重连
-- **跨节点自愈**: 死索引清理 + 幽灵连接回收 + owner 归属校验（防误删）
-- **水平扩展**: 无状态设计支持弹性伸缩，线性扩展并发能力
-- **高可用**: 多节点冗余 + 自动故障恢复 + 负载均衡
 
 ## 🤝 社区与支持
 

@@ -167,6 +167,27 @@ func TestNodeRegistry_RefreshNodes_LoadAndExpire(t *testing.T) {
 	assert.Error(t, err, "过期节点应从 Redis 删除")
 }
 
+// TestNodeRegistry_RefreshNodes_ExpireMissingHeartbeat 验证心跳缺失的幽灵节点被清理
+// 回归场景：Redis 部分写失败/人工干预导致 grpc field 残留但心跳 field 丢失，
+// refreshNodes 应将其判死清理，防止永久幽灵节点残留
+func TestNodeRegistry_RefreshNodes_ExpireMissingHeartbeat(t *testing.T) {
+	r, client := newTestNodeRegistry(t, "node-local", "127.0.0.1:50051")
+	defer r.Stop()
+	ctx := context.Background()
+
+	// 注册一个 grpc field 存在但 heartbeat field 缺失的幽灵节点
+	require.NoError(t, client.HSet(ctx, "wsc:nodes:grpc", "nodeGhost", "10.0.0.8:50051").Err())
+
+	require.NoError(t, r.refreshNodes(ctx))
+
+	// 幽灵节点应被清理（不进入本地缓存，且 Redis grpc field 被 HDel）
+	_, ok := r.GetNodeAddr("nodeGhost")
+	assert.False(t, ok)
+
+	_, err := client.HGet(ctx, "wsc:nodes:grpc", "nodeGhost").Result()
+	assert.Error(t, err, "心跳缺失的幽灵节点应从 Redis 删除")
+}
+
 // TestNodeRegistry_ReRegisterAfterKeyDeleted 验证 Redis key 被删除后 registerNode 能重新写入注册信息
 // 回归场景：refreshLoop 周期调用 registerNode，key 被手动删除或 TTL 过期后节点可自动恢复上报
 func TestNodeRegistry_ReRegisterAfterKeyDeleted(t *testing.T) {

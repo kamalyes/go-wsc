@@ -248,15 +248,19 @@ func (r *NodeRegistry) refreshNodes(ctx context.Context) error {
 	// 收集过期节点，批量清理（与读取共用判断，HDel 延迟到本地缓存更新后统一发出）
 	var expired []string
 	for nodeID, addr := range addrMap {
-		// 检查心跳是否过期
-		if heartbeatStr, ok := heartbeatMap[nodeID]; ok {
+		// 检查心跳是否过期；心跳缺失（addrMap 有而 heartbeatMap 无，Redis 部分写失败/
+		// 人工干预导致 grpc field 残留但心跳 field 丢失）同样判死，防幽灵节点永久残留
+		heartbeatStr, ok := heartbeatMap[nodeID]
+		stale := !ok
+		if ok {
 			var heartbeat int64
 			fmt.Sscanf(heartbeatStr, "%d", &heartbeat)
-			if now-heartbeat > expireThreshold {
-				expired = append(expired, nodeID)
-				r.nodes.Delete(nodeID)
-				continue
-			}
+			stale = now-heartbeat > expireThreshold
+		}
+		if stale {
+			expired = append(expired, nodeID)
+			r.nodes.Delete(nodeID)
+			continue
 		}
 		r.nodes.Store(nodeID, addr)
 	}

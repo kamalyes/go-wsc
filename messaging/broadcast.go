@@ -574,6 +574,10 @@ func (m *Manager) broadcastToFilteredNow(ctx context.Context, condition func(*mo
 	msgID := mathx.IfNotEmpty(msg.MessageID, msg.ID)
 	dataLen := len(data)
 
+	// 送达分级在扇出循环外解析一次（循环不变量外提）：过滤广播遍历全量连接，
+	// 逐客户端 ResolveGuarantee（读锁 + 决策树）是百万级无谓开销，分级对同一 msg 恒定
+	guarantee := msg.ResolveGuarantee()
+
 	// 并发数快照
 	totalWSClients := m.host.GetShardedRegistry().GetClientCount()
 	totalSSEClients := m.host.GetShardedRegistry().GetSSEClientCount()
@@ -603,7 +607,7 @@ func (m *Manager) broadcastToFilteredNow(ctx context.Context, condition func(*mo
 			m.host.TrackReceiverMessageStats(client.ID, client.UserType, dataLen)
 		} else {
 			// 成员级分级兜底（修复广播丢弃彻底丢失）：普通/必达转离线，高频语义丢弃
-			m.routeDeliveryFallback(msg, client, client.UserID)
+			m.routeDeliveryFallback(msg, client, client.UserID, guarantee)
 		}
 	})
 	wsDuration := time.Since(wsStart)
@@ -705,6 +709,10 @@ func (m *Manager) broadcastToUserIDsNow(ctx context.Context, userIDs []string, m
 	dataLen := len(data)
 	var successCount int32
 
+	// 送达分级在扇出循环外解析一次（循环不变量外提）：群组广播按成员扇出，
+	// 逐成员 ResolveGuarantee（读锁 + 决策树）是大群无谓开销，分级对同一 msg 恒定
+	guarantee := msg.ResolveGuarantee()
+
 	// 分片扇出闭包（单分片内串行按 userID 投递，保用户内顺序）
 	fanout := func(ids []string) {
 		// 按用户ID查找客户端（O(m)，仅锁定相关 shard，不遍历全部连接）
@@ -732,7 +740,7 @@ func (m *Manager) broadcastToUserIDsNow(ctx context.Context, userIDs []string, m
 							m.host.TrackReceiverMessageStats(client.ID, client.UserType, dataLen)
 						} else {
 							// 成员级分级兜底：普通/必达转离线（用户下次上线/重连时补发），高频语义丢弃
-							m.routeDeliveryFallback(msg, client, userID)
+							m.routeDeliveryFallback(msg, client, userID, guarantee)
 						}
 					}
 					return true

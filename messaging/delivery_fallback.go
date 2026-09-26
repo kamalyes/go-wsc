@@ -30,15 +30,15 @@ import (
 // client/userID 二选一提供（P2P 有 client；广播扇出有 client + 目标 userID）
 // 返回实际执行的动作（观测埋点用）
 //
-// 性能：仅在 TrySend 返回 false 后执行（热路径成功路径零开销）
+// performance：guarantee 由调用方在扇出循环外预解析一次传入（循环不变量外提）——
+// 广播/群组扇出一批客户端，同一 msg 的送达分级恒定，逐客户端重复 ResolveGuarantee
+// （读锁 + 决策树）是百万级无谓开销
 // 实现：补写 Receiver（广播消息原 Receiver 为空）后复用 StoreOfflineOnDeliveryFailure
 // 的异步转存（离线推送不阻塞扇出 goroutine）
-func (m *Manager) routeDeliveryFallback(msg *models.HubMessage, client *models.Client, targetUserID string) overload.FallbackAction {
+func (m *Manager) routeDeliveryFallback(msg *models.HubMessage, client *models.Client, targetUserID string, guarantee models.DeliveryGuarantee) overload.FallbackAction {
 	if msg == nil {
 		return overload.FallbackNone
 	}
-
-	guarantee := msg.ResolveGuarantee()
 
 	// 高频级：丢弃计数（语义正确——同 key 下一条自然覆盖）
 	if guarantee == models.GuaranteeEphemeral {
@@ -87,19 +87,21 @@ func (m *Manager) routeDeliveryFallback(msg *models.HubMessage, client *models.C
 // TrySendWithFallback 带分级兜底的非阻塞投递（广播扇出内部循环用）
 //
 // 性能契约：成功路径 = TrySend 一次（零新增指令）；失败路径才走兜底路由
+// guarantee 由调用方在扇出循环外预解析一次传入，复用成功路径送达埋点与失败兜底路由，
+// 消除逐客户端重复 ResolveGuarantee
 // 返回：是否实时送达（false = 已转离线/按高频语义处理，消息不会静默丢失）
-func (m *Manager) TrySendWithFallback(client *models.Client, data []byte, msg *models.HubMessage) bool {
+func (m *Manager) TrySendWithFallback(client *models.Client, data []byte, msg *models.HubMessage, guarantee models.DeliveryGuarantee) bool {
 	if client == nil {
 		return false
 	}
 	if client.TrySend(data) {
 		// 送达漏斗埋点：实时送达 + 在途量出队（与 SendToClientSerialized 对齐，守恒不变量）
 		if msg != nil {
-			m.host.GetOverloadMetrics().RecordRealtime(msg.ResolveGuarantee())
+			m.host.GetOverloadMetrics().RecordRealtime(guarantee)
 		}
 		m.host.AdmissionOnDelivered()
 		return true
 	}
-	m.routeDeliveryFallback(msg, client, "")
+	m.routeDeliveryFallback(msg, client, "", guarantee)
 	return false
 }

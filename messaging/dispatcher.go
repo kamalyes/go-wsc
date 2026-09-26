@@ -586,6 +586,10 @@ func (m *Manager) doBroadcastMessage(ctx context.Context, msg *models.HubMessage
 	msgID := mathx.IfNotEmpty(msg.MessageID, msg.ID)
 	dataLen := len(data)
 
+	// 送达分级在扇出循环外解析一次（循环不变量外提）：全局广播遍历全量连接，
+	// 逐客户端 ResolveGuarantee（读锁 + 决策树）是百万级无谓开销，分级对同一 msg 恒定
+	guarantee := msg.ResolveGuarantee()
+
 	// 并发数快照
 	registry := m.host.GetShardedRegistry()
 	totalWSClients := registry.GetClientCount()
@@ -605,7 +609,7 @@ func (m *Manager) doBroadcastMessage(ctx context.Context, msg *models.HubMessage
 			return
 		}
 		// 分级兜底投递：TrySend 失败按分级路由（普通/必达转离线，高频语义丢弃——拒绝不等于丢弃）
-		if m.TrySendWithFallback(client, data, msg) {
+		if m.TrySendWithFallback(client, data, msg, guarantee) {
 			atomic.AddInt32(&successCount, 1)
 			m.host.TrackReceiverMessageStats(client.ID, client.UserType, dataLen)
 		} else {

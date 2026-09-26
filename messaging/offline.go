@@ -730,6 +730,14 @@ func (m *Manager) pushAndDeleteOffline(ctx context.Context, userID string, messa
 	logger := m.host.GetLogger()
 	pushedIDs = make([]string, 0, len(messages))
 	failedIDs = make([]string, 0)
+
+	// 预取目标用户节点索引一次：同一 userID 的每条离线消息原逐条走 SendToUserWithRetry，
+	// 因其 presetNodes=nil 且本地在线分支不自动预取（见 sendToUserWithRetry 的 localOnline
+	// 判断），每条都会在 sendToUser → checkAndRouteToNode 触发一次 queryUserNodes Redis 往返，
+	// N 条积压 = N 次冗余节点查询；此处对齐 prefetchFanoutNodes 批量预取模式，回放窗口内
+	// 节点索引稳定，预取一次复用消除 N+1。查询失败/无节点时返回 nil，逐条路径自动回退重建
+	presetNodes := m.host.BatchGetUserNodes(ctx, []string{userID})[userID]
+
 	for _, message := range messages {
 		// 标记为离线消息来源（投递失败不再转存离线，防循环）
 		message.Source = models.MessageSourceOffline
@@ -741,7 +749,7 @@ func (m *Manager) pushAndDeleteOffline(ctx context.Context, userID string, messa
 		// 强制以消息原始 trace 覆盖连接 trace：ctx 来自上线连接（带连接自己的 trace_id），
 		// 换成消息信封里的原始发送链路 trace_id，使「发送→离线暂存→上线推送→投递」全程同一 trace 可查
 		msgCtx := message.TraceContext(ctx)
-		result := m.SendToUserWithRetry(msgCtx, userID, message)
+		result := m.sendToUserWithRetry(routing.EnsureRouteDefaults(msgCtx), userID, message, presetNodes)
 		pushErr := fmt.Errorf("离线消息推送失败")
 		if result != nil && result.FinalError != nil {
 			pushErr = result.FinalError

@@ -31,6 +31,7 @@ import (
 
 	"github.com/kamalyes/go-logger"
 	"github.com/kamalyes/go-toolbox/pkg/json"
+	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/netx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/cluster"
@@ -188,35 +189,20 @@ func (s *GRPCServer) CheckUsersOnline(ctx context.Context, req *wscpb.CheckUsers
 }
 
 // BroadcastGroup 向本节点的群组成员广播消息
+// 生产者-消费者模式：消费端经本地反向索引反查本节点成员后扇出，替代 Redis GetMultiGroupMembers 全量读
 func (s *GRPCServer) BroadcastGroup(ctx context.Context, req *wscpb.BroadcastGroupRequest) (*wscpb.BroadcastGroupResponse, error) {
 	// 从 gRPC incoming metadata 恢复 trace_id + 路由元数据 到 ctx（跨节点链路串联）
 	ctx = logger.RestoreTraceFromIncoming(ctx)
 	ctx = routing.RestoreFromIncomingMetadata(ctx)
 
-	// 群组仓储未配置，无法获取成员
-	if s.hub.groupStore == nil {
-		return &wscpb.BroadcastGroupResponse{Delivered: 0}, nil
-	}
-
-	// appID 归一化（群组投递信封 ns 为通配 ""，跨 ns 成员全员送达）
+	// appID 归一化（与本地反向索引建组 key 一致，跨 app 不串扰）
 	appID := constants.NormalizeAppID(routing.AppIDFromContext(ctx))
 	groupIDs := routing.GroupIDsFromContext(ctx)
 	// BroadcastGroup RPC 语义为单群组广播（cluster_dispatch 每次传单群组），取首元素
-	groupID := ""
-	if len(groupIDs) > 0 {
-		groupID = groupIDs[0]
-	}
-
-	// 获取群组成员列表（两段 Pipeline 跨 ns 聚合该 gid 的所有实例成员；appID 隔离，跨 app 不串扰）
-	groupMembers, err := s.hub.groupStore.GetMultiGroupMembers(ctx, appID, []string{groupID})
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "获取群组成员失败: %v", err)
-	}
-	members := groupMembers[groupID]
-
-	if len(members) == 0 {
+	if len(groupIDs) == 0 || groupIDs[0] == "" {
 		return &wscpb.BroadcastGroupResponse{Delivered: 0}, nil
 	}
+	groupID := groupIDs[0]
 
 	// 反序列化消息
 	msg, err := wscpb.UnmarshalHubMessage(req.GetMessageData())
@@ -228,34 +214,31 @@ func (s *GRPCServer) BroadcastGroup(ctx context.Context, req *wscpb.BroadcastGro
 	ctx = msg.ContextFrom(ctx)
 
 	// ⚠️ 此处【不】调用 msg.InjectRoute(ctx)：
-	// BroadcastGroup 的 ctx 携带的是"业务群组ID"（如 g-srv），而 broadcastToFiltered →
+	// BroadcastGroup 的 ctx 携带的是"业务群组ID"（如 g-srv），而 broadcastToUserIDs →
 	// ClientMatchesEnvelope 会用 msg.GroupIDs 去匹配 client 的"连接级系统组"（如 __default_gp__），
 	// 两个维度不同，强行注入会导致群成员设备全部被过滤（delivered=0）。
-	// 群组成员过滤已由 groupStore.GetMultiGroupMembers + memberSet 完成，下面清除 ctx 的 groupIDs 后，
-	// 下游 BroadcastToFiltered 调 InjectRoute 时只会注入 appId（msg.GroupIDs 保持 nil）；
+	// 群组成员定位已由本地反向索引（appID, groupID）完成，下面清除 ctx 的 groupIDs 后，
+	// 下游 BroadcastToUserIDs 调 InjectRoute 时只会注入 appId（msg.GroupIDs 保持 nil）；
 	// ns 保持通配空值（跨 ns 成员连接跳过 ns 过滤），ClientMatchesEnvelope 仅做 appID 隔离，不再触碰系统组维度
 	ctx = routing.RouteFrom(ctx).WithNamespace("").WithGroupIDs(nil).Inject(ctx)
 
-	// 构建成员集合用于 O(1) 过滤
-	memberSet := make(map[string]struct{}, len(members))
-	for _, m := range members {
-		memberSet[m] = struct{}{}
-	}
+	// 本地反向索引取成员（替代 Redis GetMultiGroupMembers 全量读）
+	localMembers := s.hub.shardedRegistry.GetLocalGroupMembers(appID, []string{groupID})
 
-	// 过滤广播：只投递给群组成员，按需排除发送者
+	// 按需排除发送者（用于多端同步场景）
 	excludeSender := req.GetExcludeSender()
 	senderID := req.GetSenderId()
-	delivered := s.hub.messagingMgr.BroadcastToFiltered(ctx, func(client *models.Client) bool {
-		// 只投递给群组成员
-		if _, ok := memberSet[client.UserID]; !ok {
-			return false
-		}
-		// 排除发送者（用于多端同步场景）
-		if excludeSender && client.UserID == senderID {
-			return false
-		}
-		return true
-	}, msg)
+	members := localMembers
+	if excludeSender && senderID != "" {
+		members = mathx.FilterSlice(localMembers, func(id string) bool {
+			return id != senderID
+		})
+	}
+
+	delivered := 0
+	if len(members) > 0 {
+		delivered = s.hub.messagingMgr.BroadcastToUserIDs(ctx, members, msg)
+	}
 
 	return &wscpb.BroadcastGroupResponse{
 		Delivered: int32(delivered),

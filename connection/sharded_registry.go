@@ -30,6 +30,7 @@ import (
 	"sync/atomic"
 
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
+	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/models"
 )
 
@@ -112,6 +113,14 @@ type ShardedRegistry struct {
 	// sseCount SSE 连接数（原子计数器，替代 Hub.sseClientsCount）
 	// WS 连接数 = clientCount - sseCount，无需单独维护
 	sseCount atomic.Int64
+
+	// groupMemberIdx 群组 → 本地成员反向索引：key = appID:groupID，value = userID → 引用计数
+	// 生产者-消费者模式的本地侧：连接注册（AddClient 新增）时按 client.GetGroupIDs() 写入，
+	// 注销（RemoveClient）时按引用计数递减、归零删除；
+	// fire-and-forget 群组广播由「各消费节点本地反查成员 + 扇出」替代「源节点全量读 Redis 成员」，
+	// 消除大群跨节点场景的读放大与单点扇出瓶颈（100w 量级）
+	// namespace 不参与维度：群组投递信封 ns 置空=通配（跨 ns 全额送达，见 ClientMatchesEnvelope）
+	groupMemberIdx *syncx.ShardedMap[string, map[string]int]
 }
 
 // NewShardedRegistry 创建分片注册表
@@ -125,6 +134,7 @@ func NewShardedRegistry(agentEnabled, observerEnabled bool, capacity RegistryCap
 		userShards:       newClientShardedMap(capacity.TotalClients),
 		sseShards:        newClientShardedMap(capacity.SSEClients),
 		clientIDToUserID: sync.Map{},
+		groupMemberIdx:   syncx.NewShardedMap[string, map[string]int](defaultShardCount),
 	}
 	if agentEnabled {
 		r.agentShards = newClientShardedMap(capacity.AgentClients)
@@ -200,6 +210,8 @@ func (r *ShardedRegistry) AddClient(client *models.Client) {
 	// 4. 总计数器（仅新增时累加，覆盖场景不重复计数）
 	if isNew {
 		r.clientCount.Add(1)
+		// 群组本地反向索引：仅在真正新增连接时写入（断线重连覆盖场景已存在，引用计数不变）
+		r.addToGroupMemberIdx(client)
 	}
 }
 
@@ -244,6 +256,8 @@ func (r *ShardedRegistry) RemoveClient(clientID, userID string) *models.Client {
 	// 3. 反向索引与计数器
 	r.clientIDToUserID.Delete(clientID)
 	r.clientCount.Add(-1)
+	// 群组本地反向索引：按引用计数递减，归零删除
+	r.removeFromGroupMemberIdx(removed)
 
 	return removed
 }
@@ -359,6 +373,90 @@ func (r *ShardedRegistry) MoveClientGroup(client *models.Client, newGroupID stri
 		// 普通客户：仅更新字段（群组投递走 groupRepo 成员关系，不依赖该索引）
 		client.SetGroupID(newGroupID)
 	}
+}
+
+// ============================================================================
+// 群组本地反向索引（fire-and-forget 群组广播：各节点本地反查成员替代 Redis 全量读）
+// ============================================================================
+
+// groupMemberKey 拼接 appID:groupID 的反向索引键
+// 注意与观察者索引 groupIndexKey(namespace, groupID) 区分：群组广播按 (appID, groupID) 定位，
+// namespace 不参与维度（群组投递信封 ns 置空通配，跨 ns 全额送达）
+func groupMemberKey(appID, groupID string) string {
+	return appID + ":" + groupID
+}
+
+// addToGroupMemberIdx 将客户端写入群组反向索引（引用计数，多端登录同 userID 多连接逐一累加）
+// 由 AddClient 在真正新增连接（isNew）时调用；appID 归一化保证与建组 key 一致
+func (r *ShardedRegistry) addToGroupMemberIdx(client *models.Client) {
+	if client == nil {
+		return
+	}
+	appID := client.GetAppID()
+	for _, gid := range client.GetGroupIDs() {
+		key := groupMemberKey(appID, gid)
+		r.groupMemberIdx.WithShardLock(key, func(data map[string]map[string]int) {
+			refs := data[key]
+			if refs == nil {
+				refs = make(map[string]int)
+				data[key] = refs
+			}
+			refs[client.UserID]++
+		})
+	}
+}
+
+// removeFromGroupMemberIdx 从群组反向索引递减引用计数，归零删除
+// 由 RemoveClient 调用；与 addToGroupMemberIdx 对称（同一 appID:groupID 落同一 shard 锁内原子）
+func (r *ShardedRegistry) removeFromGroupMemberIdx(client *models.Client) {
+	if client == nil {
+		return
+	}
+	appID := client.GetAppID()
+	for _, gid := range client.GetGroupIDs() {
+		key := groupMemberKey(appID, gid)
+		r.groupMemberIdx.WithShardLock(key, func(data map[string]map[string]int) {
+			refs := data[key]
+			if refs == nil {
+				return
+			}
+			if refs[client.UserID] <= 1 {
+				delete(refs, client.UserID)
+			} else {
+				refs[client.UserID]--
+			}
+			if len(refs) == 0 {
+				delete(data, key)
+			}
+		})
+	}
+}
+
+// GetLocalGroupMembers 返回指定 appID 下多群组的本地在线成员 userID 列表（跨群组去重）
+// 替代 Redis GetMultiGroupMembers 的全量读：各节点仅返回本节点在线成员，扇出范围天然收敛为本地连接
+// 返回列表不含 namespace 维度（群组投递跨 ns 通配），下游 BroadcastToUserIDs 按信封 appID 过滤
+func (r *ShardedRegistry) GetLocalGroupMembers(appID string, groupIDs []string) []string {
+	appID = constants.NormalizeAppID(appID)
+	memberSet := make(map[string]struct{})
+	for _, gid := range groupIDs {
+		if gid == "" {
+			continue
+		}
+		key := groupMemberKey(appID, gid)
+		r.groupMemberIdx.WithShardRLock(key, func(data map[string]map[string]int) {
+			for uid := range data[key] {
+				memberSet[uid] = struct{}{}
+			}
+		})
+	}
+	if len(memberSet) == 0 {
+		return nil
+	}
+	members := make([]string, 0, len(memberSet))
+	for uid := range memberSet {
+		members = append(members, uid)
+	}
+	return members
 }
 
 // ============================================================================
@@ -1034,6 +1132,7 @@ func (r *ShardedRegistry) GetActiveClientCount() int64 {
 func (r *ShardedRegistry) Clear() {
 	r.userShards.Clear()
 	r.sseShards.Clear()
+	r.groupMemberIdx.Clear()
 
 	if r.observerShards != nil {
 		r.observerShards.Clear()

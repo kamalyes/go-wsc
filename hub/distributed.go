@@ -551,9 +551,7 @@ func (h *Hub) ReleaseDistributedLock(ctx context.Context, key string) error {
 
 // handleDistributedGroupsBroadcast 处理跨节点群组广播（单群组与批量统一入口）
 //
-// 高性能：一次 Pipeline 获取所有群组成员 → 合并去重 → 一次本地过滤广播
-// 相比逐群组处理，N 个群组从 N 次 GetMembers + N 次 broadcastToFiltered 降为 1 + 1
-//
+// 生产者-消费者模式：消费端经本地反向索引反查本节点成员后扇出，替代 Redis GetMultiGroupMembers 全量读。
 // 兼容旧消息：GroupIDs 为空时回退到 TargetID（旧版单群组消息）
 func (h *Hub) handleDistributedGroupsBroadcast(ctx context.Context, distMsg *models.DistributedMessage) error {
 	// SubscribeBroadcastChannel 已过滤自身消息，此处二次防御
@@ -565,10 +563,6 @@ func (h *Hub) handleDistributedGroupsBroadcast(ctx context.Context, distMsg *mod
 		return fmt.Errorf("message data not found")
 	}
 
-	if h.groupStore == nil {
-		return fmt.Errorf("group repository is not set")
-	}
-
 	// 群组ID列表：优先 GroupIDs，回退 TargetID（兼容旧版单群组消息）
 	groupIDs := distMsg.GroupIDs
 	if len(groupIDs) == 0 && distMsg.TargetID != "" {
@@ -578,48 +572,33 @@ func (h *Hub) handleDistributedGroupsBroadcast(ctx context.Context, distMsg *mod
 		return fmt.Errorf("groupIDs is empty in distributed message")
 	}
 
-	// appID 归一化（与源节点建群时一致，保证 Redis key 同分区，跨 app 不串扰）
+	// appID 归一化（与源节点建群时一致，保证本地反向索引 key 同分区，跨 app 不串扰）
 	// namespace 保留原值仅记账（群组投递信封 ns 为通配 ""，见 messaging 群组分派器）
 	appID := constants.NormalizeAppID(distMsg.AppID)
 	namespace := distMsg.Namespace
 
-	// 两段 Pipeline 跨 ns 聚合所有实例成员并合并去重（用户跨群组只收一条）
-	groupMembers, err := h.groupStore.GetMultiGroupMembers(ctx, appID, groupIDs)
-	if err != nil {
-		h.logger.WarnContextKV(ctx, "跨节点群组广播：批量获取群组成员失败",
-			"app_id", appID,
-			"namespace", namespace,
-			"group_count", len(groupIDs),
-			"error", err)
-		return nil
-	}
-	memberSet := make(map[string]struct{})
-	for _, members := range groupMembers {
-		for _, uid := range members {
-			memberSet[uid] = struct{}{}
-		}
-	}
-	if len(memberSet) == 0 {
-		return nil
-	}
+	// 本地反向索引取成员（跨群组去重，只含本节点在线成员）
+	localMembers := h.shardedRegistry.GetLocalGroupMembers(appID, groupIDs)
 
-	// 转为成员列表，按需排除发送者（跨节点 PubSub 兜底场景，与 gRPC BroadcastGroup 对齐）
+	// 按需排除发送者（跨节点 PubSub 兜底场景，与 gRPC BroadcastGroup 对齐）
 	// ⚠️ 历史遗漏：distMsg 未携带 ExcludeSender/SenderID 时，发送者在其他节点的设备会收到自己的群组消息
-	members := make([]string, 0, len(memberSet))
-	for uid := range memberSet {
-		if distMsg.ExcludeSender && distMsg.SenderID != "" && uid == distMsg.SenderID {
-			continue
-		}
-		members = append(members, uid)
+	members := localMembers
+	if distMsg.ExcludeSender && distMsg.SenderID != "" {
+		members = mathx.FilterSlice(localMembers, func(id string) bool {
+			return id != distMsg.SenderID
+		})
 	}
 
-	// 按成员ID查找本地连接并投递
-	count := h.messagingMgr.BroadcastToUserIDs(ctx, members, distMsg.Message)
+	// 按成员ID查找本地连接并投递（本地无成员时跳过，避免空列表触发无谓的 Admit/整形）
+	count := 0
+	if len(members) > 0 {
+		count = h.messagingMgr.BroadcastToUserIDs(ctx, members, distMsg.Message)
+	}
 
 	h.logger.DebugContextKV(ctx, "跨节点群组广播已处理",
 		"namespace", namespace,
 		"group_ids", groupIDs,
-		"unique_members", len(members),
+		"local_members", len(members),
 		"from_node", distMsg.NodeID,
 		"message_id", distMsg.Message.MessageID,
 		"local_delivered", count,

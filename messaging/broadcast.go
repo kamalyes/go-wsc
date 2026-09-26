@@ -305,8 +305,8 @@ func (m *Manager) deliverToGroupReliable(ctx context.Context, msg *models.HubMes
 
 // deliverToGroupFireForget 群组广播（RequireAck=false，fire-and-forget）
 //
-// 复用历史 BroadcastToGroupMembers 逻辑：本地 BroadcastToUserIDs + 跨节点 crossNodeGroupBroadcast
-// 仅投递当前在线成员，不存储离线消息，无重试，性能最优
+// 生产者-消费者模式：源节点只发广播意图（groupIDs+msg），不做成员读也不做全量扇出；
+// 本地与远端均由各节点经本地反向索引反查成员后扇出，消除大群跨节点的 Redis 读放大与单点扇出瓶颈
 func (m *Manager) deliverToGroupFireForget(ctx context.Context, msg *models.HubMessage, excludeSender bool) *models.DeliverResult {
 	// 路由信封已注入 ctx（Deliver 入口 InjectRoute，appID 已归一化非空），直接提取单一事实源
 	appID, namespace := routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx)
@@ -327,12 +327,6 @@ func (m *Manager) deliverToGroupFireForget(ctx context.Context, msg *models.HubM
 		return result
 	}
 
-	if m.host.GetGroupRepo() == nil {
-		m.host.GetLogger().WarnContextKV(ctx, "群组仓库未设置，无法广播",
-			"namespace", namespace, "group_ids", groupIDs)
-		return result
-	}
-
 	// msg 已 Clone（Deliver 入口），同步路由信封：ns 置空=投递信封通配（跨 ns 成员的连接匹配
 	// 跳过 ns 过滤，实时送达，见 ClientMatchesEnvelope）；result.Namespace 保留原 ns 仅记账
 	ctx = msg.ContextWithRoute(ctx, appID, "", groupIDs)
@@ -340,41 +334,31 @@ func (m *Manager) deliverToGroupFireForget(ctx context.Context, msg *models.HubM
 		msg.CreateAt = time.Now()
 	}
 
-	// 1. 两段 Pipeline 跨 ns 聚合所有实例成员并合并去重（N 个实例 → 2 次 RTT）
-	memberSet, err := m.batchGetGroupMembers(ctx, groupIDs)
-	if err != nil {
-		m.host.GetLogger().ErrorContextKV(ctx, "群组广播：批量获取群组成员失败",
-			"namespace", namespace, "group_ids", groupIDs, "error", err)
-		return result
-	}
-	members := make([]string, 0, len(memberSet))
-	for uid := range memberSet {
-		members = append(members, uid)
-	}
+	// 1. 本地反向索引取成员（替代两段 Pipeline 全量读 Redis 成员）：只扇出本节点在线成员
+	localMembers := m.host.GetShardedRegistry().GetLocalGroupMembers(appID, groupIDs)
 
-	// 2. 排除发送者后得到目标成员列表；TotalMembers 语义为投递目标数，须与 LocalDelivered 同口径（过滤后）
-	targetMembers := members
+	// 2. 排除发送者后得到本地目标成员；本地无成员仍须继续跨节点广播，不可提前返回
+	targetMembers := localMembers
 	if excludeSender && msg.Sender != "" {
-		targetMembers = mathx.FilterSlice(members, func(id string) bool {
+		targetMembers = mathx.FilterSlice(localMembers, func(id string) bool {
 			return id != msg.Sender
 		})
 	}
-	result.TotalMembers = len(targetMembers)
-	if result.TotalMembers == 0 {
-		return result
-	}
 
-	// 3. 按成员ID查找本地连接并投递（O(m)，m=成员数，不遍历全部连接）
+	// 3. 本地扇出（有本地成员才走，空列表跳过 Admit/整形等无谓开销）
 	// 增加广播发送统计（原子计数器，由 flushStatsCounters 定时刷写到 Redis；与全局广播同口径）
 	if m.host.GetStatsRepo() != nil {
 		m.broadcastSentCount.Add(1)
 	}
-	localCount := m.BroadcastToUserIDs(ctx, targetMembers, msg)
+	localCount := 0
+	if len(targetMembers) > 0 {
+		localCount = m.BroadcastToUserIDs(ctx, targetMembers, msg)
+	}
 
 	// 通知观察者（ctx 已注入路由，直接使用）
 	m.NotifyObservers(ctx, msg)
 
-	// 4. 跨节点广播：优先 gRPC 直连，降级 PubSub（ctx 已含完整路由）
+	// 4. 跨节点广播：优先 gRPC 直连，降级 PubSub（各远端节点按本地索引反查投递）
 	m.crossNodeGroupBroadcast(ctx, msg, excludeSender)
 
 	// fire-and-forget 每群组消息必经的常规统计，降为 Debug（诊断需要时开 Debug 级即可）
@@ -382,7 +366,7 @@ func (m *Manager) deliverToGroupFireForget(ctx context.Context, msg *models.HubM
 		"namespace", namespace,
 		"group_ids", groupIDs,
 		"message_id", msg.MessageID,
-		"total_members", result.TotalMembers,
+		"local_members", len(targetMembers),
 		"local_delivered", localCount,
 		"grpc_enabled", m.host.IsGRPCEnabled(),
 		"pubsub_enabled", m.host.HasPubsub(),

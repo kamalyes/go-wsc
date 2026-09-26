@@ -428,7 +428,7 @@ func TestSyncToSenderDevices(t *testing.T) {
 		host.GetShardedRegistry().AddClient(c)
 		msg := makeGroupMessage("")
 		assert.NotPanics(t, func() {
-			m.syncToSenderDevices(host.Context(), msg)
+			m.syncToSenderDevices(host.Context(), msg, nil)
 		})
 		select {
 		case <-c.SendChan:
@@ -442,7 +442,7 @@ func TestSyncToSenderDevices(t *testing.T) {
 		host.GetShardedRegistry().AddClient(c)
 		msg := makeGroupMessage("u-single")
 		msg.SenderClient = "c-single"
-		m.syncToSenderDevices(host.Context(), msg)
+		m.syncToSenderDevices(host.Context(), msg, nil)
 		select {
 		case <-c.SendChan:
 			t.Fatal("发送者自身设备不应收到回环消息")
@@ -461,7 +461,7 @@ func TestSyncToSenderDevices(t *testing.T) {
 		// 与生产入口契约一致：上游 InjectRoute 注入路由信封（appID 归一化为 DefaultAppID），
 		// syncToSenderDevices 内部 ForEachUserClientFiltered 按 msg.AppID 严格匹配
 		msg.InjectRoute(host.Context())
-		m.syncToSenderDevices(host.Context(), msg)
+		m.syncToSenderDevices(host.Context(), msg, nil)
 
 		// dev2 收到
 		select {

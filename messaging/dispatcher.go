@@ -531,7 +531,7 @@ func (m *Manager) handleDirectMessage(ctx context.Context, msg *models.HubMessag
 	// 每次都同步会导致发送者其他设备收到 N 条重复（N=群组成员数）；
 	// 且群组场景 excludeSender 语义已决定发送者是否收自己的消息，多端同步会与之冲突
 	if msg.Sender != "" && msg.SenderClient != "" && len(msg.GroupIDs) == 0 {
-		m.syncToSenderDevices(ctx, msg)
+		m.syncToSenderDevices(ctx, msg, data)
 	}
 }
 

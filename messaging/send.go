@@ -1056,7 +1056,11 @@ func (m *Manager) SendToClientSerialized(ctx context.Context, client *models.Cli
 //
 // 性能：使用 ForEachUserClient 零拷贝遍历 + 内联过滤，
 // 替代旧版 GetClientsCopyForUser（拷贝1）+ FilterSlice（拷贝2）双重拷贝
-func (m *Manager) syncToSenderDevices(ctx context.Context, msg *models.HubMessage) {
+//
+// data：调用方（handleDirectMessage）首次预序列化的消息字节，多端同步直接复用，
+// 消除同一 msg 的二次 json.Marshal（两次序列化之间 msg 未被修改，字节等价）；
+// data 为 nil 时兜底重新序列化（调用方序列化失败或测试直调未预序列化）
+func (m *Manager) syncToSenderDevices(ctx context.Context, msg *models.HubMessage, data []byte) {
 	if msg.Sender == "" {
 		return
 	}
@@ -1079,11 +1083,15 @@ func (m *Manager) syncToSenderDevices(ctx context.Context, msg *models.HubMessag
 		return
 	}
 
-	// 预序列化一次（所有设备复用，消除循环内重复 Marshal）
-	data, err := json.Marshal(msg)
-	if err != nil {
-		m.host.GetLogger().ErrorContextKV(ctx, "多端同步消息序列化失败", "error", err, "message_id", msg.MessageID)
-		return
+	// 复用调用方（handleDirectMessage）首次预序列化的字节，避免同一 msg 二次 Marshal
+	// （多端同步场景发送方与接收方共用一套序列化结果，msg 未被修改，字节等价）
+	if data == nil {
+		var err error
+		data, err = json.Marshal(msg)
+		if err != nil {
+			m.host.GetLogger().ErrorContextKV(ctx, "多端同步消息序列化失败", "error", err, "message_id", msg.MessageID)
+			return
+		}
 	}
 
 	m.host.GetLogger().DebugContextKV(ctx, "多端同步消息给发送者的其他设备",

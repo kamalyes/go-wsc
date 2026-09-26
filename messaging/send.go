@@ -512,13 +512,14 @@ func (m *Manager) flushOfflineBroadcasts(ctx context.Context, collector *offline
 		})
 }
 
-// prefetchFanoutNodes 批量预取扇出目标中本地 miss 用户的节点索引（Pipeline 单次往返）
+// prefetchFanoutNodes 批量预取扇出目标的节点索引（Pipeline 单次往返）
 //
-// 扇出路径优化：群组可靠投递/批量发送对每个本地 miss 成员都要一次节点查询
-// 判定在线与路由目标（N 个远端成员 = N 次 Redis 往返）；本方法在扇出前一次 Pipeline
-// 拿到全部 miss 成员的节点映射，扇出闭包内经 sendToUserWithRetry 的 presetNodes 注入实现零回源。
+// 扇出路径优化：群组可靠投递/批量发送对每个成员都要一次节点查询来判定在线与跨节点路由目标
+// （N 个成员 = N 次 Redis 往返）。此前仅预取本地 miss 成员，本地在线成员在 sendToUser 内仍经
+// checkAndRouteToNode → queryUserNodes 逐用户 GetUserNodes 判定多端跨节点路由，同样存在 N+1；
+// 本方法改为对全部去重成员一次 Pipeline 预取，本地/远端成员统一零回源。
 //
-// 返回 nil 表示不适用（单机模式/目标过少/全部本地在线/批量查询失败），扇出回退原有逐用户查询路径。
+// 返回 nil 表示不适用（单机模式/目标过少/批量查询失败），扇出回退原有逐用户查询路径。
 // 不修改调用方 msg：信封注入在克隆副本上完成（与 sendToUserWithRetry 内部同序同参）
 func (m *Manager) prefetchFanoutNodes(ctx context.Context, msg *models.HubMessage, userIDs []string) map[string][]string {
 	// 目标过少批量预取无收益（1 个用户 Pipeline 与单次查询等价）；单机模式无跨节点索引
@@ -526,15 +527,12 @@ func (m *Manager) prefetchFanoutNodes(ctx context.Context, msg *models.HubMessag
 		return nil
 	}
 	// 路由信封注入（不归一化，保留调用方 ctx 原值）：群组扇出路径信封 ns="" 为跨 ns 通配语义，
-	// HasUser 跳过 ns 过滤判定在线、BatchGetUserNodes 走 unscoped 桶 + appID 过滤定位节点；
-	// 在克隆副本上执行，不污染调用方原始 msg
+	// BatchGetUserNodes 走 unscoped 桶 + appID 过滤定位节点；在克隆副本上执行，不污染调用方原始 msg
 	routeCtx := msg.Clone().InjectRoute(ctx)
-	appID, ns := routing.AppIDFromContext(routeCtx), routing.NamespaceFromContext(routeCtx)
 
-	// 过滤本地 miss 用户（HasUser O(1) 原子读，不产生网络往返），去重 userID
-	registry := m.host.GetShardedRegistry()
+	// 去重 userID（含本地在线成员：其节点解析用于 sendToUser 的多端跨节点路由，一并预取消除 N+1）
 	seen := make(map[string]struct{}, len(userIDs))
-	misses := make([]string, 0, len(userIDs))
+	uniques := make([]string, 0, len(userIDs))
 	for _, uid := range userIDs {
 		if uid == "" {
 			continue
@@ -543,17 +541,15 @@ func (m *Manager) prefetchFanoutNodes(ctx context.Context, msg *models.HubMessag
 			continue
 		}
 		seen[uid] = struct{}{}
-		if !registry.HasUser(uid, appID, ns) {
-			misses = append(misses, uid)
-		}
+		uniques = append(uniques, uid)
 	}
-	if len(misses) == 0 {
+	if len(uniques) == 0 {
 		return nil
 	}
 
-	nodes := m.host.BatchGetUserNodes(routeCtx, misses)
+	nodes := m.host.BatchGetUserNodes(routeCtx, uniques)
 	if len(nodes) == 0 {
-		return nil // 批量查询失败（含全部 miss），扇出回退逐用户查询
+		return nil // 批量查询失败（含全部无活跃节点），扇出回退逐用户查询
 	}
 	return nodes
 }

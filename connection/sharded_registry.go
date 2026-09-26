@@ -325,22 +325,28 @@ func (r *ShardedRegistry) hasUserAnyScope(userID string) bool {
 //
 // 复用 ClientMatchesEnvelope 单一真相源：appID 严格匹配 + namespace 空值兼容全局广播
 // appID 为空时退化为不过滤（兼容无路由 ctx 的边界场景），正常路径入口已归一化为 DefaultAppID
-// 性能：先 O(1) 检查 user 是否完全不在线（避免不必要的遍历），在线时才遍历按信封过滤
+// 性能：单次读锁内完成存在性检查 + 信封过滤（map miss 即 O(1) 判负，在线场景 2 锁 → 1 锁）
 func (r *ShardedRegistry) HasUser(userID, appID, namespace string) bool {
 	if appID == "" {
 		return r.hasUserAnyScope(userID)
 	}
-	// O(1) 快速路径：user 完全不在线则直接返回 false，避免遍历开销
-	if !r.hasUserAnyScope(userID) {
-		return false
-	}
+	// 单次读锁内完成存在性检查 + 信封过滤遍历：
+	// 原实现先 hasUserAnyScope 快速判负、再 ForEachUserClient 二次遍历过滤，
+	// 用户在线时往返 2 次读锁（在线判定热路径：P2P 每条消息经 sendToUserWithRetry
+	// 与 sendToUser 各调一次）；map miss 本身即 O(1) 判负，无需前置快速路径，
+	// 合并为单锁后在线场景 2 锁 → 1 锁，离线场景持平（单次 map miss 即返）
 	var hit bool
-	r.ForEachUserClient(userID, func(_ string, client *models.Client) bool {
-		if client != nil && ClientMatchesEnvelope(client, appID, namespace, nil) {
-			hit = true
-			return false // 命中即停
+	r.userShards.WithShardRLock(userID, func(data map[string]map[string]*models.Client) {
+		userClients, ok := data[userID]
+		if !ok {
+			return
 		}
-		return true
+		for _, client := range userClients {
+			if client != nil && ClientMatchesEnvelope(client, appID, namespace, nil) {
+				hit = true
+				return // 命中即停
+			}
+		}
 	})
 	return hit
 }

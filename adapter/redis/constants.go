@@ -31,17 +31,9 @@ const (
 	// 完整 key: <keyPrefix> + uidMapKeySuffix + ":" + <bucket>
 	uidMapKeySuffix = "uid_map"
 
-	// uidCounterKeySuffix offset 自增计数器 key 后缀（保持全局单 key：
-	// 仅新用户首次分配 offset 时 INCR 一次，写频可忽略；分桶反而破坏 offset 唯一性）
-	uidCounterKeySuffix = "uid_counter"
-
 	// allUsersKeySuffix 全体在线用户 ZSET key 后缀（分桶）
 	// 完整 key: <keyPrefix> + allUsersKeySuffix + ":" + <bucket>
 	allUsersKeySuffix = "all_users"
-
-	// typesKeySuffix userType 登记集合 key 后缀（不分桶：userType 种类有限，
-	// CleanupExpired 据此 SMEMBERS 枚举所有 type ZSET）
-	typesKeySuffix = "types"
 
 	// keyBucketMask 分桶位掩码（DefaultKeyBucketCount-1，hash 位与取桶）
 	keyBucketMask = constants.DefaultKeyBucketCount - 1

@@ -617,19 +617,19 @@ func loadBitmapTTL(config *wscconfig.OnlineStatus) time.Duration {
 // Redis Key 生成方法
 // ============================================================================
 
-// GetClientKey 获取客户端详细信息的 key
+// clientKey 获取客户端详细信息的 key
 // 性能：字符串拼接替代 fmt.Sprintf，减少分配
-func (r *OnlineStore) GetClientKey(clientID string) string {
+func (r *OnlineStore) clientKey(clientID string) string {
 	return r.keyPrefix + "client:" + clientID
 }
 
-// GetUserClientsKey 获取用户客户端集合的 key
-func (r *OnlineStore) GetUserClientsKey(userID string) string {
+// userClientsKey 获取用户客户端集合的 key
+func (r *OnlineStore) userClientsKey(userID string) string {
 	return r.keyPrefix + "user_clients:" + userID
 }
 
-// GetNodeClientsKey 获取节点客户端集合的 key
-func (r *OnlineStore) GetNodeClientsKey(nodeID string) string {
+// nodeClientsKey 获取节点客户端集合的 key
+func (r *OnlineStore) nodeClientsKey(nodeID string) string {
 	return r.keyPrefix + "node_clients:" + nodeID
 }
 
@@ -641,31 +641,14 @@ func (r *OnlineStore) keyBucket(userID string) int {
 	return int(syncx.FNVHashString32(userID)) & keyBucketMask
 }
 
-// GetUserTypeSetKey 获取用户类型集合的 key（分桶）
-// 完整 key: <keyPrefix>type:<userType>:<bucket>
-func (r *OnlineStore) GetUserTypeSetKey(userType models.UserType, userID string) string {
-	return r.keyPrefix + "type:" + userType.String() + ":" + strconv.Itoa(r.keyBucket(userID))
-}
-
-// GetAllUsersSetKey 获取所有在线用户集合的 key（分桶）
-// 完整 key: <keyPrefix>all_users:<bucket>
-func (r *OnlineStore) GetAllUsersSetKey(userID string) string {
-	return r.keyPrefix + allUsersKeySuffix + ":" + strconv.Itoa(r.keyBucket(userID))
-}
-
-// GetAllUsersBucketKey 按桶号构造全体用户 ZSET key（跨桶遍历/清理用）
-func (r *OnlineStore) GetAllUsersBucketKey(bucket int) string {
+// allUsersBucketKey 按桶号构造全体用户 ZSET key（跨桶遍历/清理用）
+func (r *OnlineStore) allUsersBucketKey(bucket int) string {
 	return r.keyPrefix + allUsersKeySuffix + ":" + strconv.Itoa(bucket)
 }
 
-// GetUserTypeBucketKey 按桶号构造类型 ZSET key（跨桶遍历/清理用）
-func (r *OnlineStore) GetUserTypeBucketKey(userType models.UserType, bucket int) string {
+// userTypeBucketKey 按桶号构造类型 ZSET key（跨桶遍历/清理用）
+func (r *OnlineStore) userTypeBucketKey(userType models.UserType, bucket int) string {
 	return r.keyPrefix + "type:" + userType.String() + ":" + strconv.Itoa(bucket)
-}
-
-// GetTypesSetKey 获取 userType 登记集合的 key
-func (r *OnlineStore) GetTypesSetKey() string {
-	return r.keyPrefix + typesKeySuffix
 }
 
 // ============================================================================
@@ -684,51 +667,41 @@ func (r *OnlineStore) GetTypesSetKey() string {
 //   - types                                  Set：所有出现过的 userType（CleanupExpired 据此遍历 type ZSET）
 // ============================================================================
 
-// GetScopedUserClientsKey 获取信封分桶的用户客户端 ZSET key
+// scopedUserClientsKey 获取信封分桶的用户客户端 ZSET key
 // ns=="" 归一化为 constants.DefaultNamespace（与 Lua 脚本 ns 兜底一致）
-func (r *OnlineStore) GetScopedUserClientsKey(userID, appID, ns string) string {
+func (r *OnlineStore) scopedUserClientsKey(userID, appID, ns string) string {
 	if ns == "" {
 		ns = constants.DefaultNamespace
 	}
 	return r.keyPrefix + "user_clients:" + appID + ":" + ns + ":" + userID
 }
 
-// GetUserNodesKey 用户节点桶 key：跨节点定位直查（单桶，1 用户 1 key）
+// userNodesKey 用户节点桶 key：跨节点定位直查（单桶，1 用户 1 key）
 // 完整 key: <keyPrefix>nodes:<appID>:<userID>，ZSET member="<ns>:<nodeID>"、score=expireTime
 // ns 编码进 member（复合段）：scoped 查询取 ns 前缀段过滤、跨 ns 通配取冒号后段，
 // 单 key 双语义（精确/通配）免双桶（100w 在线下双桶 350MB → 单桶 175MB）
-func (r *OnlineStore) GetUserNodesKey(appID, userID string) string {
+func (r *OnlineStore) userNodesKey(appID, userID string) string {
 	return r.keyPrefix + "nodes:" + appID + ":" + userID
 }
 
-// GetScopedBitmapKey 获取信封范围的 bitmap key
+// scopedBitmapKey 获取信封范围的 bitmap key
 // ns=="" 归一化为 constants.DefaultNamespace（非广播场景的默认命名空间）
-func (r *OnlineStore) GetScopedBitmapKey(appID, ns string) string {
+func (r *OnlineStore) scopedBitmapKey(appID, ns string) string {
 	if ns == "" {
 		ns = constants.DefaultNamespace
 	}
 	return r.keyPrefix + bitmapKeySuffix + appID + ":" + ns
 }
 
-// GetGlobalBitmapKey 获取 appID 范围的全局广播 bitmap key
+// globalBitmapKey 获取 appID 范围的全局广播 bitmap key
 // 全局广播（ns=""）查询时命中此 bitmap，覆盖该 appID 下所有 ns 的在线用户
-func (r *OnlineStore) GetGlobalBitmapKey(appID string) string {
+func (r *OnlineStore) globalBitmapKey(appID string) string {
 	return r.keyPrefix + bitmapKeySuffix + appID + ":" + constants.GlobalBitmapNS
 }
 
-// GetUIDMapKey 获取 userID→offset 的 Hash key（按 userID 分桶）
-func (r *OnlineStore) GetUIDMapKey(userID string) string {
+// uidMapKey 获取 userID→offset 的 Hash key（按 userID 分桶）
+func (r *OnlineStore) uidMapKey(userID string) string {
 	return r.keyPrefix + uidMapKeySuffix + ":" + strconv.Itoa(r.keyBucket(userID))
-}
-
-// GetUIDMapBucketKey 按桶号构造 uid_map key（跨桶遍历用）
-func (r *OnlineStore) GetUIDMapBucketKey(bucket int) string {
-	return r.keyPrefix + uidMapKeySuffix + ":" + strconv.Itoa(bucket)
-}
-
-// GetUIDCounterKey 获取 offset 自增计数器 key
-func (r *OnlineStore) GetUIDCounterKey() string {
-	return r.keyPrefix + uidCounterKeySuffix
 }
 
 // ============================================================================
@@ -780,7 +753,7 @@ func (r *OnlineStore) SetOffline(ctx context.Context, userID string) error {
 	}
 
 	// 获取用户所有客户端ID（使用 ZRANGE 获取 ZSET 中的所有成员）
-	clientIDs, err := r.client.ZRange(ctx, r.GetUserClientsKey(userID), 0, -1).Result()
+	clientIDs, err := r.client.ZRange(ctx, r.userClientsKey(userID), 0, -1).Result()
 	if err != nil {
 		return err
 	}
@@ -795,7 +768,7 @@ func (r *OnlineStore) SetOffline(ctx context.Context, userID string) error {
 
 // GetClient 获取客户端信息
 func (r *OnlineStore) GetClient(ctx context.Context, clientID string) (*models.Client, error) {
-	data, err := r.client.Get(ctx, r.GetClientKey(clientID)).Result()
+	data, err := r.client.Get(ctx, r.clientKey(clientID)).Result()
 	if err != nil {
 		return nil, err
 	}
@@ -830,12 +803,13 @@ func (r *OnlineStore) GetUserClients(ctx context.Context, userID string) ([]*mod
 	scoped := hasRoute && ns != ""
 	var zsetKey string
 	if scoped {
-		zsetKey = r.GetScopedUserClientsKey(userID, constants.NormalizeAppID(appID), ns)
+		zsetKey = r.scopedUserClientsKey(userID, constants.NormalizeAppID(appID), ns)
 	} else {
-		zsetKey = r.GetUserClientsKey(userID)
+		zsetKey = r.userClientsKey(userID)
 	}
 
-	clientIDs, err := r.client.ZRange(ctx, zsetKey, 0, -1).Result()
+	// ZRANGEBYSCORE 服务端按 score（心跳到期时间）过滤已过期死条目，避免后续批量 GET 扑空
+	clientIDs, err := r.rangeValidUsers(ctx, zsetKey)
 	if err != nil {
 		return nil, err
 	}
@@ -853,7 +827,7 @@ func (r *OnlineStore) GetUserClients(ctx context.Context, userID string) ([]*mod
 	pipe := r.client.Pipeline()
 	cmds := make([]*redis.StringCmd, len(clientIDs))
 	for i, clientID := range clientIDs {
-		cmds[i] = pipe.Get(ctx, r.GetClientKey(clientID))
+		cmds[i] = pipe.Get(ctx, r.clientKey(clientID))
 	}
 
 	_, err = pipe.Exec(ctx)
@@ -913,7 +887,7 @@ func (r *OnlineStore) zcountScoped(ctx context.Context, userID, appID, ns string
 	currentTime := time.Now().Unix()
 	var key string
 	if appID == "" {
-		key = r.GetUserClientsKey(userID)
+		key = r.userClientsKey(userID)
 	} else if ns == "" {
 		// 广播信封：加载 unscoped 客户端按 appID 过滤（clientMatchesRouteEnvelope 的 ns="" 为广播语义）
 		clients, err := r.GetUserClients(ctx, userID)
@@ -925,7 +899,7 @@ func (r *OnlineStore) zcountScoped(ctx context.Context, userID, appID, ns string
 		}
 		return len(clients) > 0, nil
 	} else {
-		key = r.GetScopedUserClientsKey(userID, constants.NormalizeAppID(appID), ns)
+		key = r.scopedUserClientsKey(userID, constants.NormalizeAppID(appID), ns)
 	}
 	count, err := r.client.ZCount(ctx, key, strconv.FormatInt(currentTime, 10), "+inf").Result()
 	if err != nil {
@@ -967,9 +941,9 @@ func (r *OnlineStore) BatchIsUserOnline(ctx context.Context, userIDs []string) (
 
 	normalizedAppID := constants.NormalizeAppID(appID)
 	// 全局广播（ns=""）用 global bitmap，否则 scoped bitmap
-	bitmapKey := r.GetScopedBitmapKey(normalizedAppID, ns)
+	bitmapKey := r.scopedBitmapKey(normalizedAppID, ns)
 	if ns == "" {
-		bitmapKey = r.GetGlobalBitmapKey(normalizedAppID)
+		bitmapKey = r.globalBitmapKey(normalizedAppID)
 	}
 
 	// userState 记录每个用户的 offset 解析结果
@@ -998,7 +972,7 @@ func (r *OnlineStore) BatchIsUserOnline(ctx context.Context, userIDs []string) (
 		pipe := r.client.Pipeline()
 		cmds := make([]*redis.StringCmd, len(hgetIdx))
 		for j, i := range hgetIdx {
-			cmds[j] = pipe.HGet(ctx, r.GetUIDMapKey(userIDs[i]), userIDs[i])
+			cmds[j] = pipe.HGet(ctx, r.uidMapKey(userIDs[i]), userIDs[i])
 		}
 		if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
 			return nil, err
@@ -1069,7 +1043,7 @@ func (r *OnlineStore) BatchIsUserOnline(ctx context.Context, userIDs []string) (
 			pipe := r.client.Pipeline()
 			cmds := make([]*redis.IntCmd, len(zcountIdx))
 			for j, i := range zcountIdx {
-				cmds[j] = pipe.ZCount(ctx, r.GetScopedUserClientsKey(userIDs[i], normalizedAppID, ns), currentTime, "+inf")
+				cmds[j] = pipe.ZCount(ctx, r.scopedUserClientsKey(userIDs[i], normalizedAppID, ns), currentTime, "+inf")
 			}
 			if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
 				return nil, err
@@ -1115,9 +1089,9 @@ func (r *OnlineStore) IsUserOnline(ctx context.Context, userID string) (bool, er
 	if hasRoute {
 		normalizedAppID := constants.NormalizeAppID(appID)
 		// 全局广播（ns=""）用 global bitmap，否则 scoped bitmap
-		bitmapKey := r.GetScopedBitmapKey(normalizedAppID, ns)
+		bitmapKey := r.scopedBitmapKey(normalizedAppID, ns)
 		if ns == "" {
-			bitmapKey = r.GetGlobalBitmapKey(normalizedAppID)
+			bitmapKey = r.globalBitmapKey(normalizedAppID)
 		}
 
 		// L1 命中：offset 已知，直接 GETBIT（免 Lua/HGET）
@@ -1139,7 +1113,7 @@ func (r *OnlineStore) IsUserOnline(ctx context.Context, userID string) (bool, er
 		}
 
 		// L1 未命中：Lua 原子查询 HGET uid_map → GETBIT，成功时回填 offset
-		keys := []string{r.GetUIDMapKey(userID), bitmapKey}
+		keys := []string{r.uidMapKey(userID), bitmapKey}
 		args := []any{userID, r.maxBitmapOffset}
 		luaResult, err := r.client.Eval(ctx, luaIsUserOnline, keys, args...).Result()
 		if err == nil {
@@ -1166,7 +1140,7 @@ func (r *OnlineStore) IsUserOnline(ctx context.Context, userID string) (bool, er
 
 	// 兜底路径：无路由信封时走 unscoped ZCount（兼容无路由 ctx 边界场景）
 	currentTime := time.Now().Unix()
-	count, err := r.client.ZCount(ctx, r.GetUserClientsKey(userID), strconv.FormatInt(currentTime, 10), "+inf").Result()
+	count, err := r.client.ZCount(ctx, r.userClientsKey(userID), strconv.FormatInt(currentTime, 10), "+inf").Result()
 	if err != nil {
 		return false, err
 	}
@@ -1174,12 +1148,11 @@ func (r *OnlineStore) IsUserOnline(ctx context.Context, userID string) (bool, er
 }
 
 // GetAllOnlineUsers 获取所有在线用户ID列表
-// ZScan 游标分页遍历（千万级 member 下 ZRANGE 全量会阻塞 Redis 单线程并造成 Go 侧内存尖峰）
-// 分桶布局下逐桶遍历后合并，桶间天然无重复（同一 userID 恒定落同一桶）
+// 分桶布局下逐桶 ZRANGEBYSCORE 取未过期 member 后合并，桶间天然无重复（同一 userID 恒定落同一桶）
 func (r *OnlineStore) GetAllOnlineUsers(ctx context.Context) ([]string, error) {
 	users := make([]string, 0, 1024)
 	for bucket := 0; bucket < constants.DefaultKeyBucketCount; bucket++ {
-		page, err := r.zscanValidUsers(ctx, r.GetAllUsersBucketKey(bucket))
+		page, err := r.rangeValidUsers(ctx, r.allUsersBucketKey(bucket))
 		if err != nil {
 			return nil, err
 		}
@@ -1188,40 +1161,18 @@ func (r *OnlineStore) GetAllOnlineUsers(ctx context.Context) ([]string, error) {
 	return users, nil
 }
 
-// zscanValidUsers ZScan 游标分页遍历 ZSET，仅返回 score > 当前时间的未过期 member
+// rangeValidUsers 返回 ZSET 中未过期（score > 当前时间）的 member
 //
-// SCAN 语义只保证遍历期间元素至少被返回一次（可能重复），用 seen 去重；
-// 每次 count 条（服务端建议值，实际可能多返回），游标为 0 时遍历结束。
-// ZScan 结果为扁平数组 [member, score, member, score, ...]，score 过滤在 Go 侧完成
-func (r *OnlineStore) zscanValidUsers(ctx context.Context, key string) ([]string, error) {
-	currentTime := time.Now().Unix()
-	users := make([]string, 0, 1024)
-	seen := make(map[string]struct{}, 1024)
-
-	var cursor uint64
-	for {
-		page, next, err := r.client.ZScan(ctx, key, cursor, "", 1000).Result()
-		if err != nil {
-			return nil, err
-		}
-		for i := 0; i+1 < len(page); i += 2 {
-			score, err := strconv.ParseFloat(page[i+1], 64)
-			if err != nil || int64(score) <= currentTime {
-				continue // 已过期：ZREMRANGEBYSCORE 惰性清理前的残留
-			}
-			member := page[i]
-			if _, dup := seen[member]; dup {
-				continue // SCAN 语义可能重复返回
-			}
-			seen[member] = struct{}{}
-			users = append(users, member)
-		}
-		cursor = next
-		if cursor == 0 {
-			break
-		}
-	}
-	return users, nil
+// ZRANGEBYSCORE 由 Redis 服务端按 score 下界过滤，直接跳过过期残留 member，
+// 单次往返拿全量，免 ZScan 游标多次往返、Go 侧 ParseFloat 与 seen 去重；
+// 分桶布局下每桶 member 规模可控（百万在线约 4k/桶），一次性返回无阻塞尖峰之虞
+func (r *OnlineStore) rangeValidUsers(ctx context.Context, key string) ([]string, error) {
+	// 开区间下界 "(" 排除 score == currentTime 的临界过期项，与原 score <= currentTime 跳过语义一致
+	min := "(" + strconv.FormatInt(time.Now().Unix(), 10)
+	return r.client.ZRangeByScore(ctx, key, &redis.ZRangeBy{
+		Min: min,
+		Max: "+inf",
+	}).Result()
 }
 
 // GetOnlineCount 获取在线用户总数（使用 ZCOUNT 统计未过期的用户）
@@ -1232,7 +1183,7 @@ func (r *OnlineStore) GetOnlineCount(ctx context.Context) (int64, error) {
 	pipe := r.client.Pipeline()
 	cmds := make([]*redis.IntCmd, constants.DefaultKeyBucketCount)
 	for bucket := range cmds {
-		cmds[bucket] = pipe.ZCount(ctx, r.GetAllUsersBucketKey(bucket), currentTime, "+inf")
+		cmds[bucket] = pipe.ZCount(ctx, r.allUsersBucketKey(bucket), currentTime, "+inf")
 	}
 	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
 		return 0, err
@@ -1250,12 +1201,11 @@ func (r *OnlineStore) GetOnlineCount(ctx context.Context) (int64, error) {
 }
 
 // GetOnlineUsersByType 根据用户类型获取在线用户
-// ZScan 游标分页遍历（同 GetAllOnlineUsers，避免千万级 member 全量 ZRANGE）
-// 分桶布局下逐桶遍历后合并，桶间天然无重复（同一 userID 恒定落同一桶）
+// 分桶布局下逐桶 ZRANGEBYSCORE 取未过期 member 后合并，桶间天然无重复（同一 userID 恒定落同一桶）
 func (r *OnlineStore) GetOnlineUsersByType(ctx context.Context, userType models.UserType) ([]string, error) {
 	users := make([]string, 0, 1024)
 	for bucket := 0; bucket < constants.DefaultKeyBucketCount; bucket++ {
-		page, err := r.zscanValidUsers(ctx, r.GetUserTypeBucketKey(userType, bucket))
+		page, err := r.rangeValidUsers(ctx, r.userTypeBucketKey(userType, bucket))
 		if err != nil {
 			return nil, err
 		}
@@ -1302,7 +1252,7 @@ func (r *OnlineStore) GetUserNodes(ctx context.Context, userID string) ([]string
 	}
 	ns := routing.NamespaceFromContext(ctx)
 	scoped := routing.RoutingFromContext(ctx) != nil && ns != ""
-	key := r.GetUserNodesKey(constants.NormalizeAppID(routing.AppIDFromContext(ctx)), userID)
+	key := r.userNodesKey(constants.NormalizeAppID(routing.AppIDFromContext(ctx)), userID)
 	members, err := r.client.ZRangeArgs(ctx, redis.ZRangeArgs{
 		Key:     key,
 		Start:   time.Now().Unix(), // score=expireTime，仅取未过期条目（死条目自愈关键）
@@ -1335,7 +1285,7 @@ func (r *OnlineStore) BatchGetUserNodes(ctx context.Context, userIDs []string) (
 	cmds := make([]*redis.StringSliceCmd, len(userIDs))
 	for i, userID := range userIDs {
 		cmds[i] = pipe.ZRangeArgs(ctx, redis.ZRangeArgs{
-			Key:     r.GetUserNodesKey(normalizedAppID, userID),
+			Key:     r.userNodesKey(normalizedAppID, userID),
 			Start:   now, // score=expireTime，仅取未过期条目（死条目自愈关键）
 			Stop:    "+inf",
 			ByScore: true,
@@ -1361,8 +1311,8 @@ func (r *OnlineStore) BatchGetUserNodes(ctx context.Context, userIDs []string) (
 
 // GetNodeClients 获取节点的所有在线客户端
 func (r *OnlineStore) GetNodeClients(ctx context.Context, nodeID string) ([]*models.Client, error) {
-	// 使用 ZRANGE 获取所有客户端（ZSET 存储）
-	clientIDs, err := r.client.ZRange(ctx, r.GetNodeClientsKey(nodeID), 0, -1).Result()
+	// ZRANGEBYSCORE 服务端按 score（心跳到期时间）过滤已过期死条目，避免后续批量 GET 扑空
+	clientIDs, err := r.rangeValidUsers(ctx, r.nodeClientsKey(nodeID))
 	if err != nil {
 		return nil, err
 	}
@@ -1375,7 +1325,7 @@ func (r *OnlineStore) GetNodeClients(ctx context.Context, nodeID string) ([]*mod
 	pipe := r.client.Pipeline()
 	cmds := make([]*redis.StringCmd, len(clientIDs))
 	for i, clientID := range clientIDs {
-		cmds[i] = pipe.Get(ctx, r.GetClientKey(clientID))
+		cmds[i] = pipe.Get(ctx, r.clientKey(clientID))
 	}
 
 	_, err = pipe.Exec(ctx)
@@ -1596,7 +1546,7 @@ func (r *OnlineStore) BatchSetClientsOffline(ctx context.Context, clientIDs []st
 	pipe := r.client.Pipeline()
 	cmds := make([]*redis.StringCmd, len(clientIDs))
 	for i, clientID := range clientIDs {
-		cmds[i] = pipe.Get(ctx, r.GetClientKey(clientID))
+		cmds[i] = pipe.Get(ctx, r.clientKey(clientID))
 	}
 
 	_, err := pipe.Exec(ctx)
@@ -1687,7 +1637,7 @@ func (r *OnlineStore) CleanupExpired(ctx context.Context, nodeID string) (int64,
 		return 0, fmt.Errorf("nodeID cannot be empty")
 	}
 
-	nodeClientsKey := r.GetNodeClientsKey(nodeID)
+	nodeClientsKey := r.nodeClientsKey(nodeID)
 	currentTime := time.Now().Unix()
 
 	result, err := r.client.Eval(ctx, luaCleanupExpiredClients, []string{r.keyPrefix, nodeClientsKey}, nodeID, currentTime, constants.DefaultKeyBucketCount).Result()

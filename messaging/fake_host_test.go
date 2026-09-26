@@ -58,7 +58,8 @@ type fakeHost struct {
 	statMu       sync.Mutex
 	trackedStats map[string]*trackedStat
 
-	metrics *overload.OverloadMetrics
+	metrics   *overload.OverloadMetrics
+	coalescer *overload.Coalescer // 高频合并器（nil=未启用；测试需覆盖高频分支时注入）
 }
 
 // trackedStat 单连接的接收统计累计
@@ -143,8 +144,9 @@ func (f *fakeHost) GetAllClusterNodeIDs() []string { return nil }
 
 func (f *fakeHost) GetAdmissionLevel() overload.OverloadLevel { return overload.LevelNormal }
 
-// GetEphemeralCoalescer 未启用合并器（SendToClientSerialized 高频级分支据此跳过）
-func (f *fakeHost) GetEphemeralCoalescer() *overload.Coalescer { return nil }
+// GetEphemeralCoalescer 默认未启用合并器（SendToClientSerialized 高频级分支据此跳过）；
+// 测试可通过赋值 f.coalescer 注入非 nil 合并器以覆盖高频 latest-wins 分支
+func (f *fakeHost) GetEphemeralCoalescer() *overload.Coalescer { return f.coalescer }
 
 // GetBroadcastShaper 未启用出向整形（BroadcastToFiltered/BroadcastToUserIDs 的 shaper 分支据此跳过）
 func (f *fakeHost) GetBroadcastShaper() *overload.Shaper { return nil }

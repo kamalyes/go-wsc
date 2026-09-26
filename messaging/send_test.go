@@ -26,6 +26,7 @@ import (
 
 	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/models"
+	"github.com/kamalyes/go-wsc/overload"
 	"github.com/kamalyes/go-wsc/routing"
 )
 
@@ -143,6 +144,82 @@ func TestSendToClientSerializedPreSerialized(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("未收到预序列化消息")
 	}
+}
+
+// ============================================================================
+// 送达分级解析复用测试
+// SendToClientSerialized 内 guarantee := msg.ResolveGuarantee() 一次解析复用：
+// 同一结果同时供高频合并分支决策与送达漏斗埋点 RecordRealtime 使用，
+// 消除热路径每消息第二次无谓的决策树 + 读锁解析。以下用例断言 resolve 结果
+// 按分级正确流入两处下游，回归保护该复用逻辑的语义不变。
+// ============================================================================
+
+// realtimeBucket 读取送达漏斗实时送达某分级分桶计数
+func realtimeBucket(t *testing.T, metrics *overload.OverloadMetrics, level string) int64 {
+	t.Helper()
+	realtime, ok := metrics.OverloadStats()["realtime"].(map[string]int64)
+	require.True(t, ok, "OverloadStats 应返回 realtime 分桶 map")
+	return realtime[level]
+}
+
+// TestSendToClientSerialized_RecordRealtimeByGuarantee 验证实时送达埋点按 ResolveGuarantee
+// 结果落入正确分级桶：普通/高频/必达三级各一次投递，对应桶 +1、其余桶保持 0。
+// 覆盖 guarantee 复用下游的 RecordRealtime(guarantee) 路径（合并器未启用的直投场景）。
+func TestSendToClientSerialized_RecordRealtimeByGuarantee(t *testing.T) {
+	cases := []struct {
+		name   string
+		level  string // realtime 分桶 key
+		mutate func(*models.HubMessage)
+	}{
+		{name: "普通级-类型未登记兜底", level: "standard", mutate: func(msg *models.HubMessage) { /* text 兜底 Standard */ }},
+		{name: "高频级-类型默认表", level: "ephemeral", mutate: func(msg *models.HubMessage) { msg.MessageType = models.MessageTypeTyping }},
+		{name: "必达级-类型默认表", level: "guaranteed", mutate: func(msg *models.HubMessage) { msg.MessageType = models.MessageTypePayment }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, host := newTestManager()
+			client := makeTestClient("c-"+tc.level, "u-"+tc.level)
+			msg := makeGroupMessage("sender")
+			tc.mutate(msg)
+
+			ok := m.SendToClientSerialized(context.Background(), client, msg, nil)
+			assert.True(t, ok, "投递应成功")
+
+			for _, lv := range []string{"standard", "ephemeral", "guaranteed"} {
+				want := int64(0)
+				if lv == tc.level {
+					want = 1
+				}
+				assert.Equalf(t, want, realtimeBucket(t, host.metrics, lv), "realtime[%s] 分桶应正确", lv)
+			}
+		})
+	}
+}
+
+// TestSendToClientSerialized_EphemeralRoutesToCoalescer 验证 guarantee 复用决策的
+// 高频合并分支：高频级消息在合并器启用时并入 latest-wins（Offer 接受），不直投通道、
+// 不触达 RecordRealtime。覆盖 guarantee == GuaranteeEphemeral 判断路径。
+func TestSendToClientSerialized_EphemeralRoutesToCoalescer(t *testing.T) {
+	m, host := newTestManager()
+	host.coalescer = overload.NewCoalescer(8)
+
+	client := makeTestClient("c-eph-coal", "u-eph-coal")
+	msg := makeGroupMessage("sender")
+	msg.MessageType = models.MessageTypeTyping
+
+	ok := m.SendToClientSerialized(context.Background(), client, msg, nil)
+	assert.True(t, ok, "高频消息并入合并器应返回 true")
+
+	// Offer 已接受：合并器累积 1 条 latest-wins 值，消息未直投通道
+	assert.Equal(t, int64(1), host.coalescer.Size(), "合并器应累积 1 条最新值")
+	assert.Equal(t, 0, len(client.SendChan), "高频消息应并入合并器而非直投通道")
+	assert.Equal(t, int64(0), realtimeBucket(t, host.metrics, "ephemeral"), "合并分支不走实时送达埋点")
+
+	// 准入埋点按高频级计数（RecordAdmitted 使用字面量，作通路佐证）
+	admitted, okAdmit := host.metrics.OverloadStats()["admitted"].(map[string]int64)
+	require.True(t, okAdmit, "OverloadStats 应返回 admitted 分桶 map")
+	assert.Equal(t, int64(1), admitted["ephemeral"], "高频级准入应计数一次")
 }
 
 // ============================================================================

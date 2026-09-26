@@ -949,10 +949,14 @@ func (m *Manager) SendToClientSerialized(ctx context.Context, client *models.Cli
 	msgID := mathx.IfNotEmpty(msg.MessageID, msg.ID)
 	// 状态更新按 (msgID, receiver) 定位：P2P 带 receiver、广播为空，各得其所
 	receiver := msg.Receiver
+	// 送达分级解析一次复用：ResolveGuarantee 含读锁 + 决策树（含 Data map 断言），
+	// 本函数内 msg 为上游 Clone 的私有副本、分级字段不变，coalescer 判断与送达埋点
+	// 共用同一结果，消除热路径每消息第二次无谓解析
+	guarantee := msg.ResolveGuarantee()
 
 	// 高频级：latest-wins 合并（同用户同类型只保最新；50ms drain 周期投递）
 	if coalescer := m.host.GetEphemeralCoalescer(); coalescer != nil &&
-		msg.ResolveGuarantee() == models.GuaranteeEphemeral &&
+		guarantee == models.GuaranteeEphemeral &&
 		client.ConnectionType != models.ConnectionTypeSSE {
 		m.host.GetOverloadMetrics().RecordAdmitted(models.GuaranteeEphemeral)
 		if accepted, merged := coalescer.Offer(overload.EphemeralKey(client, msg), msg); accepted {
@@ -1024,7 +1028,7 @@ func (m *Manager) SendToClientSerialized(ctx context.Context, client *models.Cli
 		// 消息成功发送到客户端通道，更新为成功状态
 		m.updateMessageStatusAsync(ctx, msgID, receiver, models.MessageSendStatusSuccess, "", "")
 		// 送达漏斗埋点：实时送达 + 在途量出队
-		m.host.GetOverloadMetrics().RecordRealtime(msg.ResolveGuarantee())
+		m.host.GetOverloadMetrics().RecordRealtime(guarantee)
 		m.host.AdmissionOnDelivered()
 
 		// 链路闭环日志：与跨 Pod 路径（distributed.go "[跨Pod] 消息已投递到本地客户端"）统一，

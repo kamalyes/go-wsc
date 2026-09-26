@@ -180,10 +180,14 @@ func (m *Manager) SendToUserWithRetry(ctx context.Context, toUserID string, msg 
 	return m.sendToUserWithRetry(ctx, toUserID, msg, nil)
 }
 
-// sendToUserWithRetry 带重试机制的发送核心
-// presetNodes：扇出调用方（群组可靠投递/批量发送）批量预取的节点索引，本地 miss 时零回源复用；
+// sendToUserWithRetry 带重试机制的发送入口（Clone + InjectRoute 后委托核心体）
+// presetNodes：扇出调用方（群组可靠投递/批量发送/离线回放）批量预取的节点索引，本地 miss 时零回源复用；
 // nil 或未覆盖该用户时回退单元素批查（BatchGetUserNodes 传单元素切片，复用批量端口）
 // 仅首次尝试有效：重试时用户可能已迁移节点，仍传 nil 重新查询
+//
+// 本方法保留 Clone：扇出类调用方（群组可靠投递/批量发送/离线回放）将同一 msg 并发分发给
+// 多个成员，Receiver/ReceiverNode/ID 逐成员不同，必须各持副本；
+// P2P 单一接收方路径（deliverP2P）复用 Deliver 已 Clone 的副本，直接走 sendToUserWithRetryCore 消除二次 Clone
 func (m *Manager) sendToUserWithRetry(ctx context.Context, toUserID string, msg *models.HubMessage, presetNodes []string) *models.SendResult {
 	// 立即创建消息副本，避免并发修改原始消息
 	msg = msg.Clone()
@@ -192,6 +196,12 @@ func (m *Manager) sendToUserWithRetry(ctx context.Context, toUserID string, msg 
 	// 群组可靠投递扇出路径 ns="" 为跨 ns 通配语义，此处不得归一化）
 	ctx = msg.InjectRoute(ctx)
 
+	return m.sendToUserWithRetryCore(ctx, toUserID, msg, presetNodes)
+}
+
+// sendToUserWithRetryCore 发送核心体：msg 必须是调用方私有副本（已 Clone 且已 InjectRoute），
+// 本方法不再 Clone（P2P 入口 deliverP2P 复用 Deliver 已 Clone 副本以消除热路径双 Clone）
+func (m *Manager) sendToUserWithRetryCore(ctx context.Context, toUserID string, msg *models.HubMessage, presetNodes []string) *models.SendResult {
 	result := &models.SendResult{
 		Attempts: make([]models.SendAttempt, 0, m.host.GetConfig().RetryPolicy.MaxRetries+1),
 	}

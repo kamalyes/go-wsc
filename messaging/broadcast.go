@@ -71,7 +71,7 @@ import (
 func (m *Manager) Deliver(ctx context.Context, msg *models.HubMessage, excludeSender bool) *models.DeliverResult {
 	// 统一入口：Clone + InjectRoute（注入 trace_id + 路由信封，appID 归一化，namespace 保留原值）
 	// namespace 不在此归一化：空值在广播分支表示「全局广播」语义，需保留
-	// P2P 分支由 sendToUserWithRetry 内部 EnsureRouteDefaults 兜底；
+	// P2P 分支由 deliverP2P 内部 EnsureRouteDefaults 兜底（复用入口已 Clone 副本，消除二次 Clone）；
 	// 群组分支 ns 必传（来源租户记号，缺失报 81407），投递信封 ns 置空通配（见各分派器）
 	msg = msg.Clone()
 	ctx = msg.InjectRoute(ctx)
@@ -130,7 +130,9 @@ func (m *Manager) Deliver(ctx context.Context, msg *models.HubMessage, excludeSe
 // ============================================================================
 
 // deliverP2P 点对点投递（msg.Receiver 非空）
-// 委托 SendToUserWithRetry（内部已 EnsureRouteDefaults + InjectRoute，处理在线/离线/重试）
+// msg 已为 Deliver 入口 Clone 的私有副本，此处复用不再二次 Clone：
+// 先 EnsureRouteDefaults 归一化 namespace（P2P 严格契约空补默认，等价原 SendToUserWithRetry 公开入口），
+// 再 InjectRoute 把归一化后的 ns 写回信封，随后直走 sendToUserWithRetryCore 处理在线/离线/重试
 func (m *Manager) deliverP2P(ctx context.Context, msg *models.HubMessage) *models.DeliverResult {
 	result := &models.DeliverResult{
 		Mode:   models.DeliveryModeP2P,
@@ -138,7 +140,9 @@ func (m *Manager) deliverP2P(ctx context.Context, msg *models.HubMessage) *model
 		Errors: make([]error, 0),
 	}
 
-	sr := m.SendToUserWithRetry(ctx, msg.Receiver, msg)
+	ctx = routing.EnsureRouteDefaults(ctx)
+	ctx = msg.InjectRoute(ctx)
+	sr := m.sendToUserWithRetryCore(ctx, msg.Receiver, msg, nil)
 	result.TotalMembers = 1
 	if sr.StoredOffline {
 		result.OfflineMembers = 1

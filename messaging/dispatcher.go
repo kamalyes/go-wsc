@@ -435,7 +435,7 @@ func (m *Manager) handleBroadcast(msg *models.HubMessage) {
 	//   不 fallback 到 sender client，避免将全局广播的观察者通知错误收窄到 sender 的 ns。
 	//   全局广播投递给所有 ns 的客户端，观察者通知也应保持全局（ns="" 仅通知全局观察者）。
 	//   若收窄到 sender ns，其他 ns 的命名空间级观察者将收不到本应关注的全局事件。
-	if len(msg.GroupIDs) == 0 {
+	if len(msg.GroupIDs) == 0 && m.observerNotifyEnabled() {
 		nsForObserver := msg.Namespace
 		var gidsForObserver []string
 

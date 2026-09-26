@@ -27,17 +27,21 @@ import (
 	"github.com/kamalyes/go-wsc/routing"
 )
 
+// observerNotifyEnabled 观察者通知管道是否就绪（notifier 已注入且 observer 索引已启用）
+// handleBroadcast 的发送者补路由查询与 NotifyObservers 共用此守卫：
+// 管道未就绪时跳过敏捷路径的冗余 sender 遍历（P2P 每消息一次分片读锁 + ctx 构造）
+func (m *Manager) observerNotifyEnabled() bool {
+	registry := m.host.GetShardedRegistry()
+	return registry != nil && registry.ObserverEnabled() && m.host.GetObserverNotifier() != nil
+}
+
 // NotifyObservers 通知观察者（观察者未启用时为 no-op）
 // 从 ctx 提取 namespace+groupIDs 定位观察范围，提交批量处理器攒批投递
 func (m *Manager) NotifyObservers(ctx context.Context, msg *models.HubMessage) {
-	if msg == nil {
+	if msg == nil || !m.observerNotifyEnabled() {
 		return
 	}
-	registry := m.host.GetShardedRegistry()
 	notifier := m.host.GetObserverNotifier()
-	if registry == nil || notifier == nil || !registry.ObserverEnabled() {
-		return
-	}
 	namespace := routing.NamespaceFromContext(ctx)
 	groupIDs := routing.GroupIDsFromContext(ctx)
 	// msg 会在 Submit 内 Clone，避免调用方修改影响异步 flush

@@ -49,6 +49,16 @@ import (
 // 统一投递入口
 // ============================================================================
 
+// ensureBroadcastID 广播类消息生成 Hub 内部 ID（幂等，已有不覆盖）
+// 与 P2P 路径（normalizeMessageFields 生成 userID 前缀 ID 用于 ACK 对账）互补：
+// 广播无单一接收者，纯雪花 ID；消息唯一标识是客户端引用与排查链路的基础契约
+// idGenerator 未注入时跳过（与 Manager 契约一致：调用方自行保证 msg.ID 非空）
+func (m *Manager) ensureBroadcastID(msg *models.HubMessage) {
+	if msg.ID == "" && m.idGenerator != nil {
+		msg.ID = m.idGenerator.GenerateRequestID()
+	}
+}
+
 // Deliver 统一消息投递入口 — 路由全由 ctx + msg 决定，一套逻辑打通所有场景
 //
 // 路由元数据来源：ctx（appID/namespace/groupIDs）+ msg（Receiver/RequireAck）
@@ -100,6 +110,13 @@ func (m *Manager) Deliver(ctx context.Context, msg *models.HubMessage, excludeSe
 	}
 	// 路由分支埋点补位（消息级日志降 Debug 后，各分支占比与降级频率经此处量化）
 	m.host.GetOverloadMetrics().RecordDeliverMode(mode)
+
+	// 广播类消息在此生成 Hub 内部 ID（P2P 例外：send 路径生成带 userID 前缀的 ID 用于
+	// ACK 对账，此处生成会破坏其前缀语义）——广播无单一接收者，纯雪花即可；
+	// 消息唯一标识是客户端与排查链路的基础契约，不应因非 ACK 路径而缺席
+	if mode != models.DeliveryModeP2P {
+		m.ensureBroadcastID(msg)
+	}
 
 	// 投递路由决策为每消息必经路径，100w 量级下 Info 级会产生海量日志 IO，降为 Debug（生产环境关闭）
 	m.host.GetLogger().DebugContextKV(ctx, "[投递诊断] Deliver 路由决策",

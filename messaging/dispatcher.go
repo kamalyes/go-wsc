@@ -600,6 +600,10 @@ func (m *Manager) HandleBroadcastMessage(ctx context.Context, msg *models.HubMes
 	// msg 可能来自跨节点 distMsg 未归一化，此处防御性兜底；namespace 保持原值（空=全局广播）
 	ctx = msg.InjectRoute(ctx)
 
+	// 跨节点/队列消费入口：源节点已生成 ID（Deliver 入口），此处幂等兜底
+	// 本地直投此入口的调用方（未经过 Deliver）同样获得消息唯一标识
+	m.ensureBroadcastID(msg)
+
 	// 准入闸门：分级水位裁决（必达级恒放行；普通/高频过载时延迟/离线路由——拒绝不等于丢弃）
 	if verdict := m.host.AdmitMessage(msg, true); verdict != overload.VerdictAdmit {
 		m.host.DeferBroadcast(ctx, msg, func(c context.Context, bm *models.HubMessage) {

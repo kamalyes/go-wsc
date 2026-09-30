@@ -17,6 +17,7 @@ package connection
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -50,6 +51,11 @@ func (m *RecordManager) store() spi.ConnectionStore {
 	return m.host.GetConnectionRecordRepo()
 }
 
+// qualityStore 返回连接质量仓储（未注入时 nil，调用方 no-op 降级）
+func (m *RecordManager) qualityStore() spi.ConnectionQualityStore {
+	return m.host.GetConnectionQualityRepository()
+}
+
 // Create 构造连接记录（内存对象，供异步保存 + 连接回调使用）
 func (m *RecordManager) Create(client *models.Client) *models.ConnectionRecord {
 	record := &models.ConnectionRecord{
@@ -73,8 +79,23 @@ func (m *RecordManager) Create(client *models.Client) *models.ConnectionRecord {
 	return record
 }
 
+// qualitySeedFrom 从连接记录派生质量初始行：quality 表随 connect 行 1:1 同生，
+// 初始零值指标 + QualityScore=100 + LastActiveAt 由仓储 Upsert 兜底；
+// 重连（同 connection_id）时 ON CONFLICT 递增 reconnect_count 并刷新
+// last_active_at/user_id，统计列不重置（与 connect 表重连语义对齐）
+func qualitySeedFrom(record *models.ConnectionRecord) *models.ConnectionQuality {
+	return &models.ConnectionQuality{
+		ConnectionID: record.ConnectionID,
+		UserID:       record.UserID,
+		AppID:        record.AppID,
+		Namespace:    record.Namespace,
+	}
+}
+
 // Save 保存或更新连接记录到数据库（仓储未注入时 no-op）
 // ctx 应为 client.Context（带 client 维度的 trace_id），实现异步保存的全链路追踪
+// connect 身份行与 quality 初始行同批落库：batcher 的心跳/统计/错误批量 UPDATE
+// 以 quality 行存在为前提，无初始行则全部空转影响 0 行（曾致质量表长期零数据）
 func (m *RecordManager) Save(ctx context.Context, record *models.ConnectionRecord) {
 	if m.store() == nil {
 		return
@@ -88,7 +109,14 @@ func (m *RecordManager) Save(ctx context.Context, record *models.ConnectionRecor
 			)
 		}).
 		ExecWithContext(func(ctx context.Context) error {
-			return m.store().Upsert(ctx, record)
+			// 两行互不阻断：connect 失败时 quality 仍尝试写入（下次重连自愈），
+			// 错误合并上报（warn 日志带 connection_id 可定位）
+			errConnect := m.store().Upsert(ctx, record)
+			var errQuality error
+			if qs := m.qualityStore(); qs != nil {
+				errQuality = qs.Upsert(ctx, qualitySeedFrom(record))
+			}
+			return errors.Join(errConnect, errQuality)
 		})
 }
 

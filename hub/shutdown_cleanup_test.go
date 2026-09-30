@@ -125,6 +125,9 @@ type shutdownRecordHost struct {
 
 func (h *shutdownRecordHost) GetLogger() spi.Logger                        { return nil }
 func (h *shutdownRecordHost) GetConnectionRecordRepo() spi.ConnectionStore { return h.store }
+func (h *shutdownRecordHost) GetConnectionQualityRepository() spi.ConnectionQualityStore {
+	return nil
+}
 func (h *shutdownRecordHost) GetDisconnectionBatcher() connection.DisconnectionSubmitter {
 	return nil
 }

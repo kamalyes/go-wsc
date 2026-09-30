@@ -93,6 +93,10 @@ type RecordHost interface {
 	GetLogger() spi.Logger
 	// GetConnectionRecordRepo 连接记录仓储（未注入返回 nil，调用方自行降级）
 	GetConnectionRecordRepo() spi.ConnectionStore
+	// GetConnectionQualityRepository 连接质量仓储（未注入返回 nil，调用方自行降级）：
+	// 注册落库时与 connect 行 1:1 同生 quality 初始行，batcher 的心跳/统计/错误
+	// 批量 UPDATE 才有落点（无初始行则全部空转影响 0 行）
+	GetConnectionQualityRepository() spi.ConnectionQualityStore
 	// GetDisconnectionBatcher 断连终态攒批器（未注入返回 nil，调用方自行降级）
 	GetDisconnectionBatcher() DisconnectionSubmitter
 }

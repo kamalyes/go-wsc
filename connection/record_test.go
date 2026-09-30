@@ -29,9 +29,10 @@ import (
 
 // fakeRecordHost 连接记录端口测试桩：仓储与攒批器可运行期切换（未注入 → 注入）
 type fakeRecordHost struct {
-	mu      sync.Mutex
-	store   spi.ConnectionStore
-	batcher DisconnectionSubmitter
+	mu           sync.Mutex
+	store        spi.ConnectionStore
+	qualityStore spi.ConnectionQualityStore
+	batcher      DisconnectionSubmitter
 }
 
 // GetLogger 返回 nil（构造器内部兜底默认日志器）
@@ -41,6 +42,12 @@ func (f *fakeRecordHost) GetConnectionRecordRepo() spi.ConnectionStore {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.store
+}
+
+func (f *fakeRecordHost) GetConnectionQualityRepository() spi.ConnectionQualityStore {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.qualityStore
 }
 
 func (f *fakeRecordHost) GetDisconnectionBatcher() DisconnectionSubmitter {
@@ -107,18 +114,48 @@ func (f *fakeRecordStore) disconnectChunks() [][]*models.DisconnectionEntry {
 	return append([][]*models.DisconnectionEntry(nil), f.chunks...)
 }
 
-// newRecordManagerFixture 构造记录管理器与端口桩（仓储 + 攒批器均已注入）
-func newRecordManagerFixture(t *testing.T) (*RecordManager, *fakeRecordHost, *fakeRecordStore, *fakeDisconnectionBatcher) {
+// fakeQualityStore 连接质量仓储桩：只覆盖注册落库路径用到的 Upsert（未覆盖方法 panic）
+type fakeQualityStore struct {
+	spi.ConnectionQualityStore // 未覆盖的方法调用即 panic
+
+	mu      sync.Mutex
+	upserts []*models.ConnectionQuality
+	// upsertErr 注入 Upsert 错误（验证 quality 失败不阻断 connect 行写入）
+	upsertErr error
+}
+
+func (f *fakeQualityStore) Upsert(_ context.Context, quality *models.ConnectionQuality) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.upserts = append(f.upserts, quality)
+	return f.upsertErr
+}
+
+func (f *fakeQualityStore) seeded() []*models.ConnectionQuality {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]*models.ConnectionQuality(nil), f.upserts...)
+}
+
+func (f *fakeQualityStore) upsertCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.upserts)
+}
+
+// newRecordManagerFixture 构造记录管理器与端口桩（仓储 + 质量仓储 + 攒批器均已注入）
+func newRecordManagerFixture(t *testing.T) (*RecordManager, *fakeRecordHost, *fakeRecordStore, *fakeQualityStore, *fakeDisconnectionBatcher) {
 	t.Helper()
 	store := &fakeRecordStore{}
+	quality := &fakeQualityStore{}
 	batcher := &fakeDisconnectionBatcher{accept: true}
-	host := &fakeRecordHost{store: store, batcher: batcher}
-	return NewRecordManager(host), host, store, batcher
+	host := &fakeRecordHost{store: store, qualityStore: quality, batcher: batcher}
+	return NewRecordManager(host), host, store, quality, batcher
 }
 
 // TestRecordCreateSnapshot 记录构造：Client 关键字段快照到 ConnectionRecord
 func TestRecordCreateSnapshot(t *testing.T) {
-	manager, _, _, _ := newRecordManagerFixture(t)
+	manager, _, _, _, _ := newRecordManagerFixture(t)
 
 	client := models.NewClient("rec-1", "u-13000", models.UserTypeCustomer)
 	client.NodeID = "node-a"
@@ -142,7 +179,7 @@ func TestRecordCreateSnapshot(t *testing.T) {
 
 // TestRecordSaveUpsertsAsync 异步保存：经 syncx.Go 异步 Upsert（Eventually 等待）
 func TestRecordSaveUpsertsAsync(t *testing.T) {
-	manager, _, store, _ := newRecordManagerFixture(t)
+	manager, _, store, _, _ := newRecordManagerFixture(t)
 
 	client := models.NewClient("rec-2", "u-13001", models.UserTypeCustomer)
 	record := manager.Create(client)
@@ -154,10 +191,71 @@ func TestRecordSaveUpsertsAsync(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond, "记录应被异步 Upsert")
 }
 
+// TestRecordSaveSeedsQualityRow 质量初始行同生：Save 落 connect 行的同时派生
+// quality 初始行（关联标识四元组来自 record；指标零值 + 评分兜底由仓储 Upsert 承担），
+// 否则 batcher 的心跳/统计/错误批量 UPDATE 全部空转影响 0 行
+func TestRecordSaveSeedsQualityRow(t *testing.T) {
+	manager, _, store, quality, _ := newRecordManagerFixture(t)
+
+	client := models.NewClient("rec-q1", "u-13008", models.UserTypeCustomer)
+	client.AppID = "app-1001"
+	client.Namespace = "ns-2001"
+	record := manager.Create(client)
+	record.AppID = client.AppID
+	record.Namespace = client.Namespace
+
+	manager.Save(context.Background(), record)
+
+	require.Eventually(t, func() bool {
+		return quality.upsertCount() == 1
+	}, 2*time.Second, 10*time.Millisecond, "质量初始行应与连接记录同批写入")
+
+	seeded := quality.seeded()
+	require.Len(t, seeded, 1)
+	q := seeded[0]
+	assert.Equal(t, record.ConnectionID, q.ConnectionID)
+	assert.Equal(t, record.UserID, q.UserID)
+	assert.Equal(t, record.AppID, q.AppID)
+	assert.Equal(t, record.Namespace, q.Namespace)
+	assert.Equal(t, store.upsertCount(), quality.upsertCount(), "connect 行与 quality 行应成对落库")
+}
+
+// TestRecordSaveQualityStoreNilNoOp 质量仓储未注入：Save 降级只写 connect 行，不 panic
+func TestRecordSaveQualityStoreNilNoOp(t *testing.T) {
+	store := &fakeRecordStore{}
+	host := &fakeRecordHost{store: store, qualityStore: nil}
+	manager := NewRecordManager(host)
+
+	client := models.NewClient("rec-qnil", "u-13009", models.UserTypeCustomer)
+	record := manager.Create(client)
+
+	require.NotPanics(t, func() {
+		manager.Save(context.Background(), record)
+	})
+	require.Eventually(t, func() bool {
+		return store.upsertCount() == 1
+	}, 2*time.Second, 10*time.Millisecond, "质量仓储缺失不应拖垮连接记录落库")
+}
+
+// TestRecordSaveQualityErrorNotBlocking quality 写入失败互不阻断：connect 行仍正常落库
+func TestRecordSaveQualityErrorNotBlocking(t *testing.T) {
+	manager, _, store, quality, _ := newRecordManagerFixture(t)
+	quality.upsertErr = errors.New("quality table unavailable")
+
+	client := models.NewClient("rec-qerr", "u-13010", models.UserTypeCustomer)
+	record := manager.Create(client)
+
+	manager.Save(context.Background(), record)
+
+	require.Eventually(t, func() bool {
+		return store.upsertCount() == 1
+	}, 2*time.Second, 10*time.Millisecond, "quality 失败不应阻断 connect 行写入")
+}
+
 // TestRecordMarkDisconnectedSubmitsSnapshot 攒批路径：断连终态以快照提交到攒批器，
 // reason=ClientRequest、code=0，ConnectedAt 从内存 Client 带入，DisconnectedAt 在提交瞬间冻结
 func TestRecordMarkDisconnectedSubmitsSnapshot(t *testing.T) {
-	manager, _, _, batcher := newRecordManagerFixture(t)
+	manager, _, _, _, batcher := newRecordManagerFixture(t)
 
 	client := models.NewClient("rec-3", "u-13002", models.UserTypeCustomer)
 	client.NodeID = "node-b"
@@ -192,7 +290,7 @@ func TestRecordMarkDisconnectedQueueFullNoOp(t *testing.T) {
 // TestRecordMarkDisconnectedBatch 停机批量终态：单块内全部条目 reason=ServerShutdown、code=1001，
 // DisconnectedAt 取同一时间戳快照（同批停机语义一致）
 func TestRecordMarkDisconnectedBatch(t *testing.T) {
-	manager, _, store, _ := newRecordManagerFixture(t)
+	manager, _, store, _, _ := newRecordManagerFixture(t)
 
 	clients := []*models.Client{
 		models.NewClient("rec-b1", "u-13003", models.UserTypeCustomer),
@@ -221,7 +319,7 @@ func TestRecordMarkDisconnectedBatch(t *testing.T) {
 // TestRecordMarkDisconnectedBatchChunks 停机超分块上限：按 disconnectionShutdownChunkSize
 // 切块直调，块边界覆盖整除与余数两种情况
 func TestRecordMarkDisconnectedBatchChunks(t *testing.T) {
-	manager, _, store, _ := newRecordManagerFixture(t)
+	manager, _, store, _, _ := newRecordManagerFixture(t)
 
 	total := disconnectionShutdownChunkSize*2 + 37 // 2 个满块 + 37 条余数块
 	clients := make([]*models.Client, 0, total)
@@ -260,7 +358,7 @@ func TestRecordMarkDisconnectedBatchChunks(t *testing.T) {
 // TestRecordMarkDisconnectedBatchStoreError 块失败不阻断：仓储持续返回错误时
 // 全部块仍被尝试（每块独立记日志），entries 仍全量返回供终评复用
 func TestRecordMarkDisconnectedBatchStoreError(t *testing.T) {
-	manager, _, store, _ := newRecordManagerFixture(t)
+	manager, _, store, _, _ := newRecordManagerFixture(t)
 	store.markErr = errors.New("db unavailable")
 
 	total := disconnectionShutdownChunkSize + 45 // 2 块：500 + 45
@@ -296,7 +394,7 @@ func TestRecordMarkDisconnectedBatchStoreError(t *testing.T) {
 
 // TestRecordMarkDisconnectedBatchEmpty 空客户端列表：直调零次不 panic
 func TestRecordMarkDisconnectedBatchEmpty(t *testing.T) {
-	manager, _, store, _ := newRecordManagerFixture(t)
+	manager, _, store, _, _ := newRecordManagerFixture(t)
 
 	manager.MarkDisconnectedBatch(nil)
 	manager.MarkDisconnectedBatch([]*models.Client{})

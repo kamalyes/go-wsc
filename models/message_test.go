@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-07-26 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-07-26 00:00:00
+ * @LastEditTime: 2026-10-01 15:10:23
  * @FilePath: \go-wsc\models\message_test.go
  * @Description: HubMessage 结构体测试
  *   - 字段对齐验证（无 padding）
@@ -606,4 +606,120 @@ func TestHubMessage_AtomicCounterUnderConcurrency(t *testing.T) {
 
 	wg.Wait()
 	assert.Equal(t, int64(concurrencyIters*2), counter)
+}
+
+// ============================================================================
+// 序列化基准（性能路线图 M1：投递路径基线）
+//
+// HubMessage 序列化走 encoding/json 反射（MarshalJSON 持 RLock 后委托
+// json.Marshal(alias)），是全网最热单发路径 sendToClientCore 的兜底分支与
+// 广播预序列化入口的共同成本。以下基准补齐 Marshal/Unmarshal 基线，
+// 子基准覆盖两种典型形态：
+//   - small：纯文本短消息（无 Data 扩展、无 GroupIDs 的最小业务形态）
+//   - typical：Data map 3 项（metadata/content_extra/media_info）+ GroupIDs 2 项 + 常规字段
+// ============================================================================
+
+// 基准产物包级 sink：防止编译器死码消除（赋值目标在包级可见，不可被优化掉）
+var (
+	hubMessageMarshalSink   []byte
+	hubMessageUnmarshalSink *HubMessage
+)
+
+// makeBenchHubMessageSmall 构造纯文本短消息（最小业务形态：常规标量字段、无扩展数据）
+func makeBenchHubMessageSmall() *HubMessage {
+	return NewHubMessage().
+		SetID("msg-small-0001").
+		SetMessageType(MessageTypeText).
+		SetSender("u-1001").
+		SetReceiver("u-2002").
+		SetSessionID("session-0001").
+		SetContent("hi")
+}
+
+// makeBenchHubMessageTypical 构造典型消息（Data map 3 项 + GroupIDs 2 项 + 常规字段全填）
+// Data 3 项经 With* 链式写入：metadata / content_extra / media_info（与生产入口一致）
+func makeBenchHubMessageTypical() *HubMessage {
+	return NewHubMessage().
+		SetID("msg-typical-0001").
+		SetMessageType(MessageTypeText).
+		SetSender("u-1001").SetSenderName("用户甲").SetSenderType(UserTypeCustomer).
+		SetReceiver("u-2002").SetReceiverName("用户乙").SetReceiverType(UserTypeCustomer).
+		SetReceiverClient("c-2002-01").SetReceiverNode("node-1").
+		SetSessionID("session-0001").
+		SetContent("typical benchmark payload：订单已发货，请留意物流信息").
+		SetMessageID("biz-0001").SetSeqNo(42).
+		SetPriority(PriorityNormal).SetReplyToMsgID("biz-0000").
+		SetRequireAck(true).SetPushType(PushTypeDirect).
+		SetAppID("default").SetNamespace("default").
+		SetGroupIDs([]string{"g-1001", "g-1002"}).
+		WithMetadata("trace-id", "bench-trace-0001").
+		WithContentExtra("color", "red").
+		WithMediaInfo(map[string]interface{}{"url": "http://example.com/img.png"})
+}
+
+// BenchmarkHubMessageMarshal 序列化基准（encoding/json 反射路径）
+// 每轮迭代为一次完整 MarshalJSON：RLock + 别名转换 + json.Marshal 反射遍历
+func BenchmarkHubMessageMarshal(b *testing.B) {
+	b.Run("small", func(b *testing.B) {
+		msg := makeBenchHubMessageSmall()
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			data, err := json.Marshal(msg)
+			if err != nil {
+				b.Fatal(err)
+			}
+			hubMessageMarshalSink = data
+		}
+	})
+
+	b.Run("typical", func(b *testing.B) {
+		msg := makeBenchHubMessageTypical()
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			data, err := json.Marshal(msg)
+			if err != nil {
+				b.Fatal(err)
+			}
+			hubMessageMarshalSink = data
+		}
+	})
+}
+
+// BenchmarkHubMessageUnmarshal 反序列化基准（入站完整解析路径）
+// 与 dispatcher 入站兜底同款形态：var msg *HubMessage; json.Unmarshal(data, &msg)
+// （指针目标每次迭代分配新 HubMessage，含 Data map / GroupIDs slice 重建）
+func BenchmarkHubMessageUnmarshal(b *testing.B) {
+	b.Run("small", func(b *testing.B) {
+		data, err := json.Marshal(makeBenchHubMessageSmall())
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			var msg *HubMessage
+			if err := json.Unmarshal(data, &msg); err != nil {
+				b.Fatal(err)
+			}
+			hubMessageUnmarshalSink = msg
+		}
+	})
+
+	b.Run("typical", func(b *testing.B) {
+		data, err := json.Marshal(makeBenchHubMessageTypical())
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			var msg *HubMessage
+			if err := json.Unmarshal(data, &msg); err != nil {
+				b.Fatal(err)
+			}
+			hubMessageUnmarshalSink = msg
+		}
+	})
 }

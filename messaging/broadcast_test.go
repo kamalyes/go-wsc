@@ -7,14 +7,16 @@
  * @Description: 消息域广播功能白盒单元测试（覆盖 messaging/broadcast.go）
  *
  * 复用 fake_host_test.go 中的 newTestManager / newStatusRecordingManager /
- * makeTestClient / makeSSEClient / makeAgentClient / makeVIPClient / makeGroupMessage 等 helper。
+ * makeTestClient / makeSSEClient / makeAgentClient / makeVIPClient / makeGroupMessage 等 helper
  *
  * 覆盖场景：
- *   1. BroadcastToFiltered（WS+SSE 投递/条件过滤/路由信封隔离/序列化失败/关闭客户端跳过）
+ *   1. BroadcastToFiltered（WS+SSE 投递/条件过滤/路由信封隔离/序列化失败/关闭客户端跳过/状态回报）
  *   2. BroadcastToUserIDs（空列表/WS+SSE 投递/关闭客户端跳过/路由隔离）
- *   3. BroadcastByUserType / BroadcastToRole / BroadcastToClientType / BroadcastToDepartment
- *   4. BroadcastExclude
- *   5. GetClientsByUserType / GetClientsByRole / GetClientsByClientType / GetClientsByDepartment / GetClientsByVIPLevel
+ *   3. BroadcastToNamespace（nsIdx 索引路径/自适应回退/空 ns 守卫/空命中/appID 隔离）
+ *   4. 广播消息 ID 生成（广播纯雪花 ID/P2P 前缀 ID/HandleBroadcastMessage 幂等）
+ *   5. BroadcastByUserType / BroadcastToRole / BroadcastToClientType / BroadcastToDepartment
+ *   6. BroadcastExclude
+ *   7. GetClientsByUserType / GetClientsByRole / GetClientsByClientType / GetClientsByDepartment / GetClientsByVIPLevel
  *
  * Copyright (c) 2026 by kamalyes, All Rights Reserved.
  */
@@ -24,6 +26,8 @@ package messaging
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -480,6 +484,272 @@ func TestBroadcastToUserIDs_MarshalFailReturnsZero(t *testing.T) {
 		delivered := m.BroadcastToUserIDs(ctx, []string{"u-1"}, msg)
 		assert.Equal(t, 0, delivered)
 	})
+}
+
+// ============================================================================
+// BroadcastToNamespace 测试（nsIdx 反向索引定点扇出 + 大命中率自适应回退）
+// ============================================================================
+
+// 路径选择的白盒锚点：两条路径存在可观测差异——
+// 索引路径（BroadcastToUserIDs → broadcastToUserIDsNow）不更新消息状态，
+// 回退路径（BroadcastToFiltered → broadcastToFilteredNow）成功投递后批量回报 Success
+
+// TestBroadcastToNamespace_IndexedDelivery 低命中率（3 用户/8 连接）走 nsIdx 索引路径：
+// 仅目标 ns 的 WS+SSE 客户端收到，其他 ns 不受影响，且不触发消息状态回报
+func TestBroadcastToNamespace_IndexedDelivery(t *testing.T) {
+	m, host, repo, cleanup := newStatusRecordingManager()
+	defer cleanup()
+
+	targetWS1 := makeTestClient("c-t1", "u-t1", "ns-target")
+	targetWS2 := makeTestClient("c-t2", "u-t2", "ns-target")
+	targetSSE := makeSSEClient("c-t3", "u-t3")
+	targetSSE.Namespace = "ns-target"
+	host.GetShardedRegistry().AddClient(targetWS1)
+	host.GetShardedRegistry().AddClient(targetWS2)
+	host.GetShardedRegistry().AddClient(targetSSE)
+
+	// 其他 ns 用户 5 个：总连接 8，命中用户 3，3*100 < 8*50 → 索引路径
+	otherClients := make([]*models.Client, 0, 5)
+	for i := 1; i <= 5; i++ {
+		c := makeTestClient(fmt.Sprintf("c-o%d", i), fmt.Sprintf("u-o%d", i), "ns-other")
+		host.GetShardedRegistry().AddClient(c)
+		otherClients = append(otherClients, c)
+	}
+
+	ctx := routing.NewRoute().WithAppID("").WithNamespace("ns-target").WithGroupIDs(nil).Inject(context.Background())
+	msg := makeGroupMessage("sender")
+	msg.MessageID = "ns-idx-1"
+
+	delivered := m.BroadcastToNamespace(ctx, "ns-target", msg)
+	assert.Equal(t, 3, delivered)
+
+	// 目标 ns 的 WS 客户端收到序列化数据
+	for _, ws := range []*models.Client{targetWS1, targetWS2} {
+		select {
+		case data := <-ws.SendChan:
+			var got models.HubMessage
+			require.NoError(t, json.Unmarshal(data, &got))
+			assert.Equal(t, "ns-idx-1", got.MessageID)
+		case <-time.After(time.Second):
+			t.Fatal("目标 ns 的 WS 客户端应收到消息")
+		}
+	}
+
+	// 目标 ns 的 SSE 客户端收到 msg 对象
+	select {
+	case got := <-targetSSE.SSEMessageCh:
+		assert.Equal(t, "ns-idx-1", got.MessageID)
+	case <-time.After(time.Second):
+		t.Fatal("目标 ns 的 SSE 客户端应收到消息")
+	}
+
+	// 其他 ns 客户端不收到
+	for _, c := range otherClients {
+		select {
+		case <-c.SendChan:
+			t.Fatalf("其他 ns 客户端 %s 不应收到消息", c.ID)
+		default:
+		}
+	}
+
+	// 索引路径不触发状态回报（broadcastToUserIDsNow 无状态回报，区别于全量扫描路径）
+	time.Sleep(150 * time.Millisecond) // 超过状态批量更新 flush 周期（20ms）
+	repo.batchUpdateMu.Lock()
+	defer repo.batchUpdateMu.Unlock()
+	for _, call := range repo.batchUpdateCalls {
+		assert.NotEqual(t, models.MessageSendStatusSuccess, call.Status,
+			"索引路径（BroadcastToUserIDs）不应触发状态回报")
+	}
+}
+
+// TestBroadcastToNamespace_AdaptiveFallback 命中率 50%（4 用户/8 连接）触发自适应回退：
+// 退回 BroadcastToFiltered 全量扫描路径，投递结果与索引路径一致，且成功投递触发状态回报
+func TestBroadcastToNamespace_AdaptiveFallback(t *testing.T) {
+	m, host, repo, cleanup := newStatusRecordingManager()
+	defer cleanup()
+
+	// 目标 ns 4 用户 + 其他 ns 4 用户：4*100 >= 8*50 → 回退全量扫描
+	for i := 1; i <= 4; i++ {
+		host.GetShardedRegistry().AddClient(
+			makeTestClient(fmt.Sprintf("c-t%d", i), fmt.Sprintf("u-t%d", i), "ns-half"))
+	}
+	for i := 1; i <= 4; i++ {
+		host.GetShardedRegistry().AddClient(
+			makeTestClient(fmt.Sprintf("c-o%d", i), fmt.Sprintf("u-o%d", i), "ns-other"))
+	}
+
+	ctx := routing.NewRoute().WithAppID("").WithNamespace("ns-half").WithGroupIDs(nil).Inject(context.Background())
+	msg := makeGroupMessage("sender")
+	msg.MessageID = "ns-fallback-1"
+
+	delivered := m.BroadcastToNamespace(ctx, "ns-half", msg)
+	assert.Equal(t, 4, delivered)
+
+	// 回退路径成功投递后经状态批量更新器回报 Success（索引路径无状态回报，此处为白盒锚点）
+	require.Eventually(t, func() bool {
+		repo.batchUpdateMu.Lock()
+		defer repo.batchUpdateMu.Unlock()
+		for _, call := range repo.batchUpdateCalls {
+			if call.Status == models.MessageSendStatusSuccess {
+				return true
+			}
+		}
+		return false
+	}, 3*time.Second, 50*time.Millisecond, "回退路径成功投递应触发状态更新为 Success")
+}
+
+// TestBroadcastToNamespace_EmptyNamespaceGuard 空 namespace = 全局广播语义：
+// 不属于本入口（由 deliverGlobally 全量扫描处理），直接返回 0 且不投递
+func TestBroadcastToNamespace_EmptyNamespaceGuard(t *testing.T) {
+	m, host := newTestManager()
+
+	client := makeTestClient("c-1", "u-1") // 默认 ns
+	host.GetShardedRegistry().AddClient(client)
+
+	msg := makeGroupMessage("sender")
+	delivered := m.BroadcastToNamespace(context.Background(), "", msg)
+	assert.Equal(t, 0, delivered)
+
+	select {
+	case <-client.SendChan:
+		t.Fatal("空 ns 不应触发任何投递")
+	default:
+	}
+}
+
+// TestBroadcastToNamespace_NoLocalUsers 本地无该 ns 用户：索引空命中直接返回 0，不进入扇出
+func TestBroadcastToNamespace_NoLocalUsers(t *testing.T) {
+	m, host := newTestManager()
+
+	client := makeTestClient("c-1", "u-1", "ns-a")
+	host.GetShardedRegistry().AddClient(client)
+
+	ctx := routing.NewRoute().WithAppID("").WithNamespace("ns-empty").WithGroupIDs(nil).Inject(context.Background())
+	msg := makeGroupMessage("sender")
+
+	delivered := m.BroadcastToNamespace(ctx, "ns-empty", msg)
+	assert.Equal(t, 0, delivered)
+
+	select {
+	case <-client.SendChan:
+		t.Fatal("其他 ns 客户端不应收到消息")
+	default:
+	}
+}
+
+// TestBroadcastToNamespace_AppIDIsolation 索引键 appID:namespace 双维度隔离：
+// 跨 app 同 ns 的客户端不进入命中集（本例 2 用户/2 连接=100% 命中走回退路径，
+// 回退路径的 ClientMatchesEnvelope 同样做 appID 严格隔离，两条路径行为一致）
+func TestBroadcastToNamespace_AppIDIsolation(t *testing.T) {
+	m, host := newTestManager()
+
+	sameApp := makeTestClient("c-same", "u-same", "ns-mixed")
+	otherApp := makeTestClient("c-other", "u-other", "ns-mixed")
+	otherApp.AppID = "app-other"
+	host.GetShardedRegistry().AddClient(sameApp)
+	host.GetShardedRegistry().AddClient(otherApp)
+
+	ctx := routing.NewRoute().WithAppID("").WithNamespace("ns-mixed").WithGroupIDs(nil).Inject(context.Background())
+	msg := makeGroupMessage("sender")
+	msg.MessageID = "ns-app-1"
+
+	// ctx appID 空 → 归一化为 DefaultAppID：仅命中同 app 客户端
+	delivered := m.BroadcastToNamespace(ctx, "ns-mixed", msg)
+	assert.Equal(t, 1, delivered)
+
+	select {
+	case <-sameApp.SendChan:
+	default:
+		t.Fatal("同 app 客户端应收到消息")
+	}
+	select {
+	case <-otherApp.SendChan:
+		t.Fatal("跨 app 客户端不应收到消息")
+	default:
+	}
+}
+
+// ============================================================================
+// 广播消息 Hub 内部 ID 生成测试
+// ============================================================================
+
+// 契约：每条消息都有唯一标识，不因非 ACK 路径缺席——
+//   - 广播类（群组/命名空间/全局）：Deliver 入口生成纯雪花 ID（无单一接收者）
+//   - P2P：send 路径生成 userID 前缀 ID（ACK 对账语义），Deliver 入口不抢先
+//   - HandleBroadcastMessage（跨节点/队列消费入口）：幂等兜底，已有不覆盖
+
+// receiveJSON 从客户端 SendChan 取一条序列化消息并解析为 map
+// （fanout 路径预序列化，客户端视角验证投递副本的最终形态）
+func receiveJSON(t *testing.T, c *models.Client) map[string]any {
+	t.Helper()
+	select {
+	case data := <-c.SendChan:
+		var payload map[string]any
+		require.NoError(t, json.Unmarshal(data, &payload))
+		return payload
+	default:
+		t.Fatalf("客户端 %s 应收到消息", c.UserID)
+		return nil
+	}
+}
+
+// TestDeliverBroadcastGeneratesHubID fire-and-forget 群组广播（跑马灯同型）生成 Hub 内部 ID
+// Deliver 入口 Clone：ID 生成在投递副本上，调用方原对象零侵入——
+// 经在线成员收到的序列化数据验证（修复前跑马灯消息 id 恒为空串）
+// fire-and-forget 的成员定位走本地反向索引（客户端 GroupID 标签），不走 GroupStore
+func TestDeliverBroadcastGeneratesHubID(t *testing.T) {
+	m, host := newTestManager()
+
+	cRecv := makeTestClient("c-recv", "u-recv", "tenantA", "g-idgen")
+	host.GetShardedRegistry().AddClient(cRecv)
+
+	msg := makeGroupMessage("owner1")
+	require.Empty(t, msg.ID, "前置：构造时无 ID")
+
+	groupCtx := routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("tenantA").WithGroupIDs([]string{"g-idgen"}).Inject(context.Background())
+	result := m.Deliver(groupCtx, msg, false)
+	require.NotNil(t, result)
+
+	payload := receiveJSON(t, cRecv)
+	assert.NotEmpty(t, payload["id"], "广播消息应生成 Hub 内部 ID（非 ACK 路径同样有唯一标识）")
+	assert.Empty(t, msg.ID, "调用方原对象不受影响（Deliver 入口 Clone，ID 在投递副本上生成）")
+}
+
+// TestHandleBroadcastMessageGeneratesHubID 本地直投/跨节点消费入口：空 ID 就地生成，已有幂等不覆盖
+func TestHandleBroadcastMessageGeneratesHubID(t *testing.T) {
+	m, _ := newTestManager()
+
+	msg := makeGroupMessage("owner2")
+	require.Empty(t, msg.ID, "前置：构造时无 ID")
+
+	m.HandleBroadcastMessage(context.Background(), msg)
+	assert.NotEmpty(t, msg.ID, "广播入口应为空 ID 消息生成 Hub 内部 ID")
+
+	idFirst := msg.ID
+	m.HandleBroadcastMessage(context.Background(), msg)
+	assert.Equal(t, idFirst, msg.ID, "已生成的 ID 不应被覆盖（幂等）")
+}
+
+// TestDeliverP2PKeepsSendPathPrefix P2P 分支不在 Deliver 入口生成：
+// 客户端收到的 id 保持 send 路径的 userID 前缀格式（ACK 对账语义），非入口纯雪花
+// 在线判定按 appID+namespace 匹配本地注册表，路由 ctx 须与客户端标签对齐
+func TestDeliverP2PKeepsSendPathPrefix(t *testing.T) {
+	m, host := newTestManager()
+
+	cRecv := makeTestClient("c-p2p", "u-p2p", "tenantA")
+	host.GetShardedRegistry().AddClient(cRecv)
+
+	msg := makeGroupMessage("owner3")
+	msg.Receiver = "u-p2p"
+
+	p2pCtx := routing.NewRoute().WithAppID(constants.DefaultAppID).WithNamespace("tenantA").Inject(context.Background())
+	result := m.Deliver(p2pCtx, msg, false)
+	require.NotNil(t, result)
+
+	payload := receiveJSON(t, cRecv)
+	id, _ := payload["id"].(string)
+	assert.True(t, strings.HasPrefix(id, "u-p2p-"),
+		"P2P 的 ID 应为 send 路径的 userID 前缀格式（实际: %q）", id)
 }
 
 // ============================================================================

@@ -7,19 +7,15 @@
  * @Description: Hub 统一投递入口与广播功能
  *
  * 本文件是消息投递的唯一公开入口（Deliver），以及广播类内部辅助的集中地：
- *   - Deliver：统一投递入口，路由全由 ctx + msg 决定，替代历史 SendToGroup/BroadcastToGroupMembers/
- *     BroadcastToGroup/BroadcastToAllGroups/BroadcastToAllNamespacesAllGroups/BroadcastToGroups/
- *     BroadcastToNamespace/Broadcast 八个割裂方法
+ *   - Deliver：统一投递入口，路由全由 ctx + msg 决定
  *   - 私有分派器：deliverP2P / deliverToGroupReliable / deliverToGroupFireForget /
  *     deliverToNamespace / deliverGlobally（由 Deliver 按决策树调用）
- *   - 跨节点辅助（仅保留有真实调用者的 2 个）：
- *     · crossNodeGroupBroadcast — deliverToGroupFireForget 调用，单群组跨节点
- *     · batchGetGroupMembers — 两个群组投递分派器调用，Pipeline 批量取成员
- *     （历史 crossNodeGroupsBroadcast / crossNodeMultiNamespaceGroupsBroadcast / resolveTargetGroups
- *      仅服务于已删除的 BroadcastToAllGroups/BroadcastToGroups，一并清理）
+ *   - 命名空间本地扇出：BroadcastToNamespace（nsIdx 反向索引定点扇出 + 大命中率自适应回退，
+ *     deliverToNamespace 与跨节点消费侧共用）
+ *   - 跨节点辅助：crossNodeGroupBroadcast（单群组跨节点）、batchGetGroupMembers（Pipeline 批量取成员）
  *   - 内部广播：BroadcastToFiltered / BroadcastToUserIDs（预序列化 + 直接 TrySend）
  *   - 过滤类广播：BroadcastByUserType / BroadcastToRole / BroadcastToClientType / BroadcastToDepartment
- *     （按客户端属性过滤，与路由正交，保留）
+ *     （按客户端属性过滤，与路由正交）
  *   - 高级包装：BroadcastPriority / BroadcastAfterDelay / BroadcastExclude（基于 Deliver）
  *
  * Copyright (c) 2026 by kamalyes, All Rights Reserved.
@@ -184,7 +180,6 @@ func (m *Manager) deliverP2P(ctx context.Context, msg *models.HubMessage) *model
 
 // deliverToGroupReliable 群组可靠投递（RequireAck=true）
 //
-// 复用历史 SendToGroup 逻辑：per-member SendToUserWithRetry + 离线存储 + 重试
 // 在线成员通过 SendToUserWithRetry 投递（自动支持跨节点路由与重试）
 // 离线成员通过离线消息处理器存储，上线后自动推送
 func (m *Manager) deliverToGroupReliable(ctx context.Context, msg *models.HubMessage, excludeSender bool) *models.DeliverResult {
@@ -421,10 +416,8 @@ func (m *Manager) deliverToNamespace(ctx context.Context, msg *models.HubMessage
 		m.broadcastSentCount.Add(1)
 	}
 
-	// 本地按命名空间过滤广播（BroadcastToFiltered 内部 combinedCondition 会叠加路由信封匹配，此处 condition 仅作业务兜底）
-	count := m.BroadcastToFiltered(ctx, func(c *models.Client) bool {
-		return c.Namespace == namespace
-	}, msg)
+	// 本地按命名空间投递：nsIdx 反向索引定点扇出 + 大命中率自适应回退（统一入口见 BroadcastToNamespace）
+	count := m.BroadcastToNamespace(ctx, namespace, msg)
 
 	// 通知观察者（命名空间级广播事件）
 	m.NotifyObservers(ctx, msg)
@@ -809,7 +802,58 @@ func (m *Manager) broadcastToUserIDsNow(ctx context.Context, userIDs []string, m
 }
 
 // ============================================================================
-// 过滤类广播方法（按客户端属性过滤，与路由正交，保留）
+// 命名空间广播（nsIdx 反向索引定点扇出 + 自适应回退）
+// ============================================================================
+
+// nsBroadcastFullScanPercent 命名空间索引回退全量扫描的命中占比阈值（百分比）
+// 索引路径按 userID 逐个加 shard 读锁 + map 查找，单价高于全量扫描的批量遍历；
+// 命中用户数占本地总连接数的比例达到该阈值（单租户独占 pod 场景）时，
+// 全量扫描更优，回退 BroadcastToFiltered 路径
+const nsBroadcastFullScanPercent = 50
+
+// BroadcastToNamespace 命名空间广播统一入口（本地投递 deliverToNamespace 与
+// 跨节点消费侧 hub.handleDistributedBroadcast 共用，保证两端路径一致）
+//
+// 经 nsIdx 反向索引定点反查该命名空间的本地在线用户后 BroadcastToUserIDs 扇出，
+// 替代 BroadcastToFiltered 对全部连接的 O(N) 全量扫描：
+//   - 多租户 pod 上命名空间广播命中率通常极低（如 10w 连接中目标 ns 仅 10 个用户），
+//     索引将 O(全部连接) 收敛为 O(该 ns 本地在线用户)
+//   - 空命中直接返回（索引与注册表在同一 AddClient/RemoveClient 内事务性维护，
+//     无该 ns 用户时全量扫描同样 0 投递，跳过序列化与准入开销）
+//
+// 自适应回退：命中用户数 ≥ 总连接数的 nsBroadcastFullScanPercent% 时退回全量扫描
+// （索引路径逐 userID 查锁的单价更高，大命中率下 64 shard 并行批量遍历反而更快）
+//
+// msg 信封在本入口统一同步（ContextWithRoute）：appID 归一化 + namespace 显式写入，
+// 确保 BroadcastToUserIDs 的 per-device 信封过滤（ClientMatchesEnvelope）与目标 ns 一致
+func (m *Manager) BroadcastToNamespace(ctx context.Context, namespace string, msg *models.HubMessage) int {
+	if namespace == "" {
+		// 空 ns = 全局广播语义，不属于本入口（由 deliverGlobally 全量扫描处理）
+		return 0
+	}
+
+	appID := mathx.IfEmpty(msg.AppID, routing.AppIDFromContext(ctx))
+	ctx = msg.ContextWithRoute(ctx, appID, namespace, nil)
+
+	registry := m.host.GetShardedRegistry()
+	users := registry.GetLocalNamespaceUsers(appID, namespace)
+	if len(users) == 0 {
+		return 0
+	}
+
+	// 自适应回退：大命中率时索引路径劣于全量扫描（用户数按设备去重、total 为连接数，
+	// 多端登录下 users 偏小于实际连接数，阈值判定偏保守即偏向全量，方向安全）
+	total := registry.GetClientCount()
+	if int64(len(users))*100 >= total*nsBroadcastFullScanPercent {
+		return m.BroadcastToFiltered(ctx, func(c *models.Client) bool {
+			return c.Namespace == namespace
+		}, msg)
+	}
+	return m.BroadcastToUserIDs(ctx, users, msg)
+}
+
+// ============================================================================
+// 过滤类广播方法（按客户端属性过滤，与路由正交）
 // ============================================================================
 
 // BroadcastByUserType 发送消息给特定用户类型的所有客户端

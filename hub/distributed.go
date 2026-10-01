@@ -476,10 +476,10 @@ func (h *Hub) handleDistributedBroadcast(ctx context.Context, distMsg *models.Di
 	}
 
 	// 命名空间广播 → 仅发送给同命名空间客户端
-	// BroadcastToFiltered 不调用 notifyObservers（源节点 BroadcastToNamespace 已统一通知观察者）
-	count := h.messagingMgr.BroadcastToFiltered(ctx, func(c *models.Client) bool {
-		return c.Namespace == namespace
-	}, distMsg.Message)
+	// BroadcastToNamespace 内部经 nsIdx 反向索引定点扇出（大命中率自适应回退全量扫描），
+	// 替代 BroadcastToFiltered 的全量连接扫描；不调用 notifyObservers
+	// （源节点 deliverToNamespace 已统一通知观察者，此处重复通知会造成 N² 重复）
+	count := h.messagingMgr.BroadcastToNamespace(ctx, namespace, distMsg.Message)
 
 	h.logger.DebugContextKV(ctx, "跨节点命名空间广播已处理",
 		"namespace", namespace,

@@ -121,6 +121,14 @@ type ShardedRegistry struct {
 	// 消除大群跨节点场景的读放大与单点扇出瓶颈（100w 量级）
 	// namespace 不参与维度：群组投递信封 ns 置空=通配（跨 ns 全额送达，见 ClientMatchesEnvelope）
 	groupMemberIdx *syncx.ShardedMap[string, map[string]int]
+
+	// nsIdx 命名空间 → 本地在线用户反向索引：key = appID:namespace，value = userID → 引用计数
+	// 命名空间广播的本地侧：连接注册（AddClient 新增）时按 client.Namespace 写入，
+	// 注销（RemoveClient）时按引用计数递减、归零删除；
+	// 多租户 pod 上命名空间广播命中率通常极低（目标 ns 用户占比远小于总连接数），
+	// 索引将 O(全部连接) 的全量扫描收敛为 O(该 ns 本地在线用户) 的定点扇出；
+	// namespace 仅在注册时设置、生命周期内不可变，索引无需迁移维护
+	nsIdx *syncx.ShardedMap[string, map[string]int]
 }
 
 // NewShardedRegistry 创建分片注册表
@@ -135,6 +143,7 @@ func NewShardedRegistry(agentEnabled, observerEnabled bool, capacity RegistryCap
 		sseShards:        newClientShardedMap(capacity.SSEClients),
 		clientIDToUserID: sync.Map{},
 		groupMemberIdx:   syncx.NewShardedMap[string, map[string]int](defaultShardCount),
+		nsIdx:            syncx.NewShardedMap[string, map[string]int](defaultShardCount),
 	}
 	if agentEnabled {
 		r.agentShards = newClientShardedMap(capacity.AgentClients)
@@ -212,6 +221,8 @@ func (r *ShardedRegistry) AddClient(client *models.Client) {
 		r.clientCount.Add(1)
 		// 群组本地反向索引：仅在真正新增连接时写入（断线重连覆盖场景已存在，引用计数不变）
 		r.addToGroupMemberIdx(client)
+		// 命名空间本地反向索引：与群组索引同构维护（新增写入，覆盖场景引用计数不变）
+		r.addToNamespaceIdx(client)
 	}
 }
 
@@ -258,6 +269,8 @@ func (r *ShardedRegistry) RemoveClient(clientID, userID string) *models.Client {
 	r.clientCount.Add(-1)
 	// 群组本地反向索引：按引用计数递减，归零删除
 	r.removeFromGroupMemberIdx(removed)
+	// 命名空间本地反向索引：按引用计数递减，归零删除
+	r.removeFromNamespaceIdx(removed)
 
 	return removed
 }
@@ -367,20 +380,6 @@ func (r *ShardedRegistry) ForEachUserClient(userID string, fn func(clientID stri
 	})
 }
 
-// MoveClientGroup 更新客户端的 GroupID 并迁移观察者索引
-// 用于 MoveGroupMember 场景：普通客户仅更新字段；观察者需从旧 group 索引迁移到新 group 索引
-func (r *ShardedRegistry) MoveClientGroup(client *models.Client, newGroupID string) {
-	if client.UserType == models.UserTypeObserver {
-		// 观察者：先从旧索引移除（用当前 GroupID），再更新字段，再加入新索引
-		r.observerIdx.remove(client)
-		client.SetGroupID(newGroupID)
-		r.observerIdx.add(client)
-	} else {
-		// 普通客户：仅更新字段（群组投递走 groupRepo 成员关系，不依赖该索引）
-		client.SetGroupID(newGroupID)
-	}
-}
-
 // ============================================================================
 // 群组本地反向索引（fire-and-forget 群组广播：各节点本地反查成员替代 Redis 全量读）
 // ============================================================================
@@ -463,6 +462,81 @@ func (r *ShardedRegistry) GetLocalGroupMembers(appID string, groupIDs []string) 
 		members = append(members, uid)
 	}
 	return members
+}
+
+// ============================================================================
+// 命名空间本地反向索引（命名空间广播：本地反查在线用户替代全量连接扫描）
+// ============================================================================
+
+// nsIdxKey 拼接 appID:namespace 的反向索引键
+// 与 groupMemberKey 同构：appID 严格隔离，namespace 为广播定位维度
+func nsIdxKey(appID, namespace string) string {
+	return appID + ":" + namespace
+}
+
+// addToNamespaceIdx 将客户端写入命名空间反向索引（引用计数，多端登录同 userID 多连接逐一累加）
+// 由 AddClient 在真正新增连接（isNew）时调用；namespace 注册后不可变，无需迁移维护
+func (r *ShardedRegistry) addToNamespaceIdx(client *models.Client) {
+	if client == nil {
+		return
+	}
+	key := nsIdxKey(client.GetAppID(), client.Namespace)
+	r.nsIdx.WithShardLock(key, func(data map[string]map[string]int) {
+		refs := data[key]
+		if refs == nil {
+			refs = make(map[string]int)
+			data[key] = refs
+		}
+		refs[client.UserID]++
+	})
+}
+
+// removeFromNamespaceIdx 从命名空间反向索引递减引用计数，归零删除
+// 由 RemoveClient 调用；与 addToNamespaceIdx 对称（同一 appID:namespace 落同一 shard 锁内原子）
+func (r *ShardedRegistry) removeFromNamespaceIdx(client *models.Client) {
+	if client == nil {
+		return
+	}
+	key := nsIdxKey(client.GetAppID(), client.Namespace)
+	r.nsIdx.WithShardLock(key, func(data map[string]map[string]int) {
+		refs := data[key]
+		if refs == nil {
+			return
+		}
+		if refs[client.UserID] <= 1 {
+			delete(refs, client.UserID)
+		} else {
+			refs[client.UserID]--
+		}
+		if len(refs) == 0 {
+			delete(data, key)
+		}
+	})
+}
+
+// GetLocalNamespaceUsers 返回指定 appID+namespace 下的本地在线用户 userID 列表（设备去重）
+// 命名空间广播（本地投递与跨节点消费侧）经此定点反查后 BroadcastToUserIDs 扇出，
+// 替代 BroadcastToFiltered 对全部连接的 O(N) 全量扫描；
+// namespace 为空时返回 nil：空 ns = 全局广播语义，由全量扫描路径处理（目标集=全部连接，全量即最优），
+// 不允许从本索引取数（索引只按非空 ns 维度建键）
+func (r *ShardedRegistry) GetLocalNamespaceUsers(appID, namespace string) []string {
+	if namespace == "" {
+		return nil
+	}
+	appID = constants.NormalizeAppID(appID)
+	key := nsIdxKey(appID, namespace)
+	var users []string
+	r.nsIdx.WithShardRLock(key, func(data map[string]map[string]int) {
+		refs := data[key]
+		if len(refs) == 0 {
+			return
+		}
+		users = make([]string, 0, len(refs))
+		for uid := range refs {
+			users = append(users, uid)
+		}
+	})
+	return users
 }
 
 // ============================================================================
@@ -1139,6 +1213,7 @@ func (r *ShardedRegistry) Clear() {
 	r.userShards.Clear()
 	r.sseShards.Clear()
 	r.groupMemberIdx.Clear()
+	r.nsIdx.Clear()
 
 	if r.observerShards != nil {
 		r.observerShards.Clear()

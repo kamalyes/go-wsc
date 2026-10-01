@@ -161,7 +161,7 @@ func (m *MessageSendRecord) SetMessage(msg *HubMessage) error {
 	m.MessageType = msg.MessageType
 
 	// 🔏 从路由信封提取 namespace + group_id（业务维度）
-	// 消息信封由入口（SendToUserWithRetry/SendToGroup/BroadcastToGroupMembers 等）注入
+	// 消息信封由入口（SendToUserWithRetry/SendToGroupMembers/Deliver 等）注入
 	m.Namespace = msg.Namespace
 	if len(msg.GroupIDs) > 0 {
 		// 记录维度：一条消息归属一个 group；跨组广播通过多条记录表达

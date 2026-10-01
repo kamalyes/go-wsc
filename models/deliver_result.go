@@ -49,7 +49,7 @@ func (m DeliveryMode) String() string {
 //   - 字段语义按 Mode 分组：
 //     P2P / GroupReliable：TotalMembers/OnlineMembers/OfflineMembers/Sent/StoredOffline/Failed 有效
 //     GroupBroadcast / Namespace / Global：LocalDelivered 有效（本地成功投递数）
-//   - 跨节点投递为异步，不计入返回值（与历史 BroadcastToGroupMembers/BroadcastToNamespace 语义一致）
+//   - 跨节点投递为异步，不计入返回值（仅统计本地同步投递结果）
 type DeliverResult struct {
 	Mode      DeliveryMode // 投递模式
 	AppID     string       // 应用ID（已归一化）

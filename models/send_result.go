@@ -33,7 +33,7 @@ type SendResult struct {
 	TotalDuration time.Duration
 	FinalError    error
 	DeliveredAt   time.Time
-	StoredOffline bool // 消息因用户离线而存储到离线队列（SendToGroup 据此分类在线/离线，避免预检查 N 次 Redis）
+	StoredOffline bool // 消息因用户离线而存储到离线队列（群组可靠投递据此分类在线/离线，避免预检查 N 次 Redis）
 }
 
 // BroadcastResult 广播发送结果

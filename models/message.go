@@ -648,8 +648,8 @@ func (m *HubMessage) RouteContext(parent context.Context) context.Context {
 
 // ContextWithRoute 将给定 appID+namespace+groupIDs + trace_id 同时写入 msg 信封和 ctx
 //
-// 与 InjectRoute 的区别：路由参数显式传入（不从 ctx 取），适用于 BroadcastToGroupMembers 等
-// 带命名空间参数的公开 API；InjectRoute 适用于从 ctx 取路由的内部发送链路
+// 与 InjectRoute 的区别：路由参数显式传入（不从 ctx 取），适用于 Deliver 等带
+// 命名空间参数的公开 API；InjectRoute 适用于从 ctx 取路由的内部发送链路
 //
 // 入口层首选；没有上下文时单独调用 SetAppID/SetNamespace/SetGroupIDs
 // 空值 appID 归一化为 DefaultAppID；namespace 保持原值（广播场景可传空）

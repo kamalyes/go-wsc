@@ -480,9 +480,8 @@ func (m *Manager) handleBroadcast(msg *models.HubMessage) {
 	//   3. 都为空 —— 全局 ns+空 group（通知全局观察者）
 	//
 	// 群组消息（GroupIDs 非空）跳过观察者通知：
-	//   SendToGroup 已在群组级别统一通知观察者，此处若再通知会导致 N+1 重复
+	//   群组可靠投递已在群组级别统一通知观察者，此处若再通知会导致 N+1 重复
 	//   （N=在线成员数：每个成员的 sendToUser 到 handleBroadcast 都会触发一次通知）
-	//   BroadcastToGroupMembers 走 BroadcastToUserIDs 不经过 handleBroadcast，无此问题
 	//   仅 P2P 消息（GroupIDs 为空）和全局广播需要在此通知观察者
 	//
 	// 全局广播（BroadcastTypeGlobal 且 msg.Namespace==""）保持全局语义：
@@ -581,7 +580,7 @@ func (m *Manager) handleDirectMessage(ctx context.Context, msg *models.HubMessag
 	}
 
 	// 多端同步：P2P 消息同步给发送者的其他设备（排除当前发送设备）
-	// 群组消息（msg.GroupIDs 非空）跳过：SendToGroup 对每个成员投递都走 handleDirectMessage，
+	// 群组消息（msg.GroupIDs 非空）跳过：群组路径对每个成员投递都走 handleDirectMessage，
 	// 每次都同步会导致发送者其他设备收到 N 条重复（N=群组成员数）；
 	// 且群组场景 excludeSender 语义已决定发送者是否收自己的消息，多端同步会与之冲突
 	if msg.Sender != "" && msg.SenderClient != "" && len(msg.GroupIDs) == 0 {

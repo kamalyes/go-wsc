@@ -7,10 +7,7 @@
  * @Description: 群组生命周期 —— CRUD、成员管理与系统组自动维护
  *
  * 本文件只负责群组本身的生命周期（建群/解散/加成员/查成员/系统组自动装配）。
- * 消息投递与广播统一走 hub.Deliver（见 broadcast.go），路由元数据全由 ctx 传递，
- * 因此历史 SendToGroup / BroadcastToGroupMembers / BroadcastToGroup /
- * BroadcastToAllGroups / BroadcastToAllNamespacesAllGroups / BroadcastToGroups /
- * BroadcastToNamespace 七个割裂方法以及对应的跨节点辅助均不在此文件。
+ * 消息投递与广播统一走 hub.Deliver（见 broadcast.go），路由元数据全由 ctx 传递
  *
  * 路由全 ctx 驱动：appID（最上层隔离维度，默认 __default_app__）+ namespace（默认 default）
  * + groupID 均从 ctx 提取（routing.NewRoute().WithAppID(...).Inject(ctx) 注入）。

@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-08-08 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-09-16 21:05:29
+ * @LastEditTime: 2026-10-02 16:20:01
  * @FilePath: \go-wsc\batcher\message_status_updater_test.go
  * @Description: 消息状态批量更新器测试 - 覆盖 message_status_updater.go
  *
@@ -21,6 +21,7 @@ package batcher
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -262,4 +263,43 @@ func statusKeys(ids ...string) []models.MessageRecordKey {
 		keys[i] = models.MessageRecordKey{MessageID: id}
 	}
 	return keys
+}
+
+// BenchmarkMessageStatusUpdater_SubmitFlush 提交+分组 flush 摊销成本基准
+// （CASE WHEN 单 SQL 合并路径的分配画像：200 条同 status 更新在 flush
+// 按 status+reason+errMsg 分组，合约为 1 次 BatchUpdateStatus，WHERE IN 200 键）
+// batchSize=65536 / interval=1h：worker 不自动 flush、不等定时器，
+// 由基准循环每 200 条手动调同包 flush
+func BenchmarkMessageStatusUpdater_SubmitFlush(b *testing.B) {
+	w := newFakeBatchWriter()
+	u := NewMessageStatusUpdater(w, 1<<14, 65536, time.Hour)
+
+	msgIDs := make([]string, 200)
+	for i := range msgIDs {
+		msgIDs[i] = fmt.Sprintf("bench-msg-%d", i)
+	}
+
+	const benchBatch = 200
+	batch := make([]*StatusUpdateItem, 0, benchBatch)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		item := &StatusUpdateItem{
+			MessageID: msgIDs[i%benchBatch],
+			Status:    models.MessageSendStatusSuccess,
+		}
+		benchSinkBool = u.Submit(item)
+		batch = append(batch, item)
+		if len(batch) == benchBatch {
+			u.flush(batch)
+			batch = batch[:0]
+		}
+	}
+	b.StopTimer()
+	if len(batch) > 0 {
+		u.flush(batch)
+	}
+	u.Stop()
+	benchSinkInt = len(w.sink.snapshot())
 }

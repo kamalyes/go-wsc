@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-08-15 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-09-19 00:36:17
+ * @LastEditTime: 2026-10-02 16:20:01
  * @FilePath: \go-wsc\batcher\message_stats_batcher_test.go
  * @Description: 消息统计批量更新器测试
  *   - NewMessageStatsBatcher 创建
@@ -286,4 +286,30 @@ func TestMessageStatsBatcher_AcquirePoolCycle(t *testing.T) {
 		}
 		return false
 	}, 2*time.Second, 10*time.Millisecond, "第二轮条目应落库且无上轮残留")
+}
+
+// BenchmarkMessageStatsBatcher_AcquireSubmit 池化条目 Acquire→填充→Submit 热路径基准
+// 重点测 sync.Pool 池化的零分配：循环前预热池（等价稳态下 flush 持续归还的条目），
+// 计时区内不触发 flush / 池 New，allocs/op 应为 0
+func BenchmarkMessageStatsBatcher_AcquireSubmit(b *testing.B) {
+	w := newFakeBatchWriter()
+	batcher := NewMessageStatsBatcher(w, 1<<14, 65536, time.Hour)
+
+	// 预热对象池：稳态下 flush 会持续归还条目，预热确保计时区内 Acquire 全程池命中
+	for i := 0; i < 4096; i++ {
+		batcher.itemPool.Put(&StatsIncrementItem{})
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		item := batcher.Acquire()
+		item.ConnectionID = "bench-conn"
+		item.MessagesSent = 1
+		item.BytesSent = 128
+		benchSinkBool = batcher.Submit(item)
+	}
+	b.StopTimer()
+	batcher.Stop()
+	benchSinkInt = len(w.quality.incrementsSnapshot())
 }

@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-09-22 11:30:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-09-22 11:30:00
+ * @LastEditTime: 2026-10-02 16:20:01
  * @FilePath: \go-wsc\batcher\message_record_outbox_test.go
  * @Description: 消息记录攒批 outbox 测试 —— flush 成功/失败路径的 pending 清理与 ACK 注册
  *
@@ -14,6 +14,7 @@ package batcher
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -189,4 +190,45 @@ func TestOutboxFlushSnapshotIsolatesConcurrentUpdate(t *testing.T) {
 	assert.Equal(t, 0, outboxPendingLen(o), "flush 完成后 pending 应清空")
 	assert.Equal(t, int32(0), atomic.LoadInt32(&ackRegistered),
 		"落库时指针已变终态，不应注册 ACK 超时")
+}
+
+// BenchmarkMessageRecordOutbox_SubmitFlush 提交+批量落库 flush 摊销成本基准
+// batchSize=65536 / interval=1h：worker 不自动 flush、不等定时器，
+// 由基准循环每 200 条手动调同包 flush（快照拷贝 + CreateBatch + pending 清理）
+func BenchmarkMessageRecordOutbox_SubmitFlush(b *testing.B) {
+	sink := &fakeMessageSink{}
+	o := NewMessageRecordOutbox(
+		&outboxTestProvider{sink: sink, logger: spi.NewDefaultLogger()},
+		1<<14, 65536, time.Hour,
+	)
+
+	msgIDs := make([]string, 200)
+	for i := range msgIDs {
+		msgIDs[i] = fmt.Sprintf("bench-msg-%d", i)
+	}
+
+	const benchBatch = 200
+	batch := make([]*models.MessageSendRecord, 0, benchBatch)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		record := &models.MessageSendRecord{
+			MessageID: msgIDs[i%benchBatch],
+			Receiver:  "bench-user",
+			Status:    models.MessageSendStatusSuccess, // 终态：flush 后不触发 onFlushed 回调
+		}
+		benchSinkBool = o.Submit(record)
+		batch = append(batch, record)
+		if len(batch) == benchBatch {
+			o.flush(batch)
+			batch = batch[:0]
+		}
+	}
+	b.StopTimer()
+	if len(batch) > 0 {
+		o.flush(batch)
+	}
+	o.Stop()
+	benchSinkInt = len(sink.createdSnapshot())
 }

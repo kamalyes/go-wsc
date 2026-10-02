@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-09-29 10:30:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-09-29 10:30:00
+ * @LastEditTime: 2026-10-02 16:20:01
  * @FilePath: \go-wsc\batcher\error_stats_batcher_test.go
  * @Description: 连接错误统计批量更新器测试
  *   - NewErrorStatsBatcher 创建
@@ -19,6 +19,7 @@ package batcher
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -164,3 +165,39 @@ type nilQualityWriter struct {
 }
 
 func (f *nilQualityWriter) GetConnectionQualityRepository() spi.ConnectionQualityStore { return nil }
+
+// BenchmarkErrorStatsBatcher_SubmitFlush 提交+聚合 flush 摊销成本基准
+// batchSize=65536 / interval=1h：worker 不自动 flush、不等定时器，
+// 由基准循环每 200 条手动调同包 flush（200 个不同连接聚合为 ≤200 条 UPDATE）
+func BenchmarkErrorStatsBatcher_SubmitFlush(b *testing.B) {
+	w := newFakeBatchWriter()
+	u := NewErrorStatsBatcher(w, 1<<14, 65536, time.Hour)
+
+	conns := make([]string, 200)
+	for i := range conns {
+		conns[i] = fmt.Sprintf("bench-err-%d", i)
+	}
+	benchErr := errors.New("bench: connection reset by peer")
+	errAt := time.Now()
+
+	const benchBatch = 200
+	batch := make([]*ErrorStatsItem, 0, benchBatch)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		item := &ErrorStatsItem{ConnectionID: conns[i%benchBatch], Error: benchErr, ErrorAt: errAt}
+		benchSinkBool = u.Submit(item)
+		batch = append(batch, item)
+		if len(batch) == benchBatch {
+			u.flush(batch)
+			batch = batch[:0]
+		}
+	}
+	b.StopTimer()
+	if len(batch) > 0 {
+		u.flush(batch)
+	}
+	u.Stop()
+	benchSinkInt = len(w.quality.errUpdatesSnapshot())
+}

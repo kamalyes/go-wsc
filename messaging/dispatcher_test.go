@@ -1,10 +1,10 @@
-﻿/*
+/*
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-07-18 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-07-25 10:56:20
- * @FilePath: \go-wsc\messaging\message_handler_test.go
- * @Description: Hub 消息处理白盒单元测试（覆盖 hub/message_handler.go）
+ * @LastEditTime: 2026-10-02 10:00:09
+ * @FilePath: \go-wsc\messaging\dispatcher_test.go
+ * @Description: Hub 消息处理白盒单元测试（覆盖 messaging/dispatcher.go）
  *
  * 覆盖：
  *   - normalizeMessageFields 字段补全/保留
@@ -391,8 +391,8 @@ func mustMarshalHubMessage(t *testing.T, msg *models.HubMessage) []byte {
 
 // fakeHost 编排层端口补齐：读泵退出路径依赖（IsShuttingDown 短路判定、
 // Unregister defer 注销、TrackConnectionError 异常断连记录），泵级测试必须真实触达
-func (f *fakeHost) IsShuttingDown() bool                 { return false }
-func (f *fakeHost) Unregister(_ *models.Client)          {}
+func (f *fakeHost) IsShuttingDown() bool                                      { return false }
+func (f *fakeHost) Unregister(_ *models.Client)                               {}
 func (f *fakeHost) TrackConnectionError(_ string, _ models.UserType, _ error) {}
 
 // newPumpWSConnPair 建立真 WebSocket 连接对（服务端 conn 交给泵，客户端侧触发读泵退出）
@@ -448,4 +448,64 @@ func TestStartClientPumpsWaitGroupPairing(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Wait 未在泵退出后返回（wg Add/Done 配对断裂）")
 	}
+}
+
+// ============================================================================
+// 入站解析基准（性能路线图 M1：入站路径基线）
+//
+// handleTextMessage 的两级解析结构：
+//   - 快路径探测（dispatcher.go:274-290）：仅反序列化 message_type/message_id
+//     2 个字段的轻量探测结构，心跳/ACK 命中即返回，跳过完整反序列化
+//   - 完整解析（dispatcher.go:293）：探测未命中后完整反序列化 HubMessage
+//     （非心跳消息共 2 次解析：探测 + 完整）
+// ============================================================================
+
+// BenchmarkInboundParse 入站文本消息解析基准
+//   - probe_hit：心跳 JSON 命中快路径（仅 2 字段探测 + 缓存 pong 回写）
+//   - probe_miss：普通文本消息探测未命中，走「探测 + 完整」两次解析
+//     （后续含字段规范化与路由注入，为入站完整处理的实际上界）
+//
+// 客户端 SendChan 由消费协程常驻排空（生产 WS 写协程恒消费），
+// 稳态测量两级解析的每消息成本差异
+func BenchmarkInboundParse(b *testing.B) {
+	m, _ := newTestManager()
+
+	client := makeTestClient("c-bench-in", "u-bench-in")
+	go func() {
+		for range client.SendChan {
+		}
+	}()
+
+	// 心跳消息：快路径命中最小形态（仅 message_type，探测结构其余字段跳过）
+	hbData, err := json.Marshal(models.NewHubMessage().SetMessageType(models.MessageTypeHeartbeat))
+	require.NoError(b, err)
+
+	// 普通文本消息：探测未命中的典型入站形态（含 Data 扩展 2 项的完整业务消息）
+	txtMsg := models.NewHubMessage().
+		SetMessageType(models.MessageTypeText).
+		SetSender("u-bench-in").
+		SetReceiver("u-peer").
+		SetContent("typical inbound text payload for parse benchmark").
+		WithMetadata("trace-id", "bench-trace-0001").
+		WithContentExtra("color", "red")
+	txtData, err := json.Marshal(txtMsg)
+	require.NoError(b, err)
+
+	ctx := context.Background()
+
+	b.Run("probe_hit", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			m.handleTextMessage(ctx, client, hbData)
+		}
+	})
+
+	b.Run("probe_miss", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			m.handleTextMessage(ctx, client, txtData)
+		}
+	})
 }

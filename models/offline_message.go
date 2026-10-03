@@ -25,7 +25,7 @@ type OfflineMessageRecord struct {
 	Sender         string            `gorm:"index;size:255;comment:发送者ID" json:"sender"`
 	Receiver       string            `gorm:"index;size:255;not null;uniqueIndex:idx_message_app_ns_receiver;index:idx_app_receiver_ns;comment:接收者ID" json:"receiver"`
 	AppID          string            `gorm:"column:app_id;size:36;not null;default:'__default_app__';index:idx_app_ns_receiver;uniqueIndex:idx_message_app_ns_receiver;index:idx_app_receiver_ns;comment:应用ID(最上层隔离维度)" json:"app_id,omitempty"`
-	Namespace      string            `gorm:"column:namespace;size:64;not null;default:'default';index:idx_app_ns_receiver;uniqueIndex:idx_message_app_ns_receiver;index:idx_app_receiver_ns;comment:命名空间ID" json:"namespace"`
+	Namespace      string            `gorm:"column:namespace;size:64;not null;index:idx_app_ns_receiver;uniqueIndex:idx_message_app_ns_receiver;index:idx_app_receiver_ns;comment:命名空间ID" json:"namespace"`
 	GroupID        string            `gorm:"column:group_id;size:64;default:'';index:idx_app_ns_receiver;comment:群组ID(空表示点对点消息)" json:"group_id,omitempty"`
 	SessionID      string            `gorm:"column:session_id;size:64;not null;index;comment:会话ID" json:"session_id"`
 	CompressedData []byte            `gorm:"not null;comment:压缩完整的HubMessage JSON数据" json:"-"`

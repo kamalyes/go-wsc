@@ -1,0 +1,57 @@
+name: Benchmark
+
+# 性能基线采集（PERFORMANCE.md P0）：
+#   - 手动触发 / 每周日自动跑一轮核心包基准
+#   - 与上一轮基线 benchstat 对比，产出趋势数据（旁路任务，不阻塞合并）
+#   - artifact 逐轮滚动覆盖：每轮基准成为下一轮的对比基线
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 每周日 18:20（UTC）执行
+    - cron: '20 18 * * 0'
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+
+      - name: Run benchmarks
+        run: |
+          go test ./models/... ./messaging/... ./overload/... ./batcher/... ./connection/... \
+            -run '^$' -bench . -benchmem -benchtime=1s -count=1 -timeout=30m 2>&1 | tee bench-current.txt
+
+      - name: Download previous baseline
+        uses: actions/download-artifact@v4
+        with:
+          name: benchmark-baseline
+        continue-on-error: true
+
+      - name: Benchstat compare
+        run: |
+          go install golang.org/x/perf/cmd/benchstat@latest
+          if [ -f benchmark-baseline/bench-current.txt ]; then
+            echo "=== benchstat: baseline vs current ==="
+            benchstat benchmark-baseline/bench-current.txt bench-current.txt || true
+          else
+            echo "no previous baseline yet, skipping comparison"
+          fi
+
+      - name: Upload current as new baseline
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-baseline
+          path: bench-current.txt
+          retention-days: 90

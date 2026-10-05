@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-09-06 09:50:55
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-12-28 00:00:00
+ * @LastEditTime: 2026-10-05 10:06:18
  * @FilePath: \go-wsc\models\message_record.go
  * @Description: 消息发送记录管理 - 使用 GORM 数据库持久化
  *
@@ -159,9 +159,13 @@ func (m *MessageSendRecord) SetMessage(msg *HubMessage, payload []byte) error {
 
 	// 提取关键字段用于索引和查询（持 HubMessage 读锁快照）
 	// 使用 msg.MessageID (业务消息ID) 和 msg.ID (Hub 内部ID)
-	// lockRead 兼容 mu 为 nil 的零值构造场景；不持锁裸读时，重试/重路由
-	// 路径复用同一消息对象并发补设属性（Set*/With* 持写锁）构成数据竞争
-	unlock := msg.lockRead()
+	// mu 为 nil 的零值构造兼容裸读（与既有 lockRead 语义一致）；非 nil 时持读锁快照，
+	// 防重试/重路由路径复用同一消息对象并发补设属性（Set*/With* 持写锁）构成数据竞争。
+	// 开码 defer 替代原方法值解锁函数：funcval 每次提取 16B 堆分配，此路径每条消息必经
+	if msg.mu != nil {
+		msg.mu.RLock()
+		defer msg.mu.RUnlock()
+	}
 	m.MessageID = msg.MessageID
 	m.HubID = msg.ID
 	m.SessionID = msg.SessionID
@@ -176,7 +180,6 @@ func (m *MessageSendRecord) SetMessage(msg *HubMessage, payload []byte) error {
 		// 记录维度：一条消息归属一个 group；跨组广播通过多条记录表达
 		m.GroupID = msg.GroupIDs[0]
 	}
-	unlock()
 
 	return nil
 }

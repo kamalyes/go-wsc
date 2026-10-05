@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-07-26 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-10-01 15:10:23
+ * @LastEditTime: 2026-10-05 10:06:18
  * @FilePath: \go-wsc\models\message_test.go
  * @Description: HubMessage 结构体测试
  *   - 字段对齐验证（无 padding）
@@ -722,4 +722,39 @@ func BenchmarkHubMessageUnmarshal(b *testing.B) {
 			hubMessageUnmarshalSink = msg
 		}
 	})
+}
+
+// ============================================================================
+// M2-1：锁路径零分配回归
+// ============================================================================
+
+// TestHubMessageLockingZeroAlloc 读写锁路径零分配回归（M2-1）
+// lockRead/lockWrite 曾以方法值返回解锁函数——funcval（fn+data 双字）每次 16B 堆分配：
+// NewHubMessage 链式构造每个 setter 一次、每个 getter/MarshalJSON 一次，
+// 全链路每消息 10+ 次无谓分配。改为分支内开码 defer 后该类分配必须保持为零
+func TestHubMessageLockingZeroAlloc(t *testing.T) {
+	if raceEnabled {
+		t.Skip("race 探测为每次锁操作注入记账分配，零分配断言仅在非 race 构建下有效")
+	}
+
+	// mu != nil 的并发安全构造 + mu == nil 的零值构造两路径都要零分配
+	msg := NewHubMessage().SetID("za-1").SetContent("c").SetMessageType(MessageTypeText)
+	bare := &HubMessage{ID: "za-bare"}
+
+	// 暖机（内联/缓存首次开销不计入）
+	msg.SetSeqNo(1)
+	bare.SetSeqNo(1)
+	_, _ = msg.GetMediaInfo()
+	_, _ = bare.GetMediaInfo()
+	_, _ = msg.GetOption("warm")
+
+	allocs := testing.AllocsPerRun(200, func() {
+		msg.SetContent("c") // 写锁（mu != nil）
+		msg.SetSeqNo(2)
+		_, _ = msg.GetOption("k") // 读锁（map miss 本身零分配）
+		_, _ = msg.GetMediaInfo()
+		bare.SetContent("c") // mu == nil 裸路径
+		_, _ = bare.GetOption("k")
+	})
+	assert.Zero(t, allocs, "锁辅助路径不得产生堆分配（funcval 回归）")
 }

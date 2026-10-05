@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-09-06 09:50:55
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-12-28 00:00:00
+ * @LastEditTime: 2026-10-05 10:06:18
  * @FilePath: \go-wsc\models\message.go
  * @Description: 消息处理逻辑
  *
@@ -101,27 +101,18 @@ type HubMessage struct {
 	SkipSendToClient    bool              `json:"skip_send_to_client,omitempty"`   // 是否跳过发送到客户端
 }
 
-// lockWrite 获取写锁并返回解锁函数；mu 为 nil 时返回 no-op（兼容直接构造的零值消息）
-func (m *HubMessage) lockWrite() func() {
-	if m.mu != nil {
-		m.mu.Lock()
-		return m.mu.Unlock
-	}
-	return func() {}
-}
-
-// lockRead 获取读锁并返回解锁函数；mu 为 nil 时返回 no-op
-func (m *HubMessage) lockRead() func() {
-	if m.mu != nil {
-		m.mu.RLock()
-		return m.mu.RUnlock
-	}
-	return func() {}
-}
+// 锁定约定（M2-1 零分配改造）：
+//   - 各方法以"分支内开码 defer"直接持锁——mu != nil 时 RLock/Lock + defer RUnlock/Unlock，
+//     Go 1.14+ 开码 defer 零堆分配；mu 为 nil 的零值构造兼容裸读裸写
+//   - 不再经由返回解锁函数的辅助方法：方法值（funcval 含 fn+data 双字）每次 16B 堆分配，
+//     NewHubMessage 链式构造每 setter 一次、每 getter/MarshalJSON 一次，每消息 10+ 次无谓分配
 
 // SetID 设置消息ID
 func (m *HubMessage) SetID(id string) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	m.ID = id
 	return m
 }
@@ -130,7 +121,10 @@ func (m *HubMessage) SetID(id string) *HubMessage {
 // 优先从 OTel span 提取 trace_id，fallback 到 ctx.Value(logger.ContextKeyTraceID)
 // 已有 trace_id 时不覆盖（跨节点消息保留源 trace）
 func (m *HubMessage) InjectContext(ctx context.Context) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	if m.TraceID != "" {
 		return m // 已有则不覆盖
 	}
@@ -142,7 +136,10 @@ func (m *HubMessage) InjectContext(ctx context.Context) *HubMessage {
 // 用于消息流转路径中恢复 ctx（如 PubSub 消费端、回调等场景）
 // ctx 已有 trace 时不覆盖（尊重上游）
 func (m *HubMessage) ContextFrom(parent context.Context) context.Context {
-	defer m.lockRead()()
+	if m.mu != nil {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+	}
 	if m.TraceID == "" {
 		return parent
 	}
@@ -154,7 +151,10 @@ func (m *HubMessage) ContextFrom(parent context.Context) context.Context {
 // 离线消息在用户上线时推送，ctx 来自上线连接（带连接自身的 trace_id）
 // 强制覆盖为消息原始发送链路的 trace_id，保证同一条消息从 NotifySend 入口 → 离线暂存 → 上线推送 → 最终投递全程同一个 trace_id 可查
 func (m *HubMessage) TraceContext(parent context.Context) context.Context {
-	defer m.lockRead()()
+	if m.mu != nil {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+	}
 	if m.TraceID == "" {
 		return parent
 	}
@@ -163,133 +163,190 @@ func (m *HubMessage) TraceContext(parent context.Context) context.Context {
 
 // SetMessageType 设置消息类型
 func (m *HubMessage) SetMessageType(messageType MessageType) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	m.MessageType = messageType
 	return m
 }
 
 // SetSender 设置发送者
 func (m *HubMessage) SetSender(sender string) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	m.Sender = sender
 	return m
 }
 
 // SetSenderName 设置发送者昵称
 func (m *HubMessage) SetSenderName(name string) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	m.SenderName = name
 	return m
 }
 
 // SetSenderType 设置发送者类型
 func (m *HubMessage) SetSenderType(senderType UserType) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	m.SenderType = senderType
 	return m
 }
 
 // SetReceiver 设置接收者
 func (m *HubMessage) SetReceiver(receiver string) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	m.Receiver = receiver
 	return m
 }
 
 // SetReceiverName 设置接收者昵称
 func (m *HubMessage) SetReceiverName(name string) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	m.ReceiverName = name
 	return m
 }
 
 // SetReceiverType 设置接收者用户类型
 func (m *HubMessage) SetReceiverType(receiverType UserType) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	m.ReceiverType = receiverType
 	return m
 }
 
 // SetReceiverClient 设置接收者客户端ID
 func (m *HubMessage) SetReceiverClient(clientID string) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	m.ReceiverClient = clientID
 	return m
 }
 
 // SetReceiverNode 设置接收者所在节点ID
 func (m *HubMessage) SetReceiverNode(nodeID string) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	m.ReceiverNode = nodeID
 	return m
 }
 
 // SetSessionID 设置会话ID
 func (m *HubMessage) SetSessionID(sessionID string) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	m.SessionID = sessionID
 	return m
 }
 
 // SetContent 设置消息内容
 func (m *HubMessage) SetContent(content string) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	m.Content = content
 	return m
 }
 
 // SetMessageID 设置业务消息ID
 func (m *HubMessage) SetMessageID(messageID string) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	m.MessageID = messageID
 	return m
 }
 
 // SetSeqNo 设置消息序列号
 func (m *HubMessage) SetSeqNo(seqNo int64) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	m.SeqNo = seqNo
 	return m
 }
 
 // SetPriority 设置优先级
 func (m *HubMessage) SetPriority(priority Priority) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	m.Priority = priority
 	return m
 }
 
 // SetReplyToMsgID 设置回复的消息ID
 func (m *HubMessage) SetReplyToMsgID(replyToMsgID string) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	m.ReplyToMsgID = replyToMsgID
 	return m
 }
 
 // SetRequireAck 设置是否需要ACK确认
 func (m *HubMessage) SetRequireAck(requireAck bool) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	m.RequireAck = requireAck
 	return m
 }
 
 // SetPushType 设置推送类型
 func (m *HubMessage) SetPushType(pushType PushType) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	m.PushType = pushType
 	return m
 }
 
 // SetBroadcastType 设置广播类型
 func (m *HubMessage) SetBroadcastType(broadcastType BroadcastType) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	m.BroadcastType = broadcastType
 	return m
 }
 
 // WithMediaInfo 设置媒体信息（接受任意类型，自动序列化为 JSON 字符串，nil 安全）
 func (m *HubMessage) WithMediaInfo(mediaInfo any) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	if mediaInfo == nil {
 		return m
 	}
@@ -302,7 +359,10 @@ func (m *HubMessage) WithMediaInfo(mediaInfo any) *HubMessage {
 
 // GetMediaInfo 获取媒体信息（返回原始值）
 func (m *HubMessage) GetMediaInfo() (any, bool) {
-	defer m.lockRead()()
+	if m.mu != nil {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+	}
 	if m.Data == nil {
 		return nil, false
 	}
@@ -312,7 +372,10 @@ func (m *HubMessage) GetMediaInfo() (any, bool) {
 
 // GetMediaInfoJSON 获取媒体信息的 JSON 字符串表示
 func (m *HubMessage) GetMediaInfoJSON() string {
-	defer m.lockRead()()
+	if m.mu != nil {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+	}
 	if m.Data == nil {
 		return "{}"
 	}
@@ -331,14 +394,20 @@ func (m *HubMessage) GetMediaInfoJSON() string {
 
 // SetSkipDatabaseStorage 设置是否跳过主数据库存储
 func (m *HubMessage) SetSkipDatabaseStorage(skip bool) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	m.SkipDatabaseStorage = skip
 	return m
 }
 
 // SetSkipSendToClient 设置是否跳过发送到客户端
 func (m *HubMessage) SetSkipSendToClient(skip bool) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	m.SkipSendToClient = skip
 	return m
 }
@@ -374,7 +443,10 @@ func (m *HubMessage) getMapValue(key string, subKey string) (interface{}, bool) 
 
 // WithOption 设置扩展数据选项
 func (m *HubMessage) WithOption(key string, value interface{}) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	if m.Data == nil {
 		m.Data = make(map[string]interface{})
 	}
@@ -384,7 +456,10 @@ func (m *HubMessage) WithOption(key string, value interface{}) *HubMessage {
 
 // GetOption 获取扩展数据选项
 func (m *HubMessage) GetOption(key string) (interface{}, bool) {
-	defer m.lockRead()()
+	if m.mu != nil {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+	}
 	if m.Data == nil {
 		return nil, false
 	}
@@ -398,7 +473,10 @@ func (m *HubMessage) WithClassification(classification *MessageClassification) *
 	if classification == nil {
 		return m
 	}
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	if m.Data == nil {
 		m.Data = make(map[string]interface{})
 	}
@@ -408,7 +486,10 @@ func (m *HubMessage) WithClassification(classification *MessageClassification) *
 
 // GetClassification 获取消息综合分类（nil 安全）
 func (m *HubMessage) GetClassification() *MessageClassification {
-	defer m.lockRead()()
+	if m.mu != nil {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+	}
 	if m.Data == nil {
 		return nil
 	}
@@ -420,13 +501,19 @@ func (m *HubMessage) GetClassification() *MessageClassification {
 
 // WithContentExtra 设置单个 content_extra 字段
 func (m *HubMessage) WithContentExtra(key string, value any) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	return m.setMapValue(DataKeyContentExtra, key, value)
 }
 
 // WithAllContentExtra 批量设置 content_extra（接受任意类型，自动序列化，nil 安全）
 func (m *HubMessage) WithAllContentExtra(contentExtra any) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	if contentExtra == nil {
 		return m
 	}
@@ -439,13 +526,19 @@ func (m *HubMessage) WithAllContentExtra(contentExtra any) *HubMessage {
 
 // GetContentExtra 获取 content_extra 字段值
 func (m *HubMessage) GetContentExtra(key string) (any, bool) {
-	defer m.lockRead()()
+	if m.mu != nil {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+	}
 	return m.getMapValue(DataKeyContentExtra, key)
 }
 
 // GetAllContentExtra 获取整个 content_extra map
 func (m *HubMessage) GetAllContentExtra() map[string]any {
-	defer m.lockRead()()
+	if m.mu != nil {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+	}
 	if m.Data == nil {
 		return make(map[string]any)
 	}
@@ -458,7 +551,10 @@ func (m *HubMessage) GetAllContentExtra() map[string]any {
 
 // GetContentExtraJSON 获取 content_extra 的 JSON 字符串表示
 func (m *HubMessage) GetContentExtraJSON() string {
-	defer m.lockRead()()
+	if m.mu != nil {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+	}
 	if m.Data == nil {
 		return "{}"
 	}
@@ -477,13 +573,19 @@ func (m *HubMessage) GetContentExtraJSON() string {
 
 // WithMetadata 设置单个 metadata 字段
 func (m *HubMessage) WithMetadata(key string, value string) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	return m.setMapValue(DataKeyMetadata, key, value)
 }
 
 // WithAllMetadata 批量设置 metadata（接受任意类型，自动序列化，nil 安全）
 func (m *HubMessage) WithAllMetadata(metadata any) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	if metadata == nil {
 		return m
 	}
@@ -497,7 +599,10 @@ func (m *HubMessage) WithAllMetadata(metadata any) *HubMessage {
 // GetMetadata 获取 metadata 字段值
 // 安全：非 string 类型返回 ("", false)，不再 panic
 func (m *HubMessage) GetMetadata(key string) (string, bool) {
-	defer m.lockRead()()
+	if m.mu != nil {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+	}
 	value, exists := m.getMapValue(DataKeyMetadata, key)
 	if !exists {
 		return "", false
@@ -511,7 +616,10 @@ func (m *HubMessage) GetMetadata(key string) (string, bool) {
 
 // GetAllMetadata 获取整个 metadata map
 func (m *HubMessage) GetAllMetadata() map[string]any {
-	defer m.lockRead()()
+	if m.mu != nil {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+	}
 	if m.Data == nil {
 		return make(map[string]any)
 	}
@@ -524,7 +632,10 @@ func (m *HubMessage) GetAllMetadata() map[string]any {
 
 // GetMetadataJSON 获取 metadata 的 JSON 字符串表示
 func (m *HubMessage) GetMetadataJSON() string {
-	defer m.lockRead()()
+	if m.mu != nil {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+	}
 	if m.Data == nil {
 		return "{}"
 	}
@@ -543,7 +654,10 @@ func (m *HubMessage) GetMetadataJSON() string {
 
 // GetTraceID 获取 trace_id，优先自身字段，fallback 到 metadata
 func (m *HubMessage) GetTraceID() string {
-	defer m.lockRead()()
+	if m.mu != nil {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+	}
 	return m.TraceID
 }
 
@@ -551,40 +665,58 @@ func (m *HubMessage) GetTraceID() string {
 
 // SetAppID 设置应用ID（链式调用，最上层隔离维度）
 func (m *HubMessage) SetAppID(appID string) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	m.AppID = appID
 	return m
 }
 
 // SetNamespace 设置命名空间（链式调用）
 func (m *HubMessage) SetNamespace(ns string) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	m.Namespace = ns
 	return m
 }
 
 // SetGroupIDs 设置群组ID列表（链式调用，P2P 传 nil）
 func (m *HubMessage) SetGroupIDs(groupIDs []string) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	m.GroupIDs = groupIDs
 	return m
 }
 
 // GetAppID 获取应用ID（空值返回空串，不补默认值，保持「空=全局共享」语义）
 func (m *HubMessage) GetAppID() string {
-	defer m.lockRead()()
+	if m.mu != nil {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+	}
 	return m.AppID
 }
 
 // GetNamespace 获取命名空间
 func (m *HubMessage) GetNamespace() string {
-	defer m.lockRead()()
+	if m.mu != nil {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+	}
 	return m.Namespace
 }
 
 // GetGroupIDs 获取群组ID列表（返回副本，避免外部修改污染内部）
 func (m *HubMessage) GetGroupIDs() []string {
-	defer m.lockRead()()
+	if m.mu != nil {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+	}
 	if m.GroupIDs == nil {
 		return nil
 	}
@@ -593,7 +725,10 @@ func (m *HubMessage) GetGroupIDs() []string {
 
 // FirstGroupID 获取第一个群组ID（单群组场景用；多群组/无群组返回空）
 func (m *HubMessage) FirstGroupID() string {
-	defer m.lockRead()()
+	if m.mu != nil {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+	}
 	if len(m.GroupIDs) == 0 {
 		return ""
 	}
@@ -613,7 +748,10 @@ func (m *HubMessage) FirstGroupID() string {
 //   - 命名空间广播/P2P：ctx 有 namespace → msg.Namespace=ns → 严格匹配
 //   - P2P 严格场景需 namespace 归一化时，调用方在入口 EnsureRouteDefaults 或 NormalizeRoute
 func (m *HubMessage) InjectRoute(ctx context.Context) context.Context {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	// 1. trace_id 注入（与 InjectContext 逻辑一致，已有不覆盖）
 	if m.TraceID == "" {
 		m.TraceID = logger.ExtractTraceID(ctx)
@@ -638,7 +776,10 @@ func (m *HubMessage) InjectRoute(ctx context.Context) context.Context {
 // RouteContext 从信封恢复路由 ctx（异步队列/跨节点/离线回放场景，ctx 已丢失时重建）
 // 如果信封为空则返回原 ctx；非空则归一化 appID 后重建 ctx
 func (m *HubMessage) RouteContext(parent context.Context) context.Context {
-	defer m.lockRead()()
+	if m.mu != nil {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+	}
 	if m.AppID == "" && m.Namespace == "" && len(m.GroupIDs) == 0 {
 		return parent
 	}
@@ -653,7 +794,10 @@ func (m *HubMessage) RouteContext(parent context.Context) context.Context {
 // 入口层首选；没有上下文时单独调用 SetAppID/SetNamespace/SetGroupIDs
 // 空值 appID 归一化为 DefaultAppID；namespace 保持原值（广播场景可传空）
 func (m *HubMessage) ContextWithRoute(parent context.Context, appID, ns string, groupIDs []string) context.Context {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	// trace_id 注入（已有不覆盖）
 	if m.TraceID == "" {
 		m.TraceID = logger.ExtractTraceID(parent)
@@ -754,7 +898,10 @@ func (m *HubMessage) ObserverCopy() (*HubMessage, []byte, error) {
 
 // GetMessageID 获取消息ID，空值返回默认消息ID
 func (m *HubMessage) GetMessageID() string {
-	defer m.lockRead()()
+	if m.mu != nil {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+	}
 	return m.MessageID
 }
 

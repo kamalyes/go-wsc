@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-09-06 20:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-09-06 20:00:00
+ * @LastEditTime: 2026-10-05 10:06:18
  * @FilePath: \go-wsc\models\delivery_guarantee.go
  * @Description: 消息送达分级模型 —— 分级送达保证的地基
  *
@@ -110,7 +110,10 @@ func GuaranteeForType(mt MessageType) (DeliveryGuarantee, bool) {
 
 // WithGuarantee 链式设置显式送达分级（优先级最高，覆盖决策树推导）
 func (m *HubMessage) WithGuarantee(g DeliveryGuarantee) *HubMessage {
-	defer m.lockWrite()()
+	if m.mu != nil {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+	}
 	m.DeliveryGuarantee = g
 	return m
 }
@@ -127,7 +130,10 @@ func (m *HubMessage) WithGuarantee(g DeliveryGuarantee) *HubMessage {
 //
 // 并发安全：持读锁一次性完成全部字段读取（不调用其他持锁方法——锁不可重入）
 func (m *HubMessage) ResolveGuarantee() DeliveryGuarantee {
-	defer m.lockRead()()
+	if m.mu != nil {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+	}
 
 	// 1. 显式设置优先
 	if m.DeliveryGuarantee != GuaranteeUnset {

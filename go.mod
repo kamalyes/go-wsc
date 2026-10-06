@@ -6,13 +6,13 @@ require (
 	github.com/alicebob/miniredis/v2 v2.35.0
 	github.com/gorilla/websocket v1.4.2
 	github.com/jpillora/backoff v1.0.0
-	github.com/kamalyes/go-argus v0.3.1
+	github.com/kamalyes/go-argus v0.4.0
 	github.com/kamalyes/go-cachex v0.4.1
 	github.com/kamalyes/go-config v0.23.0
 	github.com/kamalyes/go-logger v0.7.1
 	github.com/kamalyes/go-pbmo v0.2.0
 	github.com/kamalyes/go-sqlbuilder v0.7.0
-	github.com/kamalyes/go-toolbox v0.16.3
+	github.com/kamalyes/go-toolbox v0.17.0
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/stretchr/testify v1.11.1
 	google.golang.org/grpc v1.83.1
@@ -22,6 +22,7 @@ require (
 
 require (
 	github.com/glebarez/go-sqlite v1.21.2 // indirect
+	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.17 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	modernc.org/libc v1.22.5 // indirect

@@ -72,7 +72,7 @@ flowchart TB
         end
 
         subgraph "集群分发"
-            GRPCDirect["gRPC 直连<br/>点对点并行投递"]
+            GRPCDirect["gRPC 直连<br/>点对点并行投递<br/>死节点连接淘汰回收"]
             PubSub["Redis PubSub<br/>Pipeline 定向兜底"]
         end
 
@@ -88,7 +88,7 @@ flowchart TB
         RetryEngine["重试引擎<br/>go-toolbox 指数退避"]
         FailureRouter["失败路由器<br/>5 类专业化处理器"]
         OfflineHandler["离线处理器<br/>用户首连自动回放"]
-        Outbox["outbox 攒批<br/>离线消息异步刷写"]
+        Outbox["消息记录 outbox<br/>write-ahead 攒批落库"]
     end
 
     %% ==================== 自愈与可观测 ====================
@@ -150,10 +150,11 @@ flowchart TB
     ACKMgr -->|"超时转存"| FailureRouter
     RetryEngine --> FailureRouter
     FailureRouter --> OfflineHandler
-    OfflineHandler --> Outbox
+    Deliver -->|"write-ahead 发送记录"| Outbox
 
     %% ==================== 自愈与可观测连线 ====================
     SelfHeal -->|"死索引清理<br/>reroute 守卫"| Registry
+    SelfHeal -.->|"节点淘汰联动回收"| GRPCDirect
     Stats -.->|"集群统计聚合"| Redis
     Batcher -->|"攒批落库"| Database
 
@@ -161,8 +162,9 @@ flowchart TB
     OnlineStore -.-> Redis
     GroupStore -.-> Redis
     PubSub -.-> Redis
+    OfflineHandler -.->|"离线队列"| Redis
     OfflineHandler -->|"离线双写"| Database
-    Outbox -->|"异步刷写"| Database
+    Outbox -->|"批量落库"| Database
 
     %% ==================== 样式定义 ====================
     classDef clientStyle fill:#e1f5fe,stroke:#01579b,stroke-width:2px
@@ -311,6 +313,7 @@ result := h.KickUser(ctx, "user-123", "多端顶号", true, "您的账号在其�
 - **死索引自愈**：目标节点扑空时异步清理指向本节点的死索引条目；reroute 守卫（attempted/rejected 防抖，全拒立即转离线）防止重路由风暴
 - **owner 归属校验**：Lua 脚本保证索引清理不误删其他节点已接管的条目
 - **节点重注册**：周期性完整重注册（含 gRPC 地址），Redis key 被删/TTL 过期后自动恢复上报
+- **死节点连接回收**：注册表心跳淘汰 / 滚动发布下线节点时，联动关闭 gRPC 连接池中该节点 addr 的连接与熔断器，历史 addr 不随发布次数累积
 
 ### 🌊 削峰填谷与消息分级送达
 

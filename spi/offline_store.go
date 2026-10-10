@@ -55,6 +55,10 @@ type OfflineMessageFilter struct {
 	Cursor string
 	// Statuses 消息状态列表，为空则待处理状态
 	Statuses []models.MessageSendStatus
+	// ExcludeExhausted 排除重试耗尽的消息（retry_count >= max_retry，毒消息死信）
+	// 推送失败由 UpdatePushStatus 原子递增 retry_count，超限后不再进入推送流程
+	// max_retry <= 0 视为不限制
+	ExcludeExhausted bool
 }
 
 // OfflineStore 离线消息的 RDBMS 持久化契约

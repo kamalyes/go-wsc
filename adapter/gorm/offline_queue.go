@@ -135,6 +135,14 @@ func (r *OfflineStore) QueryMessages(ctx context.Context, filter *spi.OfflineMes
 		gormDB = gormDB.Where("namespace IN (?, '')", filter.Namespace)
 	}
 
+	// 毒消息死信过滤：重试耗尽（retry_count >= max_retry）的消息不再进入推送流程
+	// 防御客户端持续不 ACK/持续投递失败的毒消息在每次上线 drain 时被反复捞出重推（重连风暴下的 DB 写放大）
+	// 超限消息留在表内供审计（error_message 有末次失败原因），由过期清理与 CleanupOld 回收
+	// max_retry <= 0 视为不限制（配置未启用重试上限时不误杀）
+	if filter.ExcludeExhausted {
+		gormDB = gormDB.Where("max_retry <= 0 OR retry_count < max_retry")
+	}
+
 	// 分页游标：从 cursor 之后的消息开始读取（使用原生 GORM，因为需要子查询）
 	if filter.Cursor != "" {
 		tableName := models.OfflineMessageRecord{}.TableName()

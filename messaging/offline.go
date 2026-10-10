@@ -361,6 +361,9 @@ func (h *HybridOfflineMessageHandler) GetOfflineMessages(ctx context.Context, us
 		Namespace: namespace,
 		Limit:     limit,
 		Cursor:    cursor,
+		// 毒消息死信：重试耗尽（retry_count >= max_retry）的消息不再进入推送流程
+		// 防御客户端持续不 ACK 的毒消息在每次上线 drain 时被反复捞出重推（重连风暴下的 DB 写放大）
+		ExcludeExhausted: true,
 	})
 	if err != nil {
 		h.logger.ErrorContextKV(ctx, "从 MySQL 读取离线消息失败",
@@ -730,6 +733,8 @@ func (m *Manager) pushAndDeleteOffline(ctx context.Context, userID string, messa
 	logger := m.host.GetLogger()
 	pushedIDs = make([]string, 0, len(messages))
 	failedIDs = make([]string, 0)
+	// 本批首个失败原因（同批失败多为同源抖动，攒批 UPDATE 时作 error_message 代表值）
+	var batchPushErr error
 
 	// 预取目标用户节点索引一次：同一 userID 的每条离线消息原逐条走 SendToUserWithRetry，
 	// 因其 presetNodes=nil 且本地在线分支不自动预取（见 sendToUserWithRetry 的 localOnline
@@ -750,29 +755,38 @@ func (m *Manager) pushAndDeleteOffline(ctx context.Context, userID string, messa
 		// 换成消息信封里的原始发送链路 trace_id，使「发送→离线暂存→上线推送→投递」全程同一 trace 可查
 		msgCtx := message.TraceContext(ctx)
 		result := m.sendToUserWithRetry(routing.EnsureRouteDefaults(msgCtx), userID, message, presetNodes)
-		pushErr := fmt.Errorf("离线消息推送失败")
-		if result != nil && result.FinalError != nil {
-			pushErr = result.FinalError
-		}
 		if result == nil || !result.Success {
+			// pushErr 惰性构造：成功路径（绝大多数）零分配
+			pushErr := fmt.Errorf("离线消息推送失败")
+			if result != nil && result.FinalError != nil {
+				pushErr = result.FinalError
+			}
 			logger.ErrorContextKV(msgCtx, "离线消息推送失败",
 				"user_id", userID,
 				"message_id", message.MessageID,
 				"error", pushErr,
 			)
 			failedIDs = append(failedIDs, message.MessageID)
-			// 推送失败 → message_record 状态 Failed + 离线推送状态更新（保留待下次上线重试）
-			m.updateMessageStatusAsync(msgCtx, message.MessageID, message.Receiver, models.MessageSendStatusFailed, models.FailureReasonConnError, pushErr.Error())
-			if err := m.offlineHandler.UpdatePushStatus(msgCtx, []string{message.MessageID}, pushErr); err != nil {
-				logger.ErrorContextKV(msgCtx, "更新离线消息推送失败状态失败",
-					"user_id", userID,
-					"message_id", message.MessageID,
-					"error", err,
-				)
+			if batchPushErr == nil {
+				batchPushErr = pushErr
 			}
+			// 推送失败 → message_record 状态 Failed（statusUpdater 已攒批异步 UPDATE，不逐条同步 IO）
+			m.updateMessageStatusAsync(msgCtx, message.MessageID, message.Receiver, models.MessageSendStatusFailed, models.FailureReasonConnError, pushErr.Error())
 			continue
 		}
 		pushedIDs = append(pushedIDs, message.MessageID)
+	}
+
+	// 推送失败状态攒批一次（N 次同步 UPDATE → 1 次）：retry_count 由存储侧原子递增
+	// 计满 max_retry 后读取侧 ExcludeExhausted 过滤，毒消息不再被反复捞出重推
+	if len(failedIDs) > 0 {
+		if err := m.offlineHandler.UpdatePushStatus(ctx, failedIDs, batchPushErr); err != nil {
+			logger.ErrorContextKV(ctx, "更新离线消息推送失败状态失败",
+				"user_id", userID,
+				"count", len(failedIDs),
+				"error", err,
+			)
+		}
 	}
 
 	// 推送成功的按 message_id 删 MySQL（drain 路径去重 + MySQL 路径清理）

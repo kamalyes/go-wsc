@@ -180,6 +180,47 @@ func TestClientJSONMarshalNilMetadataEmptyGroupID(t *testing.T) {
 	}
 }
 
+// TestClientMetadataLazyAllocation 惰性分配：NewClient 不预建 map，首次写入创建，
+// 序列化边界（MarshalJSON/快照）输出空对象保持 JSON 形态与预分配时代一致
+func TestClientMetadataLazyAllocation(t *testing.T) {
+	client := NewClient("c-lazy", "u-lazy", UserTypeCustomer)
+
+	if client.Metadata != nil {
+		t.Fatal("NewClient 不应预分配 Metadata（省 ~300B/conn）")
+	}
+
+	// 序列化边界：无元数据输出空对象（非 null，与预分配时代形态一致）
+	data, err := json.Marshal(client)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	meta, ok := m["metadata"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("无元数据时 metadata 应序列化为空对象，实际 %T", m["metadata"])
+	}
+	if len(meta) != 0 {
+		t.Fatalf("空对象不应携带条目，实际 %v", meta)
+	}
+
+	// 快照边界同样返回空对象（连接记录落库 metadata 列形态不变）
+	if snap := client.GetMetadataSnapshot(); snap == nil || len(snap) != 0 {
+		t.Fatalf("无元数据快照应返回空对象，实际 %v", snap)
+	}
+
+	// 首次写入惰性创建
+	client.SetMetadataValue("platform", "web")
+	if client.Metadata == nil {
+		t.Fatal("首次写入应惰性创建 Metadata map")
+	}
+	if v, ok := client.GetMetadataValue("platform"); !ok || v != "web" {
+		t.Fatalf("写入后应可读取，实际 (%v, %v)", v, ok)
+	}
+}
+
 // TestClientJSONMarshalConcurrentWithOtherFields 验证“其它字段”也安全：
 // MarshalJSON 持 mu.RLock 贯穿 json.Marshal，与所有 With* 写入器（持 mu.Lock）互斥
 // 并发改 Role/Department/Skills/MaxTickets/NodeInfo/ClientType/Namespace/ClientIP/GroupID，

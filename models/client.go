@@ -26,35 +26,37 @@ import (
 
 // Client 客户端连接（统一管理 WebSocket 和 SSE 连接）
 type Client struct {
-	ID             string                 `json:"id"`                  // 客户端ID
-	UserID         string                 `json:"user_id"`             // 用户ID
-	AppID          string                 `json:"app_id,omitempty"`    // 应用ID（最上层隔离维度，入口层归一化为 DefaultAppID，用于应用间消息隔离）
-	Namespace      string                 `json:"namespace"`           // 命名空间ID（默认 "default"，类似 k8s namespace，用于观察者过滤与命名空间隔离）
-	GroupID        string                 `json:"group_id,omitempty"`  // 默认群组ID（普通用户=连接后自动加入；观察者=订阅的观察群组，空=观察整个命名空间）
-	GroupIDs       []string               `json:"group_ids,omitempty"` // 连接时自动加入的全部群组列表（管理端一人多组场景）；GetGroupIDs 回退链：GroupIDs→[GroupID]→[DefaultGroupID]
-	UserType       UserType               `json:"user_type"`           // 用户类型
-	VIPLevel       VIPLevel               `json:"vip_level"`           // VIP等级
-	Role           UserRole               `json:"role"`                // 用户角色
-	ClientIP       string                 `json:"client_ip"`           // 客户端IP
-	Conn           *websocket.Conn        `json:"-"`                   // WebSocket连接（不序列化，仅WS使用）
-	ConnectedAt    time.Time              `json:"connected_at"`        // 连接时间
-	Status         UserStatus             `json:"status"`              // 用户状态
-	Department     Department             `json:"department"`          // 部门
-	Skills         []Skill                `json:"skills"`              // 技能列表
-	MaxTickets     int                    `json:"max_tickets"`         // 最大工单数
-	NodeID         string                 `json:"node_id"`             // 所在节点ID
-	NodeIP         string                 `json:"node_ip"`             // 所在节点IP
-	NodePort       int                    `json:"node_port"`           // 所在节点端口
-	ClientType     ClientType             `json:"client_type"`         // 客户端类型（web/mobile/desktop）
-	ConnectionType ConnectionType         `json:"connection_type"`     // 连接类型（websocket/sse）
-	Metadata       map[string]interface{} `json:"metadata"`            // 元数据
-	SendChan       chan []byte            `json:"-"`                   // 发送通道（不序列化，仅WS使用）
-	CtrlCh         chan []byte            `json:"-"`                   // 控制通道（必达级：KickOut/ForceOffline/Ack 等；写泵 select 前优先排空，容量见 constants.CtrlChanCapacity）
-	PongCh         chan []byte            `json:"-"`                   // pong 控制帧队列（不序列化，cap 1；读协程收到协议级 PING 后非阻塞投递，写泵统一写出——gorilla 单写者模式）
-	DoneCh         chan struct{}          `json:"-"`                   // 生命周期关闭信号（注销时 close，写泵 select 退出；数据通道永不 close，消除 send/close 竞态）
-	Context        context.Context        `json:"-"`                   // 上下文（不序列化）
-	closed         atomic.Bool            `json:"-"`                   // channel关闭标志（不序列化）
-	CloseMu        sync.Mutex             `json:"-"`                   // 保护channel关闭的互斥锁（不序列化）
+	ID             string          `json:"id"`                  // 客户端ID
+	UserID         string          `json:"user_id"`             // 用户ID
+	AppID          string          `json:"app_id,omitempty"`    // 应用ID（最上层隔离维度，入口层归一化为 DefaultAppID，用于应用间消息隔离）
+	Namespace      string          `json:"namespace"`           // 命名空间ID（默认 "default"，类似 k8s namespace，用于观察者过滤与命名空间隔离）
+	GroupID        string          `json:"group_id,omitempty"`  // 默认群组ID（普通用户=连接后自动加入；观察者=订阅的观察群组，空=观察整个命名空间）
+	GroupIDs       []string        `json:"group_ids,omitempty"` // 连接时自动加入的全部群组列表（管理端一人多组场景）；GetGroupIDs 回退链：GroupIDs→[GroupID]→[DefaultGroupID]
+	UserType       UserType        `json:"user_type"`           // 用户类型
+	VIPLevel       VIPLevel        `json:"vip_level"`           // VIP等级
+	Role           UserRole        `json:"role"`                // 用户角色
+	ClientIP       string          `json:"client_ip"`           // 客户端IP
+	Conn           *websocket.Conn `json:"-"`                   // WebSocket连接（不序列化，仅WS使用）
+	ConnectedAt    time.Time       `json:"connected_at"`        // 连接时间
+	Status         UserStatus      `json:"status"`              // 用户状态
+	Department     Department      `json:"department"`          // 部门
+	Skills         []Skill         `json:"skills"`              // 技能列表
+	MaxTickets     int             `json:"max_tickets"`         // 最大工单数
+	NodeID         string          `json:"node_id"`             // 所在节点ID
+	NodeIP         string          `json:"node_ip"`             // 所在节点IP
+	NodePort       int             `json:"node_port"`           // 所在节点端口
+	ClientType     ClientType      `json:"client_type"`         // 客户端类型（web/mobile/desktop）
+	ConnectionType ConnectionType  `json:"connection_type"`     // 连接类型（websocket/sse）
+	// Metadata 惰性分配：NewClient 不预建 map（省 ~300B/conn），首次写入经
+	// SetMetadataValue/WithMetadataMap 惰性创建；序列化边界输出空对象保持 JSON 形态不变
+	Metadata map[string]interface{} `json:"metadata"` // 元数据
+	SendChan chan []byte            `json:"-"`        // 发送通道（不序列化，仅WS使用）
+	CtrlCh   chan []byte            `json:"-"`        // 控制通道（必达级：KickOut/ForceOffline/Ack 等；写泵 select 前优先排空，容量见 constants.CtrlChanCapacity）
+	PongCh   chan []byte            `json:"-"`        // pong 控制帧队列（不序列化，cap 1；读协程收到协议级 PING 后非阻塞投递，写泵统一写出——gorilla 单写者模式）
+	DoneCh   chan struct{}          `json:"-"`        // 生命周期关闭信号（注销时 close，写泵 select 退出；数据通道永不 close，消除 send/close 竞态）
+	Context  context.Context        `json:"-"`        // 上下文（不序列化）
+	closed   atomic.Bool            `json:"-"`        // channel关闭标志（不序列化）
+	CloseMu  sync.Mutex             `json:"-"`        // 保护channel关闭的互斥锁（不序列化）
 
 	// 原子时间戳（LastHeartbeat/LastSeen/LastPong 的唯一存储：Set* 仅写原子、Get* 仅读原子，
 	// 消除并发读写数据竞争；序列化输出经 MarshalJSON 的原子读覆盖，无 time.Time 字段）
@@ -102,7 +104,6 @@ func NewClient(id, userID string, userType UserType) *Client {
 		Namespace:   constants.DefaultNamespace, // 默认命名空间（入口层 WithNamespace 覆盖；广播场景显式置空）
 		ConnectedAt: now,
 		Status:      UserStatusOnline,
-		Metadata:    make(map[string]interface{}),
 		DoneCh:      make(chan struct{}), // 生命周期关闭信号（注册时 SendChan 由容量管理器按 UserType 容量分配，DoneCh 统一在此创建）
 		Context:     context.Background(),
 	}
@@ -147,11 +148,12 @@ func (c *Client) SetMetadataValue(key string, value interface{}) {
 }
 
 // GetMetadataSnapshot 线程安全地获取元数据的只读副本（用于序列化/日志）
+// 惰性分配下无元数据时返回空对象（非 nil），保持序列化输出形态与预分配时代一致（metadata:{}）
 func (c *Client) GetMetadataSnapshot() map[string]interface{} {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if c.Metadata == nil {
-		return nil
+		return map[string]interface{}{}
 	}
 	snapshot := make(map[string]interface{}, len(c.Metadata))
 	for k, v := range c.Metadata {
@@ -190,12 +192,10 @@ func (c *Client) MarshalJSON() ([]byte, error) {
 	defer c.mu.RUnlock()
 
 	// 内联 Metadata 快照：已持 RLock，不能再调 GetMetadataSnapshot（会再次 RLock 导致死锁/阻塞）
-	var metadataSnapshot map[string]interface{}
-	if c.Metadata != nil {
-		metadataSnapshot = make(map[string]interface{}, len(c.Metadata))
-		for k, v := range c.Metadata {
-			metadataSnapshot[k] = v
-		}
+	// 惰性分配下 nil Metadata 输出空对象（range nil map 为 no-op），保持 JSON 形态与预分配时代一致
+	metadataSnapshot := make(map[string]interface{}, len(c.Metadata))
+	for k, v := range c.Metadata {
+		metadataSnapshot[k] = v
 	}
 
 	type clientAlias Client

@@ -11,16 +11,18 @@
 package client
 
 import (
-	"github.com/kamalyes/go-wsc/models"
 	"net/http"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/kamalyes/go-wsc/models"
 )
 
 // WebSocket 结构体表示底层 WebSocket 连接
 type WebSocket struct {
-	Url            string              // 连接 URL
+	Url            string              // 连接 URL（单地址模式的目标；多地址模式仅作初始回退）
 	Conn           *websocket.Conn     // WebSocket 连接
 	Dialer         *websocket.Dialer   // WebSocket 拨号器
 	RequestHeader  http.Header         // 请求头
@@ -32,6 +34,11 @@ type WebSocket struct {
 	sendChanMu     *sync.RWMutex       // 保护 sendChan 指针和关闭操作
 	sendChanClosed int32               // 发送通道关闭标记（原子）
 	sendChanOnce   sync.Once           // 只关闭一次
+
+	// servers LB 直连地址列表（空 = 单地址模式，仅用 Url；非空则建连优先走列表随机挑选）
+	servers []string
+	// connectedUrl 当前实际连上的地址（每次拨号成功后更新；原子存取避免与并发观测读竞争）
+	connectedUrl atomic.Value
 }
 
 // NewWebSocket 创建一个新的 WebSocket 连接

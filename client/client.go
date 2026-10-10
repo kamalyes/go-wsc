@@ -69,6 +69,35 @@ func New(url string) *Client {
 	}
 }
 
+// NewWithServers 创建多服务器直连客户端（LB 直连模式）
+// 每次建连/重连随机挑选地址：长连接场景下连接天然均匀分布到各节点，
+// 断线重连风暴自动再平衡（不再集中打回原节点）；单地址失败同轮轮转剩余地址
+func NewWithServers(urls []string) *Client {
+	return New("").WithServers(urls)
+}
+
+// WithServers 设置服务器直连地址列表（链式，LB 直连模式）
+// 列表非空时建连优先走列表（随机挑选 + 失败轮转），Url 仅作列表为空时的单地址回退；
+// 空列表与全空元素被忽略（保持既有单地址行为）；集群内可配合 ResolveServers
+// 解析 headless Service 拿到全量 Pod 地址
+func (c *Client) WithServers(urls []string) *Client {
+	if servers := sanitizeServers(urls); len(servers) > 0 {
+		c.WebSocket.servers = servers
+		if c.WebSocket.Url == "" {
+			c.WebSocket.Url = servers[0]
+		}
+	}
+	return c
+}
+
+// ConnectedUrl 返回当前实际连上的地址（观测/诊断；多地址直连模式下每次拨号可能不同，未连接过返回空串）
+func (c *Client) ConnectedUrl() string {
+	if v, ok := c.WebSocket.connectedUrl.Load().(string); ok {
+		return v
+	}
+	return ""
+}
+
 // SetConfig 设置客户端配置
 // 参数 config: 用户自定义的配置
 func (c *Client) SetConfig(config *wscconfig.WSC) {

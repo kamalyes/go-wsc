@@ -11,15 +11,16 @@
 package client
 
 import (
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/kamalyes/go-wsc/models"
-
 	"github.com/gorilla/websocket"
 	"github.com/jpillora/backoff"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
+
+	"github.com/kamalyes/go-wsc/models"
 )
 
 // Closed 返回连接状态
@@ -77,9 +78,34 @@ func (c *Client) createBackoff() *backoff.Backoff {
 }
 
 // attemptConnection 尝试建立连接
+//
+// 多服务器（LB 直连）模式：每次尝试随机挑选起始地址，失败同轮轮转剩余地址，
+// 全部失败才返回最后一次错误——退避后的重试重新随机挑选（重连风暴自动再平衡）；
+// 单地址模式保持原行为（直接拨号 Url）
 func (c *Client) attemptConnection() error {
+	servers := c.WebSocket.servers
+	if len(servers) <= 1 {
+		return c.dialServer(c.WebSocket.Url)
+	}
+
+	// 随机起点 + 顺序轮转：单轮覆盖全部地址且无重复
+	start := rand.IntN(len(servers))
+	var lastErr error
+	for i := 0; i < len(servers); i++ {
+		url := servers[(start+i)%len(servers)]
+		if err := c.dialServer(url); err != nil {
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+	return lastErr
+}
+
+// dialServer 拨号指定服务器地址并记录实际连上的地址（直连模式下每次拨号可能不同）
+func (c *Client) dialServer(url string) error {
 	// 使用 Dialer 建立 WebSocket 连接
-	conn, httpResp, err := c.WebSocket.Dialer.Dial(c.WebSocket.Url, c.WebSocket.RequestHeader)
+	conn, httpResp, err := c.WebSocket.Dialer.Dial(url, c.WebSocket.RequestHeader)
 	if err != nil {
 		return err
 	}
@@ -90,6 +116,8 @@ func (c *Client) attemptConnection() error {
 	c.WebSocket.HttpResponse = httpResp
 	c.WebSocket.connMu.Unlock()
 
+	// 记录实际连上的地址（原子存取，与并发观测读无竞争）
+	c.WebSocket.connectedUrl.Store(url)
 	return nil
 }
 

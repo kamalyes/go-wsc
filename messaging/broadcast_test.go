@@ -377,6 +377,64 @@ func TestBroadcastToUserIDs_WSAndSSE(t *testing.T) {
 	}
 }
 
+// TestBroadcastFrameToUserIDs_WSAndSSE 验证预编码帧直发：WS 原样收到 frame 字节（零二次编码），
+// SSE 经 msg 对象通道收到 wrapper（SSE 无预编码通道）
+func TestBroadcastFrameToUserIDs_WSAndSSE(t *testing.T) {
+	m, host := newTestManager()
+
+	wsClient := makeTestClient("c-frame-ws", "u-frame-ws")
+	sseClient := makeSSEClient("c-frame-sse", "u-frame-sse")
+	host.GetShardedRegistry().AddClient(wsClient)
+	host.GetShardedRegistry().AddClient(sseClient)
+
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
+	msg := makeGroupMessage("sender")
+	msg.MessageID = "frame-1"
+	frame := []byte(`["p1","p2","p3"]`)
+
+	delivered := m.BroadcastFrameToUserIDs(ctx, []string{"u-frame-ws", "u-frame-sse"}, msg, frame)
+	assert.Equal(t, 2, delivered)
+
+	select {
+	case data := <-wsClient.SendChan:
+		assert.JSONEq(t, `["p1","p2","p3"]`, string(data), "WS 应原样收到预编码数组帧，不经历二次 Marshal")
+		assert.Equal(t, frame, data, "帧字节应逐字节一致（无转义膨胀）")
+	case <-time.After(time.Second):
+		t.Fatal("WS 客户端未收到预编码帧")
+	}
+
+	select {
+	case got := <-sseClient.SSEMessageCh:
+		assert.Equal(t, "frame-1", got.MessageID, "SSE 仍经 wrapper msg 对象通道")
+	case <-time.After(time.Second):
+		t.Fatal("SSE 客户端未收到消息")
+	}
+}
+
+// TestBroadcastFrameToUserIDs_EmptyFrameFallsBack 验证空 frame 回退常规 Marshal 路径（防御未编码调用方）
+func TestBroadcastFrameToUserIDs_EmptyFrameFallsBack(t *testing.T) {
+	m, host := newTestManager()
+
+	wsClient := makeTestClient("c-fb-ws", "u-fb-ws")
+	host.GetShardedRegistry().AddClient(wsClient)
+
+	ctx := routing.NewRoute().WithAppID("").WithNamespace(constants.DefaultNamespace).WithGroupIDs(nil).Inject(context.Background())
+	msg := makeGroupMessage("sender")
+	msg.MessageID = "fallback-1"
+
+	delivered := m.BroadcastFrameToUserIDs(ctx, []string{"u-fb-ws"}, msg, nil)
+	assert.Equal(t, 1, delivered)
+
+	select {
+	case data := <-wsClient.SendChan:
+		var got models.HubMessage
+		require.NoError(t, json.Unmarshal(data, &got))
+		assert.Equal(t, "fallback-1", got.MessageID, "空 frame 应回退 Marshal(msg)")
+	case <-time.After(time.Second):
+		t.Fatal("WS 客户端未收到消息")
+	}
+}
+
 // TestBroadcastToUserIDs_NamespaceIsolation 验证 namespace 路由隔离
 func TestBroadcastToUserIDs_NamespaceIsolation(t *testing.T) {
 	m, host := newTestManager()

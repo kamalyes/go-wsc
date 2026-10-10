@@ -15,6 +15,7 @@
  *   deliver_modes：P2P / 群组可靠 / 群组广播 / 命名空间 / 全局（消息级日志降 Debug 后的观测补位）
  *   cluster_grpc：跨节点 gRPC 直连投递（消息数与累计节点数，均扇出 = nodes/messages）
  *   cluster_pubsub_fallbacks：PubSub 兜底发布次数（gRPC 未覆盖时的降级频率）
+ *   cluster_dispatch_syncs：集群分发队列满时可靠档同步直发降级次数（分布式池反压观测）
  *
  * 守恒不变量（送达保证的量化验收，测试断言）：
  *   必达/普通级：realtime + offline + unrecoverable == admitted
@@ -78,6 +79,10 @@ type OverloadMetrics struct {
 
 	// clusterPubSubFallbacks PubSub 兜底发布次数（gRPC 未覆盖节点时的降级路径，成功发布口径）
 	clusterPubSubFallbacks atomic.Int64
+
+	// clusterDispatchSyncs 集群分发队列满时可靠档同步直发降级计数
+	// （分布式池反压的直观测点：持续增长说明跨节点消费能力不足，需扩 worker 或分容量）
+	clusterDispatchSyncs atomic.Int64
 }
 
 // deliverMetricBuckets Deliver 路由分支计数桶（决策树五模式，下标对齐 DeliveryMode 枚举顺序）
@@ -188,6 +193,11 @@ func (m *OverloadMetrics) RecordClusterPubSubFallback() {
 	m.clusterPubSubFallbacks.Add(1)
 }
 
+// RecordClusterDispatchSync 集群分发队列满时可靠档同步直发降级埋点
+func (m *OverloadMetrics) RecordClusterDispatchSync() {
+	m.clusterDispatchSyncs.Add(1)
+}
+
 // OverloadStats 送达漏斗与过载指标快照（map 形态，并入现有 stats 查询体系）
 func (m *OverloadMetrics) OverloadStats() map[string]any {
 	read := func(b *guaranteeMetricBuckets) map[string]int64 {
@@ -221,6 +231,7 @@ func (m *OverloadMetrics) OverloadStats() map[string]any {
 		"cluster_grpc_messages":    m.clusterGRPCMessages.Load(),
 		"cluster_grpc_nodes":       m.clusterGRPCNodes.Load(),
 		"cluster_pubsub_fallbacks": m.clusterPubSubFallbacks.Load(),
+		"cluster_dispatch_syncs":   m.clusterDispatchSyncs.Load(),
 	}
 }
 
@@ -238,6 +249,7 @@ func (m *OverloadMetrics) MetricsSnapshot() map[string]int64 {
 		"cluster_grpc_messages":    m.clusterGRPCMessages.Load(),
 		"cluster_grpc_nodes":       m.clusterGRPCNodes.Load(),
 		"cluster_pubsub_fallbacks": m.clusterPubSubFallbacks.Load(),
+		"cluster_dispatch_syncs":   m.clusterDispatchSyncs.Load(),
 	}
 }
 

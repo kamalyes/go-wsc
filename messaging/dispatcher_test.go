@@ -1,4 +1,4 @@
-/*
+﻿/*
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-07-18 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
@@ -202,7 +202,7 @@ func TestMessageHandlerDirectMessage(t *testing.T) {
 		msg.Receiver = "u-dm"
 		msg.ReceiverClient = "c-dm2" // 仅投递给 c2
 
-		m.handleDirectMessage(host.Context(), msg)
+		m.handleDirectMessage(host.Context(), msg, nil)
 
 		// c2 收到
 		select {
@@ -233,7 +233,7 @@ func TestMessageHandlerDirectMessage(t *testing.T) {
 		// handleDirectMessage 直接读 msg.AppID 做 ClientMatchesEnvelope 严格匹配
 		msg.InjectRoute(host.Context())
 
-		m.handleDirectMessage(host.Context(), msg)
+		m.handleDirectMessage(host.Context(), msg, nil)
 
 		for _, c := range []*models.Client{c1, c2} {
 			select {

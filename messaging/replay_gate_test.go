@@ -4,7 +4,7 @@
  * @LastEditors: kamalyes 501893067@qq.com
  * @LastEditTime: 2026-09-23 10:05:00
  * @FilePath: \go-wsc\messaging\replay_gate_test.go
- * @Description: 首连离线回放门闩单元测试（暂存顺序 / 超限直通 / 未回放直通 / panic 开闸）
+ * @Description: 首连离线回放门闩单元测试（暂存顺序 / 超限直通 / 未回放直通 / panic 开闸 / 并发竞态 / 免锁快路径基准）
  *
  * Copyright (c) 2026 by kamalyes, All Rights Reserved.
  */
@@ -74,4 +74,93 @@ func TestReplayGate_ReplayAfterEnd(t *testing.T) {
 	g.hold("u-5", func() { executed = true })
 	assert.True(t, executed)
 	assert.Equal(t, []int{1}, order)
+}
+
+func TestReplayGate_FastPathCounterLifecycle(t *testing.T) {
+	g := NewReplayGate()
+
+	// 闸门全开：计数为 0，快路径直投
+	assert.Zero(t, g.live.Load(), "初始应无回放用户")
+	executed := false
+	assert.False(t, g.hold("u-6", func() { executed = true }), "闸门全开应直通")
+	assert.True(t, executed)
+
+	// begin/end 幂等约束下计数守恒：重复 begin 只计一次
+	g.begin("u-7")
+	g.begin("u-7")
+	assert.Equal(t, int64(1), g.live.Load(), "重复 begin 计数应保持一次")
+	g.end("u-7")
+	g.end("u-7")
+	assert.Zero(t, g.live.Load(), "end 后计数应归零")
+
+	// 多用户并存：全部回放结束后归零
+	g.begin("u-8")
+	g.begin("u-9")
+	assert.Equal(t, int64(2), g.live.Load())
+	g.end("u-8")
+	g.end("u-9")
+	assert.Zero(t, g.live.Load())
+}
+
+func TestReplayGate_ConcurrentHoldDuringReplay(t *testing.T) {
+	g := NewReplayGate()
+
+	const broadcasts = 200
+
+	// 生产端：一半投递在回放中（应全部补投），一半在开闸后（应直投）
+	var mu sync.Mutex
+	heldTotal := 0
+	delivered := make([]bool, broadcasts*2)
+	next := 0
+
+	g.begin("u-stress")
+	for i := 0; i < broadcasts; i++ {
+		idx := next
+		next++
+		held := g.hold("u-stress", func() { delivered[idx] = true })
+		if held {
+			mu.Lock()
+			heldTotal++
+			mu.Unlock()
+		}
+	}
+	g.end("u-stress")
+	for i := 0; i < broadcasts; i++ {
+		idx := next
+		next++
+		g.hold("u-stress", func() { delivered[idx] = true })
+	}
+
+	// 守恒：全部投递恰好执行一次（暂存补投 + 直投无重复无丢失）
+	deliveredCount := 0
+	for _, ok := range delivered {
+		if ok {
+			deliveredCount++
+		}
+	}
+	assert.Equal(t, broadcasts*2, deliveredCount, "投递应恰好执行一次")
+	assert.Equal(t, broadcasts, heldTotal, "回放中投递应全部暂存（未触上限）")
+	assert.Zero(t, g.live.Load(), "结束后计数应归零")
+}
+
+func BenchmarkReplayGate_HoldGateOpen(b *testing.B) {
+	// 闸门全开（绝大多数时刻）：快路径仅一次原子读
+	g := NewReplayGate()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		g.hold("u-bench", func() {})
+	}
+}
+
+func BenchmarkReplayGate_HoldDuringReplay(b *testing.B) {
+	// 回放进行中：锁路径全流程（RLock 探测 + 写锁暂存）
+	g := NewReplayGate()
+	g.begin("u-bench")
+	defer g.end("u-bench")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		g.hold("u-bench", func() {})
+	}
 }

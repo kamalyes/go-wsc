@@ -10,7 +10,7 @@
  *   同一 clientID 的多条心跳在 flush 时去重，仅保留最新
  *
  * 工作流程：
- *   1. 心跳路径调用 Submit（非阻塞，队列满时丢弃）
+ *   1. 心跳路径经 per-connection 节流后调用 Submit（非阻塞，队列满时丢弃）
  *   2. BatchProcessor 后台 worker 收集，满 batchSize 或每 flushInterval 触发 flush
  *   3. flush 时按 clientID 去重，分别调用 connect/quality 两 repo 的
  *      BatchUpdateHeartbeats（时间戳落 wsc_connection_records，Ping 统计落 wsc_connection_qualities）
@@ -33,7 +33,6 @@ import (
 type HeartbeatStatsEntry struct {
 	ClientID string
 	PingTime time.Time
-	PongTime time.Time
 	PingMs   float64
 }
 
@@ -79,11 +78,9 @@ func (u *HeartbeatStatsUpdater) flush(batch []*HeartbeatStatsEntry) {
 	for _, entry := range deduped {
 		// 复制局部变量避免循环变量逃逸问题
 		pingTime := entry.PingTime
-		pongTime := entry.PongTime
 		entries = append(entries, &models.HeartbeatUpdateEntry{
 			ConnectionID: entry.ClientID,
 			PingTime:     &pingTime,
-			PongTime:     &pongTime,
 			PingMs:       entry.PingMs,
 		})
 	}

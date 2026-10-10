@@ -68,6 +68,9 @@ type DeliverResult struct {
 	// 群组广播/命名空间广播/全局广播的本地送达数；全局广播为异步，此值为 0
 	LocalDelivered int
 
+	// 群组广播场景：可聚合档消息已入本地聚合窗口（drain 窗口批量扇出，LocalDelivered 不含窗口内消息；跨节点意图照常已发出）
+	Aggregated bool
+
 	Errors []error // 投递过程中的错误
 }
 

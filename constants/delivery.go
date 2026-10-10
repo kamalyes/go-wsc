@@ -39,6 +39,20 @@ const DefaultBroadcastShaperRate = 10000
 // DefaultCoalescerCapacity 高频合并器默认容量（同 key 并存的最大消息数）
 const DefaultCoalescerCapacity = 4096
 
+// DefaultAggregatorBatchSize 消息聚合器单群组窗口攒批上限（条）
+// 超限新消息直通降级（单发，性能降级不丢消息）；500ms 窗口 × 10条/s/人 = 5 条/窗口，
+// 64 覆盖 6 倍突发；数组单帧推送后每连接帧率 = 窗口频率（内核友好）
+const DefaultAggregatorBatchSize = 64
+
+// DefaultAggregatorDrainInterval 消息聚合器 drain 窗口节拍
+// 每窗口 Flush 一次全部群组（每群组产出一条数组帧）；每连接帧率 = 1/该值，
+// 弹幕端到端延迟上限 ≈ 窗口节拍 + 扇出耗时；与 go-config Aggregator.DrainInterval 默认同源
+const DefaultAggregatorDrainInterval = 500 * time.Millisecond
+
+// DefaultAggregatorMaxGroups 消息聚合器群组数上限（并发活跃发言群组）
+// 空群组在 Flush 换出空批时惰性删除；上限防群组风暴（恶意/爬虫建群）内存膨胀
+const DefaultAggregatorMaxGroups = 65536
+
 // SlowConsumerThresholdRatio 慢消费者判定的队列利用率阈值（BacklogRatio 超过即计一次）
 const SlowConsumerThresholdRatio = 0.9
 

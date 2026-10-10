@@ -13,7 +13,8 @@
  *   - 命名空间本地扇出：BroadcastToNamespace（nsIdx 反向索引定点扇出 + 大命中率自适应回退，
  *     deliverToNamespace 与跨节点消费侧共用）
  *   - 跨节点辅助：crossNodeGroupBroadcast（单群组跨节点）、batchGetGroupMembers（Pipeline 批量取成员）
- *   - 内部广播：BroadcastToFiltered / BroadcastToUserIDs（预序列化 + 直接 TrySend）
+ *   - 内部广播：BroadcastToFiltered / BroadcastToUserIDs / BroadcastFrameToUserIDs
+ *     （预序列化 + 直接 TrySend，末者为聚合 drain 专用的预编码帧直发入口）
  *   - 过滤类广播：BroadcastByUserType / BroadcastToRole / BroadcastToClientType / BroadcastToDepartment
  *     （按客户端属性过滤，与路由正交）
  *   - 高级包装：BroadcastPriority / BroadcastAfterDelay / BroadcastExclude（基于 Deliver）
@@ -323,6 +324,10 @@ func (m *Manager) deliverToGroupReliable(ctx context.Context, msg *models.HubMes
 //
 // 生产者-消费者模式：源节点只发广播意图（groupIDs+msg），不做成员读也不做全量扇出；
 // 本地与远端均由各节点经本地反向索引反查成员后扇出，消除大群跨节点的 Redis 读放大与单点扇出瓶颈
+//
+// 可聚合档接线：单群组 + 非排除发送者的可聚合消息先 Offer 进本地聚合窗口
+// （drain 窗口批量扇出），跨节点广播意图照常发出——各远端节点对本地成员
+// 各自聚合，聚合后全集群帧推送数 = 在线连接数（内核 pps 友好）
 func (m *Manager) deliverToGroupFireForget(ctx context.Context, msg *models.HubMessage, excludeSender bool) *models.DeliverResult {
 	// 路由信封已注入 ctx（Deliver 入口 InjectRoute，appID 已归一化非空），直接提取单一事实源
 	appID, namespace := routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx)
@@ -348,6 +353,15 @@ func (m *Manager) deliverToGroupFireForget(ctx context.Context, msg *models.HubM
 	ctx = msg.ContextWithRoute(ctx, appID, "", groupIDs)
 	if msg.CreateAt.IsZero() {
 		msg.CreateAt = time.Now()
+	}
+
+	// 0. 可聚合档入窗：本地扇出延后至 drain 窗口（跨节点意图照发，远端节点各自聚合）；
+	// 入窗成功即返回（fire-and-forget 语义：本地投递延后一个窗口，result 不计入 LocalDelivered）
+	if m.OfferAggregatable(ctx, msg, excludeSender) {
+		m.NotifyObservers(ctx, msg)
+		m.crossNodeGroupBroadcast(ctx, msg, excludeSender)
+		result.Aggregated = true
+		return result
 	}
 
 	// 1. 本地反向索引取成员（替代两段 Pipeline 全量读 Redis 成员）：只扇出本节点在线成员
@@ -427,10 +441,8 @@ func (m *Manager) deliverToNamespace(ctx context.Context, msg *models.HubMessage
 		Operation: models.OperationTypeBroadcast,
 		Namespace: namespace,
 	}
-	if !m.host.SubmitClusterDispatch(msg, opts) {
-		m.host.GetLogger().WarnContextKV(ctx, "集群分发队列已满，丢弃跨节点命名空间广播",
-			"namespace", namespace, "message_id", msg.MessageID)
-	}
+	// 队列满分道：express 语义丢弃 / 可靠档同步直发兜底（统一见 submitClusterDispatch）
+	m.submitClusterDispatch(ctx, msg, opts)
 
 	result.LocalDelivered = count
 	return result
@@ -463,16 +475,52 @@ func (m *Manager) deliverGlobally(ctx context.Context, msg *models.HubMessage) *
 		Operation: models.OperationTypeBroadcast,
 		Namespace: "", // 全命名空间广播
 	}
-	if !m.host.SubmitClusterDispatch(msg, opts) {
-		m.host.GetLogger().WarnContextKV(ctx, "集群分发队列已满，丢弃跨节点广播",
-			"message_id", msg.MessageID)
-	}
+	// 队列满分道：express 语义丢弃 / 可靠档同步直发兜底（统一见 submitClusterDispatch）
+	m.submitClusterDispatch(ctx, msg, opts)
 
-	// 本地广播（直接异步执行，不经过 EventLoop channel 串行化）
-	go m.handleBroadcast(msg)
+	// 本地广播（直接异步执行，不经过 EventLoop channel 串行化；编码由 handleDirectMessage 兜底）
+	go m.handleBroadcast(msg, nil)
 
 	// 全局广播为异步，LocalDelivered 不计入（与历史 Broadcast 无返回值语义一致）
 	return result
+}
+
+// OfferAggregatable 可聚合档消息入窗尝试（群组广播链路统一接线点）
+//
+// 返回 true = 已入本地聚合窗口：调用方跳过即时本地扇出（drain 窗口批量扇出，
+// 各节点对本地成员各自聚合——源节点 + 跨节点入站流共用本入口）；
+// 返回 false = 不聚合或降级直通（调用方走原路径，性能降级不丢消息）：
+//   - 聚合器未启用 / 消息非可聚合档 / 多群组 / 排除发送者（窗口扇出无法复现逐成员排除语义）
+//   - 窗口满 / 群组数满（Offer 降级直通）
+//   - 序列化失败（编码前置一次，失败直通单发）
+//
+// 编码前置：入窗即完成本消息的序列化（drain 拼装为纯字节拼接，零重编码）
+func (m *Manager) OfferAggregatable(ctx context.Context, msg *models.HubMessage, excludeSender bool) bool {
+	aggregator := m.host.GetMessageAggregator()
+	if aggregator == nil || excludeSender {
+		return false
+	}
+
+	// 分级解析（读锁 + 决策树）：非可聚合档直通（大多数消息一次字段读即返回）
+	if msg.ResolveGuarantee() != models.GuaranteeAggregatable {
+		return false
+	}
+
+	// 单群组才聚合（多群组语义上无单一聚合 key，直通原路径）
+	groupIDs := routing.GroupIDsFromContext(ctx)
+	if len(groupIDs) != 1 {
+		return false
+	}
+
+	// 编码前置一次（数组拼装零重编码；失败直通单发）
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		m.host.GetLogger().ErrorContextKV(ctx, "可聚合消息序列化失败，直通单发",
+			"message_id", msg.MessageID, "error", err)
+		return false
+	}
+
+	return aggregator.Offer(routing.AppIDFromContext(ctx), groupIDs[0], payload)
 }
 
 // crossNodeGroupBroadcast 跨节点群组广播（单/多群组统一入口）
@@ -503,11 +551,35 @@ func (m *Manager) crossNodeGroupBroadcast(ctx context.Context, msg *models.HubMe
 		SenderID:      senderID,
 	}
 
-	if !m.host.SubmitClusterDispatch(msg, opts) {
-		m.host.GetLogger().WarnContextKV(ctx, "集群分发队列已满，丢弃跨节点群组广播",
-			"namespace", namespace, "group_ids", groupIDs,
-			"message_id", msg.MessageID)
+	// 队列满分道：express 语义丢弃 / 可靠档同步直发兜底（统一见 submitClusterDispatch）
+	m.submitClusterDispatch(ctx, msg, opts)
+}
+
+// submitClusterDispatch 分级跨节点分发提交（分布式池队列满分道）
+//
+// notice 与高频消息不同命（语义化丢弃）：
+//   - express 档（高频流式/可聚合）：队列满语义丢弃计数——洪峰下后续消息自然覆盖，丢弃是正确行为
+//   - reliable 档：同步直发兜底（调用方承担一次 routeToCluster RTT 作天然反压）——业务 notice
+//     不因队列满丢失；降级次数进 stats（cluster_dispatch_syncs，持续增长 = 跨节点消费能力不足）
+func (m *Manager) submitClusterDispatch(ctx context.Context, msg *models.HubMessage, opts cluster.ClusterDispatchOptions) bool {
+	if m.host.SubmitClusterDispatch(msg, opts) {
+		return true
 	}
+	if msg.ResolveGuarantee().IsExpress() {
+		m.host.GetOverloadMetrics().RecordEphemeralDrop()
+		m.host.GetLogger().DebugContextKV(ctx, "集群分发队列已满，express 广播语义丢弃",
+			"message_id", msg.MessageID)
+		return false
+	}
+	m.host.GetOverloadMetrics().RecordClusterDispatchSync()
+	m.host.GetLogger().InfoContextKV(ctx, "集群分发队列已满，可靠档降级同步直发",
+		"message_id", msg.MessageID, "operation", opts.Operation)
+	if err := m.host.RouteToCluster(ctx, msg, opts); err != nil {
+		m.host.GetLogger().WarnContextKV(ctx, "集群分发同步直发失败",
+			"message_id", msg.MessageID, "error", err)
+		return false
+	}
+	return true
 }
 
 // batchGetGroupMembers 批量获取多个群组成员并合并去重（跨 ns 聚合）
@@ -671,6 +743,26 @@ func (m *Manager) broadcastToFilteredNow(ctx context.Context, condition func(*mo
 //
 // 削峰填谷接线：同 BroadcastToFiltered（分级准入 + 出向整形 + 延迟队列路由）
 func (m *Manager) BroadcastToUserIDs(ctx context.Context, userIDs []string, msg *models.HubMessage) int {
+	return m.broadcastWithFrame(ctx, userIDs, msg, nil)
+}
+
+// BroadcastFrameToUserIDs 预编码帧直发扇出（聚合 drain 专用零二次编码入口）
+//
+// frame 为已编码的 WS 帧字节（如聚合器产出的裸 JSON 数组帧），逐成员 TrySend 直发，
+// 消除常规路径的二次 Marshal；msg 仍承担三件事：
+//   - 信封匹配键（AppID/Namespace/GroupIDs，per-device 过滤）
+//   - SSE 对象通道（TrySendSSE，SSE 无预编码通道）
+//   - TrySend 失败时的成员级分级兜底（routeDeliveryFallback）
+//
+// frame 为空时回退一次 Marshal（与常规路径同语义，防御调用方未编码场景）
+// 准入/整形/分片并行/顺序保证与 BroadcastToUserIDs 完全一致
+func (m *Manager) BroadcastFrameToUserIDs(ctx context.Context, userIDs []string, msg *models.HubMessage, frame []byte) int {
+	return m.broadcastWithFrame(ctx, userIDs, msg, frame)
+}
+
+// broadcastWithFrame 准入整形公共壳：admit/shaper 双闸门通过后进入扇出核心
+// frame 非空 = 预编码直发（零二次编码）；nil = 常规路径（核心体内 Marshal 一次）
+func (m *Manager) broadcastWithFrame(ctx context.Context, userIDs []string, msg *models.HubMessage, frame []byte) int {
 	// 路由信封同步：从 ctx 恢复路由到 msg 信封（幂等）
 	// 上游 deliverToGroupFireForget 已注入，此处作为二次兜底
 	// InjectRoute 同时回写 ctx，保证下游 ctx 与信封一致
@@ -679,7 +771,7 @@ func (m *Manager) BroadcastToUserIDs(ctx context.Context, userIDs []string, msg 
 	// 准入闸门（必达恒放行；普通/高频过载时延迟路由）
 	if verdict := m.host.AdmitMessage(msg, true); verdict != overload.VerdictAdmit {
 		m.host.DeferBroadcast(ctx, msg, func(c context.Context, bm *models.HubMessage) {
-			m.broadcastToUserIDsNow(c, userIDs, bm)
+			m.broadcastFrameToUserIDsNow(c, userIDs, bm, frame)
 		})
 		return 0
 	}
@@ -690,34 +782,40 @@ func (m *Manager) BroadcastToUserIDs(ctx context.Context, userIDs []string, msg 
 		!shaper.Allow() {
 		m.host.GetOverloadMetrics().RecordShaperDenied()
 		m.host.DeferBroadcast(ctx, msg, func(c context.Context, bm *models.HubMessage) {
-			m.broadcastToUserIDsNow(c, userIDs, bm)
+			m.broadcastFrameToUserIDsNow(c, userIDs, bm, frame)
 		})
 		return 0
 	}
 
-	return m.broadcastToUserIDsNow(ctx, userIDs, msg)
+	return m.broadcastFrameToUserIDsNow(ctx, userIDs, msg, frame)
 }
 
 // broadcastShardParallelUsers 用户数超过该阈值时启用分片并行扇出（低于则串行，省 goroutine 开销）
 const broadcastShardParallelUsers = 512
 
-// broadcastToUserIDsNow 预序列化 + 按 userIDs 扇出（延迟队列重投目标，不重复准入）
+// broadcastFrameToUserIDsNow 预编码帧/消息 + 按 userIDs 扇出（延迟队列重投目标，不重复准入）
+//
+// frame 非空直接复用（聚合 drain 零二次编码），nil 时 Marshal msg 一次
 //
 // 顺序保证（10w 级成员扇出的核心约束）：
 //   - 按 userID 均匀分片并行，同一 userID 的全部连接固定落在同一分片内串行投递，
 //     配合 client.sendChan 的 FIFO 语义 → 每个用户收到的消息顺序 = 广播调用顺序
 //   - 入口同步（WaitGroup 等全部 worker 完成）→ 调用方顺序调用两次广播，
 //     各用户 sendChan 的写入顺序与调用顺序一致
-func (m *Manager) broadcastToUserIDsNow(ctx context.Context, userIDs []string, msg *models.HubMessage) int {
+func (m *Manager) broadcastFrameToUserIDsNow(ctx context.Context, userIDs []string, msg *models.HubMessage, frame []byte) int {
 	if len(userIDs) == 0 {
 		return 0
 	}
 
 	// 预序列化 WebSocket 消息（仅一次；引擎由 go-toolbox/pkg/json 构建标签决定）
-	data, err := json.Marshal(msg)
-	if err != nil {
-		m.host.GetLogger().ErrorContextKV(ctx, "群组广播消息序列化失败", "error", err)
-		return 0
+	data := frame
+	if len(data) == 0 {
+		encoded, err := json.Marshal(msg)
+		if err != nil {
+			m.host.GetLogger().ErrorContextKV(ctx, "群组广播消息序列化失败", "error", err)
+			return 0
+		}
+		data = encoded
 	}
 
 	dataLen := len(data)
@@ -727,40 +825,27 @@ func (m *Manager) broadcastToUserIDsNow(ctx context.Context, userIDs []string, m
 	// 逐成员 ResolveGuarantee（读锁 + 决策树）是大群无谓开销，分级对同一 msg 恒定
 	guarantee := msg.ResolveGuarantee()
 
-	// 分片扇出闭包（单分片内串行按 userID 投递，保用户内顺序）
+	// 分片扇出（单分片内串行按 userID 投递，保用户内顺序）：
+	// 先 holding 预检（live==0 零锁直判，绝大多数时刻）——非回放中直接调
+	// deliverFanoutToUser（零闭包分配，10w 级扇出的 GC 主热点）；
+	// 回放中才构造闭包走 HoldUserDelivery 暂存（补投可能在任意 goroutine 执行，
+	// 成功计数走共享原子）；成功计数用分片局部变量累计、worker 退出一次性汇总
+	// （消除逐 client 原子加的 cache line 争用）
 	fanout := func(ids []string) {
-		// 按用户ID查找客户端（O(m)，仅锁定相关 shard，不遍历全部连接）
-		// 使用 ForEachUserClientFiltered 叠加路由信封(appId+namespace)匹配：
-		//   - 群组消息：client 必须同 app/ns 且 client.groupID 在 msg.GroupIDs 中
-		//   - 避免新加入群的成员通过"旧 userIDs 列表"收到不匹配其 group 的历史消息（与项目约束一致）
-		// 🔒 首连门闩：成员处于离线回放中时暂存本次投递，回放完成后按序补投
-		// （闭包捕获 data/msg，data 为预序列化不可变字节；msg 仅被 SSE TrySend 引用
-		// 读取，无并发写）
+		var local int32
 		for _, userID := range ids {
-			deliver := func() {
-				m.host.GetShardedRegistry().ForEachUserClientFiltered(userID, msg.AppID, msg.Namespace, msg.GroupIDs, func(_ string, client *models.Client) bool {
-					if client.IsClosed() {
-						return true
+			if m.holdingUserDelivery(userID) {
+				m.HoldUserDelivery(userID, func() {
+					if n := m.deliverFanoutToUser(userID, msg, data, dataLen, guarantee); n > 0 {
+						atomic.AddInt32(&successCount, int32(n))
 					}
-					if client.ConnectionType == models.ConnectionTypeSSE {
-						// SSE 客户端发送 msg 对象
-						if client.TrySendSSE(msg) {
-							atomic.AddInt32(&successCount, 1)
-						}
-					} else {
-						// WebSocket 客户端发送预序列化数据
-						if client.TrySend(data) {
-							atomic.AddInt32(&successCount, 1)
-							m.host.TrackReceiverMessageStats(client.ID, client.UserType, dataLen)
-						} else {
-							// 成员级分级兜底：普通/必达转离线（用户下次上线/重连时补发），高频语义丢弃
-							m.routeDeliveryFallback(msg, client, userID, guarantee)
-						}
-					}
-					return true
 				})
+				continue
 			}
-			m.HoldUserDelivery(userID, deliver)
+			local += int32(m.deliverFanoutToUser(userID, msg, data, dataLen, guarantee))
+		}
+		if local > 0 {
+			atomic.AddInt32(&successCount, local)
 		}
 	}
 
@@ -799,6 +884,42 @@ func (m *Manager) broadcastToUserIDsNow(ctx context.Context, userIDs []string, m
 	)
 
 	return int(totalSuccess)
+}
+
+// deliverFanoutToUser 单用户扇出投递：信封匹配过滤（app/ns/group）+ SSE/WS 分道 + 满道分级兜底
+//
+// 返回成功投递的连接数（多设备用户多条连接逐一计数，与历史扇出计数口径一致）；
+// 独立成方法使扇出热路径免闭包分配（原每用户构造的 deliver 闭包是
+// 10w 级扇出的 GC 主热点，pprof alloc_space 占比 98%）；
+// data 为预序列化不可变字节，msg 仅被 SSE TrySend 只读引用，无并发写
+func (m *Manager) deliverFanoutToUser(userID string, msg *models.HubMessage, data []byte, dataLen int, guarantee models.DeliveryGuarantee) int {
+	count := 0
+	// 按用户ID查找客户端（O(m)，仅锁定相关 shard，不遍历全部连接）
+	// ForEachUserClientFiltered 叠加路由信封(appId+namespace)匹配：
+	//   - 群组消息：client 必须同 app/ns 且 client.groupID 在 msg.GroupIDs 中
+	//   - 避免新加入群的成员通过"旧 userIDs 列表"收到不匹配其 group 的历史消息
+	m.host.GetShardedRegistry().ForEachUserClientFiltered(userID, msg.AppID, msg.Namespace, msg.GroupIDs, func(_ string, client *models.Client) bool {
+		if client.IsClosed() {
+			return true
+		}
+		if client.ConnectionType == models.ConnectionTypeSSE {
+			// SSE 客户端发送 msg 对象
+			if client.TrySendSSE(msg) {
+				count++
+			}
+			return true
+		}
+		// WebSocket 客户端发送预序列化数据
+		if client.TrySend(data) {
+			count++
+			m.host.TrackReceiverMessageStats(client.ID, client.UserType, dataLen)
+		} else {
+			// 成员级分级兜底：普通/必达转离线（用户下次上线/重连时补发），高频语义丢弃
+			m.routeDeliveryFallback(msg, client, userID, guarantee)
+		}
+		return true
+	})
+	return count
 }
 
 // ============================================================================

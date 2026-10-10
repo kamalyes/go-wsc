@@ -88,7 +88,6 @@ type WorkloadInfo struct {
 type HeartbeatUpdateEntry struct {
 	ConnectionID string
 	PingTime     *time.Time
-	PongTime     *time.Time
 	PingMs       float64 // >0 时更新 average/max/min_ping_ms
 }
 

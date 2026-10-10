@@ -119,6 +119,8 @@ type Host interface {
 	GetBroadcastShaper() *overload.Shaper
 	// GetEphemeralCoalescer 高频消息合并器（未启用时返回 nil）
 	GetEphemeralCoalescer() *overload.Coalescer
+	// GetMessageAggregator 消息聚合器（未启用时返回 nil）
+	GetMessageAggregator() *overload.MessageAggregator
 	// GetOverloadMetrics 过载漏斗指标（编排层恒注入）
 	GetOverloadMetrics() *overload.OverloadMetrics
 	// GetMessageStatusUpdater 消息状态批量更新器（未注入时返回 nil）

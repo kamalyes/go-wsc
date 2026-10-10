@@ -121,6 +121,7 @@ const (
 	MessageTypeCloseWindow          MessageType = "close_window"           // 关闭窗口消息
 	MessageTypeBStatusReminder      MessageType = "b_status_reminder"      // 业务状态提醒消息
 	MessageTypeGroupChanged         MessageType = "group_changed"          // 群组变更通知（成员被 move 时下发，告知客户端已切换群组）
+	MessageTypeStream               MessageType = "stream"                 // 高频流式聚合消息（弹幕/跑马灯/滚动通知；发送方用此类型声明消息可聚合，窗口攒批 N 条合 1 条数组帧，content 为 JSON 数组）
 )
 
 // String 实现Stringer接口

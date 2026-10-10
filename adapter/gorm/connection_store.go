@@ -203,20 +203,23 @@ func (r *ConnectionStore) BatchMarkDisconnected(ctx context.Context, entries []*
 	return r.db.WithContext(ctx).Exec(sb.String(), args...).Error
 }
 
-// BatchUpdateHeartbeats 批量更新心跳时间戳（connect 表 last_ping_at/last_pong_at）
+// BatchUpdateHeartbeats 批量更新心跳时间戳（connect 表 last_ping_at）
 // CASE WHEN 单 SQL 合并：批内 N 条逐条 UPDATE 压缩为 1 条
 // （SET col = CASE connection_id WHEN ? THEN ? ... ELSE col END WHERE connection_id IN (...)），
 // 消除逐条 Updates 的 map 解析/SQL 生成/协议往返（1w 连接 × 30s 心跳 = 333 entry/s 稳态下，
 // CPU profile 实测本路径占全进程 22%）；单 SQL 自身原子，无需事务包裹；
 // ELSE 保列值使无该字段的条目行保持原样；CASE WHEN 为 SQL 标准，MySQL/PG/CockroachDB 通吃
+//
+// last_pong_at 已停写：全链路只写不读（dashboard 同步但零查询），
+// 心跳统计经 per-connection 节流后落库（见 stats.Manager.TrackHeartbeatStats）
 func (r *ConnectionStore) BatchUpdateHeartbeats(ctx context.Context, entries []*models.HeartbeatUpdateEntry) error {
 	if len(entries) == 0 {
 		return nil
 	}
 
-	// 批内同连接多条 entry 按字段级合并（PingTime/PongTime 各取最后非 nil），
-	// 等价于逐条 UPDATE 的最终状态——entry 级覆盖会在"一条 ping + 一条 pong"互补时丢字段
-	type connectPatch struct{ ping, pong *time.Time }
+	// 批内同连接多条 entry 按字段级合并（PingTime 取最后非 nil），
+	// 等价于逐条 UPDATE 的最终状态
+	type connectPatch struct{ ping *time.Time }
 	patches := make(map[string]*connectPatch, len(entries))
 	for _, e := range entries {
 		p := patches[e.ConnectionID]
@@ -227,21 +230,15 @@ func (r *ConnectionStore) BatchUpdateHeartbeats(ctx context.Context, entries []*
 		if e.PingTime != nil {
 			p.ping = e.PingTime
 		}
-		if e.PongTime != nil {
-			p.pong = e.PongTime
-		}
 	}
 
-	var pingCount, pongCount int
+	pingCount := 0
 	for _, p := range patches {
 		if p.ping != nil {
 			pingCount++
 		}
-		if p.pong != nil {
-			pongCount++
-		}
 	}
-	if pingCount == 0 && pongCount == 0 {
+	if pingCount == 0 {
 		return nil
 	}
 
@@ -251,34 +248,17 @@ func (r *ConnectionStore) BatchUpdateHeartbeats(ctx context.Context, entries []*
 	}
 
 	var sb strings.Builder
-	args := make([]interface{}, 0, (pingCount+pongCount)*2+len(patches))
+	args := make([]interface{}, 0, pingCount*2+len(patches))
 	sb.WriteString("UPDATE ")
 	sb.WriteString(table)
-	sb.WriteString(" SET ")
-
-	if pingCount > 0 {
-		sb.WriteString("last_ping_at = CASE connection_id")
-		for cid, p := range patches {
-			if p.ping != nil {
-				sb.WriteString(" WHEN ? THEN ?")
-				args = append(args, cid, *p.ping)
-			}
+	sb.WriteString(" SET last_ping_at = CASE connection_id")
+	for cid, p := range patches {
+		if p.ping != nil {
+			sb.WriteString(" WHEN ? THEN ?")
+			args = append(args, cid, *p.ping)
 		}
-		sb.WriteString(" ELSE last_ping_at END")
 	}
-	if pongCount > 0 {
-		if pingCount > 0 {
-			sb.WriteByte(',')
-		}
-		sb.WriteString("last_pong_at = CASE connection_id")
-		for cid, p := range patches {
-			if p.pong != nil {
-				sb.WriteString(" WHEN ? THEN ?")
-				args = append(args, cid, *p.pong)
-			}
-		}
-		sb.WriteString(" ELSE last_pong_at END")
-	}
+	sb.WriteString(" ELSE last_ping_at END")
 
 	sb.WriteString(" WHERE connection_id IN (")
 	first := true

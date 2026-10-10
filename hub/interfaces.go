@@ -473,6 +473,9 @@ func (h *Hub) GetBroadcastShaper() *overload.Shaper { return h.broadcastShaper.L
 // GetEphemeralCoalescer 高频消息合并器（未启用时返回 nil）
 func (h *Hub) GetEphemeralCoalescer() *overload.Coalescer { return h.ephemeralCoalescer.Load() }
 
+// GetMessageAggregator 消息聚合器（未启用时返回 nil）
+func (h *Hub) GetMessageAggregator() *overload.MessageAggregator { return h.messageAggregator.Load() }
+
 // GetOverloadMetrics 过载漏斗指标（编排层恒注入）
 func (h *Hub) GetOverloadMetrics() *overload.OverloadMetrics { return &h.overloadMetrics }
 

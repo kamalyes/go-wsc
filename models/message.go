@@ -710,6 +710,25 @@ func (m *HubMessage) Clone() *HubMessage {
 	return &msg
 }
 
+// CloneForFanout 扇出克隆：标量信封字段独立可写，Data 与 GroupIDs 只读共享
+//
+// 逐成员扇出（群组可靠投递/批量发送/离线回放/P2P 发送）仅改写信封标量字段
+// （Receiver/ReceiverNode/ID/CreateAt/Source 等），Data 与 GroupIDs 全链路只读
+// 且所有读方均同步序列化（本地投递 Marshal/落库 SetMessage/跨节点 Publish/离线转存）；
+// 深拷贝的 map/slice 重建是 10w 级扇出的 GC 热点，共享底层结构消除该开销
+//
+// 契约：扇出进行期间调用方不得并发修改原消息的 Data/GroupIDs
+// （现状扇出均为同步 Execute，扇出完成后才可能触碰原消息，天然满足）
+func (m *HubMessage) CloneForFanout() *HubMessage {
+	if m.mu != nil {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+	}
+	msg := *m
+	msg.mu = &sync.RWMutex{}
+	return &msg
+}
+
 // CloneDeep 实现 syncx.Cloner 接口
 // DeepCopy(&dst, src) 检测到 src 实现 Cloner 时，直接调用此方法跳过反射
 func (m *HubMessage) CloneDeep() any {

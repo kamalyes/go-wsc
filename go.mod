@@ -8,7 +8,7 @@ require (
 	github.com/jpillora/backoff v1.0.0
 	github.com/kamalyes/go-argus v0.3.1
 	github.com/kamalyes/go-cachex v0.4.0
-	github.com/kamalyes/go-config v0.22.0
+	github.com/kamalyes/go-config v0.22.1
 	github.com/kamalyes/go-logger v0.7.1
 	github.com/kamalyes/go-pbmo v0.2.0
 	github.com/kamalyes/go-sqlbuilder v0.7.0
@@ -56,8 +56,6 @@ require (
 
 // 本地开发替换
 // replace github.com/kamalyes/go-cachex => ../go-cachex
-
-// replace github.com/kamalyes/go-config => ../go-config
 
 // replace github.com/kamalyes/go-logger => ../go-logger
 

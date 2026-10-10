@@ -156,6 +156,25 @@ func TestClientJSONMarshalUsesSafeSnapshotAndAtomicReads(t *testing.T) {
 	}
 }
 
+// TestStatsFlushDue 落库节流判定：零值放行 → 窗口内拦截 → 窗口过后放行
+// （窗口过后经直接改写原子状态模拟，避免测试对真实时钟敏感）
+func TestStatsFlushDue(t *testing.T) {
+	client := NewClient("c-throttle", "u-throttle", UserTypeCustomer)
+
+	if !client.StatsFlushDue(time.Minute) {
+		t.Error("零值状态（新连接首条心跳）应立即放行")
+	}
+	if client.StatsFlushDue(time.Minute) {
+		t.Error("节流窗口内的重复心跳应被拦截")
+	}
+
+	// 模拟窗口已过：回拨上次落库时间
+	client.statsFlushUnix.Store(time.Now().Add(-2 * time.Minute).Unix())
+	if !client.StatsFlushDue(time.Minute) {
+		t.Error("窗口过后应放行")
+	}
+}
+
 // TestClientJSONMarshalNilMetadataEmptyGroupID 边界：空 metadata 与空 group_id 的序列化稳定性
 func TestClientJSONMarshalNilMetadataEmptyGroupID(t *testing.T) {
 	client := NewClient("c-nil", "u-nil", UserTypeVisitor)

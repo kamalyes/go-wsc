@@ -23,15 +23,22 @@
  */
 package messaging
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 // maxReplayHoldout 单用户回放期间最大暂存投递数（超出直接投递，防内存堆积）
 const maxReplayHoldout = 1024
 
 // replayGate 首连离线回放期间的实时投递门闩（每用户粒度）
+//
+// 热路径免锁：live 原子计数在 begin/end 临界区内发布，hold 快路径 Load==0（闸门全开，绝大多数时刻）零锁直投
+// 10w 级成员扇出全程无 RLock 竞争，仅回放进行中才进入锁路径
 type replayGate struct {
 	mu      sync.RWMutex
 	pending map[string][]func()
+	live    atomic.Int64 // 回放中用户数（0 = 无任何用户处于回放，闸门全开）
 }
 
 // NewReplayGate 创建门闩（编排层构造 messaging.Manager 时经 WithReplayGate 注入）
@@ -45,12 +52,20 @@ func (g *replayGate) begin(userID string) {
 	defer g.mu.Unlock()
 	if _, ok := g.pending[userID]; !ok {
 		g.pending[userID] = nil
+		// 同临界区发布：hold 快路径读到 0 时 pending 必然为空（与锁路径互斥保证可见性）
+		g.live.Add(1)
 	}
 }
 
 // hold 投递动作过闸：回放中 → 暂存；已开闸 → 立即执行
 // 返回是否暂存（调用方可用于统计观测）
 func (g *replayGate) hold(userID string, deliver func()) bool {
+	// 快路径：无任何用户回放中，直接投递（原子读一次，无锁无 map 探测）
+	if g.live.Load() == 0 {
+		deliver()
+		return false
+	}
+
 	g.mu.RLock()
 	_, replaying := g.pending[userID]
 	g.mu.RUnlock()
@@ -74,11 +89,28 @@ func (g *replayGate) hold(userID string, deliver func()) bool {
 	return held
 }
 
+// holding 用户是否处于回放中（扇出热路径预检用）
+//
+// 快路径 live==0 零锁直判 false——调用方据此走直接投递（零闭包分配），
+// 仅回放进行中才进入 RLock 探测；与 hold 的锁路径语义一致
+func (g *replayGate) holding(userID string) bool {
+	if g.live.Load() == 0 {
+		return false
+	}
+	g.mu.RLock()
+	_, ok := g.pending[userID]
+	g.mu.RUnlock()
+	return ok
+}
+
 // end 结束回放：按暂存顺序补投全部实时投递后开闸（幂等：未 begin 时无操作）
 func (g *replayGate) end(userID string) {
 	g.mu.Lock()
 	queue, ok := g.pending[userID]
-	delete(g.pending, userID)
+	if ok {
+		delete(g.pending, userID)
+		g.live.Add(-1)
+	}
 	g.mu.Unlock()
 	if !ok {
 		return
@@ -110,6 +142,14 @@ func (m *Manager) HoldUserDelivery(userID string, deliver func()) {
 		return
 	}
 	m.replayGate.hold(userID, deliver)
+}
+
+// holdingUserDelivery 用户是否处于首连回放中（扇出热路径预检）
+//
+// 未注入门闩或闸门全开（live==0，绝大多数时刻）恒 false 且零锁——
+// 调用方据此直接投递（零闭包分配），仅真实回放中才构造闭包走暂存
+func (m *Manager) holdingUserDelivery(userID string) bool {
+	return m.replayGate != nil && m.replayGate.holding(userID)
 }
 
 // WithReplayGate 注入首连回放门闩（未注入时投递直通，行为与旧版一致）

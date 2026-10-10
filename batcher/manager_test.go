@@ -118,7 +118,6 @@ func TestManagerStopTrackingFlushesHeartbeat(t *testing.T) {
 	require.True(t, m.HeartbeatStats().Submit(&HeartbeatStatsEntry{
 		ClientID: "c-1",
 		PingTime: time.Now(),
-		PongTime: time.Now(),
 	}))
 	require.True(t, m.MessageStats().Submit(&StatsIncrementItem{
 		ConnectionID: "c-1",

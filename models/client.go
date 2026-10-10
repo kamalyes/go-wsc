@@ -63,6 +63,7 @@ type Client struct {
 	lastHeartbeatUnix atomic.Int64 `json:"-"` // LastHeartbeat 的 UnixNano 原子存储
 	lastSeenUnix      atomic.Int64 `json:"-"` // LastSeen 的 UnixNano 原子存储
 	lastPongUnix      atomic.Int64 `json:"-"` // LastPong 的 UnixNano 原子存储
+	statsFlushUnix    atomic.Int64 `json:"-"` // 心跳统计落库节流状态（Unix 秒，零值=从未落库即放行）
 
 	// pongBytes 应用层心跳 pong 的预序列化缓存（内容 per-connection 恒定，首条心跳时构建一次，
 	// 之后心跳热路径零分配零编码，见 CachedPongBytes；经 mu 保护与序列化路径互斥）
@@ -262,6 +263,23 @@ func (c *Client) GetLastPong() time.Time {
 		return time.Time{}
 	}
 	return time.Unix(0, nano)
+}
+
+// StatsFlushDue 心跳统计落库节流判定：距上次落库超过 interval 才放行并抢占本次slot（CAS 抢占：并发路径提交同一连接时仅一次放行；零值状态=新连接首条心跳立即落库）
+// 节流动机：心跳落库写的是 dashboard 活跃统计的分钟桶口径源数据，逐心跳全量落库
+// 在 CRDB 上构成 range 写热点（小批被大批排队，实测 2 行 UPDATE 长尾 900ms+），按节流粒度落库写量随节流系数等比下降、桶归属统计无损
+func (c *Client) StatsFlushDue(interval time.Duration) bool {
+	now := time.Now().Unix()
+	threshold := int64(interval / time.Second)
+	for {
+		last := c.statsFlushUnix.Load()
+		if now-last < threshold {
+			return false
+		}
+		if c.statsFlushUnix.CompareAndSwap(last, now) {
+			return true
+		}
+	}
 }
 
 // CachedPongBytes 返回应用层心跳 pong 的预序列化缓存，缓存缺失时经 build 构建一次并缓存

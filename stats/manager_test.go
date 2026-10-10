@@ -25,6 +25,7 @@ import (
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/spi"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // ============================================================================
@@ -114,6 +115,31 @@ func TestTrackErrorSkipsExcludedUserTypes(t *testing.T) {
 	assert.Empty(t, quality.errors, "系统/机器人/观察者不应记录错误")
 }
 
+// 心跳统计落库节流：节流窗口内同一连接的重复心跳仅落库一次
+// （写热点的等比下降依赖此拦截发生在 Submit 之前——队列与 flush 均不应看到窗口内条目）
+func TestTrackHeartbeatStatsThrottled(t *testing.T) {
+	host := newFakeHost()
+	records := &recordingHeartbeatStore{}
+	host.connRecRepo = records
+	// 真实攒批器 + 长 flush 间隔（仅 Stop 触发 flush）
+	host.hbBatcher = batcher.NewHeartbeatStatsUpdater(host, 16, 8, time.Hour)
+	m := NewManager(host)
+
+	// 节流间隔调大避免测试对时钟边界敏感（同包 var 直改，测试结束还原）
+	origThrottle := heartbeatStatsFlushThrottle
+	heartbeatStatsFlushThrottle = time.Hour
+	defer func() { heartbeatStatsFlushThrottle = origThrottle }()
+
+	client := models.NewClient("c-throttle", "u-throttle", models.UserTypeCustomer)
+	m.TrackHeartbeatStats(client) // 首调：零值状态放行
+	m.TrackHeartbeatStats(client) // 节流窗口内：拦截
+
+	host.hbBatcher.Stop()
+	require.Len(t, records.heartbeats, 1, "节流窗口内重复心跳不应重复落库")
+	assert.Equal(t, "c-throttle", records.heartbeats[0].ConnectionID)
+	assert.NotNil(t, records.heartbeats[0].PingTime, "放行条目应携带心跳时间戳")
+}
+
 // ============================================================================
 // 在线状态：无后端时读侧退化为本地注册表视图
 // ============================================================================
@@ -162,5 +188,17 @@ type recordingQualityStore struct {
 
 func (s *recordingQualityStore) BatchAddErrors(_ context.Context, entries []*models.ErrorUpdateEntry) error {
 	s.errors = append(s.errors, entries...)
+	return nil
+}
+
+// recordingHeartbeatStore 记录 BatchUpdateHeartbeats 调用（心跳节流测试观测点）
+type recordingHeartbeatStore struct {
+	spi.ConnectionStore
+
+	heartbeats []*models.HeartbeatUpdateEntry
+}
+
+func (s *recordingHeartbeatStore) BatchUpdateHeartbeats(_ context.Context, entries []*models.HeartbeatUpdateEntry) error {
+	s.heartbeats = append(s.heartbeats, entries...)
 	return nil
 }

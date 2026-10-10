@@ -31,6 +31,11 @@ type Manager struct {
 	host Host
 }
 
+// heartbeatStatsFlushThrottle 心跳统计落库节流间隔（per-connection）
+// 活跃统计消费方（dashboard 同步 ClickHouse 的分钟桶聚合）粒度无损；
+// var 便于测试调小阈值验证节流分支（同 hub.shutdownFinalizeSkipAfter 模式）
+var heartbeatStatsFlushThrottle = 120 * time.Second
+
 // NewManager 创建统计域管理器
 func NewManager(host Host) *Manager {
 	return &Manager{host: host}
@@ -182,6 +187,10 @@ func (m *Manager) TrackConnectionError(connectionID string, userType models.User
 // TrackHeartbeatStats 追踪心跳和 Ping 统计
 // 优化：使用批量聚合器，避免每次心跳都启动 goroutine 写数据库
 // 心跳时间戳由 batcher flush 写 connect 表，Ping 统计写 quality 表
+//
+// 落库节流：每连接 throttle 间隔内仅落一次（Client.StatsFlushDue），
+// CRDB 心跳批量 UPDATE 的 range 写热点随节流系数等比下降；
+// last_pong_at 全链路只写不读（dashboard 同步但零查询）已停写
 func (m *Manager) TrackHeartbeatStats(client *models.Client) {
 	if (m.host.GetConnectionQualityRepository() == nil && m.host.GetConnectionRecordRepo() == nil) || client == nil {
 		return
@@ -189,6 +198,12 @@ func (m *Manager) TrackHeartbeatStats(client *models.Client) {
 
 	// 排除系统、机器人、观察者
 	if !m.ShouldTrackUserStats(client.UserType) {
+		return
+	}
+
+	// 落库节流：节流窗口内的心跳不落库（活性由内存时间轮与 Redis 在线索引承载，
+	// DB 只服务 dashboard 分钟桶统计口径）
+	if !client.StatsFlushDue(heartbeatStatsFlushThrottle) {
 		return
 	}
 
@@ -204,7 +219,6 @@ func (m *Manager) TrackHeartbeatStats(client *models.Client) {
 		b.Submit(&batcher.HeartbeatStatsEntry{
 			ClientID: client.ID,
 			PingTime: lastHeartbeat,
-			PongTime: client.GetLastPong(),
 			PingMs:   pingMs,
 		})
 	}

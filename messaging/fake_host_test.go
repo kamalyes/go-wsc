@@ -26,6 +26,7 @@ import (
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 
 	"github.com/kamalyes/go-wsc/batcher"
+	"github.com/kamalyes/go-wsc/cluster"
 	"github.com/kamalyes/go-wsc/connection"
 	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/models"
@@ -60,6 +61,12 @@ type fakeHost struct {
 
 	metrics   *overload.OverloadMetrics
 	coalescer *overload.Coalescer // 高频合并器（nil=未启用；测试需覆盖高频分支时注入）
+
+	aggregator *overload.MessageAggregator // 可聚合窗口（nil=未启用；测试需覆盖聚合分支时注入）
+
+	// 集群分发替身状态（SubmitClusterDispatch 分道测试用）
+	dispatchQueueFull  bool         // 置 true 模拟分布式池队列满（提交被拒）
+	clusterDirectCalls atomic.Int32 // RouteToCluster 同步直发兜底调用计数
 }
 
 // trackedStat 单连接的接收统计累计
@@ -104,6 +111,10 @@ func (f *fakeHost) GetShardedRegistry() *connection.ShardedRegistry { return f.r
 
 func (f *fakeHost) GetMessageSink() spi.MessageSink { return f.messageSink }
 
+// GetMessageAggregator 默认 nil（OfferAggregatable 首个 nil 判断直通单发），
+// 聚合链路测试经注入真实窗口覆盖
+func (f *fakeHost) GetMessageAggregator() *overload.MessageAggregator { return f.aggregator }
+
 func (f *fakeHost) GetGroupRepo() spi.GroupStore { return f.groupRepo }
 
 // GetMessageStatusUpdater 默认 nil（updateMessageStatusAsync 首个 nil 判断返回），
@@ -129,6 +140,17 @@ func (f *fakeHost) BatchGetUserNodes(_ context.Context, _ []string) map[string][
 // CheckAndRouteToNode 单机模式无跨节点路由（sendToUser 的分布式分支据此走本地投递）
 func (f *fakeHost) CheckAndRouteToNode(_ context.Context, _ string, _ *models.HubMessage, _ []string) (bool, []string, error) {
 	return false, nil, nil
+}
+
+// SubmitClusterDispatch 集群分发替身：按 dispatchQueueFull 模拟分布式池队列满
+func (f *fakeHost) SubmitClusterDispatch(_ *models.HubMessage, _ cluster.ClusterDispatchOptions) bool {
+	return !f.dispatchQueueFull
+}
+
+// RouteToCluster 同步直发替身：仅计数（submitClusterDispatch 可靠档兜底路径验证）
+func (f *fakeHost) RouteToCluster(_ context.Context, _ *models.HubMessage, _ cluster.ClusterDispatchOptions) error {
+	f.clusterDirectCalls.Add(1)
+	return nil
 }
 
 // GetObserverNotifier 未注入观察者通知批处理器（NotifyObservers 攒批入口据此 no-op）

@@ -36,6 +36,8 @@ const (
 	GuaranteeEphemeral
 	// GuaranteeGuaranteed 必达：控制通道 + ACK + 离线多级兜底，零丢失
 	GuaranteeGuaranteed
+	// GuaranteeAggregatable 可聚合：全保留窗口攒批（N 条合 1 条数组帧），容忍窗口级延迟与 Ephemeral 的区别：latest-wins 丢旧保新（只需最新值），可聚合全保留合并（条条要送达）
+	GuaranteeAggregatable
 )
 
 // String 送达分级的日志/序列化友好表示
@@ -43,13 +45,24 @@ func (g DeliveryGuarantee) String() string {
 	switch g {
 	case GuaranteeGuaranteed:
 		return "guaranteed"
-	case GuaranteeEphemeral:
-		return "ephemeral"
 	case GuaranteeStandard:
 		return "standard"
+	case GuaranteeEphemeral:
+		return "ephemeral"
+	case GuaranteeAggregatable:
+		return "aggregatable"
 	default:
 		return "unset"
 	}
+}
+
+// IsExpress 是否快速通道档（高频流式/可聚合）
+//
+// express 语义：fire-and-forget——不落 message_record、不进离线队列、不走重试链、
+// 队列满语义丢弃（latest-wins 语义下同 key 下一条消息自然覆盖，丢弃是正确行为）；
+// 可靠档（Standard/Guaranteed）保持现状全机制
+func (g DeliveryGuarantee) IsExpress() bool {
+	return g == GuaranteeEphemeral || g == GuaranteeAggregatable
 }
 
 // ClassificationGuaranteedScore 分类评分必达阈值
@@ -83,6 +96,9 @@ var guaranteeTypeDefaults = map[MessageType]DeliveryGuarantee{
 	MessageTypeReaction:          GuaranteeEphemeral,
 	MessageTypeUserStatusChanged: GuaranteeEphemeral,
 	MessageTypeHeartbeat:         GuaranteeEphemeral,
+
+	// 可聚合：全保留窗口攒批（弹幕/跑马灯/滚动通知等高频群组流式消息）
+	MessageTypeStream: GuaranteeAggregatable,
 }
 
 // GuaranteeForType 查询消息类型的默认送达分级

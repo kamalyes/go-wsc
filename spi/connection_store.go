@@ -39,7 +39,7 @@ type ConnectionStore interface {
 	// IN 影响 0 行（记录已被清理）静默返回；批内同连接去重保留最后（终态以最后一次为准）
 	BatchMarkDisconnected(ctx context.Context, entries []*models.DisconnectionEntry) error
 
-	// BatchUpdateHeartbeats 批量更新心跳时间戳（connect 表 last_ping_at/last_pong_at，单事务）
+	// BatchUpdateHeartbeats 批量更新心跳时间戳（connect 表 last_ping_at，单 SQL）
 	BatchUpdateHeartbeats(ctx context.Context, entries []*models.HeartbeatUpdateEntry) error
 
 	// GetByConnectionID 根据连接ID获取连接记录

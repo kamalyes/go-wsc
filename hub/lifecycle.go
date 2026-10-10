@@ -23,6 +23,8 @@ import (
 	"github.com/kamalyes/go-wsc/connection"
 	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/models"
+	"github.com/kamalyes/go-wsc/overload"
+	"github.com/kamalyes/go-wsc/routing"
 )
 
 const (
@@ -131,6 +133,11 @@ func (h *Hub) Run() {
 	// 🧹 启动高频合并器 drain ticker（latest-wins 快照周期投递）
 	if h.ephemeralCoalescer.Load() != nil {
 		h.startCoalescerDrain()
+	}
+
+	// 🧺 启动消息聚合器 drain ticker（可聚合消息窗口攒批周期投递）
+	if h.messageAggregator.Load() != nil {
+		h.startAggregatorDrain()
 	}
 
 	// 🐌 启动慢消费者扫描器（三级递进治理：记录 → 告警 → 驱逐；驱逐前消息保全）
@@ -831,6 +838,72 @@ func (h *Hub) deliverCoalesced(msg *models.HubMessage) {
 		}
 		return true
 	})
+}
+
+// ============================================================================
+// 消息聚合器 drain（本体在 overload 域，节拍与投递归编排层）
+// ============================================================================
+
+// startAggregatorDrain 启动消息聚合器 drain ticker（Run 时调用，ctx 结束自动退出）
+//
+// 周期：每窗口 Flush 一次全部群组，每群组一批数组帧（N 条合 1 条），
+// 节拍经 wscconfig.Aggregator.DrainInterval 配置（零值走 constants 默认 500ms，全保留合并的延迟上限，聚合后每连接帧率 = 1/窗口），
+// 仅对本节点成员扇出（跨节点不二次广播意图——各节点对本地成员各自聚合，
+// 广播意图在消息入口已发出，此处再发会造成集群扇出风暴）
+func (h *Hub) startAggregatorDrain() {
+	syncx.Go(h.ctx).
+		OnPanic(func(r any) {
+			h.logger.ErrorKV("消息聚合器 drain panic", "panic", r, "stack", string(debug.Stack()), "node_id", h.nodeID)
+		}).
+		Exec(func() {
+			// 节拍配置化（Aggregator.DrainInterval）：零值走 constants 默认（零值 Hub 构造的测试安全）
+			interval := mathx.IfNotZero(h.aggregatorDrainInterval, constants.DefaultAggregatorDrainInterval)
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-h.ctx.Done():
+					return
+				case <-ticker.C:
+					// atomic load：热替换后的新聚合器实例即刻生效（nil 时本轮跳过）
+					agg := h.messageAggregator.Load()
+					if agg == nil {
+						continue
+					}
+					for _, batch := range agg.Flush() {
+						h.deliverAggregatedBatch(batch)
+					}
+				}
+			}
+		})
+}
+
+// deliverAggregatedBatch 扇出一批聚合消息（单群组一个窗口的全部消息 → 1 条数组帧）
+//
+// 零二次编码：Frame 在 Offer 侧已序列化、Flush 侧纯字节拼装，此处作为 WS 帧原样直发
+// （旧路径 string(Frame) 拷贝 + Marshal 转义再编码，数组帧被塞进 content 字符串
+// 导致客户端双解析——预编码努力在 drain 端被抵消，已由 BroadcastFrameToUserIDs 消除）
+//
+// msg 仍构造：SSE 客户端无预编码通道，经 Content 字符串通道承载同一帧（一次 memcpy）；
+// 同时作为信封匹配键（appID 隔离，ns 置空通配、groupIDs 置空——业务群组定位已由
+// 反查完成，连接匹配仅做 appID 隔离，与 gRPC BroadcastGroup 消费端的信封处理一致）
+//
+// 防循环：batch 消息显式 Standard 档（决策树显式设置优先），不再进聚合窗口
+func (h *Hub) deliverAggregatedBatch(batch overload.AggregatedBatch) {
+	appID := constants.NormalizeAppID(batch.AppID)
+	members := h.shardedRegistry.GetLocalGroupMembers(appID, []string{batch.GroupID})
+	if len(members) == 0 {
+		return
+	}
+
+	msg := models.NewHubMessage().
+		SetMessageType(models.MessageTypeStream).
+		SetContent(string(batch.Frame)).
+		WithGuarantee(models.GuaranteeStandard)
+
+	ctx := routing.NewRoute().WithAppID(appID).Inject(h.ctx)
+	h.messagingMgr.BroadcastFrameToUserIDs(ctx, members, msg, batch.Frame)
 }
 
 // ============================================================================

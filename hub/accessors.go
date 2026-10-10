@@ -58,9 +58,9 @@ func (h *Hub) NodeInfo() *models.NodeInfo { return h.nodeInfo }
 // 参数为 nil 表示保留该组件现状（不替换）；闸门替换时旧实例 Stop、
 // 新实例 Store 后立即 Start —— 已 Run 的 Hub 调用时新闸门直接进入
 // 水位评估循环（atomic Store 发布：后台循环并发 Load 读到完整初始化的实例）。
-// 组件构造见 overload.NewAdmissionGate / NewShaper / NewCoalescer
-// （零值参数由 constants 包默认值兜底）。
-func (h *Hub) SetOverloadPolicy(gate *overload.AdmissionGate, shaper *overload.Shaper, coalescer *overload.Coalescer) *Hub {
+// 组件构造见 overload.NewAdmissionGate / NewShaper / NewCoalescer / NewMessageAggregator
+// （零值参数由 constants 包默认值兜底）
+func (h *Hub) SetOverloadPolicy(gate *overload.AdmissionGate, shaper *overload.Shaper, coalescer *overload.Coalescer, aggregator *overload.MessageAggregator) *Hub {
 	if gate != nil {
 		if old := h.admission.Load(); old != nil {
 			old.Stop()
@@ -73,6 +73,9 @@ func (h *Hub) SetOverloadPolicy(gate *overload.AdmissionGate, shaper *overload.S
 	}
 	if coalescer != nil {
 		h.ephemeralCoalescer.Store(coalescer)
+	}
+	if aggregator != nil {
+		h.messageAggregator.Store(aggregator)
 	}
 	return h
 }

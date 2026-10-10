@@ -486,10 +486,12 @@ func (m *Manager) normalizeMessageFields(client *models.Client, msg *models.HubM
 
 // handleBroadcast 处理广播消息
 //
+// data 为调用方预序列化的消息体编码字节（可靠投递热路径落库与投递共享同一份，nil 时 handleDirectMessage 内部序列化兜底）
+//
 // trace_id 恢复：广播队列异步消费，原请求 ctx 已不可用。
 // msg 在入队前已通过 InjectContext 注入 trace_id，此处从 msg 恢复到 ctx，
 // 保证下游 HandleBroadcastMessage / handleDirectMessage / NotifyObservers 日志链路串联。
-func (m *Manager) handleBroadcast(msg *models.HubMessage) {
+func (m *Manager) handleBroadcast(msg *models.HubMessage, data []byte) {
 	ctx := msg.ContextFrom(m.host.Context())
 
 	// 通知观察者（异步，不阻塞主流程）
@@ -536,7 +538,7 @@ func (m *Manager) handleBroadcast(msg *models.HubMessage) {
 		m.HandleBroadcastMessage(ctx, msg)
 		return
 	}
-	m.handleDirectMessage(ctx, msg)
+	m.handleDirectMessage(ctx, msg, data)
 }
 
 // handleDirectMessage 处理点对点消息
@@ -544,13 +546,16 @@ func (m *Manager) handleBroadcast(msg *models.HubMessage) {
 // 性能：
 //   - 指定 ReceiverClient 时走 GetClient O(1) 查找，避免遍历
 //   - 未指定时走 ForEachUserClient 零拷贝遍历直接发送，避免 GetClientsCopyForUser 切片拷贝
-//   - 消息预序列化一次，多设备复用
-func (m *Manager) handleDirectMessage(ctx context.Context, msg *models.HubMessage) {
+//   - 消息预序列化一次，多设备复用；data 为调用方预序列化编码（落库与投递共享
+//     同一份，消除逐成员二次 Marshal），nil 时内部序列化
+func (m *Manager) handleDirectMessage(ctx context.Context, msg *models.HubMessage, data []byte) {
 	// msg 路由信封由上游入口（sendToUser/handleBroadcast）已通过 InjectRoute 注入，此处直接读 msg 过滤
 
 	// 预序列化一次（接收者多设备复用，消除循环内重复 Marshal）
-	// 序列化失败时 data=nil，由 SendToClientSerialized 内部兜底
-	data, _ := json.Marshal(msg)
+	// data 为 nil 时兜底序列化（异步广播等无预序列化上下文的调用方）
+	if data == nil {
+		data, _ = json.Marshal(msg)
+	}
 
 	sent := 0
 	if msg.ReceiverClient != "" {

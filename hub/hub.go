@@ -98,11 +98,13 @@ type Hub struct {
 	rerouteGuard sync.Map
 
 	// ========== 过载保护域（atomic.Pointer 支持运行期热替换） ==========
-	admission           atomic.Pointer[overload.AdmissionGate]
-	broadcastShaper     atomic.Pointer[overload.Shaper]
-	ephemeralCoalescer  atomic.Pointer[overload.Coalescer]
-	broadcastDelayQueue *overload.BroadcastDelayQueue
-	overloadMetrics     overload.OverloadMetrics
+	admission               atomic.Pointer[overload.AdmissionGate]
+	broadcastShaper         atomic.Pointer[overload.Shaper]
+	ephemeralCoalescer      atomic.Pointer[overload.Coalescer]
+	messageAggregator       atomic.Pointer[overload.MessageAggregator]
+	aggregatorDrainInterval time.Duration // 聚合 drain 窗口节拍（构造期由 Aggregator 配置解析，Run 期只读）
+	broadcastDelayQueue     *overload.BroadcastDelayQueue
+	overloadMetrics         overload.OverloadMetrics
 
 	// ========== 批处理器域（攒批落库/通知抑制写放大，五组件归一管理） ==========
 	batcherMgr *batcher.Manager
@@ -294,6 +296,11 @@ func NewHub(config *wscconfig.WSC) *Hub {
 	hub.admission.Store(overload.NewAdmissionGate(0, 0, 0))
 	hub.broadcastShaper.Store(overload.NewShaper(0))
 	hub.ephemeralCoalescer.Store(overload.NewCoalescer(0))
+	// 消息聚合器：可聚合档群组消息窗口攒批（N 条合 1 条数组帧），窗口参数配置化
+	//（drain 节拍/窗口尺寸/群组数上限经 Aggregator 配置注入，零值由消费侧走 constants 默认）
+	aggCfg := mathx.IfNotZero(config.Aggregator, wscconfig.DefaultAggregatorConfig())
+	hub.messageAggregator.Store(overload.NewMessageAggregator(aggCfg.BatchSize, aggCfg.MaxGroups))
+	hub.aggregatorDrainInterval = aggCfg.DrainInterval
 	// 广播延迟队列：填谷重投（Run() 时启动 drain 循环）
 	hub.broadcastDelayQueue = overload.NewBroadcastDelayQueue(func() overload.ShaperInterval {
 		if s := hub.broadcastShaper.Load(); s != nil {

@@ -12,7 +12,7 @@
  *
  * 并发模型：单写者覆盖（Offer 持分片锁覆盖 map 槽位），Drain 换出整个 map
  * （swap-and-rebuild，O(容量) 一次拷贝，投递侧遍历新表无锁）
- * 分片锁降低 Offer 热点竞争（同 ShardedMap 模式，shard = FNV(key) % N）
+ * 分片锁降低 Offer 热点竞争（同 ShardedMap 模式，shard = FNV(按字段流式) % N）
  *
  * 容量保护：条目数超限（高频 key 滥用/攻击）时 Offer 返回 false，
  * 上层按高频级语义丢弃计数（latest-wins 的尽头是容量上限，防内存膨胀）
@@ -32,11 +32,40 @@ import (
 // coalescerShardCount 合并器分片数（Offer 热点分散）
 const coalescerShardCount = 16
 
+// FNV-1a 哈希常量（分片定位：按字段流式吸收，杜绝 key 拼接分配）
+const (
+	fnvOffset32 uint32 = 2166136261
+	fnvPrime32  uint32 = 16777619
+)
+
+// fnvString 对字符串追加 FNV-1a 吸收（跨字段顺序调用即得多字段组合哈希）
+func fnvString(h uint32, s string) uint32 {
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= fnvPrime32
+	}
+	return h
+}
+
+// EphemeralKey 高频合并 key（用户 × 消息类型：同用户同类型只保最新值）
+//
+// 结构化 key：map 查找与分片哈希均按字段进行，Offer 热路径零字符串分配
+// （拼接式 key 在百万级高频扇出下是持续的 GC 分配热点）
+type EphemeralKey struct {
+	UserID      string
+	MessageType models.MessageType
+}
+
+// shardOf 分片定位（FNV-1a 按字段流式吸收）
+func (k EphemeralKey) shardOf() int {
+	return int(fnvString(fnvString(fnvOffset32, k.UserID), string(k.MessageType)) % coalescerShardCount)
+}
+
 // Coalescer 高频消息合并器（latest-wins）
 type Coalescer struct {
 	shards [coalescerShardCount]struct {
 		mu    sync.Mutex
-		slots map[string]*models.HubMessage // key → 最新消息
+		slots map[EphemeralKey]*models.HubMessage // key → 最新消息
 	}
 
 	capacity int          // 总容量上限（所有分片之和）
@@ -51,19 +80,9 @@ func NewCoalescer(capacity int) *Coalescer {
 	}
 	c := &Coalescer{capacity: capacity}
 	for i := range c.shards {
-		c.shards[i].slots = make(map[string]*models.HubMessage)
+		c.shards[i].slots = make(map[EphemeralKey]*models.HubMessage)
 	}
 	return c
-}
-
-// shardOf key → 分片索引（FNV-1a，与 ShardedMap 同风格的均匀打散）
-func shardOf(key string) int {
-	var h uint32 = 2166136261
-	for i := 0; i < len(key); i++ {
-		h ^= uint32(key[i])
-		h *= 16777619
-	}
-	return int(h % coalescerShardCount)
 }
 
 // Offer 提交一条高频消息（latest-wins：同 key 覆盖旧消息）
@@ -71,12 +90,12 @@ func shardOf(key string) int {
 // 返回 (accepted, merged)：
 //   - accepted=false：容量超限（防滥用）或参数非法，上层按高频语义丢弃计数
 //   - merged=true：本次覆盖了同 key 旧消息（latest-wins 削峰，供漏斗 merged 埋点）
-func (c *Coalescer) Offer(key string, msg *models.HubMessage) (accepted, merged bool) {
-	if key == "" || msg == nil {
+func (c *Coalescer) Offer(key EphemeralKey, msg *models.HubMessage) (accepted, merged bool) {
+	if key.UserID == "" || key.MessageType == "" || msg == nil {
 		return false, false
 	}
 
-	shard := &c.shards[shardOf(key)]
+	shard := &c.shards[key.shardOf()]
 	shard.mu.Lock()
 	_, existed := shard.slots[key]
 	if !existed && c.size.Load() >= int64(c.capacity) {
@@ -110,7 +129,7 @@ func (c *Coalescer) Drain() []*models.HubMessage {
 				drained = append(drained, msg)
 			}
 			// swap：换新 map，投递侧遍历快照期间 Offer 写新 map，互不阻塞
-			shard.slots = make(map[string]*models.HubMessage)
+			shard.slots = make(map[EphemeralKey]*models.HubMessage)
 			total += len(drained) - total
 		}
 		shard.mu.Unlock()
@@ -133,11 +152,6 @@ func (c *Coalescer) MergedCount() int64 {
 
 // Capacity 返回合并器总容量上限
 func (c *Coalescer) Capacity() int { return c.capacity }
-
-// EphemeralKey 高频合并的 key（用户 × 消息类型：同用户同类型只保最新值）
-func EphemeralKey(client *models.Client, msg *models.HubMessage) string {
-	return client.UserID + "|" + string(msg.MessageType)
-}
 
 // startCoalescerDrain 启动合并器 drain ticker（Run 时调用，ctx 结束自动退出）
 //

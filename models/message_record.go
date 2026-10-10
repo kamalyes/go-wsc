@@ -139,17 +139,22 @@ func (m *MessageSendRecord) BeforeCreate(tx *gorm.DB) error {
 }
 
 // SetMessage 设置消息数据（将 HubMessage 序列化存储）
-func (m *MessageSendRecord) SetMessage(msg *HubMessage) error {
+//
+// payload 为调用方已序列化的消息体编码字节（可靠投递热路径与本地投递共享同一份编码，消除逐成员二次 Marshal）；nil 时内部自行序列化
+func (m *MessageSendRecord) SetMessage(msg *HubMessage, payload []byte) error {
 	if msg == nil {
 		return nil
 	}
 
-	// 序列化 HubMessage
-	data, err := json.Marshal(msg)
-	if err != nil {
-		return err
+	// 序列化 HubMessage（调用方未预序列化时兜底）
+	if payload == nil {
+		data, err := json.Marshal(msg)
+		if err != nil {
+			return err
+		}
+		payload = data
 	}
-	m.MessageData = string(data)
+	m.MessageData = string(payload)
 
 	// 提取关键字段用于索引和查询
 	// 使用 msg.MessageID (业务消息ID) 和 msg.ID (Hub 内部ID)

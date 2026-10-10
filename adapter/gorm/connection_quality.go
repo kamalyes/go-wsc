@@ -140,7 +140,7 @@ func (r *ConnectionQualityStore) Upsert(ctx context.Context, quality *models.Con
 }
 
 // BatchUpdateHeartbeats 批量更新 Ping 统计与活跃时间（quality 表）
-// 心跳时间戳(last_ping_at/last_pong_at)已切回 connect 表，由 ConnectionStore.BatchUpdateHeartbeats 写入
+// 心跳时间戳(last_ping_at)由 ConnectionStore.BatchUpdateHeartbeats 写入
 // CASE WHEN 单 SQL 合并（含移动平均的自引用嵌套 CASE），消除逐条 Updates 开销
 // （CPU profile 实测占全进程 21%）；单 SQL 自身原子，无需事务包裹；
 // 三方言原生兼容（CASE WHEN + 列自引用为 SQL 标准）

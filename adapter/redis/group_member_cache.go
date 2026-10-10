@@ -227,7 +227,9 @@ func (c *GroupMemberCache) InvalidateTopology(appID, groupID string) {
 }
 
 // invalidateLocal 本地逐出并触发失效通知（5 个写路径的统一收口：本地缓存即时失效 + 回调标记待广播）
+// appID 入口归一化：本地逐出与失效广播回调共享同一口径，跨节点信封与消费日志不再出现空 app_id
 func (c *GroupMemberCache) invalidateLocal(appID, gid string) {
+	appID = mathx.IfEmpty(appID, constants.DefaultAppID)
 	c.evict(appID, gid)
 	if c.onInvalidate != nil {
 		c.onInvalidate(appID, gid)

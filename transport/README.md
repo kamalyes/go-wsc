@@ -68,7 +68,7 @@ http.ListenAndServe(":8080", mux)
 
 - 依赖 spi 的 `ConnectionAuthenticator` 契约；默认实现 `NewTokenAuthenticator`（AES-GCM
   对称加解密）内置本域。第三方鉴权（OAuth / 自定义 Token）实现契约后注入。
-- 依赖 connection 的 `ChanPool`（升级路径预初始化客户端通道，可选项，注册路径幂等兜底）。
+- 依赖 connection 的 `CapacityManager`（升级路径预初始化客户端通道，可选项，注册路径幂等兜底）。
 - 对编排层仅经 `Registrar` 端口交互（ports.go），无 hub import。
 - 零框架依赖是铁律：`grep -rn "gin.|gozero.|echo." transport/` 为空。
 

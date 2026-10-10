@@ -105,7 +105,7 @@ func NewClient(id, userID string, userType UserType) *Client {
 		LastPong:      now,
 		Status:        UserStatusOnline,
 		Metadata:      make(map[string]interface{}),
-		DoneCh:        make(chan struct{}), // 生命周期关闭信号（注册时 SendChan 由对象池分配，DoneCh 统一在此创建）
+		DoneCh:        make(chan struct{}), // 生命周期关闭信号（注册时 SendChan 由容量管理器按 UserType 容量分配，DoneCh 统一在此创建）
 		Context:       context.Background(),
 	}
 	c.lastHeartbeatUnix.Store(unix)

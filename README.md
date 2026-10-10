@@ -438,6 +438,21 @@ err = messaging.InitializeOfflineQueue(h, messaging.OfflineDeps{
 - **优雅关闭**: 平滑连接排空和资源清理
 - **健康检查**: HTTP 端点支持负载均衡器探测
 
+### 内存与 GC 调优
+
+长连接服务断连后容器内存回落慢通常是 Go 运行时特性而非泄漏：GC 由分配驱动（空闲进程不触发新周期）、scavenger 限速向 OS 归还页面 K8s 部署建议：
+
+```yaml
+env:
+  - name: GOMEMLIMIT # 容器 memory limit 的 ~80%，逼近软限时 GC 自动积极回收，防 OOMKill
+    value: 800MiB
+  - name: GOGC # 可选，默认 100；峰值内存敏感场景降至 50（以 CPU 换内存）
+    value: "50"
+```
+
+- 大规模断连后需立即归还内存：业务进程暴露管理端点调用 `debug.FreeOSMemory()`（GC + 全量 scavenge）；勿定时调用，与运行时分配驱动机制相悖
+- 节点透明大页（THP）建议设为 `madvise`：Go 不主动请求大页，`always` 会让稀疏堆按 2MB 粒度膨胀并产生 cgroup 记账残留
+
 ## 🤝 社区与支持
 
 ### 获取帮助

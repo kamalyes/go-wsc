@@ -53,15 +53,15 @@ type ClientAttributes struct {
 // 职责：升级器配置（Origin 检查/缓冲区）、客户端属性提取（Token/明文）、
 // 客户端构造（元数据/节点信息/连接级 ctx）与完整升级编排
 type Upgrader struct {
-	cfg       *wscconfig.WSC              // 全量配置（升级缓冲/来源/健康检查/验证/响应头）
-	registrar Registrar                   // 编排层端口（注册/注销/关闭态/确认消息）
-	logger    spi.Logger                  // 日志器（nil 时构造兜底默认实例）
-	hasher    *safe.TemporalHasher        // 时间窗口哈希（ClientID 生成，由 cfg.TemporalHasher 构造）
-	auth      spi.ConnectionAuthenticator // 连接鉴权器（nil=未启用连接 Token，纯明文提取）
-	chanPool  *connection.ChanPool        // 客户端通道池（nil=跳过预初始化，注册路径兜底）
-	idGen     RequestIDGenerator          // 请求 ID 生成器（nil=健康检查消息 ID 留空）
-	hubCtx    context.Context             // 编排层生命周期 ctx（连接级 ctx 的父）
-	nodeID    string                      // 本节点标识（响应头/注册确认消息回显）
+	cfg         *wscconfig.WSC              // 全量配置（升级缓冲/来源/健康检查/验证/响应头）
+	registrar   Registrar                   // 编排层端口（注册/注销/关闭态/确认消息）
+	logger      spi.Logger                  // 日志器（nil 时构造兜底默认实例）
+	hasher      *safe.TemporalHasher        // 时间窗口哈希（ClientID 生成，由 cfg.TemporalHasher 构造）
+	auth        spi.ConnectionAuthenticator // 连接鉴权器（nil=未启用连接 Token，纯明文提取）
+	capacityMgr *connection.CapacityManager // 客户端容量管理器（nil=跳过预初始化，注册路径兜底）
+	idGen       RequestIDGenerator          // 请求 ID 生成器（nil=健康检查消息 ID 留空）
+	hubCtx      context.Context             // 编排层生命周期 ctx（连接级 ctx 的父）
+	nodeID      string                      // 本节点标识（响应头/注册确认消息回显）
 
 	upgraderOnce sync.Once
 	wsUpgrader   *websocket.Upgrader
@@ -103,9 +103,9 @@ func (u *Upgrader) WithAuthenticator(auth spi.ConnectionAuthenticator) *Upgrader
 	return u
 }
 
-// WithChanPool 注入客户端通道池（升级路径预初始化 SendChan；nil=注册路径兜底初始化）
-func (u *Upgrader) WithChanPool(pool *connection.ChanPool) *Upgrader {
-	u.chanPool = pool
+// WithCapacityManager 注入客户端容量管理器（升级路径预初始化 SendChan；nil=注册路径兜底初始化）
+func (u *Upgrader) WithCapacityManager(mgr *connection.CapacityManager) *Upgrader {
+	u.capacityMgr = mgr
 	return u
 }
 
@@ -311,8 +311,8 @@ func (u *Upgrader) CreateClientFromRequest(r *http.Request, conn *websocket.Conn
 		}())
 
 	// 预初始化客户端 SendChan（根据客户端类型使用配置的容量；注册路径幂等兜底）
-	if u.chanPool != nil {
-		u.chanPool.InitClientSendChan(client)
+	if u.capacityMgr != nil {
+		u.capacityMgr.InitClientSendChan(client)
 	}
 	return client
 }

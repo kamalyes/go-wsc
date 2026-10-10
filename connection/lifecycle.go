@@ -318,8 +318,9 @@ func (m *LifecycleManager) CleanupHalfRegistered(client *models.Client) {
 // CloseChannel 关闭客户端发送通道
 // 用 DoneCh 通知写循环退出，数据通道（SendChan/SSEMessageCh）永不 close：
 //  1. 消除 TrySend 的 chansend 与本函数 closechan 的数据竞态
-//  2. 不回收到对象池（竞态窗口内 racing sender 仍可能写入残留消息，复用会跨连接串消息）
-//  3. 不置 nil SendChan，避免与写循环的 select 读产生数据竞争
+//  2. 不跨连接复用：竞态窗口内 racing sender 仍可能写入残留消息，复用会跨连接串消息；
+//     channel 与 Client 同生命周期，断连后随 Client 整体交由 GC 回收
+//  3. 不置 nil SendChan，避免与写循环 select 读产生数据竞争
 func (m *LifecycleManager) CloseChannel(client *models.Client) {
 	// 使用互斥锁保护关闭操作（防并发调用 double close DoneCh/SSECloseCh）
 	client.CloseMu.Lock()

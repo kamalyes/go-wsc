@@ -61,6 +61,9 @@ func NewHeartbeatManager(host HeartbeatHost, registry *ShardedRegistry, clientTi
 
 // Handle 处理一次心跳（协议级 PING 与应用层心跳共用同一保活入口）
 // 流程：前置回调 → 续期 → Redis 异步续期入队 → 上报回调 → 后置回调 → 统计
+//
+// 日志策略：成功路径单条 Debug（生产 Info 级静默，排查时开 Debug 可观测心跳节奏；
+// 千万级下逐条 Info 是日志风暴，心跳频次经 TrackHeartbeatStats 聚合统计）
 func (m *HeartbeatManager) Handle(client *models.Client) {
 	// 检查客户端是否已关闭（防止处理已断开客户端的心跳）
 	if client == nil || client.IsClosed() {
@@ -68,7 +71,12 @@ func (m *HeartbeatManager) Handle(client *models.Client) {
 	}
 
 	// 触发心跳前置回调，返回 false 则跳过后续心跳处理
+	// 拦截是业务侧主动跳过（非异常），Debug 级留痕供排查"心跳上来了但状态没更新"
 	if cb := m.host.GetBeforeHeartbeatCallback(); cb != nil && !cb(client) {
+		m.logger.DebugContextKV(client.Context, "⛔ 心跳被前置回调拦截跳过",
+			"client_id", client.ID,
+			"user_id", client.UserID,
+		)
 		return
 	}
 
@@ -90,6 +98,12 @@ func (m *HeartbeatManager) Handle(client *models.Client) {
 
 	// 异步追踪心跳统计（不阻塞主流程）
 	m.host.TrackHeartbeatStats(client)
+
+	m.logger.DebugContextKV(client.Context, "💓 收到心跳消息",
+		"client_id", client.ID,
+		"user_id", client.UserID,
+		"connection_type", client.ConnectionType,
+	)
 }
 
 // touch 刷新客户端心跳（协议级 PING 与应用层心跳共用同一保活路径）
@@ -132,9 +146,17 @@ func (m *HeartbeatManager) onTimeout(client *models.Client) {
 	if client.IsClosed() {
 		return
 	}
+	// 与 SSE 兜底扫描的超时日志对称（Debug 级，排查"客户端没退连接却掉线"的关键证据）
+	lastHeartbeat := client.GetLastHeartbeat()
+	m.logger.DebugContextKV(client.Context, "检测到WS心跳超时，注销客户端",
+		"client_id", client.ID,
+		"user_id", client.UserID,
+		"last_heartbeat", lastHeartbeat,
+		"timeout_threshold", m.clientTimeout.String(),
+	)
 	// 触发心跳超时回调
 	if cb := m.host.GetHeartbeatTimeoutCallback(); cb != nil {
-		cb(client.ID, client.UserID, client.GetLastHeartbeat())
+		cb(client.ID, client.UserID, lastHeartbeat)
 	}
 	// 异步注销客户端
 	m.host.Unregister(client)

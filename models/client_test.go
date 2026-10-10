@@ -254,9 +254,10 @@ func equalStringSlice(a, b []string) bool {
 }
 
 // TestClientJSONMarshalFieldSetUnchanged 验收标准（文档要求）：
-// 自定义 MarshalJSON 产出的 JSON 顶层字段集合必须与“默认序列化”完全一致，
+// 自定义 MarshalJSON 产出的 JSON 顶层字段集合必须与历史输出完全一致，
 // 保证 Redis 在线状态里的 client JSON 字段集合不变（SetClientOnline 往返兼容）
-// 仅取值路径变为并发安全，字段集合不增不减
+// LastHeartbeat/LastSeen/LastPong 已从结构体删除（原子唯一存储），覆盖层仍输出这三个 key，
+// 期望集合 = 默认序列化 key ∪ 三个原子覆盖 key
 func TestClientJSONMarshalFieldSetUnchanged(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -301,9 +302,50 @@ func TestClientJSONMarshalFieldSetUnchanged(t *testing.T) {
 			customKeys := jsonTopLevelKeys(t, customData)
 			defaultKeys := jsonTopLevelKeys(t, defaultData)
 
-			if !equalStringSlice(customKeys, defaultKeys) {
-				t.Errorf("field set changed:\n  default=%v\n  custom =%v", defaultKeys, customKeys)
+			// 三个时间戳 key 由 MarshalJSON 覆盖层补齐（结构体字段已删除，Redis 输出不变）
+			expectedKeys := append(append([]string(nil), defaultKeys...),
+				"last_heartbeat", "last_pong", "last_seen")
+			sort.Strings(expectedKeys)
+
+			if !equalStringSlice(customKeys, expectedKeys) {
+				t.Errorf("field set changed:\n  expected=%v\n  custom  =%v", expectedKeys, customKeys)
 			}
 		})
+	}
+}
+
+// TestClientCachedPongBytes pong 预序列化缓存：首次构建一次、后续命中不重建、空构建不缓存
+func TestClientCachedPongBytes(t *testing.T) {
+	client := NewClient("c-pong", "u-pong", UserTypeCustomer)
+
+	buildCalls := 0
+	first := client.CachedPongBytes(func() []byte {
+		buildCalls++
+		return []byte(`{"message_type":"pong"}`)
+	})
+	if buildCalls != 1 {
+		t.Fatalf("首次调用应触发一次构建，实际 %d 次", buildCalls)
+	}
+
+	// 缓存命中：不重复构建，返回同一份字节
+	second := client.CachedPongBytes(func() []byte {
+		buildCalls++
+		return []byte(`{"message_type":"other"}`)
+	})
+	if buildCalls != 1 {
+		t.Fatalf("缓存命中后不应重复构建，实际 %d 次", buildCalls)
+	}
+	if &first[0] != &second[0] {
+		t.Fatal("缓存命中应返回同一份字节切片")
+	}
+
+	// build 返回空：不缓存（新客户端验证，下次调用仍会重新构建）
+	fresh := NewClient("c-pong-2", "u-pong-2", UserTypeCustomer)
+	if got := fresh.CachedPongBytes(func() []byte { return nil }); got != nil {
+		t.Fatal("空构建应返回 nil 且不缓存")
+	}
+	calls := 0
+	if got := fresh.CachedPongBytes(func() []byte { calls++; return []byte(`{}`) }); len(got) == 0 || calls != 1 {
+		t.Fatalf("空构建未缓存，下次调用应重新构建（calls=%d）", calls)
 	}
 }

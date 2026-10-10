@@ -243,3 +243,47 @@ func TestMessageStatsBatcher_StopMultipleTimes(t *testing.T) {
 		batcher.Stop()
 	}, "多次调用 Stop 不应 panic")
 }
+
+// TestMessageStatsBatcher_AcquirePoolCycle 池化条目循环：
+// Acquire 清零 → 填充提交 → flush 落库并归还 → 下轮 Acquire 复用且无残留计数
+func TestMessageStatsBatcher_AcquirePoolCycle(t *testing.T) {
+	w, fakeRepo := newStatsTestHub(t)
+	// batchSize=1：每次 Submit 即满批触发 flush，无需等待定时器
+	batcher := NewMessageStatsBatcher(w, 100, 1, 10*time.Second)
+	defer batcher.Stop()
+
+	// 第一轮：池化条目清零后填充提交
+	item := batcher.Acquire()
+	assert.Zero(t, item.ConnectionID, "Acquire 应返回清零条目")
+	assert.Zero(t, item.MessagesSent, "Acquire 应返回清零条目")
+	item.ConnectionID = "conn-pool-1"
+	item.MessagesSent = 1
+	item.BytesSent = 100
+	assert.True(t, batcher.Submit(item), "第一轮提交应成功")
+
+	require.Eventually(t, func() bool {
+		for _, e := range fakeRepo.incrementsSnapshot() {
+			if e.ConnectionID == "conn-pool-1" && e.MessagesSent == 1 && e.BytesSent == 100 {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 10*time.Millisecond, "第一轮池化条目应正确落库")
+
+	// 第二轮：Acquire 大概率复用 flush 归还的条目，残留字段被清零、新值正确
+	item2 := batcher.Acquire()
+	assert.Zero(t, item2.MessagesSent, "复用条目不应携带上轮 MessagesSent 残留")
+	assert.Zero(t, item2.BytesSent, "复用条目不应携带上轮 BytesSent 残留")
+	item2.ConnectionID = "conn-pool-2"
+	item2.MessagesReceived = 3
+	assert.True(t, batcher.Submit(item2), "第二轮提交应成功")
+
+	require.Eventually(t, func() bool {
+		for _, e := range fakeRepo.incrementsSnapshot() {
+			if e.ConnectionID == "conn-pool-2" && e.MessagesReceived == 3 && e.MessagesSent == 0 {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 10*time.Millisecond, "第二轮条目应落库且无上轮残留")
+}

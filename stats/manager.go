@@ -126,11 +126,12 @@ func (m *Manager) TrackSenderMessageStats(connectionID string, senderType models
 	}
 
 	// 使用批量更新器，避免每条消息创建 goroutine
+	// 池化路径（Acquire+Submit）消除逐条堆分配：广播扇出下单条消息产生 N 个统计条目
 	if b := m.host.GetMessageStatsBatcher(); b != nil {
-		b.Submit(&batcher.StatsIncrementItem{
-			ConnectionID: connectionID,
-			MessagesSent: 1,
-		})
+		item := b.Acquire()
+		item.ConnectionID = connectionID
+		item.MessagesSent = 1
+		b.Submit(item)
 	}
 }
 
@@ -145,13 +146,13 @@ func (m *Manager) TrackReceiverMessageStats(connectionID string, receiverType mo
 		return
 	}
 
-	// 使用批量更新器，避免每条消息创建 goroutine
+	// 使用批量更新器，避免每条消息创建 goroutine（池化路径同 TrackSenderMessageStats）
 	if b := m.host.GetMessageStatsBatcher(); b != nil {
-		b.Submit(&batcher.StatsIncrementItem{
-			ConnectionID:     connectionID,
-			MessagesReceived: 1,
-			BytesReceived:    int64(dataSize),
-		})
+		item := b.Acquire()
+		item.ConnectionID = connectionID
+		item.MessagesReceived = 1
+		item.BytesReceived = int64(dataSize)
+		b.Submit(item)
 	}
 }
 

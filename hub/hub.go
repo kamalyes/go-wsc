@@ -141,8 +141,7 @@ type Hub struct {
 	startCh  chan struct{}
 
 	// ========== 基础设施 ==========
-	pubsub  *cachex.PubSub
-	msgPool sync.Pool
+	pubsub *cachex.PubSub
 	// nodeMessage 跨节点消息通道
 	nodeMessage chan *models.DistributedMessage
 	// heartbeatRedisCh 心跳 Redis 更新通道（单 goroutine 消费，替代每心跳一 goroutine）
@@ -228,12 +227,6 @@ func NewHub(config *wscconfig.WSC) *Hub {
 		heartbeatRedisCh: make(chan *models.Client, 8192),
 		config:           config,
 		logger:           logger,
-		msgPool: sync.Pool{
-			New: func() any {
-				b := make([]byte, 0, 1024)
-				return &b
-			},
-		},
 	}
 
 	// 分片注册表（替代单 mutex 的 clients/userToClients map）

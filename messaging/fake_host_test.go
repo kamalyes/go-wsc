@@ -465,7 +465,6 @@ func makeTestClient(clientID, userID string, opts ...string) *models.Client {
 		UserType:    models.UserTypeCustomer,
 		Role:        models.UserRoleCustomer,
 		Status:      models.UserStatusOnline,
-		LastSeen:    time.Now(),
 		SendChan:    make(chan []byte, 16),
 		Context:     context.WithValue(context.Background(), ContextKeyUserID, userID),
 		ConnectedAt: time.Now(),

@@ -58,15 +58,16 @@ func makeOnlineStatusClients(prefix string, n int) []*models.Client {
 	clients := make([]*models.Client, n)
 	for i := 0; i < n; i++ {
 		clients[i] = &models.Client{
-			ID:            fmt.Sprintf("%s-c-%d", prefix, i),
-			UserID:        fmt.Sprintf("%s-u-%d", prefix, i),
-			UserType:      models.UserTypeCustomer,
-			Status:        models.UserStatusOnline,
-			NodeID:        "bench-node",
-			SendChan:      make(chan []byte, 1),
-			Context:       context.Background(),
-			LastHeartbeat: time.Now(),
+			ID:       fmt.Sprintf("%s-c-%d", prefix, i),
+			UserID:   fmt.Sprintf("%s-u-%d", prefix, i),
+			UserType: models.UserTypeCustomer,
+			Status:   models.UserStatusOnline,
+			NodeID:   "bench-node",
+			SendChan: make(chan []byte, 1),
+			Context:  context.Background(),
 		}
+		// 时间戳为原子存储（无 time.Time 字段），经 Set* 初始化保持序列化输出含心跳时间
+		clients[i].SetLastHeartbeat(time.Now())
 	}
 	return clients
 }

@@ -344,12 +344,31 @@ func (m *Manager) handleTextMessage(ctx context.Context, client *models.Client, 
 // handleHeartbeatMessage 处理应用层心跳/PING 消息：保活续期 + pong 响应
 // 协议级 PING 的 pong 控制帧由 setupPingHandler 投递 PongCh、写泵统一写出（本文件），
 // 此处仅响应应用层 ping 文本消息；快路径与完整反序列化兜底两分支统一走本方法
+//
+// pong 预序列化缓存：内容 per-connection 恒定，首条心跳经 buildPong 构建一次后缓存到
+// Client（CachedPongBytes），后续心跳零分配零编码直投控制 lane——千万级连接下省去
+// 每心跳一次的 HubMessage 分配 + json.Marshal（30s 间隔即 33w 次/秒）
 func (m *Manager) handleHeartbeatMessage(client *models.Client) {
 	m.host.HandleHeartbeat(client)
 	if client == nil || client.IsClosed() {
 		return
 	}
 
+	pong := client.CachedPongBytes(func() []byte { return m.buildPong(client) })
+	if len(pong) == 0 {
+		m.logWithClient(logger.DEBUG, "心跳 pong 序列化失败，丢弃本次响应", client)
+		return
+	}
+	if !m.controlLane.SendControl(client, pong, nil) {
+		m.logWithClient(logger.DEBUG, "心跳 pong 双 lane 均满，丢弃本次响应", client)
+		return
+	}
+	client.SetLastPong(time.Now())
+}
+
+// buildPong 构建应用层 pong 的序列化字节（连接级固定内容：类型 + 接收者 + 连接级唯一 ID，
+// 经 CachedPongBytes 缓存后逐心跳复用，ID 无逐次唯一性需求）
+func (m *Manager) buildPong(client *models.Client) []byte {
 	pong := models.NewHubMessage().
 		SetMessageType(models.MessageTypePong).
 		SetReceiver(client.UserID).
@@ -357,12 +376,11 @@ func (m *Manager) handleHeartbeatMessage(client *models.Client) {
 	if m.idGenerator != nil {
 		pong.SetID(m.idGenerator.GenerateRequestID())
 	}
-
-	if !m.controlLane.SendControlMessage(client, pong) {
-		m.logWithClient(logger.DEBUG, "心跳 pong 双 lane 均满，丢弃本次响应", client)
-		return
+	data, err := json.Marshal(pong)
+	if err != nil {
+		return nil
 	}
-	client.SetLastPong(time.Now())
+	return data
 }
 
 // handleForwardableMessage 处理可转发类型的消息（窗口消息、状态消息等）

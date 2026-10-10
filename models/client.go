@@ -38,9 +38,6 @@ type Client struct {
 	ClientIP       string                 `json:"client_ip"`           // 客户端IP
 	Conn           *websocket.Conn        `json:"-"`                   // WebSocket连接（不序列化，仅WS使用）
 	ConnectedAt    time.Time              `json:"connected_at"`        // 连接时间
-	LastSeen       time.Time              `json:"last_seen"`           // 最后活跃时间
-	LastHeartbeat  time.Time              `json:"last_heartbeat"`      // 最后心跳时间
-	LastPong       time.Time              `json:"last_pong"`           // 最后心跳响应时间
 	Status         UserStatus             `json:"status"`              // 用户状态
 	Department     Department             `json:"department"`          // 部门
 	Skills         []Skill                `json:"skills"`              // 技能列表
@@ -59,11 +56,15 @@ type Client struct {
 	closed         atomic.Bool            `json:"-"`                   // channel关闭标志（不序列化）
 	CloseMu        sync.Mutex             `json:"-"`                   // 保护channel关闭的互斥锁（不序列化）
 
-	// 原子时间戳（消除 LastHeartbeat/LastSeen/LastPong 的并发读写数据竞争）
-	// 与 time.Time 字段同步更新，并发读通过原子读获取
-	lastHeartbeatUnix atomic.Int64 `json:"-"` // LastHeartbeat 的 UnixNano 原子镜像
-	lastSeenUnix      atomic.Int64 `json:"-"` // LastSeen 的 UnixNano 原子镜像
-	lastPongUnix      atomic.Int64 `json:"-"` // LastPong 的 UnixNano 原子镜像
+	// 原子时间戳（LastHeartbeat/LastSeen/LastPong 的唯一存储：Set* 仅写原子、Get* 仅读原子，
+	// 消除并发读写数据竞争；序列化输出经 MarshalJSON 的原子读覆盖，无 time.Time 字段）
+	lastHeartbeatUnix atomic.Int64 `json:"-"` // LastHeartbeat 的 UnixNano 原子存储
+	lastSeenUnix      atomic.Int64 `json:"-"` // LastSeen 的 UnixNano 原子存储
+	lastPongUnix      atomic.Int64 `json:"-"` // LastPong 的 UnixNano 原子存储
+
+	// pongBytes 应用层心跳 pong 的预序列化缓存（内容 per-connection 恒定，首条心跳时构建一次，
+	// 之后心跳热路径零分配零编码，见 CachedPongBytes；经 mu 保护与序列化路径互斥）
+	pongBytes []byte
 
 	// VIPLevel 的原子镜像（消除 UpgradeVIPLevel 并发写与广播遍历并发读的数据竞争）
 	vipLevelVal atomic.Int32 `json:"-"`
@@ -79,7 +80,7 @@ type Client struct {
 	// 且 MarshalJSON 会反射读取”的非原子字段（GroupID/Namespace/Role/ClientIP/Department/
 	// Skills/MaxTickets/NodeID/NodeIP/NodePort/ClientType/ConnectionType）
 	// MarshalJSON 在整段 json.Marshal 期间持 RLock，与所有 With*/SetMetadataValue/SetGroupID
-	// 的 Lock 互斥 原子镜像字段（Status/VIPLevel/LastHeartbeat/LastSeen/LastPong）另走 atomic，不经此锁
+	// 的 Lock 互斥；原子字段（Status/VIPLevel/时间戳）另走 atomic 不经此锁，pongBytes 亦经此锁保护
 	mu sync.RWMutex `json:"-"`
 
 	// SSE 专用字段（仅当 ConnectionType 为 SSE 时使用）
@@ -94,19 +95,16 @@ func NewClient(id, userID string, userType UserType) *Client {
 	now := time.Now()
 	unix := now.UnixNano()
 	c := &Client{
-		ID:            id,
-		UserID:        userID,
-		UserType:      userType,
-		AppID:         constants.DefaultAppID,     // 默认应用ID（入口层 WithAppID 覆盖为真实值；与 ClientMatchesEnvelope 严格匹配配套）
-		Namespace:     constants.DefaultNamespace, // 默认命名空间（入口层 WithNamespace 覆盖；广播场景显式置空）
-		ConnectedAt:   now,
-		LastSeen:      now,
-		LastHeartbeat: now,
-		LastPong:      now,
-		Status:        UserStatusOnline,
-		Metadata:      make(map[string]interface{}),
-		DoneCh:        make(chan struct{}), // 生命周期关闭信号（注册时 SendChan 由容量管理器按 UserType 容量分配，DoneCh 统一在此创建）
-		Context:       context.Background(),
+		ID:          id,
+		UserID:      userID,
+		UserType:    userType,
+		AppID:       constants.DefaultAppID,     // 默认应用ID（入口层 WithAppID 覆盖为真实值；与 ClientMatchesEnvelope 严格匹配配套）
+		Namespace:   constants.DefaultNamespace, // 默认命名空间（入口层 WithNamespace 覆盖；广播场景显式置空）
+		ConnectedAt: now,
+		Status:      UserStatusOnline,
+		Metadata:    make(map[string]interface{}),
+		DoneCh:      make(chan struct{}), // 生命周期关闭信号（注册时 SendChan 由容量管理器按 UserType 容量分配，DoneCh 统一在此创建）
+		Context:     context.Background(),
 	}
 	c.lastHeartbeatUnix.Store(unix)
 	c.lastSeenUnix.Store(unix)
@@ -183,8 +181,7 @@ func (c *Client) GetMetadataSnapshot() map[string]interface{} {
 //  4. 对“注册后仍会被并发写入”的字段，覆盖别名提升的同名字段，改用并发安全取值：
 //     - Metadata 内联快照（与 hub/connection_record.go 入库语义一致）
 //     - GroupID 直接读字段（已持 RLock，与 SetGroupID/WithGroupID 互斥）
-//     - LastHeartbeat/LastSeen/LastPong 走原子读（Set* 仅更新原子镜像、从不更新 time.Time 字段，
-//     直接读字段会得到 NewClient 时的过期值且存在数据竞争）
+//     - LastHeartbeat/LastSeen/LastPong 走原子读（唯一存储为原子字段，无 time.Time 字段）
 //     - Status/VIPLevel 走原子读（消除与 SetStatus/SetVIPLevel 并发写的数据竞争，atomic 不依赖 mu 可安全调用）
 //
 // JSON 字段集合与原 json.Marshal(client) 完全一致，仅取值路径变为并发安全
@@ -265,6 +262,27 @@ func (c *Client) GetLastPong() time.Time {
 		return time.Time{}
 	}
 	return time.Unix(0, nano)
+}
+
+// CachedPongBytes 返回应用层心跳 pong 的预序列化缓存，缓存缺失时经 build 构建一次并缓存
+// pong 内容 per-connection 恒定（类型 + 接收者 + 连接级唯一 ID，幂等保活响应无逐次唯一性需求），
+// 构建后心跳热路径零分配零编码；持 mu 与 MarshalJSON 序列化路径互斥，build 返回空切片时不缓存
+func (c *Client) CachedPongBytes(build func() []byte) []byte {
+	c.mu.RLock()
+	cached := c.pongBytes
+	c.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	fresh := build()
+	if len(fresh) == 0 {
+		return nil
+	}
+	c.mu.Lock()
+	c.pongBytes = fresh
+	c.mu.Unlock()
+	return fresh
 }
 
 // WithVIPLevel 设置VIP等级

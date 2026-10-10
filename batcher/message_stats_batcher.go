@@ -27,6 +27,7 @@ package batcher
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
@@ -46,19 +47,41 @@ type StatsIncrementItem struct {
 type MessageStatsBatcher struct {
 	hub       StorageBatchWriter
 	processor *syncx.BatchProcessor[*StatsIncrementItem]
+
+	// itemPool 统计条目对象池：广播扇出等单消息多接收者场景消除逐条小对象分配
+	// （100w 接收者广播：100w 次堆分配 → 池内循环复用，GC 标记对象数骤降）
+	// 生命周期：Acquire（清零）→ 填充 → Submit 入队 → flush 聚合落库 → Put 归还；
+	// 队列满丢弃路径由 Submit 内部即时归还，归还不触碰字段（清零延迟到下一次 Acquire）
+	itemPool sync.Pool
 }
 
 // NewMessageStatsBatcher 创建消息统计批量更新器
 func NewMessageStatsBatcher(hub StorageBatchWriter, queueSize, batchSize int, flushInterval time.Duration) *MessageStatsBatcher {
 	u := &MessageStatsBatcher{hub: hub}
+	u.itemPool = sync.Pool{New: func() any { return &StatsIncrementItem{} }}
 	u.processor = syncx.NewBatchProcessor(queueSize, batchSize, flushInterval, u.flush)
 	return u
 }
 
+// Acquire 获取池化统计条目（已清零，填充字段后经 Submit 入队）
+// 高频路径（广播扇出逐接收者统计）以 Acquire+Submit 替代字面量构造，消除逐条堆分配；
+// 清零在 Acquire 时执行（归还时不触碰字段），防上一轮残留计数串扰
+// 所有权契约：Submit 后条目归批量器所有（flush 后回池复用），调用方不得继续持有使用，
+// 同一指针仅可 Submit 一次（重复入队会破坏池内唯一性）
+func (u *MessageStatsBatcher) Acquire() *StatsIncrementItem {
+	item := u.itemPool.Get().(*StatsIncrementItem)
+	*item = StatsIncrementItem{}
+	return item
+}
+
 // Submit 非阻塞提交统计增量
-// 队列满时返回 false（统计数据可丢失，非核心路径）
+// 队列满时返回 false（统计数据可丢失，非核心路径），条目即时归还池
 func (u *MessageStatsBatcher) Submit(item *StatsIncrementItem) bool {
-	return u.processor.Submit(item)
+	if u.processor.Submit(item) {
+		return true
+	}
+	u.itemPool.Put(item)
+	return false
 }
 
 // Stop 停止更新器，flush 剩余数据后退出
@@ -104,6 +127,11 @@ func (u *MessageStatsBatcher) flush(batch []*StatsIncrementItem) {
 			BytesSent:        item.BytesSent,
 			BytesReceived:    item.BytesReceived,
 		})
+	}
+
+	// 聚合完成（值已拷贝进 entries），源条目归还对象池供下一轮 Acquire 复用
+	for _, item := range batch {
+		u.itemPool.Put(item)
 	}
 
 	// 用 context.Background() 而非 h.ctx

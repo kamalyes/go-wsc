@@ -321,8 +321,10 @@ func TestHeartbeatPongResponse(t *testing.T) {
 	m.handleTextMessage(context.Background(), client, data)
 
 	// CtrlCh 未初始化时 pong 走控制 lane 的数据 lane 回退（SendChan）
+	var firstRaw []byte
 	select {
 	case raw := <-client.SendChan:
+		firstRaw = raw
 		var pong models.HubMessage
 		require.NoError(t, json.Unmarshal(raw, &pong))
 		assert.Equal(t, models.MessageTypePong, pong.MessageType, "应回写 pong 消息")
@@ -333,6 +335,15 @@ func TestHeartbeatPongResponse(t *testing.T) {
 	}
 
 	assert.False(t, client.GetLastPong().IsZero(), "pong 送达后应刷新 LastPong")
+
+	// 第二次心跳：pong 命中预序列化缓存（零分配零编码），字节与首次完全一致
+	m.handleTextMessage(context.Background(), client, data)
+	select {
+	case raw := <-client.SendChan:
+		assert.Equal(t, string(firstRaw), string(raw), "缓存命中的 pong 应与首次字节一致")
+	case <-time.After(time.Second):
+		t.Fatal("第二次心跳应复用缓存 pong 响应")
+	}
 }
 
 // TestMessageHandlerTextNonForwardable 验证普通文本消息触发接收回调

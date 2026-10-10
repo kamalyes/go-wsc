@@ -35,8 +35,7 @@ import (
 // 基础发送方法
 // ============================================================================
 
-// routeToClusterForOfflineUser 当用户在本地和 Redis 索引中都判定为离线时，
-// 仍通过 routeToCluster pubsub 广播到其他节点
+// routeToClusterForOfflineUser 当用户在本地和 Redis 索引中都判定为离线时，仍通过 routeToCluster pubsub 广播到其他节点
 //
 // 场景：多 Pod 部署中，用户在 Pod A 连接，但 Redis 在线索引因心跳 batch 延迟（2s）、
 // channel 满、或 Redis 抖动暂时为空，导致 Pod B 的 checkUserOnline 返回 false。
@@ -89,7 +88,7 @@ func (m *Manager) doOfflineBroadcast(ctx context.Context, userID string, msg *mo
 // sendToUser 发送消息给指定用户（内部方法）
 // 自动支持分布式：如果用户在其他节点，会自动路由过去
 //
-// msg 必须为调用方私有副本（入口 SendToUserWithRetry 已 Clone / 测试构造局部 msg），
+// msg 必须为调用方私有副本（入口 SendToUserWithRetry 已 Clone / 测试构造局部 msg）
 // 本方法内直接补默认字段（历史双 Clone 冗余：热路径为 ack 重试小众路径买单）
 // presetNodes 非空时跳过 Redis 节点查询（SendToUserWithRetry 本地 miss 时已预取，单次往返）
 func (m *Manager) sendToUser(ctx context.Context, toUserID string, msg *models.HubMessage, presetNodes []string) error {
@@ -98,26 +97,24 @@ func (m *Manager) sendToUser(ctx context.Context, toUserID string, msg *models.H
 	msg.CreateAt = mathx.IfNotZero(msg.CreateAt, time.Now())
 
 	// 信封注入（幂等）：sendToUser 可被 ack 重试/离线推送等路径直接调用，msg 可能未经入口注入；
-	// InjectRoute 仅归一化 appID、ns 保留 ctx 原值（P2P 路径公开入口已归一化，
-	// 群组可靠投递扇出路径 ns="" 为跨 ns 通配语义，此处不得归一化）
+	// InjectRoute 仅归一化 appID、ns 保留 ctx 原值
+	// P2P 路径公开入口已归一化，群组可靠投递扇出路径 ns="" 为跨 ns 通配语义，此处不得归一化
 	ctx = msg.InjectRoute(ctx)
-	// trace 恢复：ctx 无 trace 时从消息信封恢复（如 workerPool/离线回放等异步路径 ctx 已丢失），
-	// sendToUser 是所有投递路径的漏斗点，在此恢复保证下游 SendToClientSerialized 的
-	// 投递日志与消息原始链路同一 trace_id；ctx 已有 trace 不覆盖（在线链路同源）
+	// trace 恢复：ctx 无 trace 时从消息信封恢复（如 workerPool/离线回放等异步路径 ctx 已丢失）
+	// sendToUser 是所有投递路径的漏斗点，在此恢复 trace_id 保证下游 SendToClientSerialized 的投递日志与消息原始链路同一 trace_id
+	// ctx 已有 trace 不覆盖（在线链路同源）
 	ctx = msg.ContextFrom(ctx)
 
 	// write-ahead：先落 sending 记录再投递（outbox 模式）
 	// 必须先于 checkAndRouteToNode（跨节点 Publish）和 handleBroadcast（本地投递）提交：
-	// 投递侧的状态回报走 statusUpdater 批量 UPDATE（扑空静默忽略，见
-	// gormadapter.MessageSink.BatchUpdateStatus），若记录后建，UPDATE 命中 0 行
-	// → 状态永久停留 sending → 被 ACK 超时兜底误标 ack_timeout 并重复转存离线
-	// （用户实际已收到，上线后重复推送）先提交 INSERT 任务使其在投递链路上花费的
-	// Publish RTT + 目标节点处理 + statusUpdater flush 间隔内完成落库
-	// 🔀 express 分道跳过落库：高频流式消息不产生 message_record（防记录表被弹幕/typing 灌爆），
+	// 投递侧的状态回报走 statusUpdater 批量 UPDATE（扑空静默忽略，见 gormadapter.MessageSink.BatchUpdateStatus）
+	// 若记录后建，UPDATE 命中 0 行，状态永久停留 sending，被 ACK 超时兜底误标 ack_timeout 并重复转存离线，用户实际已收到且上线后重复推送
+	// 先提交 INSERT 任务使其在投递链路上花费的 Publish RTT + 目标节点处理 + statusUpdater flush 间隔内完成落库
+	// 🔀 express 分道跳过落库：高频流式消息不产生 message_record（防记录表被弹幕/typing 灌爆）
 	// 相应地也无状态回报/ACK 对账/离线兜底（全链路轻装，见 sendToUserWithRetryCore express 收尾）
-	// 🔀 单次序列化复用：落库记录与本地投递共享同一份编码字节（原路径逐成员两次
-	// json.Marshal——落库 SetMessage 与 handleDirectMessage 各一次，是逐成员
-	// 可靠扇出的最大单项分配热点）；express 档不落库但投递复用同一份
+	// 🔀 单次序列化复用：落库记录与本地投递共享同一份编码字节
+	// 原路径逐成员两次 json.Marshal（落库 SetMessage 与 handleDirectMessage 各一次），是逐成员可靠扇出的最大单项分配热点
+	// express 档不落库，但投递复用同一份
 	data, _ := json.Marshal(msg)
 	if !msg.ResolveGuarantee().IsExpress() {
 		m.recordMessageToDatabase(msg, nil, data)
@@ -138,7 +135,7 @@ func (m *Manager) sendToUser(ctx context.Context, toUserID string, msg *models.H
 			"error", err,
 		)
 		// 本地无连接且跨节点路由失败：本地投递必然扑空，返回错误让上层
-		// 重试机制（瞬时故障如 Redis 抖动可重试成功）或最终失败离线兜底接管，
+		// 重试机制（瞬时故障如 Redis 抖动可重试成功）或最终失败离线兜底接管
 		// 避免 fire-and-forget 谎报成功导致消息静默丢失
 		if !localOnline {
 			return errorx.NewError(models.ErrTypeTemporaryFailure, "跨节点路由失败(用户不在本节点): %v", err)
@@ -155,15 +152,15 @@ func (m *Manager) sendToUser(ctx context.Context, toUserID string, msg *models.H
 	}
 	// 用户在本节点或单机模式，正常发送
 	// 多端跨节点：routed=true 仅代表"已投递到其他节点"，用户可能同时在本地和
-	// 其他节点有设备（如手机连 Pod A、电脑连 Pod B），本地投递不能被跳过，
+	// 其他节点有设备（如手机连 Pod A、电脑连 Pod B），本地投递不能被跳过
 	// 否则本地设备永远收不到跨节点发送方的消息（修复前 routed=true 直接 return）
 	// 同步执行 handleBroadcast：保证同一发送者顺序发送的消息按序投递到接收方
 	// SendToUserWithRetry 本身为阻塞调用，handleBroadcast 内仅做非阻塞的 TrySend
 	// （观察者通知走 batcher 异步、数据库记录已先行提交），不会显著拖慢发送路径；
 	// 此前用 `go` 异步派发会使并发 goroutine 竞争同一接收方 sendChan 导致消息乱序
-	// 🔒 首连门闩：先 holding 预检（闸门全开零锁直判，绝大多数时刻）直接投递
-	// （零闭包分配，逐成员扇出热路径）；回放中才构造闭包走暂存
-	// （闭包捕获的 msg 为 sendToUser 入口克隆的独立副本，延迟执行无并发写风险）
+	// 🔒 首连门闩：先 holding 预检，闸门全开零锁直判（绝大多数时刻），直接投递零闭包分配（逐成员扇出热路径）
+	// 回放中才构造闭包走暂存
+	// 闭包捕获的 msg 为 sendToUser 入口克隆的独立副本，延迟执行无并发写风险
 	if m.holdingUserDelivery(toUserID) {
 		m.HoldUserDelivery(toUserID, func() { m.handleBroadcast(msg, data) })
 	} else {
@@ -185,36 +182,34 @@ func (m *Manager) sendToUser(ctx context.Context, toUserID string, msg *models.H
 // ============================================================================
 
 // SendToUserWithRetry 带重试机制的发送消息给指定用户
-// 公开 P2P 入口：先 EnsureRouteDefaults 归一化 appID/namespace（P2P 严格契约，空补默认值），
-// 内部路径（sendToUserWithRetry/sendToUser）不再归一化——群组可靠投递的 per-member 扇出
-// 走同一管道，信封 ns="" 为跨 ns 通配语义（见 Deliver 群组分派器），归一化会破坏通配
+// 公开 P2P 入口：先 EnsureRouteDefaults 归一化 appID/namespace（P2P 严格契约，空补默认值）
+// 内部路径（sendToUserWithRetry/sendToUser）不再归一化——群组可靠投递的 per-member 扇出走同一管道，信封 ns="" 为跨 ns 通配语义（见 Deliver 群组分派器），归一化会破坏通配
 func (m *Manager) SendToUserWithRetry(ctx context.Context, toUserID string, msg *models.HubMessage) *models.SendResult {
 	ctx = routing.EnsureRouteDefaults(ctx)
 	return m.sendToUserWithRetry(ctx, toUserID, msg, nil)
 }
 
 // sendToUserWithRetry 带重试机制的发送入口（Clone + InjectRoute 后委托核心体）
-// presetNodes：扇出调用方（群组可靠投递/批量发送/离线回放）批量预取的节点索引，本地 miss 时零回源复用；
+// presetNodes：扇出调用方（群组可靠投递/批量发送/离线回放）批量预取的节点索引，本地 miss 时零回源复用
 // nil 或未覆盖该用户时回退单元素批查（BatchGetUserNodes 传单元素切片，复用批量端口）
 // 仅首次尝试有效：重试时用户可能已迁移节点，仍传 nil 重新查询
 //
-// 本方法保留扇出克隆：扇出类调用方（群组可靠投递/批量发送/离线回放）将同一 msg 并发分发给
-// 多个成员，Receiver/ReceiverNode/ID 逐成员不同，必须各持副本（Data/GroupIDs 只读共享，
-// 见 CloneForFanout 契约）；
+// 本方法保留扇出克隆：扇出类调用方（群组可靠投递/批量发送/离线回放）将同一 msg 并发分发给多个成员
+// Receiver/ReceiverNode/ID 逐成员不同，必须各持副本（Data/GroupIDs 只读共享，见 CloneForFanout 契约）
 // P2P 单一接收方路径（deliverP2P）复用 Deliver 已 Clone 的副本，直接走 sendToUserWithRetryCore 消除二次 Clone
 func (m *Manager) sendToUserWithRetry(ctx context.Context, toUserID string, msg *models.HubMessage, presetNodes []string) *models.SendResult {
-	// 扇出克隆：仅标量信封字段逐成员改写，Data/GroupIDs 只读共享（深拷贝 map/slice
-	// 重建是 10w 级扇出的 GC 热点；全部读方同步序列化，见 CloneForFanout 契约）
+	// 扇出克隆：仅标量信封字段逐成员改写，Data/GroupIDs 只读共享
+	// 深拷贝 map/slice 重建是 10w 级扇出的 GC 热点，全部读方同步序列化，见 CloneForFanout 契约
 	msg = msg.CloneForFanout()
 
-	// InjectRoute 注入信封（appID 幂等归一化，ns 保留 ctx 原值：P2P 路径公开入口已归一化，
-	// 群组可靠投递扇出路径 ns="" 为跨 ns 通配语义，此处不得归一化）
+	// InjectRoute 注入信封（appID 幂等归一化，ns 保留 ctx 原值）
+	// P2P 路径公开入口已归一化，群组可靠投递扇出路径 ns="" 为跨 ns 通配语义，此处不得归一化
 	ctx = msg.InjectRoute(ctx)
 
 	return m.sendToUserWithRetryCore(ctx, toUserID, msg, presetNodes)
 }
 
-// sendToUserWithRetryCore 发送核心体：msg 必须是调用方私有副本（已 Clone 且已 InjectRoute），
+// sendToUserWithRetryCore 发送核心体：msg 必须是调用方私有副本（已 Clone 且已 InjectRoute）
 // 本方法不再 Clone（P2P 入口 deliverP2P 复用 Deliver 已 Clone 副本以消除热路径双 Clone）
 func (m *Manager) sendToUserWithRetryCore(ctx context.Context, toUserID string, msg *models.HubMessage, presetNodes []string) *models.SendResult {
 	result := &models.SendResult{
@@ -251,7 +246,7 @@ func (m *Manager) sendToUserWithRetryCore(ctx context.Context, toUserID string, 
 	// （原路径：IsUserOnline bitmap + checkAndRouteToNode 节点单查 = 2 次往返）
 	localOnline := m.host.GetShardedRegistry().HasUser(toUserID, routing.AppIDFromContext(ctx), routing.NamespaceFromContext(ctx))
 
-	// 🔀 投递等级解析（一次解析全链路复用）：express 档把解析结果固化到显式字段，
+	// 🔀 投递等级解析（一次解析全链路复用）：express 档把解析结果固化到显式字段
 	// sendToUser/收尾分支再解析恒命中决策树第 1 优先级（显式设置），全链路仅此一次完整决策树
 	guarantee := msg.ResolveGuarantee()
 	express := guarantee.IsExpress()
@@ -268,8 +263,8 @@ func (m *Manager) sendToUserWithRetryCore(ctx context.Context, toUserID string, 
 		isOnline = len(presetNodes) > 0
 	}
 
-	// 逐消息成功路径日志走 DEBUG（千万连接规模下逐消息 INFO 是吞吐反模式，
-	// 异常路径——离线存储失败/投递 0 客户端/终态失败——保持 INFO/WARN 生产可见）
+	// 逐消息成功路径日志走 DEBUG（千万连接规模下逐消息 INFO 是吞吐反模式）
+	// 异常路径——离线存储失败/投递 0 客户端/终态失败——保持 INFO/WARN 生产可见
 	m.host.GetLogger().DebugContextKV(ctx, "[投递诊断] 用户在线检查",
 		"user_id", toUserID,
 		"message_id", msg.MessageID,
@@ -364,12 +359,10 @@ func (m *Manager) sendToUserWithRetryCore(ctx context.Context, toUserID string, 
 
 // deliverOnlineWithPolicy 在线投递执行器：按投递等级选择单发或重试链
 //
-// express 档：fire-and-forget 单次尝试，不构造 retry 链（退避参数/条件判断零开销）——
+// express 档：fire-and-forget 单次尝试，不构造 retry 链（退避参数/条件判断零开销）
 // latest-wins 语义下同 key 下一条消息自然覆盖本条，重试毫无意义
-// 可靠档：首次尝试内联直发（正常扇出成员首次即成功，重试链对象与链内
-// GetRuntimeCaller 调用者捕获是逐成员纯热路径浪费），仅首次失败且可重试时
-// 才构造退避重试链消化剩余次数（presetNodes 仅首次有效：重试时用户可能已迁移节点，
-// 重试传 nil 重新查询）
+// 可靠档：首次尝试内联直发（正常扇出成员首次即成功，重试链对象与链内 GetRuntimeCaller 调用者捕获是逐成员纯热路径浪费），仅首次失败且可重试时才构造退避重试链消化剩余次数
+// presetNodes 仅首次有效：重试时用户可能已迁移节点，重试传 nil 重新查询
 func (m *Manager) deliverOnlineWithPolicy(ctx context.Context, toUserID string, msg *models.HubMessage, presetNodes []string, result *models.SendResult, express bool) error {
 	if express {
 		return m.executeSendAttempt(ctx, toUserID, msg, presetNodes, result)
@@ -399,7 +392,7 @@ func (m *Manager) deliverOnlineWithPolicy(ctx context.Context, toUserID string, 
 //
 // express：无 message_record 可更新、不转离线——语义丢弃计数（高频语义下的最终丢失）
 // 可靠档：标记 Failed + 异步转存离线（消息不丢，用户上线时推送）
-// 此前可靠档该路径仅依赖 30s 后的 ACK 超时扫描兜底：延迟窗口大、依赖扫描器存活，
+// 此前可靠档该路径仅依赖 30s 后的 ACK 超时扫描兜底：延迟窗口大、依赖扫描器存活
 // 且 sendToUser fire-and-forget 谎报成功时连扫描器都捞不到（状态被误报 success 的路径除外）
 // StoreOfflineOnDeliveryFailure 内部：转存成功覆盖状态为 UserOffline，失败保持 Failed
 func (m *Manager) settleDeliveryFailure(ctx context.Context, msg *models.HubMessage, finalErr error, express bool) {
@@ -598,9 +591,9 @@ func (m *Manager) prefetchFanoutNodes(ctx context.Context, msg *models.HubMessag
 	if len(userIDs) < 2 || (!m.host.HasPubsub() && !m.host.IsGRPCEnabled()) {
 		return nil
 	}
-	// 路由信封构造（不归一化 ns，保留调用方 ctx 原值）：群组扇出路径信封 ns="" 为跨 ns 通配语义，
+	// 路由信封构造（不归一化 ns，保留调用方 ctx 原值）：群组扇出路径信封 ns="" 为跨 ns 通配语义
 	// BatchGetUserNodes 走 unscoped 桶 + appID 过滤定位节点
-	// 零 Clone：批量预取仅消费路由维度（appID+ns），直接从 msg 信封构造 routeCtx，
+	// 零 Clone：批量预取仅消费路由维度（appID+ns），直接从 msg 信封构造 routeCtx
 	// 消除整消息深拷贝（与 sendToUserWithRetry 的 InjectRoute 同参同序：msg 优先、ctx 兜底）
 	appID := mathx.IfEmpty(msg.AppID, routing.AppIDFromContext(ctx))
 	ns := mathx.IfEmpty(msg.Namespace, routing.NamespaceFromContext(ctx))
@@ -831,7 +824,7 @@ func (m *Manager) recordMessageToDatabase(msg *models.HubMessage, sendErr error,
 	}
 
 	// SetMessage 序列化消息体并同步 Namespace/GroupID 等路由信封字段到 record
-	// payload：调用方预序列化的编码字节（与本地投递共享同一份，消除逐成员二次 Marshal）
+	// payload：调用方预序列化的编码字节，与本地投递共享同一份，消除逐成员二次 Marshal
 	if err := record.SetMessage(msg, payload); err != nil {
 		m.host.GetLogger().WarnContextKV(msg.ContextFrom(m.host.Context()), "序列化消息数据失败",
 			"message_id", msg.MessageID, "error", err)
@@ -853,7 +846,7 @@ func (m *Manager) recordMessageToDatabase(msg *models.HubMessage, sendErr error,
 }
 
 // updateMessageStatusAsync 非阻塞更新消息状态到 DB
-// 按 (msgID, receiver) 精确定位记录：P2P 同一 message_id 会为每个 receiver 各建一条记录，
+// 按 (msgID, receiver) 精确定位记录：P2P 同一 message_id 会为每个 receiver 各建一条记录
 // receiver 缺失会造成多 receiver 状态相互覆盖（如 A 的 success 覆盖 B 的 failed）
 func (m *Manager) updateMessageStatusAsync(ctx context.Context, msgID, receiver string, status models.MessageSendStatus, reason models.FailureReason, errMsg string) {
 	if m.host.GetMessageSink() == nil || m.host.GetMessageStatusUpdater() == nil {
@@ -863,7 +856,7 @@ func (m *Manager) updateMessageStatusAsync(ctx context.Context, msgID, receiver 
 	// ⏰ 状态由 sending 变更时 O(1) 取消跨节点 ACK 超时任务（本地投递即时取消，跨节点目标取消为 no-op）
 	// 本节点持有的 timer 被取消后不再触发冗余 ClaimStaleSending 检查；详见 ack_timer.go
 	m.cancelAckTimeout(models.MessageRecordKey{MessageID: msgID, Receiver: receiver})
-	// 攒批竞态消除：记录仍在 outbox 未落库时直接合并状态（INSERT 时带终态），
+	// 攒批竞态消除：记录仍在 outbox 未落库时直接合并状态（INSERT 时带终态）
 	// 跳过 statusUpdater 的 UPDATE —— 否则 UPDATE 可能先于 INSERT 到库而扑空
 	if outbox := m.host.GetMessageRecordOutbox(); outbox != nil &&
 		outbox.UpdateStatusIfPending(models.MessageRecordKey{MessageID: msgID, Receiver: receiver}, status, reason, errMsg) {
@@ -896,9 +889,8 @@ func (m *Manager) updateMessageStatusAsync(ctx context.Context, msgID, receiver 
 //   - 转存成功 → message_record 状态从 Failed 覆盖为 UserOffline（消息已安全暂存，等用户上线推送）
 //   - 转存失败 → 保持调用方已标记的 Failed 状态（消息确实丢了）
 //
-// 注意：多设备场景下若部分设备投递成功部分失败，失败设备仍会触发转存。
-// 这不会导致重复推送：用户上线 drain 时 pushAndDeleteOffline 成功后按 message_id 删 MySQL，
-// 客户端也可按 message_id 去重。
+// 注意：多设备场景下若部分设备投递成功部分失败，失败设备仍会触发转存
+// 这不会导致重复推送：用户上线 drain 时 pushAndDeleteOffline 成功后按 message_id 删 MySQL，客户端也可按 message_id 去重
 func (m *Manager) StoreOfflineOnDeliveryFailure(msg *models.HubMessage, deliveryErr error) {
 	if m.offlineHandler == nil || msg.Receiver == "" {
 		return
@@ -1039,9 +1031,8 @@ func (m *Manager) sendToClientCore(ctx context.Context, client *models.Client, m
 	msgID := mathx.IfNotEmpty(msg.MessageID, msg.ID)
 	// 状态更新按 (msgID, receiver) 定位：P2P 带 receiver、广播为空，各得其所
 	receiver := msg.Receiver
-	// 送达分级解析一次复用：ResolveGuarantee 含读锁 + 决策树（含 Data map 断言），
-	// 本函数内 msg 为上游 Clone 的私有副本、分级字段不变，coalescer 判断与送达埋点
-	// 共用同一结果，消除热路径每消息第二次无谓解析
+	// 送达分级解析一次复用：ResolveGuarantee 含读锁 + 决策树（含 Data map 断言）
+	// 本函数内 msg 为上游 Clone 的私有副本、分级字段不变，coalescer 判断与送达埋点共用同一结果，消除热路径每消息第二次无谓解析
 	guarantee := msg.ResolveGuarantee()
 
 	// 高频级：latest-wins 合并（同用户同类型只保最新；50ms drain 周期投递）
@@ -1165,9 +1156,9 @@ func (m *Manager) sendToClientCore(ctx context.Context, client *models.Client, m
 // 性能：使用 ForEachUserClient 零拷贝遍历 + 内联过滤，
 // 替代旧版 GetClientsCopyForUser（拷贝1）+ FilterSlice（拷贝2）双重拷贝
 //
-// data：调用方（handleDirectMessage）首次预序列化的消息字节，多端同步直接复用，
-// 消除同一 msg 的二次 json.Marshal（两次序列化之间 msg 未被修改，字节等价）；
-// data 为 nil 时兜底重新序列化（调用方序列化失败或测试直调未预序列化）
+// data：调用方 handleDirectMessage 首次预序列化的消息字节，多端同步直接复用
+// 消除同一 msg 的二次 json.Marshal，两次序列化之间 msg 未被修改，字节等价
+// data 为 nil 时兜底重新序列化，即调用方序列化失败或测试直调未预序列化场景
 func (m *Manager) syncToSenderDevices(ctx context.Context, msg *models.HubMessage, data []byte) {
 	if msg.Sender == "" {
 		return

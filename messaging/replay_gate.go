@@ -33,7 +33,8 @@ const maxReplayHoldout = 1024
 
 // replayGate 首连离线回放期间的实时投递门闩（每用户粒度）
 //
-// 热路径免锁：live 原子计数在 begin/end 临界区内发布，hold 快路径 Load==0（闸门全开，绝大多数时刻）零锁直投
+// 热路径免锁：live 原子计数在 begin/end 临界区内发布
+// hold 快路径 Load==0 即闸门全开（绝大多数时刻）零锁直投
 // 10w 级成员扇出全程无 RLock 竞争，仅回放进行中才进入锁路径
 type replayGate struct {
 	mu      sync.RWMutex
@@ -146,8 +147,8 @@ func (m *Manager) HoldUserDelivery(userID string, deliver func()) {
 
 // holdingUserDelivery 用户是否处于首连回放中（扇出热路径预检）
 //
-// 未注入门闩或闸门全开（live==0，绝大多数时刻）恒 false 且零锁——
-// 调用方据此直接投递（零闭包分配），仅真实回放中才构造闭包走暂存
+// 未注入门闩或闸门全开（live==0，绝大多数时刻）恒 false 且零锁
+// 调用方据此直接投递零闭包分配，仅真实回放中才构造闭包走暂存
 func (m *Manager) holdingUserDelivery(userID string) bool {
 	return m.replayGate != nil && m.replayGate.holding(userID)
 }

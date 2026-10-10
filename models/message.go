@@ -150,10 +150,9 @@ func (m *HubMessage) ContextFrom(parent context.Context) context.Context {
 }
 
 // TraceContext 以消息信封的 trace_id 为准强制覆盖 ctx（离线回放场景专用）
-// 与 ContextFrom 的区别：ContextFrom 尊重 ctx 已有 trace 不覆盖；本方法以消息原始 trace 优先——
-// 离线消息在用户上线时推送，ctx 来自上线连接（带连接自身的 trace_id），
-// 强制覆盖为消息原始发送链路的 trace_id，保证同一条消息从 NotifySend 入口
-// → 离线暂存 → 上线推送 → 最终投递全程同一个 trace_id 可查
+// 与 ContextFrom 的区别：ContextFrom 尊重 ctx 已有 trace 不覆盖，本方法以消息原始 trace 优先
+// 离线消息在用户上线时推送，ctx 来自上线连接（带连接自身的 trace_id）
+// 强制覆盖为消息原始发送链路的 trace_id，保证同一条消息从 NotifySend 入口 → 离线暂存 → 上线推送 → 最终投递全程同一个 trace_id 可查
 func (m *HubMessage) TraceContext(parent context.Context) context.Context {
 	defer m.lockRead()()
 	if m.TraceID == "" {
@@ -671,7 +670,7 @@ func (m *HubMessage) ContextWithRoute(parent context.Context, appID, ns string, 
 
 // Clone 创建消息的深拷贝，避免并发修改问题
 // 实现 syncx.Cloner 接口，DeepCopy 调用时走零反射快速路径
-// 持 RLock 读取全部字段（与 Set*/With* 的 Lock 互斥），Data map 深拷贝（含嵌套子 map），
+// 持 RLock 读取全部字段（与 Set*/With* 的 Lock 互斥），Data map 深拷贝（含嵌套子 map）
 // 副本使用独立 mu（避免与原对象共享锁互相阻塞）
 func (m *HubMessage) Clone() *HubMessage {
 	if m.mu != nil {
@@ -688,7 +687,7 @@ func (m *HubMessage) Clone() *HubMessage {
 	if m.Data != nil {
 		msg.Data = make(map[string]interface{}, len(m.Data))
 		for k, v := range m.Data {
-			// setMapValue 创建的子 map（metadata/content_extra）为可变结构，
+			// setMapValue 创建的子 map（metadata/content_extra）为可变结构
 			// 需深拷贝避免副本修改子 map 时通过共享引用污染原对象
 			if subMap, ok := v.(map[string]interface{}); ok {
 				copied := make(map[string]interface{}, len(subMap))
@@ -712,13 +711,12 @@ func (m *HubMessage) Clone() *HubMessage {
 
 // CloneForFanout 扇出克隆：标量信封字段独立可写，Data 与 GroupIDs 只读共享
 //
-// 逐成员扇出（群组可靠投递/批量发送/离线回放/P2P 发送）仅改写信封标量字段
-// （Receiver/ReceiverNode/ID/CreateAt/Source 等），Data 与 GroupIDs 全链路只读
-// 且所有读方均同步序列化（本地投递 Marshal/落库 SetMessage/跨节点 Publish/离线转存）；
-// 深拷贝的 map/slice 重建是 10w 级扇出的 GC 热点，共享底层结构消除该开销
+// 适用场景为群组可靠投递/批量发送/离线回放/P2P 发送等逐成员扇出，仅改写 Receiver/ReceiverNode/ID/CreateAt/Source 等信封标量字段
+// Data 与 GroupIDs 全链路只读，所有读方（本地投递 Marshal/落库 SetMessage/跨节点 Publish/离线转存）均同步序列化
+// 依据：深拷贝的 map/slice 重建是 10w 级扇出的 GC 热点，共享底层结构消除该开销
 //
 // 契约：扇出进行期间调用方不得并发修改原消息的 Data/GroupIDs
-// （现状扇出均为同步 Execute，扇出完成后才可能触碰原消息，天然满足）
+// 现状扇出均为同步 Execute，扇出完成后才可能触碰原消息，天然满足
 func (m *HubMessage) CloneForFanout() *HubMessage {
 	if m.mu != nil {
 		m.mu.RLock()
@@ -741,8 +739,7 @@ func (m *HubMessage) CloneDeep() any {
 // 投递语义（旁路投递，非主投递链路）：
 //   - Clone 保证不污染原消息（观察者收到的副本与原消息互不影响）
 //   - 旁路标记保证接收方能区分观察者副本与直投消息
-//   - 预序列化一次：所有 WS 观察者复用同一份字节，SSE 观察者复用同一份对象，
-//     消除逐观察者 Clone+Marshal
+//   - 预序列化一次：所有 WS 观察者复用同一份字节，SSE 观察者复用同一份对象，消除逐观察者 Clone+Marshal
 func (m *HubMessage) ObserverCopy() (*HubMessage, []byte, error) {
 	observerMsg := m.Clone()
 	observerMsg.WithMetadata("observer_mode", "true")
@@ -761,7 +758,7 @@ func (m *HubMessage) GetMessageID() string {
 	return m.MessageID
 }
 
-// MarshalJSON 自定义序列化：持 RLock 贯穿 json.Marshal，与所有 Set*/With* 的 Lock 互斥，
+// MarshalJSON 自定义序列化：持 RLock 贯穿 json.Marshal，与所有 Set*/With* 的 Lock 互斥
 // 消除反射遍历 Data map 与并发写入导致的 "concurrent map iteration and map write" fatal
 func (m *HubMessage) MarshalJSON() ([]byte, error) {
 	if m.mu != nil {

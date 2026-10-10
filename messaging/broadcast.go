@@ -145,7 +145,7 @@ func (m *Manager) Deliver(ctx context.Context, msg *models.HubMessage, excludeSe
 
 // deliverP2P 点对点投递（msg.Receiver 非空）
 // msg 已为 Deliver 入口 Clone 的私有副本，此处复用不再二次 Clone：
-// 先 EnsureRouteDefaults 归一化 namespace（P2P 严格契约空补默认，等价原 SendToUserWithRetry 公开入口），
+// 先 EnsureRouteDefaults 归一化 namespace（P2P 严格契约空补默认，等价原 SendToUserWithRetry 公开入口）
 // 再 InjectRoute 把归一化后的 ns 写回信封，随后直走 sendToUserWithRetryCore 处理在线/离线/重试
 func (m *Manager) deliverP2P(ctx context.Context, msg *models.HubMessage) *models.DeliverResult {
 	result := &models.DeliverResult{
@@ -260,8 +260,7 @@ func (m *Manager) deliverToGroupReliable(ctx context.Context, msg *models.HubMes
 
 	ctx, collector := withOfflineBroadcastCollector(ctx)
 	defer m.flushOfflineBroadcasts(ctx, collector)
-	// 批量预取本地 miss 成员的节点索引（1 次 Pipeline 替代扇出内 N 次单查，
-	// 远端成员为主的群组单条消息 N 次往返 → 1 次）
+	// 批量预取本地 miss 成员的节点索引（1 次 Pipeline 替代扇出内 N 次单查，远端成员为主的群组单条消息 N 次往返 → 1 次）
 	presetNodes := m.prefetchFanoutNodes(ctx, msg, filteredMembers)
 	newFanoutExecutor(filteredMembers, m.fanoutConcurrency()).
 		Execute(func(idx int, uid string) (*models.SendResult, error) {
@@ -487,8 +486,7 @@ func (m *Manager) deliverGlobally(ctx context.Context, msg *models.HubMessage) *
 
 // OfferAggregatable 可聚合档消息入窗尝试（群组广播链路统一接线点）
 //
-// 返回 true = 已入本地聚合窗口：调用方跳过即时本地扇出（drain 窗口批量扇出，
-// 各节点对本地成员各自聚合——源节点 + 跨节点入站流共用本入口）；
+// 返回 true = 已入本地聚合窗口：调用方跳过即时本地扇出（drain 窗口批量扇出，各节点对本地成员各自聚合——源节点 + 跨节点入站流共用本入口）
 // 返回 false = 不聚合或降级直通（调用方走原路径，性能降级不丢消息）：
 //   - 聚合器未启用 / 消息非可聚合档 / 多群组 / 排除发送者（窗口扇出无法复现逐成员排除语义）
 //   - 窗口满 / 群组数满（Offer 降级直通）
@@ -525,10 +523,9 @@ func (m *Manager) OfferAggregatable(ctx context.Context, msg *models.HubMessage,
 
 // crossNodeGroupBroadcast 跨节点群组广播（单/多群组统一入口）
 //
-// 统一走 OperationTypeGroupsBroadcast 复数语义，信封携带全部 GroupIDs，
-// 单群组作为 GroupIDs=[groupID] 的特例；提交到分布式池经 routeToCluster
-// 投递（gRPC 直连优先 + PubSub 兜底），消除 per-message goroutine
-// namespace/groupIDs 从 ctx 提取：群组分派器信封 ns 已置空（通配），
+// 统一走 OperationTypeGroupsBroadcast 复数语义，信封携带全部 GroupIDs，单群组作为 GroupIDs=[groupID] 的特例
+// 提交到分布式池经 routeToCluster 投递（gRPC 直连优先 + PubSub 兜底），消除 per-message goroutine
+// namespace/groupIDs 从 ctx 提取：群组分派器信封 ns 已置空（通配）
 // 原样传递到远端，远端成员聚合与连接匹配同样跨 ns 通配
 func (m *Manager) crossNodeGroupBroadcast(ctx context.Context, msg *models.HubMessage, excludeSender bool) {
 	if !m.host.HasPubsub() && !m.host.IsGRPCEnabled() {
@@ -660,7 +657,7 @@ func (m *Manager) broadcastToFilteredNow(ctx context.Context, condition func(*mo
 	msgID := mathx.IfNotEmpty(msg.MessageID, msg.ID)
 	dataLen := len(data)
 
-	// 送达分级在扇出循环外解析一次（循环不变量外提）：过滤广播遍历全量连接，
+	// 送达分级在扇出循环外解析一次（循环不变量外提）：过滤广播遍历全量连接
 	// 逐客户端 ResolveGuarantee（读锁 + 决策树）是百万级无谓开销，分级对同一 msg 恒定
 	guarantee := msg.ResolveGuarantee()
 
@@ -671,8 +668,8 @@ func (m *Manager) broadcastToFilteredNow(ctx context.Context, condition func(*mo
 	var successCount int32
 	var wsScanned, sseScanned int64
 
-	// 组合过滤条件：业务 condition + appId/namespace 隔离（ClientMatchesEnvelope 做 appId+namespace 严格匹配，
-	// 不做 msg.GroupIDs vs client.GroupID 系统组匹配——两者维度不同，详见 ClientMatchesEnvelope 注释）
+	// 组合过滤条件：业务 condition + appId/namespace 隔离
+	// ClientMatchesEnvelope 做 appId+namespace 严格匹配，不做 msg.GroupIDs vs client.GroupID 系统组匹配——两者维度不同，详见 ClientMatchesEnvelope 注释
 	// 所有 BroadcastByUserType / BroadcastToRole / BroadcastToClientType 等上层调用自动获得 appId+namespace 隔离
 	combinedCondition := func(c *models.Client) bool {
 		return connection.ClientMatchesEnvelope(c, msg.AppID, msg.Namespace, msg.GroupIDs) && condition(c)
@@ -748,7 +745,7 @@ func (m *Manager) BroadcastToUserIDs(ctx context.Context, userIDs []string, msg 
 
 // BroadcastFrameToUserIDs 预编码帧直发扇出（聚合 drain 专用零二次编码入口）
 //
-// frame 为已编码的 WS 帧字节（如聚合器产出的裸 JSON 数组帧），逐成员 TrySend 直发，
+// frame 为已编码的 WS 帧字节（如聚合器产出的裸 JSON 数组帧），逐成员 TrySend 直发
 // 消除常规路径的二次 Marshal；msg 仍承担三件事：
 //   - 信封匹配键（AppID/Namespace/GroupIDs，per-device 过滤）
 //   - SSE 对象通道（TrySendSSE，SSE 无预编码通道）
@@ -798,10 +795,8 @@ const broadcastShardParallelUsers = 512
 // frame 非空直接复用（聚合 drain 零二次编码），nil 时 Marshal msg 一次
 //
 // 顺序保证（10w 级成员扇出的核心约束）：
-//   - 按 userID 均匀分片并行，同一 userID 的全部连接固定落在同一分片内串行投递，
-//     配合 client.sendChan 的 FIFO 语义 → 每个用户收到的消息顺序 = 广播调用顺序
-//   - 入口同步（WaitGroup 等全部 worker 完成）→ 调用方顺序调用两次广播，
-//     各用户 sendChan 的写入顺序与调用顺序一致
+//   - 按 userID 均匀分片并行，同一 userID 的全部连接固定落在同一分片内串行投递，配合 client.sendChan 的 FIFO 语义 → 每个用户收到的消息顺序 = 广播调用顺序
+//   - 入口同步（WaitGroup 等全部 worker 完成）→ 调用方顺序调用两次广播，各用户 sendChan 的写入顺序与调用顺序一致
 func (m *Manager) broadcastFrameToUserIDsNow(ctx context.Context, userIDs []string, msg *models.HubMessage, frame []byte) int {
 	if len(userIDs) == 0 {
 		return 0
@@ -821,16 +816,14 @@ func (m *Manager) broadcastFrameToUserIDsNow(ctx context.Context, userIDs []stri
 	dataLen := len(data)
 	var successCount int32
 
-	// 送达分级在扇出循环外解析一次（循环不变量外提）：群组广播按成员扇出，
+	// 送达分级在扇出循环外解析一次（循环不变量外提）：群组广播按成员扇出
 	// 逐成员 ResolveGuarantee（读锁 + 决策树）是大群无谓开销，分级对同一 msg 恒定
 	guarantee := msg.ResolveGuarantee()
 
 	// 分片扇出（单分片内串行按 userID 投递，保用户内顺序）：
-	// 先 holding 预检（live==0 零锁直判，绝大多数时刻）——非回放中直接调
-	// deliverFanoutToUser（零闭包分配，10w 级扇出的 GC 主热点）；
-	// 回放中才构造闭包走 HoldUserDelivery 暂存（补投可能在任意 goroutine 执行，
-	// 成功计数走共享原子）；成功计数用分片局部变量累计、worker 退出一次性汇总
-	// （消除逐 client 原子加的 cache line 争用）
+	// 先 holding 预检，live==0 零锁直判（绝大多数时刻），非回放中直接调 deliverFanoutToUser 零闭包分配（10w 级扇出的 GC 主热点）
+	// 回放中才构造闭包走 HoldUserDelivery 暂存，补投可能在任意 goroutine 执行，成功计数走共享原子
+	// 成功计数用分片局部变量累计、worker 退出一次性汇总，消除逐 client 原子加的 cache line 争用
 	fanout := func(ids []string) {
 		var local int32
 		for _, userID := range ids {
@@ -928,8 +921,7 @@ func (m *Manager) deliverFanoutToUser(userID string, msg *models.HubMessage, dat
 
 // nsBroadcastFullScanPercent 命名空间索引回退全量扫描的命中占比阈值（百分比）
 // 索引路径按 userID 逐个加 shard 读锁 + map 查找，单价高于全量扫描的批量遍历；
-// 命中用户数占本地总连接数的比例达到该阈值（单租户独占 pod 场景）时，
-// 全量扫描更优，回退 BroadcastToFiltered 路径
+// 命中用户数占本地总连接数的比例达到该阈值（单租户独占 pod 场景）时，全量扫描更优，回退 BroadcastToFiltered 路径
 const nsBroadcastFullScanPercent = 50
 
 // BroadcastToNamespace 命名空间广播统一入口（本地投递 deliverToNamespace 与
@@ -937,15 +929,13 @@ const nsBroadcastFullScanPercent = 50
 //
 // 经 nsIdx 反向索引定点反查该命名空间的本地在线用户后 BroadcastToUserIDs 扇出，
 // 替代 BroadcastToFiltered 对全部连接的 O(N) 全量扫描：
-//   - 多租户 pod 上命名空间广播命中率通常极低（如 10w 连接中目标 ns 仅 10 个用户），
-//     索引将 O(全部连接) 收敛为 O(该 ns 本地在线用户)
-//   - 空命中直接返回（索引与注册表在同一 AddClient/RemoveClient 内事务性维护，
-//     无该 ns 用户时全量扫描同样 0 投递，跳过序列化与准入开销）
+//   - 多租户 pod 上命名空间广播命中率通常极低（如 10w 连接中目标 ns 仅 10 个用户），索引将 O(全部连接) 收敛为 O(该 ns 本地在线用户)
+//   - 空命中直接返回（索引与注册表在同一 AddClient/RemoveClient 内事务性维护，无该 ns 用户时全量扫描同样 0 投递，跳过序列化与准入开销）
 //
 // 自适应回退：命中用户数 ≥ 总连接数的 nsBroadcastFullScanPercent% 时退回全量扫描
 // （索引路径逐 userID 查锁的单价更高，大命中率下 64 shard 并行批量遍历反而更快）
 //
-// msg 信封在本入口统一同步（ContextWithRoute）：appID 归一化 + namespace 显式写入，
+// msg 信封在本入口统一同步（ContextWithRoute）：appID 归一化 + namespace 显式写入
 // 确保 BroadcastToUserIDs 的 per-device 信封过滤（ClientMatchesEnvelope）与目标 ns 一致
 func (m *Manager) BroadcastToNamespace(ctx context.Context, namespace string, msg *models.HubMessage) int {
 	if namespace == "" {
@@ -962,8 +952,7 @@ func (m *Manager) BroadcastToNamespace(ctx context.Context, namespace string, ms
 		return 0
 	}
 
-	// 自适应回退：大命中率时索引路径劣于全量扫描（用户数按设备去重、total 为连接数，
-	// 多端登录下 users 偏小于实际连接数，阈值判定偏保守即偏向全量，方向安全）
+	// 自适应回退：大命中率时索引路径劣于全量扫描（用户数按设备去重、total 为连接数，多端登录下 users 偏小于实际连接数，阈值判定偏保守即偏向全量，方向安全）
 	total := registry.GetClientCount()
 	if int64(len(users))*100 >= total*nsBroadcastFullScanPercent {
 		return m.BroadcastToFiltered(ctx, func(c *models.Client) bool {

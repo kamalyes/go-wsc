@@ -1,4 +1,4 @@
-﻿/*
+/*
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-10-10 21:36:00
  * @LastEditors: kamalyes 501893067@qq.com
@@ -6,8 +6,8 @@
  * @FilePath: \go-wsc\overload\aggregator_bench_test.go
  * @Description: 消息聚合器热路径基准（弹幕入窗 Offer 与窗口换出 Flush）
  *
- * 形态说明：单组入窗稳态为窗口满后的溢出直通分支（shard 锁 + map 探测
- * + group 锁 + 上限判定），与生产洪峰下入窗速率压满 drain 节拍时一致；
+ * 形态说明：单组入窗稳态为窗口满后的溢出直通分支
+ * 即 shard 锁 + map 探测 + group 锁 + 上限判定，与生产洪峰下入窗速率压满 drain 节拍时一致
  * 并行多组形态测量 16 分片的竞争分散度
  *
  * Copyright (c) 2026 by kamalyes, All Rights Reserved.

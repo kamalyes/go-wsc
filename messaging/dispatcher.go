@@ -486,11 +486,12 @@ func (m *Manager) normalizeMessageFields(client *models.Client, msg *models.HubM
 
 // handleBroadcast 处理广播消息
 //
-// data 为调用方预序列化的消息体编码字节（可靠投递热路径落库与投递共享同一份，nil 时 handleDirectMessage 内部序列化兜底）
+// data 为调用方预序列化的消息体编码字节，可靠投递热路径落库与投递共享同一份
+// nil 时 handleDirectMessage 内部序列化兜底
 //
-// trace_id 恢复：广播队列异步消费，原请求 ctx 已不可用。
-// msg 在入队前已通过 InjectContext 注入 trace_id，此处从 msg 恢复到 ctx，
-// 保证下游 HandleBroadcastMessage / handleDirectMessage / NotifyObservers 日志链路串联。
+// trace_id 恢复：广播队列异步消费，原请求 ctx 已不可用
+// msg 在入队前已通过 InjectContext 注入 trace_id，此处从 msg 恢复到 ctx
+// 保证下游 HandleBroadcastMessage / handleDirectMessage / NotifyObservers 日志链路串联
 func (m *Manager) handleBroadcast(msg *models.HubMessage, data []byte) {
 	ctx := msg.ContextFrom(m.host.Context())
 

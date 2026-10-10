@@ -6,7 +6,7 @@
  * @FilePath: \go-wsc\overload\coalescer_bench_test.go
  * @Description: 高频合并器热路径基准（latest-wins 入窗 Offer）
  *
- * 形态说明：单 key 覆盖为最热竞争形态（同用户连发正在输入/已读）；
+ * 形态说明：单 key 覆盖为最热竞争形态，即同用户连发正在输入/已读
  * 并行活跃 key 集形态测量 16 分片的竞争分散度与容量内覆盖稳态
  *
  * Copyright (c) 2026 by kamalyes, All Rights Reserved.

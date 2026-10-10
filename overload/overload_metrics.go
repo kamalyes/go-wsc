@@ -28,28 +28,66 @@ package overload
 import (
 	"sync/atomic"
 
+	rand "math/rand/v2"
+
 	"github.com/kamalyes/go-wsc/models"
 )
 
-// guaranteeMetricBuckets 分级计数桶数（标准/高频/必达 + 汇总，对齐 DeliveryGuarantee 枚举宽度）
-type guaranteeMetricBuckets [4]atomic.Int64
+// hotStripes 热计数分片数（2 的幂，写入按 rand 选片分散竞争）
+const hotStripes = 8
+
+// stripedCell 分片单元（8B 计数 + 56B pad = 恰好整条 cache line，消除相邻分片伪共享）
+type stripedCell struct {
+	pad [56]byte
+	v   atomic.Int64
+}
+
+// hotCounter 热路径分片计数器
+//
+// 洪峰扇出下 Record* 埋点每成员/每消息一次原子加
+// 全局单变量在多 worker 并发下竞争同一 cache line（CPU profile 实测 Int32.Add 占 4.3%）
+// 分片写入按 math/rand/v2 的 per-thread ChaCha8 状态选片，无锁约 1ns
+// 读取端聚合求和
+type hotCounter [hotStripes]stripedCell
+
+// add 分片写入（选片仅依赖线程局部随机数，无共享状态竞争）
+func (c *hotCounter) add(delta int64) {
+	c[rand.Uint64()&(hotStripes-1)].v.Add(delta)
+}
+
+// total 聚合读取（各分片 Load 求和，快照语义与单计数器一致）
+func (c *hotCounter) total() int64 {
+	var sum int64
+	for i := range c {
+		sum += c[i].v.Load()
+	}
+	return sum
+}
+
+// guaranteeMetricBuckets 分级计数桶（标准/高频/必达 + 汇总，对齐 DeliveryGuarantee 枚举宽度；
+// 热路径计数器（admitted/realtime/offlineFallback）为分片形态，消息级低频计数保持单原子）
+type guaranteeMetricBuckets [4]hotCounter
 
 // OverloadMetrics 过载与送达漏斗指标（零值可用，全 atomic 无锁）
 type OverloadMetrics struct {
-	// admitted per 分级准入（放行进投递链路）计数
+	// admitted per 分级准入计数，每成员调用，分片写入
+	// 准入 = 放行进投递链路
 	admitted guaranteeMetricBuckets
 
-	// realtime per 分级实时送达（TrySend/写泵成功）计数
+	// realtime per 分级实时送达计数，每成员调用，分片写入
+	// 实时送达 = TrySend/写泵成功
 	realtime guaranteeMetricBuckets
 
-	// offlineFallback per 分级转离线补发计数
+	// offlineFallback per 分级转离线补发计数，洪峰兜底高频，分片写入
 	offlineFallback guaranteeMetricBuckets
 
-	// ephemeralMerged 高频级 latest-wins 合并（覆盖旧消息）次数
-	ephemeralMerged atomic.Int64
+	// ephemeralMerged 高频级 latest-wins 合并次数，合并器热路径，分片写入
+	// 合并 = Offer 覆盖同 key 旧消息
+	ephemeralMerged hotCounter
 
-	// ephemeralDropped 高频级语义丢弃（latest-wins 过期/容量保护）次数
-	ephemeralDropped atomic.Int64
+	// ephemeralDropped 高频级语义丢弃次数，洪峰兜底高频，分片写入
+	// 丢弃 = latest-wins 过期/容量保护
+	ephemeralDropped hotCounter
 
 	// unrecoverable 无兜底可用的最终丢失（离线 handler 未配置：部署缺陷信号，正常应为 0）
 	unrecoverable guaranteeMetricBuckets
@@ -104,34 +142,34 @@ func bucketIndex(g models.DeliveryGuarantee) int {
 	}
 }
 
-// RecordAdmitted 准入埋点（每消息 1 次 atomic add）
+// RecordAdmitted 准入埋点（每成员 1 次，分片写入）
 func (m *OverloadMetrics) RecordAdmitted(g models.DeliveryGuarantee) {
-	m.admitted[bucketIndex(g)].Add(1)
+	m.admitted[bucketIndex(g)].add(1)
 }
 
 // RecordRealtime 实时送达埋点
 func (m *OverloadMetrics) RecordRealtime(g models.DeliveryGuarantee) {
-	m.realtime[bucketIndex(g)].Add(1)
+	m.realtime[bucketIndex(g)].add(1)
 }
 
 // RecordOfflineFallback 转离线补发埋点
 func (m *OverloadMetrics) RecordOfflineFallback(g models.DeliveryGuarantee) {
-	m.offlineFallback[bucketIndex(g)].Add(1)
+	m.offlineFallback[bucketIndex(g)].add(1)
 }
 
 // RecordEphemeralDrop 高频语义丢弃埋点
 func (m *OverloadMetrics) RecordEphemeralDrop() {
-	m.ephemeralDropped.Add(1)
+	m.ephemeralDropped.add(1)
 }
 
 // RecordEphemeralMerged 高频 latest-wins 合并埋点（Offer 覆盖同 key 旧消息时调用）
 func (m *OverloadMetrics) RecordEphemeralMerged() {
-	m.ephemeralMerged.Add(1)
+	m.ephemeralMerged.add(1)
 }
 
 // RecordUnrecoverable 无兜底丢失埋点（正常为 0；非 0 = 离线 handler 未配置的部署缺陷）
 func (m *OverloadMetrics) RecordUnrecoverable(g models.DeliveryGuarantee) {
-	m.unrecoverable[bucketIndex(g)].Add(1)
+	m.unrecoverable[bucketIndex(g)].add(1)
 }
 
 // RecordAdmissionVerdict 准入裁决埋点（延迟/离线三态分流）
@@ -202,10 +240,10 @@ func (m *OverloadMetrics) RecordClusterDispatchSync() {
 func (m *OverloadMetrics) OverloadStats() map[string]any {
 	read := func(b *guaranteeMetricBuckets) map[string]int64 {
 		return map[string]int64{
-			"standard":   b[0].Load(),
-			"ephemeral":  b[1].Load(),
-			"guaranteed": b[2].Load(),
-			"unset":      b[3].Load(),
+			"standard":   b[0].total(),
+			"ephemeral":  b[1].total(),
+			"guaranteed": b[2].total(),
+			"unset":      b[3].total(),
 		}
 	}
 	return map[string]any{
@@ -213,8 +251,8 @@ func (m *OverloadMetrics) OverloadStats() map[string]any {
 		"realtime":          read(&m.realtime),
 		"offline_fallback":  read(&m.offlineFallback),
 		"unrecoverable":     read(&m.unrecoverable),
-		"ephemeral_merged":  m.ephemeralMerged.Load(),
-		"ephemeral_dropped": m.ephemeralDropped.Load(),
+		"ephemeral_merged":  m.ephemeralMerged.total(),
+		"ephemeral_dropped": m.ephemeralDropped.total(),
 		"admission_delayed": m.admissionDelayed.Load(),
 		"admission_offline": m.admissionOffline.Load(),
 		"shaper_denied":     m.shaperDenied.Load(),
@@ -238,8 +276,8 @@ func (m *OverloadMetrics) OverloadStats() map[string]any {
 // MetricsSnapshot 标量计数快照（测试/自检断言用；分桶计数见 OverloadStats）
 func (m *OverloadMetrics) MetricsSnapshot() map[string]int64 {
 	return map[string]int64{
-		"ephemeral_merged":         m.ephemeralMerged.Load(),
-		"ephemeral_dropped":        m.ephemeralDropped.Load(),
+		"ephemeral_merged":         m.ephemeralMerged.total(),
+		"ephemeral_dropped":        m.ephemeralDropped.total(),
 		"admission_delayed":        m.admissionDelayed.Load(),
 		"admission_offline":        m.admissionOffline.Load(),
 		"shaper_denied":            m.shaperDenied.Load(),
@@ -268,8 +306,8 @@ func (m *OverloadMetrics) DeliveryFunnelConsistent() (bool, map[string]int64) {
 		{"guaranteed", 2}, // GuaranteeGuaranteed
 	}
 	for _, c := range checks {
-		in := m.admitted[c.index].Load()
-		out := m.realtime[c.index].Load() + m.offlineFallback[c.index].Load() + m.unrecoverable[c.index].Load()
+		in := m.admitted[c.index].total()
+		out := m.realtime[c.index].total() + m.offlineFallback[c.index].total() + m.unrecoverable[c.index].total()
 		if in != out {
 			offences[c.name] = in - out
 		}

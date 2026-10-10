@@ -140,7 +140,8 @@ func (m *MessageSendRecord) BeforeCreate(tx *gorm.DB) error {
 
 // SetMessage 设置消息数据（将 HubMessage 序列化存储）
 //
-// payload 为调用方已序列化的消息体编码字节（可靠投递热路径与本地投递共享同一份编码，消除逐成员二次 Marshal）；nil 时内部自行序列化
+// payload 为调用方已序列化的消息体编码字节，可靠投递热路径与本地投递共享同一份编码，消除逐成员二次 Marshal
+// nil 时内部自行序列化
 func (m *MessageSendRecord) SetMessage(msg *HubMessage, payload []byte) error {
 	if msg == nil {
 		return nil

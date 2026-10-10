@@ -14,7 +14,16 @@
 ## 🏗️ 系统架构
 
 ```mermaid
-graph TB
+---
+config:
+  layout: elk
+  flowchart:
+    useMaxWidth: false
+    nodeSpacing: 45
+    rankSpacing: 55
+    wrappingWidth: 220
+---
+flowchart TB
     %% ==================== 客户端层 ====================
     subgraph "客户端层"
         WSC["go-wsc SDK<br/>WebSocket 客户端"]
@@ -28,7 +37,7 @@ graph TB
     %% ==================== 接入层 ====================
     subgraph "接入层"
         LB["K8s Service / Ingress<br/>流量接入"]
-        Upgrader["transport.Upgrader<br/>WS / SSE 升级握手<br/>AES-256-GCM Token 解密"]
+        Upgrader["transport.Upgrader<br/>WS / SSE 升级握手<br/>AES-256-GCM<br/>Token 解密"]
     end
 
     %% ==================== 分布式 Hub 集群 ====================
@@ -48,7 +57,7 @@ graph TB
         end
 
         subgraph "统一投递 Deliver"
-            Deliver["Deliver 决策树<br/>P2P / 群组可靠 / 群组广播<br/>命名空间 / 全局"]
+            Deliver["Deliver 决策树<br/>P2P / 群组可靠<br/>群组广播 / 全局"]
             TopoCache["群拓扑缓存<br/>64 分片 LRU + TTL<br/>稳态 0 Redis RTT"]
             GroupStore["群组三维分桶<br/>members:app:ns:gid<br/>gns / nss 双索引"]
         end
@@ -84,15 +93,15 @@ graph TB
 
     %% ==================== 自愈与可观测 ====================
     subgraph "自愈与可观测"
-        SelfHeal["四层自愈<br/>死节点感知 / 重路由 /<br/>ACK 兜底 / 幽灵回收"]
+        SelfHeal["四层自愈<br/>死节点感知 / 重路由<br/>ACK 兜底 / 幽灵回收"]
         Stats["统计域<br/>bitmap 在线状态 O(1)<br/>指标 + 健康上报"]
         Batcher["批处理域<br/>消息记录 / 状态攒批写"]
     end
 
     %% ==================== 存储层 ====================
     subgraph "存储层"
-        Redis[("Redis<br/>节点桶 / 群组桶 / PubSub<br/>离线队列 / 集群统计")]
-        Database[("MySQL / GORM<br/>离线消息 / 消息归档<br/>连接记录 / 连接质量")]
+        Redis[("Redis<br/>节点桶 / 群组桶<br/>PubSub / 离线队列<br/>集群统计")]
+        Database[("MySQL / GORM<br/>离线消息 / 归档<br/>连接记录 / 质量")]
     end
 
     %% ==================== 流量进入 ====================
@@ -103,7 +112,7 @@ graph TB
     TSC -.->|"WebSocket"| LB
     SSEClient -.->|"SSE 长连接"| LB
     LB --> Upgrader
-    Upgrader -->|"Token 解密通过 · 连接注册"| Hub1
+    Upgrader -->|"Token 解密通过<br/>连接注册"| Hub1
     Upgrader --> Hub2
     Upgrader --> HubN
 
@@ -144,7 +153,7 @@ graph TB
     OfflineHandler --> Outbox
 
     %% ==================== 自愈与可观测连线 ====================
-    SelfHeal -->|"死索引清理 / reroute 守卫"| Registry
+    SelfHeal -->|"死索引清理<br/>reroute 守卫"| Registry
     Stats -.->|"集群统计聚合"| Redis
     Batcher -->|"攒批落库"| Database
 

@@ -260,3 +260,43 @@ func TestGRPCBreaker_StatsAndIsOpen(t *testing.T) {
 	assert.Equal(t, "open", stats.State)
 	assert.GreaterOrEqual(t, stats.Failures, int32(3), "失败计数应 >= 3")
 }
+
+// TestGRPCClientPool_Remove 验证 Remove 回收指定 addr 的连接与熔断器（死节点回收原语）
+// 滚动发布/宕机节点经 NodeRegistry 淘汰后，连接池须同步回收其 ClientConn，
+// 否则历史 addr 条目随发布次数无界累积
+func TestGRPCClientPool_Remove(t *testing.T) {
+	pool := NewGRPCClientPool()
+	defer pool.Close()
+	ctx := context.Background()
+
+	// 建立两个 addr 的连接（grpc.NewClient 惰性建连，无需真实服务端）
+	_, err := pool.GetClient(unreachableAddr)
+	require.NoError(t, err)
+	otherAddr := "127.0.0.1:2"
+	_, err = pool.GetClient(otherAddr)
+	require.NoError(t, err)
+	require.Equal(t, 2, pool.ConnectionCount())
+
+	// 触发熔断器创建（失败调用计入 per-node 熔断器）
+	_, _ = pool.SendToUser(ctx, unreachableAddr, "u1", []byte("msg"))
+
+	// Remove 回收：连接与熔断器条目均移除
+	pool.Remove(unreachableAddr)
+	assert.Equal(t, 1, pool.ConnectionCount())
+	_, ok := pool.connections.Load(unreachableAddr)
+	assert.False(t, ok, "连接应随 Remove 移除")
+	_, ok = pool.breakers.Load(unreachableAddr)
+	assert.False(t, ok, "熔断器应随 Remove 移除")
+
+	// 移除不存在的 addr / 空 addr：no-op 不 panic
+	assert.NotPanics(t, func() {
+		pool.Remove("127.0.0.1:9")
+		pool.Remove("")
+	})
+	assert.Equal(t, 1, pool.ConnectionCount(), "no-op Remove 不应影响其余连接")
+
+	// Remove 后 GetClient 重建连接（节点实际仍存活时的自愈语义）
+	_, err = pool.GetClient(unreachableAddr)
+	require.NoError(t, err)
+	assert.Equal(t, 2, pool.ConnectionCount())
+}

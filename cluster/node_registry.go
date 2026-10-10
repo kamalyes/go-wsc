@@ -55,6 +55,10 @@ type NodeRegistry struct {
 	// nodes 缓存所有活跃节点的 gRPC 地址（nodeID → addr）
 	nodes sync.Map
 
+	// onNodeEvicted 节点淘汰回调（nodeID, addr）：refreshNodes 剔除死节点时触发，
+	// 调用方据此回收按 addr 缓存的关联资源（hub 接线关闭 gRPC 连接池的死连接）
+	onNodeEvicted func(nodeID, addr string)
+
 	// stopCh 停止信号
 	stopCh chan struct{}
 	wg     sync.WaitGroup
@@ -148,6 +152,20 @@ func (r *NodeRegistry) SetNodeAddr(nodeID, addr string) {
 	r.nodes.Store(nodeID, addr)
 }
 
+// OnNodeEvicted 注册节点淘汰回调（nil 清除回调）
+// 回调在 refreshNodes 剔除死节点时同步触发（refreshLoop goroutine 内），
+// 不得执行阻塞操作；addr 为该节点被剔除时的最后已知地址
+func (r *NodeRegistry) OnNodeEvicted(fn func(nodeID, addr string)) {
+	r.onNodeEvicted = fn
+}
+
+// notifyEvicted 触发节点淘汰回调（未注册时 no-op）
+func (r *NodeRegistry) notifyEvicted(nodeID, addr string) {
+	if r.onNodeEvicted != nil {
+		r.onNodeEvicted(nodeID, addr)
+	}
+}
+
 // GetNodeAddr 获取指定节点的 gRPC 地址
 func (r *NodeRegistry) GetNodeAddr(nodeID string) (string, bool) {
 	if nodeID == r.localNodeID {
@@ -237,10 +255,12 @@ func (r *NodeRegistry) refreshNodes(ctx context.Context) error {
 	expireThreshold := int64(nodeRegistryTTL / time.Second)
 
 	// 更新本地缓存，清理过期节点
-	r.nodes.Range(func(key, _ any) bool {
+	r.nodes.Range(func(key, value any) bool {
 		nodeID := key.(string)
 		if _, exists := addrMap[nodeID]; !exists {
 			r.nodes.Delete(nodeID)
+			// Redis 已无该节点（下线/滚动发布）：通知回收其 addr 关联资源
+			r.notifyEvicted(nodeID, value.(string))
 		}
 		return true
 	})
@@ -260,6 +280,8 @@ func (r *NodeRegistry) refreshNodes(ctx context.Context) error {
 		if stale {
 			expired = append(expired, nodeID)
 			r.nodes.Delete(nodeID)
+			// 心跳过期/缺失判死：通知回收其 addr 关联资源
+			r.notifyEvicted(nodeID, addr)
 			continue
 		}
 		r.nodes.Store(nodeID, addr)

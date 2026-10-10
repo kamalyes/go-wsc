@@ -142,6 +142,17 @@ func (o *MessageRecordOutbox) flush(records []*models.MessageSendRecord) {
 	defer cancel()
 
 	if err := o.provider.GetMessageSink().CreateBatch(ctx, records); err != nil {
+		// 失败批次同样从 pending 移除（与成功路径对称）：记录已按丢弃语义处理、不会重投，
+		// 残留会让 UpdateStatusIfPending 永远命中已死记录，且 DB 故障期间持续 flush 失败
+		// 会让 map 无界增长（每条含序列化 MessageData）
+		o.mu.Lock()
+		for _, record := range records {
+			key := models.MessageRecordKey{MessageID: record.MessageID, Receiver: record.Receiver}
+			if o.pending[key] == record {
+				delete(o.pending, key)
+			}
+		}
+		o.mu.Unlock()
 		o.provider.GetLogger().WarnContextKV(context.Background(), "outbox 批量落库失败，本批记录丢弃",
 			"count", len(records),
 			"error", err,

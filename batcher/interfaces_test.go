@@ -123,6 +123,8 @@ type fakeMessageSink struct {
 	block func()
 	// err 非 nil 时作为 BatchUpdateStatus 的返回值
 	err error
+	// createErr 非 nil 时作为 CreateBatch 的返回值且不记录（测试 outbox 落库失败路径）
+	createErr error
 }
 
 // fakeStatusBatch 一次 BatchUpdateStatus 调用的记录
@@ -162,9 +164,11 @@ func (f *fakeMessageSink) snapshot() []*fakeStatusBatch {
 // CreateBatch 批量落库记录（outbox flush 消费，记录条数供断言）
 func (f *fakeMessageSink) CreateBatch(_ context.Context, records []*models.MessageSendRecord) error {
 	f.mu.Lock()
-	f.created = append(f.created, records...)
+	if f.createErr == nil {
+		f.created = append(f.created, records...)
+	}
 	f.mu.Unlock()
-	return nil
+	return f.createErr
 }
 
 func (f *fakeMessageSink) createdSnapshot() []*models.MessageSendRecord {

@@ -196,6 +196,8 @@ func (h *Hub) Run() {
 		h.InitNodeGRPC()
 	}
 	h.startNodeGRPC()
+	// ♻️ 死节点淘汰联动回收 gRPC 连接（startNodeGRPC 后组件均已就位）
+	h.wireNodeEvictionCleanup()
 
 	// 使用 EventLoop 管理事件循环
 	// 统一处理客户端注册/注销、消息广播和定时任务

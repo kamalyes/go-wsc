@@ -13,6 +13,7 @@ package cluster
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -252,4 +253,52 @@ func TestNodeRegistry_RefreshNodes_RemovesStaleLocal(t *testing.T) {
 
 	_, ok := r.GetNodeAddr("ghostNode")
 	assert.False(t, ok, "Redis 中不存在的节点应从本地缓存清理")
+}
+
+// TestNodeRegistry_RefreshNodes_EvictionCallback 验证节点淘汰回调触发（死节点 gRPC 连接回收接线）
+// 覆盖 refreshNodes 全部剔除点：本地缓存有而 Redis 无（已下线）、心跳过期判死、心跳缺失幽灵节点；
+// 活跃节点不得触发回调
+func TestNodeRegistry_RefreshNodes_EvictionCallback(t *testing.T) {
+	r, client := newTestNodeRegistry(t, "node-local", "127.0.0.1:50051")
+	defer r.Stop()
+	ctx := context.Background()
+
+	// 剔除点 ①：本地缓存有、Redis 无（节点已下线/滚动发布）
+	r.nodes.Store("nodeGone", "10.0.0.99:50051")
+
+	// 剔除点 ②：心跳过期判死（Redis 中存在）
+	now := time.Now().Unix()
+	expired := now - int64(nodeRegistryTTL/time.Second) - 10
+	require.NoError(t, client.HSet(ctx, "wsc:nodes:grpc", "nodeStale", "10.0.0.9:50051").Err())
+	require.NoError(t, client.HSet(ctx, "wsc:nodes:heartbeat", "nodeStale", expired).Err())
+
+	// 剔除点 ③：心跳缺失幽灵节点（grpc field 残留）
+	require.NoError(t, client.HSet(ctx, "wsc:nodes:grpc", "nodeGhost", "10.0.0.8:50051").Err())
+
+	// 活跃节点（新鲜心跳，不应触发回调）
+	require.NoError(t, client.HSet(ctx, "wsc:nodes:grpc", "nodeAlive", "10.0.0.1:50051").Err())
+	require.NoError(t, client.HSet(ctx, "wsc:nodes:heartbeat", "nodeAlive", now).Err())
+
+	type evictEntry struct{ nodeID, addr string }
+	var mu sync.Mutex
+	var evicted []evictEntry
+	r.OnNodeEvicted(func(nodeID, addr string) {
+		mu.Lock()
+		evicted = append(evicted, evictEntry{nodeID, addr})
+		mu.Unlock()
+	})
+
+	require.NoError(t, r.refreshNodes(ctx))
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, evicted, 3, "三个死节点均应触发淘汰回调")
+	evictedSet := make(map[evictEntry]struct{}, len(evicted))
+	for _, e := range evicted {
+		evictedSet[e] = struct{}{}
+	}
+	assert.Contains(t, evictedSet, evictEntry{"nodeGone", "10.0.0.99:50051"}, "Redis 缺失节点应触发回调")
+	assert.Contains(t, evictedSet, evictEntry{"nodeStale", "10.0.0.9:50051"}, "心跳过期节点应触发回调")
+	assert.Contains(t, evictedSet, evictEntry{"nodeGhost", "10.0.0.8:50051"}, "心跳缺失幽灵节点应触发回调")
+	assert.NotContains(t, evictedSet, evictEntry{"nodeAlive", "10.0.0.1:50051"}, "活跃节点不应触发回调")
 }

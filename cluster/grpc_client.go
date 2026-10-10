@@ -138,6 +138,24 @@ func (p *GRPCClientPool) IsCircuitOpen(addr string) bool {
 	return cb.GetState() == breaker.StateOpen
 }
 
+// Remove 关闭并移除指定地址的连接与熔断器（节点下线/滚动发布时回收死连接）
+// 不回收则历史 addr 的 ClientConn 随发布次数无界累积——每条含后台重连 backoff
+// 协程与传输缓冲，addr 失效后永不再被路由命中
+// 与 GetClient 的 LoadOrStore 竞态由「删除后重建」自愈：节点实际仍存活时
+// 下次 GetClient 重新建连，仅付出一次重连开销；在途 RPC 不受影响
+// （grpc ClientConn.Close 优雅排空，仅拒绝新调用）
+func (p *GRPCClientPool) Remove(addr string) {
+	if addr == "" {
+		return
+	}
+	if val, ok := p.connections.LoadAndDelete(addr); ok {
+		if conn, ok := val.(*grpc.ClientConn); ok {
+			_ = conn.Close()
+		}
+	}
+	p.breakers.Delete(addr)
+}
+
 // Close 关闭所有连接并清空连接池
 func (p *GRPCClientPool) Close() {
 	p.connections.Range(func(key, value any) bool {

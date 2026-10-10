@@ -451,6 +451,21 @@ func (h *Hub) InitNodeGRPC() {
 	)
 }
 
+// wireNodeEvictionCleanup 节点淘汰联动清理接线：注册表剔除死节点时，
+// 回收 gRPC 连接池中该节点 addr 的 ClientConn 与熔断器
+// 不回收则滚动发布/宕机节点的旧连接随发布次数无界累积（每条 ClientConn
+// 含后台重连 backoff 协程，addr 失效后永不再被路由命中）
+// 双来源覆盖：InitNodeGRPC 构造与 WithNodeRegistry/WithGRPCClientPool 注入，
+// Run 时二者均已就位；重复调用幂等（闭包覆盖）
+func (h *Hub) wireNodeEvictionCleanup() {
+	if h.nodeRegistry == nil || h.grpcClientPool == nil {
+		return
+	}
+	h.nodeRegistry.OnNodeEvicted(func(_, addr string) {
+		h.grpcClientPool.Remove(addr)
+	})
+}
+
 // startNodeGRPC 启动 gRPC 服务端并注册本节点到 Redis
 //
 // 在 Hub.Run 中调用，启动顺序：

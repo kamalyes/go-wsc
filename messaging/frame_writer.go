@@ -154,6 +154,44 @@ func (m *Manager) writeClientMessagesBatch(client *models.Client, first []byte) 
 	return err
 }
 
+// writeControlBatch 控制通道批量写（首条直写 + CtrlCh 积压合帧一次 writev）
+//
+// 心跳 pong 等高频控制消息的排空路径与数据 lane 共用合帧语义：突发 N 条控制帧
+// 从 N 次 syscall 降至 2 次；帧内顺序 = 接收顺序（FIFO 不变），控制帧严格先于
+// 数据帧的语义由调用方（handleClientWrite 的排空位置）保证；
+// 控制帧不计入准入闸门水位（与原逐条写路径口径一致，OnWriteBatch 仅数据 lane 调用）
+func (m *Manager) writeControlBatch(client *models.Client, first []byte) error {
+	// 整批共享一次写超时
+	client.Conn.SetWriteDeadline(time.Now().Add(clientWriteTimeout))
+
+	if err := client.Conn.WriteMessage(websocket.TextMessage, first); err != nil {
+		return err
+	}
+
+	// 非阻塞排空 CtrlCh 积压：突发 N 条控制帧一次 writev 写出
+	frames := acquireBatchFrames()
+	for i := 1; i < clientWriteBatchSize; i++ {
+		select {
+		case data, ok := <-client.CtrlCh:
+			if !ok {
+				// 通道关闭：已写出帧有效，交由外层循环感知关闭并退出
+				releaseBatchFrames(frames)
+				return nil
+			}
+			frames = append(frames, data)
+		default:
+			err := writeFramesBatch(client.Conn, frames)
+			releaseBatchFrames(frames)
+			return err
+		}
+	}
+
+	// 整批收满：写出（剩余积压由下一批处理，不丢弃）
+	err := writeFramesBatch(client.Conn, frames)
+	releaseBatchFrames(frames)
+	return err
+}
+
 // batchFramesPool 积压帧收集切片池（writev 的载荷引用视图）
 var batchFramesPool = sync.Pool{
 	New: func() any {

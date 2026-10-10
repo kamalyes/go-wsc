@@ -88,8 +88,10 @@ func (m *Manager) handleClientWrite(client *models.Client) {
 	hubCtx := m.host.Context()
 
 	for {
-		// 控制帧严格优先（双 lane 单写者）：select 前先非阻塞排空 CtrlCh，
+		// 控制帧严格优先（双 lane 单写者）：select 前先排空 CtrlCh，
 		// 消除 select 伪随机调度导致控制帧（KickOut/ForceOffline/Ack）被数据帧插队的可能；
+		// 排空走批量合帧（writeControlBatch：首条直写 + 积压一次 writev），
+		// 心跳 pong 等高频控制帧从逐条 syscall 降至突发 2 次；
 		// CtrlCh 为 nil（SSE/手工构造）时跳过，天然安全
 		// 控制消息以 TextMessage 写出（序列化后的业务级控制消息，非 WS 协议控制帧）
 		if client.CtrlCh != nil {
@@ -102,7 +104,7 @@ func (m *Manager) handleClientWrite(client *models.Client) {
 					if client.Conn == nil {
 						continue
 					}
-					if err := m.writeClientMessages(client, data); err != nil {
+					if err := m.writeControlBatch(client, data); err != nil {
 						m.logWithClient(logger.ERROR, "控制帧写入失败", client, "error", err)
 						// 主动关闭连接，让读 goroutine 的 ReadMessage 立即报错退出（语义同数据写失败）
 						_ = client.Conn.Close()

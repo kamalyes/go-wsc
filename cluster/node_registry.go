@@ -57,13 +57,16 @@ type NodeRegistry struct {
 
 	// onNodeEvicted 节点淘汰回调（nodeID, addr）：refreshNodes 剔除死节点时触发，
 	// 调用方据此回收按 addr 缓存的关联资源（hub 接线关闭 gRPC 连接池的死连接）
+	// 由 mu 保护并发读写：Register 经异步 goroutine 启动 refreshLoop，
+	// OnNodeEvicted 可能在首次 refreshNodes 之后才完成接线
 	onNodeEvicted func(nodeID, addr string)
 
 	// stopCh 停止信号
 	stopCh chan struct{}
 	wg     sync.WaitGroup
 
-	// mu 保护 stopped/wg，防止 Stop 与 Register 的 wg.Add/Wait 并发竞争
+	// mu 保护 stopped/wg/onNodeEvicted，防止 Stop 与 Register 的 wg.Add/Wait 并发竞争
+	// 及回调字段的接线/触发竞争
 	mu      sync.Mutex
 	stopped bool
 }
@@ -155,14 +158,21 @@ func (r *NodeRegistry) SetNodeAddr(nodeID, addr string) {
 // OnNodeEvicted 注册节点淘汰回调（nil 清除回调）
 // 回调在 refreshNodes 剔除死节点时同步触发（refreshLoop goroutine 内），
 // 不得执行阻塞操作；addr 为该节点被剔除时的最后已知地址
+// 持 mu 写入：与 refreshLoop 的 notifyEvicted 读并发安全
 func (r *NodeRegistry) OnNodeEvicted(fn func(nodeID, addr string)) {
+	r.mu.Lock()
 	r.onNodeEvicted = fn
+	r.mu.Unlock()
 }
 
 // notifyEvicted 触发节点淘汰回调（未注册时 no-op）
+// 锁内取快照、锁外执行：回调内不得反向调用本注册中心的加锁方法（防死锁）
 func (r *NodeRegistry) notifyEvicted(nodeID, addr string) {
-	if r.onNodeEvicted != nil {
-		r.onNodeEvicted(nodeID, addr)
+	r.mu.Lock()
+	fn := r.onNodeEvicted
+	r.mu.Unlock()
+	if fn != nil {
+		fn(nodeID, addr)
 	}
 }
 

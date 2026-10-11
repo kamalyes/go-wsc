@@ -383,6 +383,14 @@ func (h *SSEHandler) writeSSEEvent(client *models.Client, msg *models.HubMessage
 		return err
 	}
 	client.SSEFlusher.Flush()
+	// 网络写出成功埋点（DEBUG）：channel 入队成功（"SSE消息发送成功"）不代表实际发出，
+	// 此处为 SSE 投递链路最末端的落盘确认点（与 WS 写泵的"消息已写出至网络"同口径）
+	h.logger.DebugContextKV(msg.ContextFrom(h.hubCtx), "SSE消息已写出至网络",
+		"message_id", msg.MessageID,
+		"client_id", client.ID,
+		"user_id", client.UserID,
+		"bytes", buf.Len(),
+	)
 	return nil
 }
 

@@ -120,7 +120,9 @@ func (m *Manager) writeClientMessagesBatch(client *models.Client, first []byte) 
 	}
 
 	// 非阻塞排空积压：突发 N 条消息避免 N 次唤醒
+	// totalBytes 累计本批写出字节数（首帧 + 积压帧），供网络写出确认日志统计
 	batch := 1
+	totalBytes := len(first)
 	frames := acquireBatchFrames()
 	for i := 1; i < clientWriteBatchSize; i++ {
 		select {
@@ -132,6 +134,7 @@ func (m *Manager) writeClientMessagesBatch(client *models.Client, first []byte) 
 				return nil
 			}
 			frames = append(frames, message)
+			totalBytes += len(message)
 			batch++
 		default:
 			client.SetBacklogRatio(len(client.SendChan), cap(client.SendChan))
@@ -142,6 +145,10 @@ func (m *Manager) writeClientMessagesBatch(client *models.Client, first []byte) 
 				return err
 			}
 			releaseBatchFrames(frames)
+			// 网络写出成功埋点（DEBUG）：channel 入队成功（"消息已投递到本地客户端"）不代表实际发出，
+			// 写泵可能因写失败断链丢弃在途帧，此处为投递链路最末端的落盘确认点，
+			// 与入队日志按 client_id + 时间区间关联即可确认消息真正到达网络
+			m.logWithClient(logger.DEBUG, "消息已写出至网络", client, "frame_count", batch, "bytes", totalBytes)
 			return nil
 		}
 	}
@@ -151,6 +158,9 @@ func (m *Manager) writeClientMessagesBatch(client *models.Client, first []byte) 
 	m.host.OnWriteBatch(batch)
 	err := writeFramesBatch(client.Conn, frames)
 	releaseBatchFrames(frames)
+	if err == nil {
+		m.logWithClient(logger.DEBUG, "消息已写出至网络", client, "frame_count", batch, "bytes", totalBytes)
+	}
 	return err
 }
 

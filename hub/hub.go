@@ -32,6 +32,7 @@ import (
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 
 	"github.com/kamalyes/go-wsc/batcher"
+	"github.com/kamalyes/go-wsc/broker"
 	"github.com/kamalyes/go-wsc/cluster"
 	"github.com/kamalyes/go-wsc/connection"
 	"github.com/kamalyes/go-wsc/group"
@@ -118,6 +119,9 @@ type Hub struct {
 
 	// ========== 工作池 ==========
 	workerPool *messaging.HubWorkerPool
+
+	// ========== 消息总线消费域（未注入即 nil，MQ 模式零初始化） ==========
+	brokerMgr *broker.Manager
 
 	// ========== SPI 仓储（未注入即 nil，域内自行判空降级） ==========
 	messageSink spi.MessageSink

@@ -21,6 +21,7 @@ import (
 
 	"github.com/kamalyes/go-cachex"
 
+	"github.com/kamalyes/go-wsc/broker"
 	"github.com/kamalyes/go-wsc/cluster"
 	"github.com/kamalyes/go-wsc/messaging"
 	"github.com/kamalyes/go-wsc/models"
@@ -89,6 +90,20 @@ func (h *Hub) WithWorkloadStore(store spi.WorkloadStore) *Hub {
 // 两半依赖的便捷组装见 messaging.InitializeOfflineQueue（业务侧亦可直接传构造好的 handler）
 func (h *Hub) WithOfflineMessageHandler(handler spi.OfflineQueue) *Hub {
 	h.messagingMgr.WithOfflineHandler(handler)
+	return h
+}
+
+// WithEventBus 注入事件总线并装配消费域（须在 Run() 前注入）
+//
+// bus 非空即 MQ 模式——Run() 时订阅 deliver/broadcast 双通道，
+// 消费收敛到 hub.Deliver 决策树（零新增投递逻辑）；
+// 未注入即直调模式，broker 域零初始化零开销。去重窗参数走 broker 包内置默认
+// （等级分流去重不开放配置，避免死配置）
+func (h *Hub) WithEventBus(bus spi.EventBus) *Hub {
+	if bus == nil {
+		return h
+	}
+	h.brokerMgr = broker.NewManager(bus, h.Deliver, 0, 0, h.logger)
 	return h
 }
 

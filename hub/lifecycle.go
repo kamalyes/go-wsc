@@ -155,6 +155,14 @@ func (h *Hub) Run() {
 	// 启动指标收集器（如果已配置）
 	close(h.startCh)
 
+	// 📡 启动消息总线消费域（MQ 模式：WithEventBus 注入后订阅 deliver/broadcast
+	// 双通道，消费收敛到 hub.Deliver 决策树；直调模式下 brokerMgr 为 nil 零开销）
+	if h.brokerMgr != nil {
+		if err := h.brokerMgr.Start(h.ctx); err != nil {
+			h.logger.ErrorKV("消息总线消费域启动失败", "error", err.Error(), "node_id", h.nodeID)
+		}
+	}
+
 	// 🌐 启动分布式服务（如果启用了 PubSub）
 	if h.pubsub != nil {
 		// 节点心跳已由 cluster.NodeRegistry.refreshLoop 接管（gRPC 模式）
@@ -520,6 +528,14 @@ func (h *Hub) SafeShutdown() error {
 	shutdownStart := time.Now()
 
 	h.logger.InfoKV("🛑 开始安全关闭 Hub", "node_id", h.nodeID)
+
+	// 📡 停止消息总线消费域（drain 第②步：停拉取 → 排空在途批次 → 提交位点；
+	// 先于本地清理，让 MQ 在途消息完成投递，未排空的由 redelivery 接管）
+	if h.brokerMgr != nil {
+		if err := h.brokerMgr.Close(); err != nil {
+			h.logger.WarnKV("关闭消息总线消费域异常", "error", err.Error(), "node_id", h.nodeID)
+		}
+	}
 
 	// 停止心跳统计 / 消息统计 / 观察者通知批处理器（Stop 内部 flush 剩余数据并等待完成）
 	if h.batcherMgr != nil {

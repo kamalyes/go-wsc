@@ -7,10 +7,8 @@
  * @Description: SSE 接入处理器 —— 客户端构造 / 升级编排 / 写循环 / 协议写
  *
  * 迁移自 hub/sse.go（P2 批1 域化）：SSE 协议能力与写循环归位 transport，
- * 深编排（注册/注销/关闭态）经 Registrar 端口回调；SSE 投递原语
- * （SendToUserViaSSE/BroadcastToSSEClients）属 SSE 协议语义，随本文件留驻
- * （经 ShardedRegistry 只读遍历投递 SSEMessageCh）；纯查询门面（GetSSEClients 等）
- * 由 registry 遍历原语直接组合，不再另设门面
+ * 深编排（注册/注销/关闭态）经 Registrar 端口回调；SSE 投递原语由
+ * messaging 域经 ShardedRegistry 只读遍历投递 SSEMessageCh（本域不重复实现）
  *
  * SSE 协议：单向服务端→客户端推送，格式 `data: <json>\n\n`，心跳用注释行 `: ping\n\n`
  * 链路：HTTP 请求 → HandleSSEUpgrade（token 解码 + 鉴权）→ CreateSSEClient → 同步注册
@@ -28,14 +26,12 @@ import (
 	"net/http"
 	"runtime/debug"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-logger"
 	"github.com/kamalyes/go-toolbox/pkg/json"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
-	"github.com/kamalyes/go-wsc/connection"
 	"github.com/kamalyes/go-wsc/messaging"
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/spi"
@@ -58,11 +54,10 @@ var sseBufPool = sync.Pool{
 // 职责：SSE 客户端构造（响应头/专用通道）、升级编排（健康检查/鉴权/验证/注册）、
 // 写循环（消息事件/心跳写出与 Flush）
 type SSEHandler struct {
-	cfg       *wscconfig.WSC              // 全量配置
-	logger    spi.Logger                  // 日志器（nil 时构造兜底默认实例）
-	registrar Registrar                   // 编排层端口（同步注册/注销/关闭态）
-	upgrader  *Upgrader                   // 复用属性提取（ExtractClientAttributes，token 解码与明文兜底同一套逻辑）
-	registry  *connection.ShardedRegistry // 连接注册表（SSE 投递原语遍历读用）
+	cfg       *wscconfig.WSC // 全量配置
+	logger    spi.Logger     // 日志器（nil 时构造兜底默认实例）
+	registrar Registrar      // 编排层端口（同步注册/注销/关闭态）
+	upgrader  *Upgrader      // 复用属性提取（ExtractClientAttributes，token 解码与明文兜底同一套逻辑）
 	hubCtx    context.Context
 	nodeID    string
 
@@ -106,14 +101,6 @@ func (h *SSEHandler) WithHubContext(ctx context.Context) *SSEHandler {
 // WithNodeID 注入节点标识
 func (h *SSEHandler) WithNodeID(nodeID string) *SSEHandler {
 	h.nodeID = nodeID
-	return h
-}
-
-// WithShardedRegistry 注入连接注册表（SSE 投递原语遍历读用）
-func (h *SSEHandler) WithShardedRegistry(registry *connection.ShardedRegistry) *SSEHandler {
-	if registry != nil {
-		h.registry = registry
-	}
 	return h
 }
 
@@ -401,113 +388,4 @@ func (h *SSEHandler) writeSSEHeartbeat(client *models.Client) error {
 	}
 	client.SSEFlusher.Flush()
 	return nil
-}
-
-// ============================================================================
-// SSE 消息投递原语（messaging 域 send/broadcast 经端口复用，协议语义留驻本域）
-// ============================================================================
-
-// SendToUserViaSSE 通过 SSE 发送消息给指定用户（支持多设备，按 namespace 隔离）
-// 使用 ForEachSSEUserClient 持读锁零拷贝遍历，替代 GetSSEUserClients 锁外遍历的数据竞争
-// 🔏 namespace 隔离：msg.Namespace 非空时仅投递给同 ns 的 SSE 设备，
-// 避免同一 userID 跨 ns 串扰
-func (h *SSEHandler) SendToUserViaSSE(userID string, msg *models.HubMessage) bool {
-	// 快速检查用户是否有 SSE 连接（O(1)）
-	if !h.registry.HasSSEUser(userID) {
-		h.logger.WarnContextKV(msg.ContextFrom(h.hubCtx), "SSE用户不存在",
-			"user_id", userID,
-			"message_id", msg.MessageID,
-			"message_type", msg.MessageType,
-		)
-		return false
-	}
-
-	// 持读锁零拷贝遍历发送
-	successCount := 0
-	totalDevices := 0
-	h.registry.ForEachSSEUserClient(userID, func(clientID string, client *models.Client) bool {
-		// 🔏 namespace 隔离：msg.Namespace 非空时仅投递给同 ns 的设备
-		if msg.Namespace != "" && client.Namespace != msg.Namespace {
-			return true
-		}
-		totalDevices++
-		select {
-		case client.SSEMessageCh <- msg:
-			client.SetLastSeen(time.Now())
-			successCount++
-			h.logger.DebugContextKV(msg.ContextFrom(h.hubCtx), "SSE消息发送",
-				"message_id", msg.MessageID,
-				"from", msg.Sender,
-				"to", userID,
-				"client_id", clientID,
-				"type", msg.MessageType,
-			)
-		default:
-			// SSE 消息队列满
-			h.logger.WarnContextKV(msg.ContextFrom(h.hubCtx), "SSE消息队列已满",
-				"user_id", userID,
-				"client_id", clientID,
-				"message_id", msg.MessageID,
-				"message_type", msg.MessageType,
-			)
-		}
-		return true
-	})
-
-	if successCount > 0 {
-		// 每 SSE 消息必经，与 WS 消息日志同口径降为 Debug
-		h.logger.DebugContextKV(msg.ContextFrom(h.hubCtx), "SSE消息发送成功",
-			"user_id", userID,
-			"message_id", msg.MessageID,
-			"message_type", msg.MessageType,
-			"success_devices", successCount,
-			"total_devices", totalDevices,
-		)
-		return true
-	}
-
-	return false
-}
-
-// BroadcastToSSEClients 广播消息到所有 SSE 客户端（按 app/namespace 信封隔离）
-// 通过 ForEachSSEClientParallel 并行分片读锁遍历（百万级优化）
-// 🔏 appId/namespace 隔离：与 WebSocket 路径保持一致，
-// msg.AppID/msg.Namespace 非空时仅投递给同 app/ns 的 SSE 客户端，避免跨应用/租户串扰
-func (h *SSEHandler) BroadcastToSSEClients(msg *models.HubMessage) {
-	// 🔏 路由信封 + trace_id 同步（与所有入口共用同一套逻辑，幂等，已有不覆盖）
-	// namespace 保持原值（空=全局广播，ClientMatchesEnvelope 跳过 ns 过滤匹配所有）
-	msg.InjectRoute(h.hubCtx)
-
-	start := time.Now()
-	totalSSEClients := h.registry.GetSSEClientCount()
-
-	var sent, skipped, scanned int64
-	h.registry.ForEachSSEClientParallel(0, func(userID, clientID string, client *models.Client) {
-		atomic.AddInt64(&scanned, 1)
-		if !connection.ClientMatchesEnvelope(client, msg.AppID, msg.Namespace, msg.GroupIDs) {
-			return
-		}
-		select {
-		case client.SSEMessageCh <- msg:
-			client.SetLastSeen(time.Now())
-			atomic.AddInt64(&sent, 1)
-		default:
-			atomic.AddInt64(&skipped, 1)
-			h.logger.WarnContextKV(msg.ContextFrom(h.hubCtx), "SSE客户端消息通道已满，跳过",
-				"user_id", userID,
-				"client_id", clientID,
-				"message_id", msg.MessageID,
-			)
-		}
-	})
-
-	h.logger.DebugContextKV(msg.ContextFrom(h.hubCtx), "SSE广播完成",
-		"message_id", msg.MessageID,
-		"namespace", msg.Namespace,
-		"total_sse_clients", totalSSEClients,
-		"scanned", atomic.LoadInt64(&scanned),
-		"sent", atomic.LoadInt64(&sent),
-		"skipped", atomic.LoadInt64(&skipped),
-		"duration_ms", time.Since(start).Milliseconds(),
-	)
 }

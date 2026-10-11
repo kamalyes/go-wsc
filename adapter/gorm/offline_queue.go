@@ -200,12 +200,10 @@ func (r *OfflineStore) ClearByReceiver(ctx context.Context, appID, namespace, re
 		Delete(&models.OfflineMessageRecord{}).Error
 }
 
-// DeleteExpired 删除过期的离线消息
+// DeleteExpired 删除过期的离线消息（按主键分批提交，超时中断不回滚已删批次）
 func (r *OfflineStore) DeleteExpired(ctx context.Context) (int64, error) {
-	result := r.db.WithContext(ctx).
-		Where("expire_at < ?", time.Now()).
-		Delete(&models.OfflineMessageRecord{})
-	return result.RowsAffected, result.Error
+	return deleteInBatches(ctx, r.db, &models.OfflineMessageRecord{},
+		"expire_at < ?", time.Now())
 }
 
 // UpdatePushStatus 更新离线消息推送状态
@@ -240,12 +238,10 @@ func (r *OfflineStore) UpdatePushStatus(ctx context.Context, messageIDs []string
 		Updates(updates).Error
 }
 
-// CleanupOld 清理旧记录（已成功推送或已过期的消息）
+// CleanupOld 清理旧记录（已成功推送或已过期的消息，按主键分批提交）
 func (r *OfflineStore) CleanupOld(ctx context.Context, before time.Time) (int64, error) {
-	result := r.db.WithContext(ctx).
-		Where("created_at < ? AND (status = ? OR expire_at < ?)", before, models.MessageSendStatusSuccess, time.Now()).
-		Delete(&models.OfflineMessageRecord{})
-	return result.RowsAffected, result.Error
+	return deleteInBatches(ctx, r.db, &models.OfflineMessageRecord{},
+		"created_at < ? AND (status = ? OR expire_at < ?)", before, models.MessageSendStatusSuccess, time.Now())
 }
 
 // startCleanupScheduler 启动定时清理任务

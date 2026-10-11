@@ -458,8 +458,10 @@ func (h *Hub) cleanupExpiredMessageRecords() {
 
 	deletedCount, err := h.messageSink.DeleteExpired(ctx)
 	if err != nil {
+		// 分批删除超时中断时已提交批次生效，已删数即本轮进度，下轮调度续删
 		h.logger.WarnKV("清理过期消息记录失败",
 			"error", err,
+			"deleted", deletedCount,
 			"node_id", h.nodeID,
 		)
 		return

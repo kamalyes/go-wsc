@@ -150,11 +150,10 @@ func (r *MessageSink) FindRetryable(ctx context.Context, limit int) ([]*models.M
 	return records, err
 }
 
-// DeleteExpired 删除过期的记录
+// DeleteExpired 删除过期的记录（按主键分批提交，超时中断不回滚已删批次）
 func (r *MessageSink) DeleteExpired(ctx context.Context) (int64, error) {
-	now := time.Now()
-	result := r.db.WithContext(ctx).Where("expires_at IS NOT NULL AND expires_at < ?", now).Delete(&models.MessageSendRecord{})
-	return result.RowsAffected, result.Error
+	return deleteInBatches(ctx, r.db, &models.MessageSendRecord{},
+		"expires_at IS NOT NULL AND expires_at < ?", time.Now())
 }
 
 // Delete 删除记录
@@ -370,15 +369,14 @@ func (r *MessageSink) GetStatistics(ctx context.Context) (map[string]int64, erro
 	return stats, nil
 }
 
-// CleanupOld 清理旧记录
+// CleanupOld 清理旧记录（按主键分批提交）
 func (r *MessageSink) CleanupOld(ctx context.Context, before time.Time) (int64, error) {
-	result := r.db.WithContext(ctx).Where("create_time < ? AND status IN ?", before, []models.MessageSendStatus{
-		models.MessageSendStatusSuccess,
-		models.MessageSendStatusFailed,
-		models.MessageSendStatusExpired,
-	}).Delete(&models.MessageSendRecord{})
-
-	return result.RowsAffected, result.Error
+	return deleteInBatches(ctx, r.db, &models.MessageSendRecord{},
+		"create_time < ? AND status IN ?", before, []models.MessageSendStatus{
+			models.MessageSendStatusSuccess,
+			models.MessageSendStatusFailed,
+			models.MessageSendStatusExpired,
+		})
 }
 
 // GetDB 获取底层 GORM DB

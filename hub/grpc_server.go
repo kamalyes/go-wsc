@@ -168,14 +168,16 @@ func (s *GRPCServer) SendToUser(ctx context.Context, req *wscpb.SendToUserReques
 		return true
 	})
 
+	// 🔔 通知本节点观察者（跨节点 gRPC 消息也需要通知观察者，与本地 broadcast 流程一致）
+	// 路由来源：直接从 msg 信封取（不再"猜"接收者 client 的 ns/group，跨节点场景下 user 可能本节点无 client）
+	// 投递全拒（delivered==0 返回 ResourceExhausted）时也必须通知：观察者关注的是消息事件
+	// 而非投递结果（事件已发生，订阅方不应因过载拒绝丢失事件）
+	observerCtx := routing.NewRoute().WithAppID(msg.AppID).WithNamespace(msg.Namespace).WithGroupIDs(msg.GroupIDs).Inject(ctx)
+	s.hub.NotifyObservers(observerCtx, msg)
+
 	if delivered == 0 {
 		return nil, status.Error(codes.ResourceExhausted, "online client rejected delivery")
 	}
-
-	// 🔔 通知本节点观察者（跨节点 gRPC 消息也需要通知观察者，与本地 broadcast 流程一致）
-	// 路由来源：直接从 msg 信封取（不再"猜"接收者 client 的 ns/group，跨节点场景下 user 可能本节点无 client）
-	observerCtx := routing.NewRoute().WithAppID(msg.AppID).WithNamespace(msg.Namespace).WithGroupIDs(msg.GroupIDs).Inject(ctx)
-	s.hub.NotifyObservers(observerCtx, msg)
 
 	return &wscpb.SendToUserResponse{
 		Success:    true,

@@ -1440,6 +1440,13 @@ func (r *OnlineStore) BatchSetClientsOnline(ctx context.Context, clients []*mode
 		if client.ID == "" || client.UserID == "" || client.NodeID == "" {
 			continue
 		}
+		// 段分隔符校验："|" 是 Lua 侧段分隔符，前 8 段任一含 "|" 会段错位
+		//（userType 落到 expireTime 位 → tonumber(nil) 运行时错误，同批上线写入整批失败）。
+		// 丢弃该条而非报错炸批：单条脏数据不应拖垮同批 50 个客户端的在线写入
+		if strings.ContainsRune(client.ID, '|') || strings.ContainsRune(client.UserID, '|') ||
+			strings.ContainsRune(client.NodeID, '|') || strings.ContainsRune(string(client.UserType), '|') {
+			continue
+		}
 
 		data, err := json.Marshal(client)
 		if err != nil {
@@ -1521,6 +1528,12 @@ func (r *OnlineStore) RenewClientsOnline(ctx context.Context, clients []*models.
 	validIdx := make([]int, 0, len(clients))
 	for i, client := range clients {
 		if client == nil || client.ID == "" || client.UserID == "" || client.NodeID == "" {
+			continue
+		}
+		// 段分隔符校验与 BatchSetClientsOnline 同因：7 段轻量数据同样以 "|" 分段，
+		// 脏字段段错位会让 Lua 运行时错误炸掉同批心跳续期
+		if strings.ContainsRune(client.ID, '|') || strings.ContainsRune(client.UserID, '|') ||
+			strings.ContainsRune(client.NodeID, '|') || strings.ContainsRune(string(client.UserType), '|') {
 			continue
 		}
 		// appID/ns 归一化与 BatchSetClientsOnline 一致，保证 Lua 内 key 构造无空段

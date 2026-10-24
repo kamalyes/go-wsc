@@ -18,7 +18,7 @@ import "time"
 const CtrlChanCapacity = 16
 
 // DefaultAdmissionHighWatermark 准入闸门默认高水位线（在途消息数）
-// backlog = 写泵写入数 - 业务投递数；超过高水位触发过载升级（L++）
+// backlog = 业务入队数 - 已完成写出数；超过高水位触发过载升级（L++）
 // 基准：单节点万级连接 × 每连接 SendChan 256 缓冲的合理在途量级
 const DefaultAdmissionHighWatermark = 8000
 

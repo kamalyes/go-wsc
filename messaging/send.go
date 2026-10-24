@@ -13,6 +13,7 @@ package messaging
 
 import (
 	"context"
+	"fmt"
 	"runtime/debug"
 	"time"
 
@@ -157,9 +158,18 @@ func (m *Manager) sendToUser(ctx context.Context, toUserID string, msg *models.H
 	// 回放中才构造闭包走暂存
 	// 闭包捕获的 msg 为 sendToUser 入口克隆的独立副本，延迟执行无并发写风险
 	if m.holdingUserDelivery(toUserID) {
-		m.HoldUserDelivery(toUserID, func() { m.handleBroadcast(msg, data) })
+		m.HoldUserDelivery(toUserID, func() {
+			// 暂存期间已返回调用方，补投失败必须在此接回离线兜底
+			if m.handleBroadcast(msg, data) == 0 && !routed {
+				failure := errorx.NewError(models.ErrTypeTemporaryFailure, "held delivery rejected")
+				m.updateMessageStatusAsync(msg.ContextFrom(m.host.Context()), msg.MessageID, toUserID, models.MessageSendStatusFailed, models.FailureReasonQueueFull, failure.Error())
+				m.StoreOfflineOnDeliveryFailure(msg, failure)
+			}
+		})
 	} else {
-		m.handleBroadcast(msg, data)
+		if m.handleBroadcast(msg, data) == 0 && !routed {
+			return errorx.NewError(models.ErrTypeTemporaryFailure, "no client accepted delivery")
+		}
 	}
 	m.host.GetLogger().DebugContextKV(ctx, "[投递诊断] 本地投递已发起（含多端跨节点双投递场景）",
 		"message_id", msg.MessageID,
@@ -321,12 +331,26 @@ func (m *Manager) sendToUserWithRetryCore(ctx context.Context, toUserID string, 
 	// 用户在线 - 执行发送：express 单次直发（fire-and-forget），可靠档走退避重试链
 	finalErr := m.deliverOnlineWithPolicy(ctx, toUserID, msg, presetNodes, result, express)
 
+	// 返回前确认离线保存结果，确保成功与已入队标志反映实际处理结果
+	if finalErr != nil && !express && m.offlineHandler != nil && msg.Source != models.MessageSourceOffline {
+		if storeErr := m.offlineHandler.StoreOfflineMessage(ctx, toUserID, msg); storeErr == nil {
+			result.StoredOffline = true
+			finalErr = nil
+			m.updateMessageStatusAsync(ctx, msg.MessageID, msg.Receiver, models.MessageSendStatusUserOffline, models.FailureReasonUserOffline, "")
+		} else {
+			finalErr = fmt.Errorf("delivery failed: %w; offline fallback failed: %w", finalErr, storeErr)
+		}
+	}
 	// 设置最终结果
 	m.finalizeSendResult(result, finalErr, startTime)
 
 	// 投递终态失败收尾（express 语义丢弃 / 可靠档转离线，不同命）
 	if finalErr != nil && !result.StoredOffline {
-		m.settleDeliveryFailure(ctx, msg, finalErr, express)
+		if express {
+			m.settleDeliveryFailure(ctx, msg, finalErr, true)
+		} else {
+			m.updateMessageStatusAsync(ctx, msg.MessageID, msg.Receiver, models.MessageSendStatusFailed, models.FailureReasonMaxRetry, finalErr.Error())
+		}
 	}
 
 	// 终态汇总：与入口"[投递诊断] 用户在线检查"首尾呼应，一眼判断消息是否发出/卡在哪一步

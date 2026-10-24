@@ -67,7 +67,7 @@ func appIDFromIncoming(ctx context.Context) string {
 }
 
 // startDispatchMockServer 在随机回环端口启动 mock gRPC server，返回 addr 与清理函数
-func startDispatchMockServer(t *testing.T, mock *dispatchMockServer) (string, func()) {
+func startDispatchMockServer(t *testing.T, mock wscpb.NodeServiceServer) (string, func()) {
 	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)

@@ -112,6 +112,8 @@ func writeFramesBatch(conn *websocket.Conn, msgs [][]byte) error {
 // 排空积压时收集 up to clientWriteBatchSize-1 条走 writev 合帧。
 // 性能：突发 N 条 2 次 syscall（原 N 次）；GC 压力：帧头池化零分配
 func (m *Manager) writeClientMessagesBatch(client *models.Client, first []byte) error {
+	batch := 1
+	defer func() { client.CompletePendingWrites(int64(batch)) }()
 	// 整批共享一次写超时（突发场景 N 次期限设置降至 1 次）
 	client.Conn.SetWriteDeadline(time.Now().Add(clientWriteTimeout))
 
@@ -121,7 +123,6 @@ func (m *Manager) writeClientMessagesBatch(client *models.Client, first []byte) 
 
 	// 非阻塞排空积压：突发 N 条消息避免 N 次唤醒
 	// totalBytes 累计本批写出字节数（首帧 + 积压帧），供网络写出确认日志统计
-	batch := 1
 	totalBytes := len(first)
 	frames := acquireBatchFrames()
 	for i := 1; i < clientWriteBatchSize; i++ {

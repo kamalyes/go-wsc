@@ -16,9 +16,13 @@ package spi
 
 import (
 	"context"
+	"errors"
 
 	"github.com/kamalyes/go-wsc/models"
 )
+
+// ErrOfflineStorageSkipped 表示消息类型被策略排除，不能将跳过视为保存成功
+var ErrOfflineStorageSkipped = errors.New("offline storage skipped for message type")
 
 // OfflineQueue 离线消息处理器接口（业务逻辑层）
 //

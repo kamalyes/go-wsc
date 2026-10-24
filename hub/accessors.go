@@ -65,6 +65,7 @@ func (h *Hub) SetOverloadPolicy(gate *overload.AdmissionGate, shaper *overload.S
 		if old := h.admission.Load(); old != nil {
 			old.Stop()
 		}
+		gate.SetPendingCounter(&h.pendingMessages)
 		h.admission.Store(gate)
 		gate.Start()
 	}

@@ -59,6 +59,7 @@ type fakeHost struct {
 	statMu       sync.Mutex
 	trackedStats map[string]*trackedStat
 
+	verdict   overload.AdmitVerdict
 	metrics   *overload.OverloadMetrics
 	coalescer *overload.Coalescer // 高频合并器（nil=未启用；测试需覆盖高频分支时注入）
 
@@ -204,7 +205,7 @@ func (f *fakeHost) HandleHeartbeat(_ *models.Client) {}
 
 // AdmitMessage 消息级准入恒放行（闸门由过载域测试自行覆盖）
 func (f *fakeHost) AdmitMessage(_ *models.HubMessage, _ bool) overload.AdmitVerdict {
-	return overload.VerdictAdmit
+	return f.verdict
 }
 
 // AdmissionOnDelivered 投递完成埋点 no-op
@@ -586,3 +587,5 @@ func newStatusRecordingManager() (*Manager, *fakeHost, *fakeMessageRecordRepo, f
 	}
 	return m, host, repo, cleanup
 }
+
+func (f *fakeHost) OnWriteBatch(n int) { f.metrics.RecordWriteBatch(n) }

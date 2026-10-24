@@ -49,14 +49,16 @@ type Client struct {
 	ConnectionType ConnectionType  `json:"connection_type"`     // 连接类型（websocket/sse）
 	// Metadata 惰性分配：NewClient 不预建 map（省 ~300B/conn），首次写入经
 	// SetMetadataValue/WithMetadataMap 惰性创建；序列化边界输出空对象保持 JSON 形态不变
-	Metadata map[string]interface{} `json:"metadata"` // 元数据
-	SendChan chan []byte            `json:"-"`        // 发送通道（不序列化，仅WS使用）
-	CtrlCh   chan []byte            `json:"-"`        // 控制通道（必达级：KickOut/ForceOffline/Ack 等；写泵 select 前优先排空，容量见 constants.CtrlChanCapacity）
-	PongCh   chan []byte            `json:"-"`        // pong 控制帧队列（不序列化，cap 1；读协程收到协议级 PING 后非阻塞投递，写泵统一写出——gorilla 单写者模式）
-	DoneCh   chan struct{}          `json:"-"`        // 生命周期关闭信号（注销时 close，写泵 select 退出；数据通道永不 close，消除 send/close 竞态）
-	Context  context.Context        `json:"-"`        // 上下文（不序列化）
-	closed   atomic.Bool            `json:"-"`        // channel关闭标志（不序列化）
-	CloseMu  sync.Mutex             `json:"-"`        // 保护channel关闭的互斥锁（不序列化）
+	Metadata       map[string]interface{}       `json:"metadata"` // 元数据
+	SendChan       chan []byte                  `json:"-"`        // 发送通道（不序列化，仅WS使用）
+	CtrlCh         chan []byte                  `json:"-"`        // 控制通道（必达级：KickOut/ForceOffline/Ack 等；写泵 select 前优先排空，容量见 constants.CtrlChanCapacity）
+	PongCh         chan []byte                  `json:"-"`        // pong 控制帧队列（不序列化，cap 1；读协程收到协议级 PING 后非阻塞投递，写泵统一写出——gorilla 单写者模式）
+	DoneCh         chan struct{}                `json:"-"`        // 生命周期关闭信号（注销时 close，写泵 select 退出；数据通道永不 close，消除 send/close 竞态）
+	Context        context.Context              `json:"-"`        // 上下文（不序列化）
+	pendingWrites  atomic.Int64                 `json:"-"`        // 本连接尚未结算的数据帧数。
+	pendingCounter atomic.Pointer[atomic.Int64] `json:"-"`        // 所属 Hub 的共享积压计数。
+	closed         atomic.Bool                  `json:"-"`        // channel关闭标志（不序列化）
+	CloseMu        sync.Mutex                   `json:"-"`        // 保护channel关闭的互斥锁（不序列化）
 
 	// 原子时间戳（LastHeartbeat/LastSeen/LastPong 的唯一存储：Set* 仅写原子、Get* 仅读原子，
 	// 消除并发读写数据竞争；序列化输出经 MarshalJSON 的原子读覆盖，无 time.Time 字段）
@@ -636,6 +638,27 @@ func (c *Client) IsClosed() bool {
 // MarkClosed 标记客户端channel为已关闭
 func (c *Client) MarkClosed() {
 	c.closed.Store(true)
+	c.CompletePendingWrites(c.pendingWrites.Load())
+}
+
+// SetPendingCounter 在连接注册并对外可见前，绑定所属 Hub 的共享积压计数
+func (c *Client) SetPendingCounter(counter *atomic.Int64) { c.pendingCounter.Store(counter) }
+
+// CompletePendingWrites 结算已写出、写出失败或断连放弃的数据帧，避免重复扣减
+func (c *Client) CompletePendingWrites(n int64) {
+	for n > 0 {
+		current := c.pendingWrites.Load()
+		take := min(n, current)
+		if take == 0 {
+			return
+		}
+		if c.pendingWrites.CompareAndSwap(current, current-take) {
+			if counter := c.pendingCounter.Load(); counter != nil {
+				counter.Add(-take)
+			}
+			return
+		}
+	}
 }
 
 // TrySend 尝试向客户端发送数据（WebSocket），如果已关闭或失败则返回false
@@ -649,10 +672,24 @@ func (c *Client) TrySend(data []byte) (sent bool) {
 		return false
 	}
 
+	// 先预占计数再发布到通道，失败或并发断连时回滚，防止写泵先消费后记账
+	c.pendingWrites.Add(1)
+	if counter := c.pendingCounter.Load(); counter != nil {
+		counter.Add(1)
+	}
+	defer func() {
+		if !sent {
+			c.CompletePendingWrites(1)
+		}
+	}()
+	if c.IsClosed() {
+		return false
+	}
+
 	// 捕获闭锁竞态窗口内的 send on closed channel panic
 	defer func() {
 		if r := recover(); r != nil {
-			c.closed.Store(true)
+			c.MarkClosed()
 			sent = false
 		}
 	}()
@@ -679,7 +716,7 @@ func (c *Client) TrySendControl(data []byte) (sent bool) {
 
 	defer func() {
 		if r := recover(); r != nil {
-			c.closed.Store(true)
+			c.MarkClosed()
 			sent = false
 		}
 	}()
@@ -721,7 +758,7 @@ func (c *Client) TrySendSSE(msg *HubMessage) (sent bool) {
 
 	defer func() {
 		if r := recover(); r != nil {
-			c.closed.Store(true)
+			c.MarkClosed()
 			sent = false
 		}
 	}()

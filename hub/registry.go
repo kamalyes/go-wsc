@@ -45,6 +45,7 @@ func (h *Hub) Register(client *models.Client) {
 	)
 	// 通道四件套同步初始化（升级器已预初始化时幂等跳过）：必须先于后台注册 goroutine，
 	// 否则传输域紧随 Register 调用的 SendRegisteredMessage 会因 SendChan 未就绪被静默丢弃
+	client.SetPendingCounter(&h.pendingMessages)
 	h.capacityMgr.InitClientSendChan(client)
 	// 注册任务计入 h.wg：SafeShutdown 的 h.wg.Wait() 需等待在途注册完成，
 	// 避免半注册连接在 shutdown 批量清理后才加入注册表造成泄漏
@@ -61,6 +62,7 @@ func (h *Hub) RegisterSync(client *models.Client) {
 		return
 	}
 	// 通道四件套同步初始化（与 Register 入口一致，幂等）
+	client.SetPendingCounter(&h.pendingMessages)
 	h.capacityMgr.InitClientSendChan(client)
 	h.handleRegister(client)
 }

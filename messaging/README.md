@@ -39,6 +39,12 @@ v4 起本域吸收三个旧包（裁决记录 #10）：
 | `DeliveryGuarantee` | 消息级保证：at-least-once / exactly-once（单节点内 Outbox） |
 | worker_pool | 分池写，单连接单写 goroutine，天然防交叉写 |
 
+### 投递结果与过载积压统计
+
+- **积压口径**：WS 积压 = 经 `Client.TrySend` 接纳、尚未完成写出或清理的数据帧数；P2P、广播、观察者共用此入口，入队失败回滚、写出结算、断连释放，控制通道与 SSE 不混入统计。Hub 挂独立实时计数（替换准入闸门时保留已有积压），`Hub.PendingMessages` 即真实待写帧数
+- **投递成功语义**：至少一个匹配客户端接纳才算在线投递成功（队列接纳 ≠ 客户端 ACK）；目标节点用户在线但拒绝投递返回 `ResourceExhausted`，单条与微批 gRPC 均保留该分类——不转成用户不在线、不清理在线索引、不降级 PubSub 后误报成功
+- **离线兜底**：P2P 最终兜底同步确认存储结果后才返回 `StoredOffline=true`；回放暂存消息补投失败同样接回离线兜底；`notice` 支持离线重放，其余被策略排除的系统消息返回 `spi.ErrOfflineStorageSkipped`（跳过 ≠ 保存成功）
+
 ## 怎么用
 
 ```go

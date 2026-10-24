@@ -247,6 +247,10 @@ func (m *Manager) GetStats() *models.HubStats {
 		Uptime:           m.GetUptime(),
 	}
 
+	if pending, ok := m.host.(interface{ PendingMessages() int64 }); ok {
+		stats.QueuedMessages = int(pending.PendingMessages())
+	}
+
 	// 从 statsRepo 获取更详细的统计信息
 	if repo := m.host.GetStatsRepo(); repo != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)

@@ -39,6 +39,8 @@ import (
 	wscpb "github.com/kamalyes/go-wsc/models/pb"
 	"github.com/kamalyes/go-wsc/routing"
 	"github.com/redis/go-redis/v9"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // ============================================================================
@@ -50,6 +52,7 @@ import (
 
 // clusterRouteResult 路由结果（内部使用）
 type clusterRouteResult struct {
+	rejectedNodes  []string // 在线目标明确拒绝投递的节点列表（不能按索引失效或结果未知处理）
 	grpcDelivered  int      // gRPC 成功投递节点数
 	pubsubFallback []string // 需 PubSub 兜底的节点列表（地址未知/调用失败）
 	userMissNodes  []string // gRPC 目标节点明确返回"用户不在"的节点列表（索引过期/用户已迁移）
@@ -62,6 +65,7 @@ const (
 	grpcOutcomeDelivered grpcDispatchOutcome = iota // 投递成功
 	grpcOutcomeFallback                             // 调用失败或结果未知 → PubSub 定向兜底重试
 	grpcOutcomeUserMiss                             // 目标节点明确用户不在 → 不对该节点兜底（PubSub 定向发布同样会扑空）
+	grpcOutcomeRejected                             // 用户在线但目标节点拒绝 → 保留在线索引并向调用方报告失败
 )
 
 // deadNodeProbeRetryDelay 定向发布返回 0 且节点心跳正常时的重试等待
@@ -148,6 +152,9 @@ func (h *Hub) routeToCluster(ctx context.Context, msg *models.HubMessage, opts c
 
 	// ① 尝试 gRPC 直连
 	result := h.dispatchViaGRPC(ctx, msg, opts)
+	if len(result.rejectedNodes) > 0 && result.grpcDelivered == 0 {
+		return status.Errorf(codes.ResourceExhausted, "online target rejected delivery: %v", result.rejectedNodes)
+	}
 	if result.grpcDelivered > 0 {
 		h.overloadMetrics.RecordClusterGRPC(result.grpcDelivered)
 	}
@@ -404,6 +411,8 @@ func (h *Hub) dispatchViaGRPC(ctx context.Context, msg *models.HubMessage, opts 
 		switch outcomes[i] {
 		case grpcOutcomeDelivered:
 			result.grpcDelivered++
+		case grpcOutcomeRejected:
+			result.rejectedNodes = append(result.rejectedNodes, nodeID)
 		case grpcOutcomeUserMiss:
 			result.userMissNodes = append(result.userMissNodes, nodeID)
 		default:
@@ -438,6 +447,9 @@ func (h *Hub) executeGRPCDispatch(ctx context.Context, addr string, msgData []by
 	switch opts.Operation {
 	case models.OperationTypeSendMessage:
 		resp, derr := grpcClient.SendToUser(ctx, addr, opts.TargetUserID, msgData)
+		if status.Code(derr) == codes.ResourceExhausted || (derr == nil && resp != nil && !resp.GetSuccess() && resp.GetUserOnline()) {
+			return grpcOutcomeRejected
+		}
 		// 🔥 必须检查响应体的 Success 字段：目标节点用户不在时返回 (Success=false, UserOnline=false, err=nil)，
 		// 此前只检查 err 会把"目标节点明确投递失败"误判为投递成功 → 上层 routed=true 直接 return →
 		// 消息静默丢失（Redis 在线索引过期/用户已断线迁移的典型场景）
@@ -531,6 +543,8 @@ func (h *Hub) dispatchNodeViaBatch(ctx context.Context, addr string, msgData []b
 	switch h.grpcBatchDispatcher.Submit(ctx, addr, h.buildDispatchItem(ctx, opts, msgData, "")) {
 	case cluster.OutcomeDelivered:
 		return grpcOutcomeDelivered
+	case cluster.OutcomeRejected:
+		return grpcOutcomeRejected
 	case cluster.OutcomeUserMiss:
 		return grpcOutcomeUserMiss
 	default:

@@ -16,12 +16,14 @@ package messaging
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/batcher"
 	"github.com/kamalyes/go-wsc/models"
+	"github.com/kamalyes/go-wsc/spi"
 )
 
 // recordMessageToDatabase 记录消息到数据库（write-ahead：先落 sending 记录再投递）
@@ -147,6 +149,10 @@ func (m *Manager) StoreOfflineOnDeliveryFailure(msg *models.HubMessage, delivery
 		ExecWithContext(func(storeCtx context.Context) error {
 			storeCtx = msg.ContextFrom(storeCtx)
 			if err := m.offlineHandler.StoreOfflineMessage(storeCtx, msg.Receiver, msg); err != nil {
+				if errors.Is(err, spi.ErrOfflineStorageSkipped) {
+					m.host.GetLogger().DebugContextKV(storeCtx, "offline fallback skipped; message not queued", "message_id", msg.MessageID)
+					return nil
+				}
 				return err
 			}
 			// 转存成功 → 覆盖状态为 UserOffline（消息已暂存，等用户上线推送）

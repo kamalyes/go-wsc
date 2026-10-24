@@ -280,9 +280,6 @@ func (h *Hub) handleUnregister(client *models.Client) {
 		return
 	}
 
-	// ⏰ 取消时间轮上的心跳超时任务（客户端已注销，不再需要超时检测）
-	h.heartbeatMgr.CancelTimeout(client.ID)
-
 	// 关键修复：验证客户端指针一致性
 	// TemporalHasher 在时间窗口内为相同用户+设备生成相同 ClientID，
 	// 断线重连时新客户端会覆盖旧客户端的注册表条目，
@@ -295,6 +292,12 @@ func (h *Hub) handleUnregister(client *models.Client) {
 		)
 		return
 	}
+
+	// ⏰ 取消时间轮上的心跳超时任务（客户端已注销，不再需要超时检测）
+	// 必须在指针一致性校验之后：CancelTimeout 按 clientID 定位，新连接已用相同
+	// clientID 重新调度超时任务时，旧连接的迟到注销会误取消新连接的超时任务，
+	// 新连接从此失去超时保护（半开连接永不清理）
+	h.heartbeatMgr.CancelTimeout(client.ID)
 
 	// Phase 2: 关闭通道与连接（幂等，重复调用无副作用）
 	h.lifecycleMgr.CloseChannel(client)

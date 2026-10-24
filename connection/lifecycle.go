@@ -286,14 +286,16 @@ func (m *LifecycleManager) RemoveUnsafe(client *models.Client) {
 		return
 	}
 
-	// ⏰ 取消时间轮上的心跳超时任务
-	m.heartbeat.CancelTimeout(client.ID)
-
 	// 指针一致性校验：旧客户端已被新连接替换时不误删新客户端
 	if removed != client {
 		m.registry.AddClient(removed)
 		return
 	}
+
+	// ⏰ 取消时间轮上的心跳超时任务
+	// 必须在指针一致性校验之后：CancelTimeout 按 clientID 定位，会误取消
+	// 新连接已调度的超时任务（新连接从此失去超时保护）
+	m.heartbeat.CancelTimeout(client.ID)
 
 	m.CloseChannel(client)
 	m.CloseConnection(client)
@@ -306,10 +308,16 @@ func (m *LifecycleManager) CleanupHalfRegistered(client *models.Client) {
 	if client == nil {
 		return
 	}
-	// 移除注册表条目（未注册时无操作）
-	m.registry.RemoveClient(client.ID, client.UserID)
-	// 撤销已调度的心跳超时任务（未调度时无操作），避免重复注销
-	m.heartbeat.CancelTimeout(client.ID)
+	// 移除注册表条目（未注册时无操作）+ 指针一致性校验：
+	// TemporalHasher 同窗口内为相同用户+设备生成相同 ClientID，半注册期间
+	// 新连接可能已覆盖注册表条目——按 clientID 移除会误删新连接，须回加；
+	// CancelTimeout 同理按 clientID 定位，仅在本连接仍是条目持有者时执行，
+	// 避免误取消新连接的心跳超时任务（半开连接将永不清理）
+	if removed := m.registry.RemoveClient(client.ID, client.UserID); removed != nil && removed != client {
+		m.registry.AddClient(removed)
+	} else if removed == client {
+		m.heartbeat.CancelTimeout(client.ID)
+	}
 	// 关闭生命周期信号与底层连接（触发客户端立即重连）
 	m.CloseChannel(client)
 	m.CloseConnection(client)

@@ -405,3 +405,44 @@ func TestLifecycleCloseConnectionGoingAway(t *testing.T) {
 	require.True(t, ok, "应收到 close 帧，实际错误: %v", err)
 	assert.Equal(t, websocket.CloseGoingAway, closeErr.Code, "应携带 1001 GoingAway 关闭码")
 }
+
+// TestLifecycleStaleCleanupKeepsNewTimeoutTask 旧连接迟到清理不误取消新连接的心跳超时任务
+// TemporalHasher 同窗口内为相同用户+设备生成相同 clientID，重连覆盖后：
+// 旧连接的 RemoveUnsafe / CleanupHalfRegistered 若在指针校验前 CancelTimeout（按clientID 定位），会误取消新连接的超时任务——新连接从此失去超时保护，
+// 半开连接永不清理；修复后新连接的超时任务仍会触发注销
+func TestLifecycleStaleCleanupKeepsNewTimeoutTask(t *testing.T) {
+	registry := NewShardedRegistry(false, false, RegistryCapacity{TotalClients: 64})
+	host := newFakeLifecycleHost()
+	hbHost := &fakeHeartbeatHost{}
+	heartbeat := NewHeartbeatManager(hbHost, registry, 80*time.Millisecond)
+	t.Cleanup(heartbeat.Stop)
+	manager := NewLifecycleManager(host, registry, heartbeat, MultiLoginPolicy{})
+
+	oldClient := models.NewClient("lc-stale-timeout", "u-13000", models.UserTypeCustomer)
+	newClient := models.NewClient("lc-stale-timeout", "u-13000", models.UserTypeCustomer)
+	registry.AddClient(oldClient)
+	heartbeat.ScheduleTimeout(oldClient)
+
+	// 同 clientID 重连覆盖：新连接入表并重新调度超时任务（替换旧任务）
+	registry.AddClient(newClient)
+	heartbeat.ScheduleTimeout(newClient)
+
+	// 旧连接的迟到清理（两条路径依次触发）：均不得取消新连接的超时任务
+	manager.RemoveUnsafe(oldClient)
+	manager.CleanupHalfRegistered(oldClient)
+
+	// 注册表仍持有新连接
+	current, exists := registry.GetClient(newClient.ID)
+	require.True(t, exists, "新连接的注册表条目不应被误删")
+	assert.Same(t, newClient, current)
+
+	// 等待超时窗口：新连接的超时任务应存活并触发注销（未被误取消）
+	require.Eventually(t, func() bool {
+		return hbHost.unregisteredCount() > 0
+	}, 2*time.Second, 20*time.Millisecond, "新连接的心跳超时任务不应被旧连接清理误取消")
+
+	hbHost.mu.Lock()
+	defer hbHost.mu.Unlock()
+	require.NotEmpty(t, hbHost.unregistered)
+	assert.Same(t, newClient, hbHost.unregistered[0], "超时注销的应是新连接自身")
+}

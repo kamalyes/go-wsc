@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kamalyes/go-wsc/models"
 	"github.com/stretchr/testify/require"
 )
 
@@ -27,10 +28,13 @@ func TestAdmissionPendingBacklogAndRecovery(t *testing.T) {
 	require.EqualValues(t, 7, replacement.Backlog())
 }
 
-func TestAdmissionStandaloneEnqueuedMinusSettled(t *testing.T) {
+func TestAdmissionUnboundCounterAlwaysDrains(t *testing.T) {
+	// 未绑定积压计数：安全退化——水位评估恒低于低水位不升载，Admit 恒放行，
+	// delivered/written 仅作为 Stats 观测口径不参与决策（delivered-written 累计差在断连放弃帧场景会单调漂移，已从 Backlog 决策中移除）
 	g := NewAdmissionGate(0, 0, 0)
 	g.OnDelivered()
-	require.EqualValues(t, 1, g.Backlog())
 	g.OnWriteBatch(1)
 	require.Zero(t, g.Backlog())
+	require.Equal(t, LevelNormal, g.Level())
+	require.Equal(t, VerdictAdmit, g.Admit(models.NewHubMessage(), false))
 }

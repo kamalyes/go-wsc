@@ -262,15 +262,18 @@ func (g *AdmissionGate) Level() OverloadLevel {
 	return OverloadLevel(g.level.Load())
 }
 
-// Backlog 当前在途量（delivered - written，Little's law 排队延迟估计的分子）
+// Backlog 当前在途量（绑定的实际积压计数为唯一真实源）
+// 未绑定 counter 时恒为 0：水位评估恒低于低水位、Admit 恒放行（安全退化，仅 Stats 观测有效）
+// 不再用 delivered-written 累计差兜底：断连放弃帧"已计投递但永不写出"，累计差会
+// 单调漂移使水位虚高卡死在 L4——独立使用闸门必须 SetPendingCounter 绑定实际积压计数
 func (g *AdmissionGate) Backlog() int64 {
 	if counter := g.pending.Load(); counter != nil {
 		return max(0, counter.Load())
 	}
-	return max(0, g.delivered.Load()-g.written.Load())
+	return 0
 }
 
-// SetPendingCounter 在闸门启动前绑定 Hub 的实际积压计数
+// SetPendingCounter 在闸门启动前绑定 Hub 的实际积压计数（启用水位评估的前置条件）
 func (g *AdmissionGate) SetPendingCounter(counter *atomic.Int64) { g.pending.Store(counter) }
 
 // ForceLevel 强制设置水位（测试/运维手动降载用）

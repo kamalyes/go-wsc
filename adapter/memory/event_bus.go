@@ -52,7 +52,11 @@ type topicHub struct {
 	subs     []*subscriber
 	rrCursor int // queue 语义 round-robin 游标（仅分发 goroutine 触碰）
 
+	// queue 分发队列：Close 不关闭它（向 closed channel 写会 panic），
+	// 改由 stopCh 通知分发循环排空后退出；Publish 经 select 双路在
+	// stop 关闭后停止入队
 	queue     chan *spi.DeliverEnvelope
+	stopCh    chan struct{}
 	closeOnce sync.Once
 }
 
@@ -76,13 +80,6 @@ func NewEventBus() *EventBus {
 // 信封按 Intent 路由 topic：IntentBroadcast → broadcast，其余 → deliver
 // （与 NATS 适配器的 Publish 路由规则一致，信封语义跨驱动不变）
 func (b *EventBus) Publish(ctx context.Context, env *spi.DeliverEnvelope) error {
-	b.mu.Lock()
-	if b.closed {
-		b.mu.Unlock()
-		return ErrBusClosed
-	}
-	b.mu.Unlock()
-
 	if env == nil {
 		return errors.New("memory event bus: envelope is nil")
 	}
@@ -92,12 +89,18 @@ func (b *EventBus) Publish(ctx context.Context, env *spi.DeliverEnvelope) error 
 		topic = spi.TopicBroadcast
 	}
 
-	hub := b.topicHub(topic)
+	hub := b.lockedTopicHub(topic)
+	if hub == nil {
+		return ErrBusClosed
+	}
+	// 入队与停止双路 select：stopCh 已关闭时不入队（Close 与在途 Publish 的竞态窗口内可能随机选中 queue 分支，残余消息随分发 循环退出被丢弃——非生产实现的纳秒级窗口，换取零 panic）
 	select {
 	case hub.queue <- env:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-hub.stopCh:
+		return ErrBusClosed
 	}
 }
 
@@ -106,14 +109,13 @@ func (b *EventBus) Subscribe(ctx context.Context, topic spi.EventBusTopic, handl
 	if handler == nil {
 		return errors.New("memory event bus: handler is nil")
 	}
-	b.mu.Lock()
-	if b.closed {
-		b.mu.Unlock()
+	// 锁内取/建 hub 并检查关闭：Close 快照后新建 hub 不在快照内的
+	// 泄漏路径已由 lockedTopicHub 的 closed 检查封死（不会出现永不停止的分发 goroutine）
+	hub := b.lockedTopicHub(topic)
+	if hub == nil {
 		return ErrBusClosed
 	}
-	b.mu.Unlock()
 
-	hub := b.topicHub(topic)
 	hub.mu.Lock()
 	first := len(hub.subs) == 0
 	hub.subs = append(hub.subs, &subscriber{handler: handler})
@@ -130,6 +132,9 @@ func (b *EventBus) Subscribe(ctx context.Context, topic spi.EventBusTopic, handl
 }
 
 // Close 优雅关闭：拒绝新消息、等待在途分发排空
+//
+// 不关闭 queue（向 closed channel 写会 panic），改经 stopCh 通知各
+// 分发循环排空后自行退出
 func (b *EventBus) Close() error {
 	b.mu.Lock()
 	if b.closed {
@@ -144,7 +149,7 @@ func (b *EventBus) Close() error {
 	b.mu.Unlock()
 
 	for _, hub := range hubs {
-		hub.closeOnce.Do(func() { close(hub.queue) })
+		hub.closeOnce.Do(func() { close(hub.stopCh) })
 	}
 	b.wg.Wait()
 	return nil
@@ -152,13 +157,29 @@ func (b *EventBus) Close() error {
 
 // dispatchLoop topic 分发主循环（单 goroutine 串行：保序的分派点）
 func (b *EventBus) dispatchLoop(ctx context.Context, hub *topicHub) {
-	for env := range hub.queue {
-		if ctx.Err() != nil {
-			// ctx 取消后仍需排空队列（Close 语义：等 channel 关闭排空）
-			// 但不再执行业务 handler，直接跳过剩余消息
-			continue
+	for {
+		select {
+		case env := <-hub.queue:
+			if ctx.Err() != nil {
+				// ctx 取消后仍需排空队列（Close 语义：等停止信号排空）
+				// 但不再执行业务 handler，直接跳过剩余消息
+				continue
+			}
+			b.dispatch(ctx, hub, env)
+		case <-hub.stopCh:
+			// 停止信号：非阻塞排空剩余消息后退出
+			for {
+				select {
+				case env := <-hub.queue:
+					if ctx.Err() != nil {
+						continue
+					}
+					b.dispatch(ctx, hub, env)
+				default:
+					return
+				}
+			}
 		}
-		b.dispatch(ctx, hub, env)
 	}
 }
 
@@ -216,14 +237,22 @@ func (s *subscriber) invoke(ctx context.Context, env *spi.DeliverEnvelope) (err 
 	return s.handler(ctx, env)
 }
 
-// topicHubOf 取或建 topic hub（双检：读路径无锁化由调用方 mu 保护，此处全走写锁）
-func (b *EventBus) topicHub(topic spi.EventBusTopic) *topicHub {
+// lockedTopicHub 锁内取或建 topic hub；总线已关闭返回 nil（调用方拒绝）
+//
+// 关闭检查与取/建同锁：Close 的 hubs 快照发生在同一把锁的另一侧，快照后不可能再新建 hub（杜绝"新建 hub 不在快照内、分发循环永不停止"的泄漏路径）
+func (b *EventBus) lockedTopicHub(topic spi.EventBusTopic) *topicHub {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.closed {
+		return nil
+	}
 	if hub, ok := b.topics[topic]; ok {
 		return hub
 	}
-	hub := &topicHub{queue: make(chan *spi.DeliverEnvelope, dispatchQueueSize)}
+	hub := &topicHub{
+		queue:  make(chan *spi.DeliverEnvelope, dispatchQueueSize),
+		stopCh: make(chan struct{}),
+	}
 	b.topics[topic] = hub
 	return hub
 }

@@ -363,6 +363,7 @@ func (u *Upgrader) HandleWebSocketUpgrade(w http.ResponseWriter, r *http.Request
 
 	// 启用连接 Token 且不允许回退时，attrs 可能为 nil（已记录拒绝日志）
 	if attrs == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -376,6 +377,7 @@ func (u *Upgrader) HandleWebSocketUpgrade(w http.ResponseWriter, r *http.Request
 				"remote_addr", r.RemoteAddr,
 				"query", r.URL.RawQuery,
 			)
+			http.Error(w, "connection rejected", http.StatusBadRequest)
 			return
 		}
 	}
@@ -387,6 +389,7 @@ func (u *Upgrader) HandleWebSocketUpgrade(w http.ResponseWriter, r *http.Request
 			"user_id", attrs.UserID,
 			"remote_addr", r.RemoteAddr,
 		)
+		http.Error(w, "shutting down", http.StatusServiceUnavailable)
 		return
 	}
 

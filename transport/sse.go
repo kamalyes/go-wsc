@@ -213,6 +213,7 @@ func (h *SSEHandler) HandleSSEUpgrade(w http.ResponseWriter, r *http.Request) {
 	attrs := h.upgrader.ExtractClientAttributes(r)
 	if attrs == nil {
 		// token 解码失败且不允许降级（ExtractClientAttributes 已记录拒绝日志）
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -225,6 +226,7 @@ func (h *SSEHandler) HandleSSEUpgrade(w http.ResponseWriter, r *http.Request) {
 				"remote_addr", r.RemoteAddr,
 				"query", r.URL.RawQuery,
 			)
+			http.Error(w, "connection rejected", http.StatusBadRequest)
 			return
 		}
 	}
@@ -236,6 +238,7 @@ func (h *SSEHandler) HandleSSEUpgrade(w http.ResponseWriter, r *http.Request) {
 			"user_id", attrs.UserID,
 			"remote_addr", r.RemoteAddr,
 		)
+		http.Error(w, "shutting down", http.StatusServiceUnavailable)
 		return
 	}
 

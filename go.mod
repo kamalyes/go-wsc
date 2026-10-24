@@ -7,7 +7,7 @@ require (
 	github.com/gorilla/websocket v1.4.2
 	github.com/jpillora/backoff v1.0.0
 	github.com/kamalyes/go-argus v0.3.1
-	github.com/kamalyes/go-cachex v0.4.0
+	github.com/kamalyes/go-cachex v0.4.1
 	github.com/kamalyes/go-config v0.23.0
 	github.com/kamalyes/go-logger v0.7.1
 	github.com/kamalyes/go-pbmo v0.2.0

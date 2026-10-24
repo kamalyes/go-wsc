@@ -55,6 +55,9 @@ func (m *Manager) StartClientPumps(client *models.Client) {
 	}
 	// 安装顺序必须是 PING 处理器先于读写泵（单写者模式，见 setupPingHandler 注释）
 	m.setupPingHandler(client)
+	// wg.Add 必须先于 go 语句：泵函数内的 defer Done 要求 Add 在 goroutine 启动前生效，
+	// 否则 SafeShutdown 的 wg.Wait 可能赶在 Add 之前返回（注册与停机并发的窗口），泵越过关停点
+	m.wg.Add(2)
 	go m.handleClientWrite(client)
 	go m.handleClientRead(client)
 }
@@ -77,7 +80,6 @@ func (m *Manager) setupPingHandler(client *models.Client) {
 
 // handleClientWrite 处理客户端消息写入
 func (m *Manager) handleClientWrite(client *models.Client) {
-	m.wg.Add(1)
 	defer m.wg.Done()
 	// panic 防护（泵级兜底）：写泵任一环节 panic 不打崩节点，关闭连接让读泵
 	// ReadMessage 立即报错退出，经其 defer Unregister 完成清理（与 handleRegister 同标准）
@@ -190,8 +192,8 @@ func (m *Manager) writeClientMessages(client *models.Client, data []byte) error 
 }
 
 // handleClientRead 处理客户端消息读取
+// wg 计数由 StartClientPumps 在 go 语句前统一 Add（见其注释）
 func (m *Manager) handleClientRead(client *models.Client) {
-	m.wg.Add(1)
 	defer m.wg.Done()
 	// panic 防护（泵级兜底）：读泵任一环节 panic 不打崩节点；defer 顺序保证
 	// Unregister/结束日志仍执行后（panic 展开按 LIFO），此处 recover 并关闭连接

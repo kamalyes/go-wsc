@@ -24,9 +24,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -379,4 +383,69 @@ func mustMarshalHubMessage(t *testing.T, msg *models.HubMessage) []byte {
 	data, err := json.Marshal(msg)
 	require.NoError(t, err)
 	return data
+}
+
+// ============================================================================
+// 泵生命周期 wg 配对测试
+// ============================================================================
+
+// fakeHost 编排层端口补齐：读泵退出路径依赖（IsShuttingDown 短路判定、
+// Unregister defer 注销、TrackConnectionError 异常断连记录），泵级测试必须真实触达
+func (f *fakeHost) IsShuttingDown() bool                 { return false }
+func (f *fakeHost) Unregister(_ *models.Client)          {}
+func (f *fakeHost) TrackConnectionError(_ string, _ models.UserType, _ error) {}
+
+// newPumpWSConnPair 建立真 WebSocket 连接对（服务端 conn 交给泵，客户端侧触发读泵退出）
+// 与 transport 包 newWSConnPair 同款语义：阻塞等待服务端就绪，避免 Dial 返回与投递竞态
+func newPumpWSConnPair(t testing.TB) (serverConn, clientConn *websocket.Conn) {
+	t.Helper()
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	serverConnCh := make(chan *websocket.Conn, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		serverConnCh <- c
+	}))
+	t.Cleanup(srv.Close)
+
+	var err error
+	clientConn, _, err = websocket.DefaultDialer.Dial(strings.Replace(srv.URL, "http://", "ws://", 1), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = clientConn.Close() })
+
+	select {
+	case serverConn = <-serverConnCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("服务端连接未就绪")
+	}
+	return serverConn, clientConn
+}
+
+// TestStartClientPumpsWaitGroupPairing 泵 wg 配对：StartClientPumps 的 Add 先于 go 语句，
+// 关闭通道与连接后 Wait() 应在超时前返回。修复前 Add 在泵函数体内执行，注册与停机
+// 并发的窗口内 Wait 可能赶在 Add 之前返回（泵越过关停点）；本测试验证 Add/Done 严格配对
+func TestStartClientPumpsWaitGroupPairing(t *testing.T) {
+	m, _ := newTestManager()
+
+	serverConn, clientConn := newPumpWSConnPair(t)
+
+	client := makeTestClient("wg-pump-1", "u-7000")
+	client.Conn = serverConn
+
+	m.StartClientPumps(client)
+
+	// 触发两泵退出：读泵经连接关闭（ReadMessage 报错返回），写泵经通道关闭（ok=false 返回）
+	_ = clientConn.Close()
+	_ = serverConn.Close()
+	close(client.SendChan)
+
+	done := make(chan struct{})
+	go func() { m.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Wait 未在泵退出后返回（wg Add/Done 配对断裂）")
+	}
 }

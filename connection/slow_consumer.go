@@ -55,6 +55,11 @@ type SlowConsumerScanner struct {
 	// 成正比，正常时近空表，无内存膨胀风险）
 	// sync.Map：ForEachClientParallel 并行回调下并发安全（迁移修正，原普通 map 有数据竞争）
 	states sync.Map
+
+	// scanMu 单轮扫描互斥：states 计数（consecutive++/warned）在单轮内由分片唯一性
+	// 保证互斥，但 ScanOnce 为导出方法（运维接口/测试可手动触发），与 Start 周期扫描
+	// 并发时同一 client 的计数自增存在数据竞争，整轮互斥消除（周期本就串行，锁仅挡并发手动触发）
+	scanMu sync.Mutex
 }
 
 // NewSlowConsumerScanner 创建慢消费者扫描器
@@ -93,8 +98,11 @@ func (s *SlowConsumerScanner) Start(ctx context.Context) {
 }
 
 // ScanOnce 单轮扫描（分片并行遍历 + 无锁采样 + 三级治理）
-// 导出供测试与运维接口手动触发
+// 导出供测试与运维接口手动触发；并发手动触发与周期扫描间整轮互斥
 func (s *SlowConsumerScanner) ScanOnce() {
+	s.scanMu.Lock()
+	defer s.scanMu.Unlock()
+
 	threshold := float64(constants.SlowConsumerThresholdRatio)
 	consecutiveLimit := constants.SlowConsumerConsecutiveThreshold
 

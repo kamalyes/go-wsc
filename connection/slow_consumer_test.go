@@ -13,6 +13,7 @@ package connection
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -168,4 +169,34 @@ func TestSlowConsumerHookNil(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		scanner.ScanOnce() // 不应 panic
 	}
+}
+
+// TestSlowConsumerConcurrentScanOnce 并发手动触发与周期扫描互斥：
+// ScanOnce 为导出方法，修复前运维手动触发与 Start 周期扫描并发时，同一 client 的
+// consecutive++/warned 写存在数据竞争（-race 报警），计数丢失致驱逐轮次错乱；
+// 修复后整轮互斥，6 轮并发精确等价 6 轮串行——每满 3 轮驱逐一次并清零，共 2 次
+func TestSlowConsumerConcurrentScanOnce(t *testing.T) {
+	client := models.NewClient("conc-1", "u-8000", models.UserTypeCustomer)
+	client.Context = context.Background()
+	client.SendChan = make(chan []byte, 32)
+	client.SetBacklogRatio(9, 10) // 持续积压：每轮必然计数
+
+	hook := &fakeEvictHook{}
+	scanner := NewSlowConsumerScanner(newScannerRegistry(t, client), hook, time.Hour, nil)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			scanner.ScanOnce()
+		}()
+	}
+	wg.Wait()
+
+	// 互斥串行化后轮次守恒：consecutive 1,2,3→驱逐清零，1,2,3→驱逐清零
+	require.Len(t, hook.evicted, 2, "6 轮并发扫描应恰好驱逐 2 次（每满 3 轮一次）")
+	assert.Equal(t, 3, hook.evicted[0].consecutive, "两次驱逐的计数均应为 3")
+	assert.Equal(t, 3, hook.evicted[1].consecutive)
+	assert.Equal(t, 0, scanner.Stats(), "末轮驱逐后状态应清零")
 }

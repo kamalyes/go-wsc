@@ -388,6 +388,40 @@ func TestHandleWebSocketUpgradeHealthCheck(t *testing.T) {
 	assert.Zero(t, regCnt, "健康检查不应创建客户端")
 }
 
+// TestHandleWebSocketUpgradeHealthCheckDeferredClose CloseImmediately=false：
+// 发送响应消息后连接最终必须关闭。修复前该配置下连接永不 Close（健康检查连接无
+// 读写泵接管，hijack 后的 FD 无人释放），长期运行耗尽句柄；本测试验证响应后
+// 客户端读到服务端关闭（EOF/异常），而不是一直挂到读超时
+func TestHandleWebSocketUpgradeHealthCheckDeferredClose(t *testing.T) {
+	cfg := newUpgraderTestConfig()
+	cfg.HealthCheck.Enabled = true
+	cfg.HealthCheck.SendResponseMessage = true
+	cfg.HealthCheck.CloseImmediately = false
+	reg := &fakeRegistrar{}
+	u := NewUpgrader(cfg, reg)
+	srv := httptest.NewServer(http.HandlerFunc(u.HandleWebSocketUpgrade))
+	defer srv.Close()
+
+	dialURL := strings.Replace(srv.URL, "http://", "ws://", 1) + "?health=true"
+	conn, _, err := websocket.DefaultDialer.Dial(dialURL, nil)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	// 响应消息可读回
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := conn.ReadMessage()
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "health_check")
+
+	// 服务端 defer conn.Close() 生效：客户端应观察到连接关闭而非永久悬挂
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_, _, err = conn.ReadMessage()
+	require.Error(t, err, "响应后服务端应关闭连接（无泵接管的健康检查连接必须释放 FD）")
+
+	regCnt, _, _, _ := reg.counts()
+	assert.Zero(t, regCnt)
+}
+
 // newWSConnPair 建立真 WebSocket 连接对（服务端/客户端各持一端，客户端构造测试用）
 // 与 connection 包同款语义：阻塞等待服务端就绪，避免 Dial 返回与 handler 投递竞态
 func newWSConnPair(t testing.TB) (serverConn, clientConn *websocket.Conn) {

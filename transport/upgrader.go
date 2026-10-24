@@ -469,10 +469,9 @@ func (u *Upgrader) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 根据配置决定是否立即关闭连接
-	if u.cfg.HealthCheck.CloseImmediately {
-		defer conn.Close()
-	}
+	// 健康检查连接无读写泵接管：无论配置如何最终必须关闭，否则 hijack 后的
+	// FD 无人释放（客户端即便断开，本侧未 Close 仍持有句柄），长期运行耗尽句柄
+	defer conn.Close()
 
 	// 根据配置决定是否发送响应消息
 	if u.cfg.HealthCheck.SendResponseMessage {

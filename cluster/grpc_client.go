@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kamalyes/go-logger"
@@ -45,9 +46,9 @@ const (
 // GRPCClientPool gRPC 客户端连接池，管理到其他节点的连接
 // 使用 sync.Map 按 addr 缓存连接，LoadOrStore 避免并发重复创建
 type GRPCClientPool struct {
-	connections   sync.Map        // addr → *grpc.ClientConn
-	breakers      sync.Map        // addr → *breaker.Circuit（per-node 熔断器）
-	breakerConfig *breaker.Config // 可选自定义熔断器配置（nil 用默认）
+	connections   sync.Map                       // addr → *grpc.ClientConn
+	breakers      sync.Map                       // addr → *breaker.Circuit（per-node 熔断器）
+	breakerConfig atomic.Pointer[breaker.Config] // 可选自定义熔断器配置（nil 用默认）；atomic 指针支持运行期安全调优（裸指针写入与 getOrCreateBreaker 的读构成数据竞争，-race 必报）
 }
 
 // NewGRPCClientPool 创建新的 gRPC 客户端连接池
@@ -66,9 +67,10 @@ func (p *GRPCClientPool) ConnectionCount() int {
 }
 
 // SetBreakerConfig 设置自定义熔断器配置（用于测试或生产调优）
-// 必须在首次调用任何 gRPC 方法前设置，否则已创建的熔断器不受影响
+// 必须在首次调用任何 gRPC 方法前设置，否则已创建的熔断器不受影响；
+// 原子替换：与 getOrCreateBreaker 并发安全（运行期调优不构成数据竞争）
 func (p *GRPCClientPool) SetBreakerConfig(config breaker.Config) {
-	p.breakerConfig = &config
+	p.breakerConfig.Store(&config)
 }
 
 // GetClient 获取或创建到指定地址的 gRPC 连接
@@ -118,8 +120,8 @@ func (p *GRPCClientPool) getOrCreateBreaker(addr string) *breaker.Circuit {
 			log.Printf("[WSC] gRPC 节点熔断器状态变更 addr=%s from=%s to=%s", addr, from.String(), to.String())
 		},
 	}
-	if p.breakerConfig != nil {
-		cfg = *p.breakerConfig
+	if custom := p.breakerConfig.Load(); custom != nil {
+		cfg = *custom
 	}
 	cb := breaker.New(fmt.Sprintf("grpc-node-%s", addr), cfg)
 	actual, _ := p.breakers.LoadOrStore(addr, cb)

@@ -311,6 +311,14 @@ func (r *NodeRegistry) refreshNodes(ctx context.Context) error {
 			r.notifyEvicted(nodeID, addr)
 			continue
 		}
+		// 换 addr 检测：nodeID 存活但地址变更（Pod 重建换 IP）时，旧 addr 的
+		// ClientConn（含后台重连 backoff goroutine）与熔断器在池中泄漏累积——
+		// 恰是 Pool.Remove 声称要防的场景，覆盖 Store 前对比旧值并回收
+		if old, ok := r.nodes.Load(nodeID); ok {
+			if oldAddr, _ := old.(string); oldAddr != "" && oldAddr != addr {
+				r.notifyEvicted(nodeID, oldAddr)
+			}
+		}
 		r.nodes.Store(nodeID, addr)
 	}
 

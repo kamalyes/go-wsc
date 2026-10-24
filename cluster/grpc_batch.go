@@ -182,6 +182,9 @@ func (d *GRPCBatchDispatcher) flush(addr string) {
 	}
 	pending := batch.pending
 	batch.pending = nil
+	// 排空即删：节点下线后 OnNodeEvicted 只清连接池，本侧同 addr 的 nodeBatch 若不回收将随滚动发布次数无界累积（空 pending 残留）。
+	// 并发 submit 持锁发现条目缺失会重建，语义无损
+	delete(d.buffers, addr)
 	d.mu.Unlock()
 
 	d.sendAndResolve(addr, pending)
@@ -290,8 +293,16 @@ func toProtoDispatchItem(item DispatchItem) *wscpb.DispatchItem {
 
 // classifyOutcome 将单条 protobuf 结果映射为投递分类
 func classifyOutcome(op models.OperationType, r *wscpb.DispatchResult) DispatchOutcome {
-	if r != nil && op == models.OperationTypeSendMessage && r.GetUserOnline() && !r.GetSuccess() {
-		return OutcomeRejected
+	// SendMessage 的明确判定先于 Error 非空（与 unary 路径 cluster_dispatch.go
+	// 的判定序对齐）：目标节点用户不在的响应本就携带 Error="用户不在线"
+	// （grpc_server SendToUser），若按 Error 非空先判 Fallback，userMiss 全部
+	// 退化为 PubSub 全集群广播兜底——死索引风暴时广播流量成倍放大，且
+	// UserMiss 触发的重路由决策与 selfHealDeadIndexEntries 自愈永不执行
+	if r != nil && op == models.OperationTypeSendMessage && !r.GetSuccess() {
+		if r.GetUserOnline() {
+			return OutcomeRejected
+		}
+		return OutcomeUserMiss
 	}
 	if r == nil || r.GetError() != "" {
 		return OutcomeFallback
@@ -301,7 +312,7 @@ func classifyOutcome(op models.OperationType, r *wscpb.DispatchResult) DispatchO
 		if r.GetSuccess() {
 			return OutcomeDelivered
 		}
-		// success=false 且无错误 = 目标节点明确用户不在（原 SendToUser 的 Success 语义）
+		// 不可达：!Success 已在上方提前分类（防御保留）
 		return OutcomeUserMiss
 	case models.OperationTypeKickUser:
 		if r.GetCount() > 0 {

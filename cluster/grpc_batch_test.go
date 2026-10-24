@@ -79,15 +79,25 @@ func TestDispatchOperationRoundTrip(t *testing.T) {
 func TestClassifyOutcome(t *testing.T) {
 	// nil 结果 → fallback
 	assert.Equal(t, OutcomeFallback, classifyOutcome(models.OperationTypeSendMessage, nil))
-	// 显式错误 → fallback（send/kick/group 通用）
+	// 显式错误（Success=true 语义下的响应级错误，如 kick/group 处理器 err.Error()）→ fallback
 	assert.Equal(t, OutcomeFallback,
-		classifyOutcome(models.OperationTypeSendMessage, &wscpb.DispatchResult{Error: "boom"}))
+		classifyOutcome(models.OperationTypeKickUser, &wscpb.DispatchResult{Error: "boom"}))
+	assert.Equal(t, OutcomeFallback,
+		classifyOutcome(models.OperationTypeGroupsBroadcast, &wscpb.DispatchResult{Error: "boom"}))
 
-	// SendMessage：success=true → delivered；success=false 无错误 → user_miss
+	// SendMessage：success=true → delivered
 	assert.Equal(t, OutcomeDelivered,
 		classifyOutcome(models.OperationTypeSendMessage, &wscpb.DispatchResult{Success: true}))
+	// SendMessage userMiss：服务端用户不在的响应携带 Error="用户不在线"
+	// （grpc_server SendToUser），与 unary 判定序一致按 !Success 分类，
+	// 不得因 Error 非空退化为全集群 PubSub 广播兜底
+	assert.Equal(t, OutcomeUserMiss,
+		classifyOutcome(models.OperationTypeSendMessage, &wscpb.DispatchResult{Success: false, Error: "用户不在线"}))
 	assert.Equal(t, OutcomeUserMiss,
 		classifyOutcome(models.OperationTypeSendMessage, &wscpb.DispatchResult{Success: false}))
+	// SendMessage rejected：在线但过载拒绝（ResourceExhausted，UserOnline=true）
+	assert.Equal(t, OutcomeRejected,
+		classifyOutcome(models.OperationTypeSendMessage, &wscpb.DispatchResult{Success: false, UserOnline: true, Error: "online client rejected delivery"}))
 
 	// KickUser：count>0 → delivered；count=0 无错误 → user_miss
 	assert.Equal(t, OutcomeDelivered,

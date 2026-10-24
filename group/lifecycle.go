@@ -398,13 +398,14 @@ func (m *LifecycleManager) JoinMemberGroupOnConnect(ctx context.Context, client 
 
 // LeaveSystemGroupsOnDisconnect 客户端断开时自动离开系统保留组
 //
-// 多端登录保护：仅当该 userID 已无任何在线连接时才离开系统组
+// 多端登录保护：仅当该 userID 已无任何同信封在线连接时才离开系统组
 // 调用时当前 client 已由 removeClientUnsafe（handleUnregister Phase 1）从注册表移除，
-// 因此 HasUser 查询的是"移除当前连接后是否还存在其他在线连接"
+// 因此在线检查查询的是"移除当前连接后是否还存在其他在线连接"
 // 竞态可接受：RemoveMembers 对不存在成员幂等，重连时 JoinSystemGroupsOnConnect 会重新加入
 //
-// 系统组单值，appID/namespace 直接从 client 取（与 JoinSystemGroupsOnConnect 的归一化一致，
-// 保证 leave 的后端 key 与 join 时写入的 key 同分区）
+// 系统组单值，appID 归一化、namespace 保持原值（与 JoinSystemGroupsOnConnect 写入的分区一致）：
+// 全局观察者/agent 的 Namespace 为 ""，归一化成 DefaultNamespace 会使 leave 落错分区，
+// join 写入的成员关系永不清理（后端系统组随历史断开的观察者持续膨胀）
 func (m *LifecycleManager) LeaveSystemGroupsOnDisconnect(ctx context.Context, client *models.Client) {
 	if m.host.GetGroupStore() == nil {
 		return
@@ -413,15 +414,16 @@ func (m *LifecycleManager) LeaveSystemGroupsOnDisconnect(ctx context.Context, cl
 	if groupID == "" {
 		return
 	}
-	// 该 userID 仍有其他同 appID+namespace 的在线连接时保留系统组成员身份，避免多端场景下其他端收不到系统组广播
-	// 按 client 自身信封过滤：跨 app/ns 的连接不算（不同应用/命名空间各自管理系统组成员生命周期）
-	if m.host.GetShardedRegistry().HasUser(client.UserID, client.GetAppID(), client.GetNamespace()) {
+	appID, rawNS := client.GetAppID(), client.Namespace
+	// 该 userID 仍有其他同 (appID, namespace 原值) 信封的在线连接时保留系统组成员身份，避免多端场景下其他端收不到系统组广播
+	// 精确匹配原值 namespace：HasUser 的空值语义是广播全局匹配，"" 分区会误吞用户在其他命名空间的在线连接
+	if m.host.GetShardedRegistry().HasUserExactEnvelope(client.UserID, appID, rawNS) {
 		m.host.GetLogger().DebugContextKV(ctx, "用户仍有其他同信封在线连接，保留系统组成员身份",
 			"user_id", client.UserID, "group_id", groupID,
-			"app_id", client.GetAppID(), "namespace", client.GetNamespace())
+			"app_id", appID, "namespace", rawNS)
 		return
 	}
-	if err := m.host.GetGroupStore().RemoveMembers(ctx, client.GetAppID(), client.GetNamespace(), groupID, []string{client.UserID}); err != nil {
+	if err := m.host.GetGroupStore().RemoveMembers(ctx, appID, rawNS, groupID, []string{client.UserID}); err != nil {
 		m.host.GetLogger().DebugContextKV(ctx, "离开系统组失败",
 			"user_id", client.UserID, "group_id", groupID, "error", err)
 	}

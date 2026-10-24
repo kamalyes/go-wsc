@@ -639,6 +639,77 @@ func TestLeaveSystemGroupsSkipsNormalUser(t *testing.T) {
 	}
 }
 
+func TestLeaveSystemGroupsGlobalObserverRemovesFromRawNamespace(t *testing.T) {
+	// 全局观察者 Namespace=""：leave 必须删在 join 写入的 "" 分区上，
+	// 归一化到 DefaultNamespace 分区会使成员关系永不清理
+	f := newLifecycleFixture()
+	mgr := NewLifecycleManager(f)
+
+	client := models.NewClient("c1", "u1", models.UserTypeObserver)
+	client.AppID = constants.DefaultAppID
+	client.Namespace = ""
+
+	k := gkey(constants.DefaultAppID, "", constants.SystemGroupObservers)
+	f.store.members[k] = map[string]bool{"u1": true}
+
+	mgr.LeaveSystemGroupsOnDisconnect(context.Background(), client)
+
+	if f.store.members[k]["u1"] {
+		t.Fatal("全局观察者断开后应从 namespace 原值分区移除系统组成员身份")
+	}
+	if f.store.members[gkey(constants.DefaultAppID, constants.DefaultNamespace, constants.SystemGroupObservers)]["u1"] {
+		t.Fatal("leave 不应触碰 DefaultNamespace 分区")
+	}
+}
+
+func TestLeaveSystemGroupsGlobalObserverKeepsWhenOtherGlobalDeviceOnline(t *testing.T) {
+	// 全局观察者多端：另一台同 "" 信封设备仍在线时保留成员身份
+	f := newLifecycleFixture()
+	mgr := NewLifecycleManager(f)
+
+	client := models.NewClient("c1", "u1", models.UserTypeObserver)
+	client.AppID = constants.DefaultAppID
+	client.Namespace = ""
+
+	other := models.NewClient("c2", "u1", models.UserTypeObserver)
+	other.AppID = constants.DefaultAppID
+	other.Namespace = ""
+	f.reg.AddClient(other)
+
+	k := gkey(constants.DefaultAppID, "", constants.SystemGroupObservers)
+	f.store.members[k] = map[string]bool{"u1": true}
+
+	mgr.LeaveSystemGroupsOnDisconnect(context.Background(), client)
+
+	if !f.store.members[k]["u1"] {
+		t.Fatal("另一台同信封全局观察者设备在线时不应移除系统组成员身份")
+	}
+}
+
+func TestLeaveSystemGroupsGlobalObserverRemovesWhenOnlyCrossNSOnline(t *testing.T) {
+	// 跨命名空间连接不算同信封："" 分区成员应被移除（精确匹配而非广播空值语义）
+	f := newLifecycleFixture()
+	mgr := NewLifecycleManager(f)
+
+	client := models.NewClient("c1", "u1", models.UserTypeObserver)
+	client.AppID = constants.DefaultAppID
+	client.Namespace = ""
+
+	other := models.NewClient("c2", "u1", models.UserTypeObserver)
+	other.AppID = constants.DefaultAppID
+	other.Namespace = "ns2"
+	f.reg.AddClient(other)
+
+	k := gkey(constants.DefaultAppID, "", constants.SystemGroupObservers)
+	f.store.members[k] = map[string]bool{"u1": true}
+
+	mgr.LeaveSystemGroupsOnDisconnect(context.Background(), client)
+
+	if f.store.members[k]["u1"] {
+		t.Fatal("仅跨命名空间在线时应移除全局观察者系统组成员身份")
+	}
+}
+
 // ============================================================================
 // 查询透传
 // ============================================================================

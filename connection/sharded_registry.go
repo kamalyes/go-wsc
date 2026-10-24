@@ -364,6 +364,31 @@ func (r *ShardedRegistry) HasUser(userID, appID, namespace string) bool {
 	return hit
 }
 
+// HasUserExactEnvelope 检查指定信封(appID+namespace 原值)下某用户是否在线（分区精确匹配）
+//
+// 与 HasUser 的区别：namespace 空值不做全局放宽——HasUser 的空值语义服务于广播投递范围
+// （namespace=="" 匹配所有命名空间），本方法服务于分区生命周期判定（系统组成员 join/leave
+// 必须读写同一分区 key，"" 分区不因用户在其他命名空间在线而误判为仍需保留）
+func (r *ShardedRegistry) HasUserExactEnvelope(userID, appID, namespace string) bool {
+	if appID == "" {
+		return r.hasUserAnyScope(userID)
+	}
+	var hit bool
+	r.userShards.WithShardRLock(userID, func(data map[string]map[string]*models.Client) {
+		userClients, ok := data[userID]
+		if !ok {
+			return
+		}
+		for _, client := range userClients {
+			if client != nil && client.AppID == appID && client.Namespace == namespace {
+				hit = true
+				return // 命中即停
+			}
+		}
+	})
+	return hit
+}
+
 // ForEachUserClient 遍历指定用户的所有客户端（在读锁内执行，并发安全）
 // 回调返回 false 时停止遍历回调不应执行阻塞操作（TrySend 等非阻塞操作可安全调用）
 func (r *ShardedRegistry) ForEachUserClient(userID string, fn func(clientID string, client *models.Client) bool) {

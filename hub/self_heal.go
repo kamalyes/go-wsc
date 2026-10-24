@@ -140,8 +140,23 @@ func (h *Hub) sweepRerouteGuard() {
 		entry.mu.Lock()
 		expired := now.After(entry.expiresAt)
 		entry.mu.Unlock()
-		if expired {
-			h.rerouteGuard.Delete(key)
+		if !expired {
+			return true
+		}
+		// 删除前复核（check-then-delete 竞态防护）：读到 expired=true 到执行删除
+		// 的窗口内，并发 markRerouteAttempted/markRerouteRejected 可能恰好懒重置
+		// 续期该条目（expiresAt 已前移）——无条件 Delete 会误删刚续期的活跃守卫，
+		// 已尝试节点记忆丢失、"防重复投递/防 ping-pong"防线失效一次。
+		// LoadAndDelete 后持锁复核，未过期则放回
+		if actual, loaded := h.rerouteGuard.LoadAndDelete(key); loaded {
+			if cur, ok := actual.(*rerouteGuardEntry); ok {
+				cur.mu.Lock()
+				stillExpired := now.After(cur.expiresAt)
+				cur.mu.Unlock()
+				if !stillExpired {
+					h.rerouteGuard.Store(key, actual)
+				}
+			}
 		}
 		return true
 	})

@@ -124,7 +124,7 @@ func (h *HybridOfflineMessageHandler) StoreOfflineMessage(ctx context.Context, u
 
 	// 过滤不需要存储的消息类型
 	if h.shouldSkipOfflineStorage(ctx, userID, msg) {
-		return nil
+		return spi.ErrOfflineStorageSkipped
 	}
 
 	// 并行执行 Redis + MySQL 双写（无共享状态，各写各的错误变量）
@@ -155,7 +155,7 @@ func (h *HybridOfflineMessageHandler) StoreOfflineMessage(ctx context.Context, u
 // shouldSkipOfflineStorage 判断是否应该跳过离线存储
 func (h *HybridOfflineMessageHandler) shouldSkipOfflineStorage(ctx context.Context, userID string, msg *models.HubMessage) bool {
 	// 过滤系统消息
-	if msg.MessageType.IsSystemType() {
+	if msg.MessageType.IsSystemType() && msg.MessageType != models.MessageTypeNotice {
 		// trace 恢复：以消息信封 trace_id 为准，跳过日志可关联原始发送链路
 		h.logger.DebugContextKV(msg.ContextFrom(ctx), "跳过系统消息的离线存储",
 			"user_id", userID,

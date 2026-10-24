@@ -119,7 +119,16 @@ func (m *Manager) SendToClient(ctx context.Context, client *models.Client, msg *
 //   - Admit 拒绝（Delay/Offline，P2P 场景仅极端水位触发）→ 转离线补发 + 上层重试兜底
 //   - 实时路径零改动（TrySend 成功路径）
 func (m *Manager) SendToClientSerialized(ctx context.Context, client *models.Client, msg *models.HubMessage, preSerialized []byte) bool {
-	return m.sendToClientCore(ctx, client, msg, preSerialized, true)
+	ok := m.TryDeliverToClient(ctx, client, msg, preSerialized)
+	if !ok && msg != nil {
+		m.StoreOfflineOnDeliveryFailure(msg, fmt.Errorf("client delivery rejected"))
+	}
+	return ok
+}
+
+// TryDeliverToClient 返回实际准入或入队结果，离线兜底由汇总投递结果的调用方负责
+func (m *Manager) TryDeliverToClient(ctx context.Context, client *models.Client, msg *models.HubMessage, data []byte) bool {
+	return m.sendToClientCore(ctx, client, msg, data, true)
 }
 
 // sendToClientCore 投递核心体（带状态回报开关）
@@ -169,8 +178,7 @@ func (m *Manager) sendToClientCore(ctx context.Context, client *models.Client, m
 		rejectErr := fmt.Errorf("admission rejected at %s", level)
 		if reportStatus {
 			m.updateMessageStatusAsync(ctx, msgID, receiver, models.MessageSendStatusFailed, models.FailureReasonQueueFull, rejectErr.Error())
-			// 转离线补发（P2P 离线上线推送 + SendToUserWithRetry/ACK 重试双保险）
-			m.StoreOfflineOnDeliveryFailure(msg, rejectErr)
+			// 离线兜底由持有整体投递结果的调用方处理
 		}
 		return false
 	}
@@ -198,8 +206,7 @@ func (m *Manager) sendToClientCore(ctx context.Context, client *models.Client, m
 		if reportStatus {
 			// SSE通道已满或已关闭，更新为失败状态
 			m.updateMessageStatusAsync(ctx, msgID, receiver, models.MessageSendStatusFailed, models.FailureReasonQueueFull, sseErr.Error())
-			// 在线投递失败 → 异步转存离线（P2P 场景，避免循环）
-			m.StoreOfflineOnDeliveryFailure(msg, sseErr)
+			// 此处只报告投递失败，调用方负责离线兜底
 		}
 		return false
 	}
@@ -251,8 +258,7 @@ func (m *Manager) sendToClientCore(ctx context.Context, client *models.Client, m
 	if reportStatus {
 		// 发送通道已满或已关闭，更新为失败状态
 		m.updateMessageStatusAsync(ctx, msgID, receiver, models.MessageSendStatusFailed, models.FailureReasonQueueFull, queueErr.Error())
-		// 在线投递失败 → 异步转存离线（P2P 场景，避免循环）
-		m.StoreOfflineOnDeliveryFailure(msg, queueErr)
+		// 此处只报告投递失败，调用方负责离线兜底
 	}
 	return false
 }

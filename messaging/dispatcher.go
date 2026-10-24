@@ -27,6 +27,7 @@ import (
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/connection"
+	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/overload"
 	"github.com/kamalyes/go-wsc/routing"
@@ -492,7 +493,7 @@ func (m *Manager) normalizeMessageFields(client *models.Client, msg *models.HubM
 // trace_id 恢复：广播队列异步消费，原请求 ctx 已不可用
 // msg 在入队前已通过 InjectContext 注入 trace_id，此处从 msg 恢复到 ctx
 // 保证下游 HandleBroadcastMessage / handleDirectMessage / NotifyObservers 日志链路串联
-func (m *Manager) handleBroadcast(msg *models.HubMessage, data []byte) {
+func (m *Manager) handleBroadcast(msg *models.HubMessage, data []byte) int {
 	ctx := msg.ContextFrom(m.host.Context())
 
 	// 通知观察者（异步，不阻塞主流程）
@@ -537,9 +538,9 @@ func (m *Manager) handleBroadcast(msg *models.HubMessage, data []byte) {
 
 	if msg.BroadcastType == models.BroadcastTypeGlobal {
 		m.HandleBroadcastMessage(ctx, msg)
-		return
+		return 0
 	}
-	m.handleDirectMessage(ctx, msg, data)
+	return m.handleDirectMessage(ctx, msg, data)
 }
 
 // handleDirectMessage 处理点对点消息
@@ -549,7 +550,7 @@ func (m *Manager) handleBroadcast(msg *models.HubMessage, data []byte) {
 //   - 未指定时走 ForEachUserClient 零拷贝遍历直接发送，避免 GetClientsCopyForUser 切片拷贝
 //   - 消息预序列化一次，多设备复用；data 为调用方预序列化编码（落库与投递共享
 //     同一份，消除逐成员二次 Marshal），nil 时内部序列化
-func (m *Manager) handleDirectMessage(ctx context.Context, msg *models.HubMessage, data []byte) {
+func (m *Manager) handleDirectMessage(ctx context.Context, msg *models.HubMessage, data []byte) int {
 	// msg 路由信封由上游入口（sendToUser/handleBroadcast）已通过 InjectRoute 注入，此处直接读 msg 过滤
 
 	// 预序列化一次（接收者多设备复用，消除循环内重复 Marshal）
@@ -564,15 +565,17 @@ func (m *Manager) handleDirectMessage(ctx context.Context, msg *models.HubMessag
 		// 不做 GroupIDs 系统组 vs 业务群匹配：ReceiverClient 已由发送方精准指定
 		if client, ok := m.host.GetShardedRegistry().GetClient(msg.ReceiverClient); ok {
 			if client != nil && (msg.Namespace == "" || client.Namespace == msg.Namespace) {
-				m.SendToClientSerialized(ctx, client, msg, data)
-				sent = 1
+				if client.UserID == msg.Receiver && connection.ClientMatchesEnvelope(client, constants.NormalizeAppID(msg.AppID), msg.Namespace, nil) && m.TryDeliverToClient(ctx, client, msg, data) {
+					sent = 1
+				}
 			}
 		}
 	} else {
 		// 未指定客户端：遍历用户所有设备（ForEachUserClientFiltered 内部已按 msg.AppID/msg.Namespace 规则过滤）
 		m.host.GetShardedRegistry().ForEachUserClientFiltered(msg.Receiver, msg.AppID, msg.Namespace, msg.GroupIDs, func(_ string, client *models.Client) bool {
-			m.SendToClientSerialized(ctx, client, msg, data)
-			sent++
+			if m.TryDeliverToClient(ctx, client, msg, data) {
+				sent++
+			}
 			return true
 		})
 	}
@@ -591,17 +594,12 @@ func (m *Manager) handleDirectMessage(ctx context.Context, msg *models.HubMessag
 			"delivered_clients", sent,
 			"receiver_client", msg.ReceiverClient,
 		)
-	} else if m.SendToUserViaSSE(msg.Receiver, msg) {
-		m.host.GetLogger().DebugContextKV(ctx, "[投递诊断] 本地直连投递完成（SSE 通道）",
-			"message_id", msg.MessageID,
-			"receiver", msg.Receiver,
-		)
 	} else {
-		m.host.GetLogger().WarnContextKV(ctx, "[投递诊断] 本地直连投递 0 客户端（本地无该用户连接）",
+		m.host.GetLogger().WarnContextKV(ctx, "[投递诊断] 本地直连投递 0 客户端（无匹配连接或全部拒绝）",
 			"message_id", msg.MessageID,
 			"receiver", msg.Receiver,
 			"receiver_client", msg.ReceiverClient,
-			"hint", "在线判定为真但本地无连接：用户刚断线或连接在其他节点，请检查跨节点路由日志",
+			"hint", "检查连接路由、准入闸门和发送队列拒绝日志",
 		)
 	}
 
@@ -612,6 +610,7 @@ func (m *Manager) handleDirectMessage(ctx context.Context, msg *models.HubMessag
 	if msg.Sender != "" && msg.SenderClient != "" && len(msg.GroupIDs) == 0 {
 		m.syncToSenderDevices(ctx, msg, data)
 	}
+	return sent
 }
 
 // HandleBroadcastMessage 处理广播消息

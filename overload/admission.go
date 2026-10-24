@@ -7,7 +7,7 @@
  * @Description: 准入闸门 —— 分级驱动的削峰填谷核心
  *
  * 机制（AIMD + 分级决策矩阵）：
- *   - backlog = written - delivered（在途量，Little's law：backlog/吞吐 ≈ 排队延迟）
+ *   - backlog = delivered - written（在途量，Little's law：backlog/吞吐 ≈ 排队延迟）
  *   - 每 evalInterval 评估一次：backlog > 高水位 → level++（快速升载，过载保护优先）
  *     连续 cooldownLevels 个周期 backlog < 低水位 → level--（缓慢降载，防抖动）
  *   - Admit 按分级×水位矩阵给出三态裁决：放行（实时）/ 延迟（入延迟队列）/ 离线（转离线补发）
@@ -83,7 +83,8 @@ const (
 // 零值/默认构造即可工作（NewAdmissionGate 填充默认水位），未 Start 时
 // level 恒为 L0（Admit 全放行），Start 后开始水位评估
 type AdmissionGate struct {
-	level atomic.Int32 // 当前 OverloadLevel（热路径无锁读）
+	pending atomic.Pointer[atomic.Int64] // 共享的实际积压计数，替换闸门时保留。
+	level   atomic.Int32                 // 当前 OverloadLevel（热路径无锁读）
 
 	written   atomic.Int64 // 累计写入数（写泵埋点）
 	delivered atomic.Int64 // 累计投递数（投递入口埋点）
@@ -150,7 +151,7 @@ func (g *AdmissionGate) evaluateLoop() {
 		case <-g.stopCh:
 			return
 		case <-ticker.C:
-			backlog := g.written.Load() - g.delivered.Load()
+			backlog := g.Backlog()
 			current := OverloadLevel(g.level.Load())
 
 			if backlog > g.highWatermark {
@@ -261,10 +262,16 @@ func (g *AdmissionGate) Level() OverloadLevel {
 	return OverloadLevel(g.level.Load())
 }
 
-// Backlog 当前在途量（written - delivered，Little's law 排队延迟估计的分子）
+// Backlog 当前在途量（delivered - written，Little's law 排队延迟估计的分子）
 func (g *AdmissionGate) Backlog() int64 {
-	return g.written.Load() - g.delivered.Load()
+	if counter := g.pending.Load(); counter != nil {
+		return max(0, counter.Load())
+	}
+	return max(0, g.delivered.Load()-g.written.Load())
 }
+
+// SetPendingCounter 在闸门启动前绑定 Hub 的实际积压计数
+func (g *AdmissionGate) SetPendingCounter(counter *atomic.Int64) { g.pending.Store(counter) }
 
 // ForceLevel 强制设置水位（测试/运维手动降载用）
 func (g *AdmissionGate) ForceLevel(level OverloadLevel) {

@@ -102,6 +102,7 @@ type Hub struct {
 	rerouteGuard sync.Map
 
 	// ========== 过载保护域（atomic.Pointer 支持运行期热替换） ==========
+	pendingMessages         atomic.Int64
 	admission               atomic.Pointer[overload.AdmissionGate]
 	broadcastShaper         atomic.Pointer[overload.Shaper]
 	ephemeralCoalescer      atomic.Pointer[overload.Coalescer]
@@ -300,7 +301,9 @@ func NewHub(config *wscconfig.WSC) *Hub {
 	hub.batcherMgr.RecordOutbox().OnFlushed(hub.messagingMgr.ScheduleAckTimeouts)
 
 	// 🚦 削峰填谷组件默认启用（开箱即用；SetOverloadPolicy 可覆盖/关闭）
-	hub.admission.Store(overload.NewAdmissionGate(0, 0, 0))
+	gate := overload.NewAdmissionGate(0, 0, 0)
+	gate.SetPendingCounter(&hub.pendingMessages)
+	hub.admission.Store(gate)
 	hub.broadcastShaper.Store(overload.NewShaper(0))
 	hub.ephemeralCoalescer.Store(overload.NewCoalescer(0))
 	// 消息聚合器：可聚合档群组消息窗口攒批（N 条合 1 条数组帧），窗口参数配置化

@@ -60,6 +60,8 @@ const (
 	OutcomeFallback
 	// OutcomeUserMiss 目标节点明确用户不在 → 跳过 PubSub 兜底
 	OutcomeUserMiss
+	// OutcomeRejected 用户在线但目标节点拒绝 → 不降级 PubSub 兜底、保留在线索引
+	OutcomeRejected
 )
 
 // GRPCBatchDispatcher 跨节点 gRPC 微批分派器
@@ -288,6 +290,9 @@ func toProtoDispatchItem(item DispatchItem) *wscpb.DispatchItem {
 
 // classifyOutcome 将单条 protobuf 结果映射为投递分类
 func classifyOutcome(op models.OperationType, r *wscpb.DispatchResult) DispatchOutcome {
+	if r != nil && op == models.OperationTypeSendMessage && r.GetUserOnline() && !r.GetSuccess() {
+		return OutcomeRejected
+	}
 	if r == nil || r.GetError() != "" {
 		return OutcomeFallback
 	}

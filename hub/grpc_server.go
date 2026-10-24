@@ -160,10 +160,17 @@ func (s *GRPCServer) SendToUser(ctx context.Context, req *wscpb.SendToUserReques
 	// ctx 的归一化路由）同步归一化——空信封极端场景下检查按 DefaultAppID 过滤，
 	// 投递却不归一化会退化为无过滤跨 app 串扰
 	deliverAppID := constants.NormalizeAppID(msg.AppID)
+	delivered := 0
 	s.hub.shardedRegistry.ForEachUserClientFiltered(userID, deliverAppID, msg.Namespace, msg.GroupIDs, func(_ string, client *models.Client) bool {
-		s.hub.messagingMgr.SendToClientSerialized(ctx, client, msg, preSerialized)
+		if s.hub.messagingMgr.TryDeliverToClient(ctx, client, msg, preSerialized) {
+			delivered++
+		}
 		return true
 	})
+
+	if delivered == 0 {
+		return nil, status.Error(codes.ResourceExhausted, "online client rejected delivery")
+	}
 
 	// 🔔 通知本节点观察者（跨节点 gRPC 消息也需要通知观察者，与本地 broadcast 流程一致）
 	// 路由来源：直接从 msg 信封取（不再"猜"接收者 client 的 ns/group，跨节点场景下 user 可能本节点无 client）
@@ -358,9 +365,9 @@ func (s *GRPCServer) dispatchBatchItem(parentCtx context.Context, item *wscpb.Di
 			MessageData: item.GetMessageData(),
 		})
 		if err != nil {
-			return &wscpb.DispatchResult{Error: err.Error()}
+			return &wscpb.DispatchResult{Error: err.Error(), UserOnline: status.Code(err) == codes.ResourceExhausted}
 		}
-		return &wscpb.DispatchResult{Success: resp.GetSuccess(), UserOnline: resp.GetUserOnline()}
+		return &wscpb.DispatchResult{Success: resp.GetSuccess(), UserOnline: resp.GetUserOnline(), Error: resp.GetError()}
 
 	case models.OperationTypeKickUser:
 		resp, err := s.KickUser(itemCtx, &wscpb.KickUserRequest{

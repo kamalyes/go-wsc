@@ -534,3 +534,6 @@ func (h *Hub) SendConditional(ctx context.Context, condition func(*models.Client
 func (h *Hub) SendToUserWithRetry(ctx context.Context, toUserID string, msg *models.HubMessage) *models.SendResult {
 	return h.messagingMgr.SendToUserWithRetry(ctx, toUserID, msg)
 }
+
+// PendingMessages 返回尚未完成写出或断连清理的 WS 数据帧数量
+func (h *Hub) PendingMessages() int64 { return max(0, h.pendingMessages.Load()) }

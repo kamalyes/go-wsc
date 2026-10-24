@@ -39,15 +39,32 @@ func (c *Client) Connect() {
 	c.initSendChannel()
 	b := c.createBackoff()
 	for {
+		// 重试前检查主动关闭：Close 置 Disconnected 后循环不得再拨号（防连接复活）
+		if c.Closed() {
+			return
+		}
 		nextRec := b.Duration()
 		if err := c.attemptConnection(); err != nil {
 			// 转换到错误状态
 			_ = c.stateMachine.TransitionTo(models.ConnectionStatusError)
 			c.handleConnectError(err)
-			time.Sleep(nextRec)
+			// 退避等待可被主动关闭中断（Close 关闭 closeSignal）：
+			// 不可中断的 sleep 会让服务器不可达时的重试循环永不退出（goroutine 泄漏）
+			timer := time.NewTimer(nextRec)
+			select {
+			case <-timer.C:
+			case <-c.WebSocket.closeSignal:
+				timer.Stop()
+				return
+			}
 			// 转换到重连中状态
 			_ = c.stateMachine.TransitionTo(models.ConnectionStatusReconnecting)
 			continue
+		}
+		// 拨号期间被主动关闭：立即清理新连接防止复活（clean 幂等，重复调用无害）
+		if c.Closed() {
+			c.clean()
+			return
 		}
 		c.onConnectionSuccess()
 		return
@@ -63,6 +80,9 @@ func (c *Client) initSendChannel() {
 	c.WebSocket.sendChanOnce = sync.Once{}
 	// 重置关闭标志
 	atomic.StoreInt32(&c.WebSocket.sendChanClosed, 0)
+	// 重置主动关闭信号与 Once：新一轮连接的退避等待重新可中断
+	c.WebSocket.closeSignal = make(chan struct{})
+	c.WebSocket.closeOnce = sync.Once{}
 	c.WebSocket.sendChanMu.Unlock()
 }
 
@@ -162,11 +182,14 @@ func (c *Client) notifyConnected() {
 
 // setupHandlers 设置关闭、ping 和 pong 的处理函数
 func (c *Client) setupHandlers() {
-	// 收到连接关闭信号回调
+	// 收到连接关闭信号回调：只通知不做 clean——清理决策统一收敛到
+	// handleReconnectOrClean（ReadMessage 错误路径）。CloseHandler 内提前 clean
+	// 会置 Disconnected，AutoReconnect=true 的重连被 Closed() 拦截，
+	// 服务端优雅关闭（滚动发布/踢人）后客户端永久掉线；
+	// 用户需拦截重连（如被踢场景）可在 onClose 回调内主动 Close
 	defaultCloseHandler := c.WebSocket.Conn.CloseHandler()
 	c.WebSocket.Conn.SetCloseHandler(func(code int, text string) error {
 		result := defaultCloseHandler(code, text)
-		c.clean()
 		if f := c.onClose.Load(); f != nil {
 			f.(func(int, string))(code, text)
 		}
@@ -236,16 +259,14 @@ func (c *Client) handleReconnectOrClean() {
 
 // processReceivedMessage 处理接收到的消息
 func (c *Client) processReceivedMessage(messageType int, message []byte) {
-	// 处理消息时加锁
-	syncx.WithLock(&c.mu, func() {
-		// 根据消息类型分发处理
-		switch messageType {
-		case websocket.TextMessage:
-			c.handleTextMessage(message)
-		case websocket.BinaryMessage:
-			c.handleBinaryMessage(message)
-		}
-	})
+	// 消息回调在锁外分发：回调内调用 Close()/clean 需要拿同一把 mu，
+	// 锁内执行构成自死锁（读协程持锁等回调返回、回调等锁释放）
+	switch messageType {
+	case websocket.TextMessage:
+		c.handleTextMessage(message)
+	case websocket.BinaryMessage:
+		c.handleBinaryMessage(message)
+	}
 }
 
 // handleTextMessage 处理文本消息
@@ -281,11 +302,8 @@ func (c *Client) writeMessages() {
 			continue // 继续处理下一个消息
 		}
 
-		// 处理已发送消息时加锁
-		c.mu.Lock()
-		// 根据消息类型处理后续逻辑
+		// 已发送回调在锁外分发（与 processReceivedMessage 同因：防回调内 Close 自死锁）
 		c.handleSentMessage(msg)
-		c.mu.Unlock()
 	}
 }
 
@@ -355,11 +373,15 @@ func (c *Client) clean() {
 		if c.WebSocket.Conn != nil {
 			_ = c.WebSocket.Conn.Close()
 		}
-		// 原子关闭 sendChan（写锁保护）
+		// 原子关闭 sendChan 与主动关闭信号（写锁保护：与 initSendChannel 的重置互斥）
 		c.WebSocket.sendChanMu.Lock()
 		c.WebSocket.sendChanOnce.Do(func() {
 			atomic.StoreInt32(&c.WebSocket.sendChanClosed, 1)
 			close(c.WebSocket.sendChan)
+		})
+		// 关闭主动关闭信号：中断 Connect 重连循环的退避等待
+		c.WebSocket.closeOnce.Do(func() {
+			close(c.WebSocket.closeSignal)
 		})
 		c.WebSocket.sendChanMu.Unlock()
 		c.WebSocket.connMu.Unlock()

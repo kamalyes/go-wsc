@@ -34,6 +34,8 @@ type WebSocket struct {
 	sendChanMu     *sync.RWMutex       // 保护 sendChan 指针和关闭操作
 	sendChanClosed int32               // 发送通道关闭标记（原子）
 	sendChanOnce   sync.Once           // 只关闭一次
+	closeSignal    chan struct{}        // 主动关闭信号：中断 Connect 重连循环的退避等待（随 initSendChannel 重置）
+	closeOnce      sync.Once           // closeSignal 只关闭一次
 
 	// servers LB 直连地址列表（空 = 单地址模式，仅用 Url；非空则建连优先走列表随机挑选）
 	servers []string
@@ -52,6 +54,7 @@ func NewWebSocket(url string) *WebSocket {
 		sendMu:        &sync.Mutex{},
 		sendChanMu:    &sync.RWMutex{},
 		sendChan:      make(chan *ClientMessage, 256), // 初始化发送消息缓冲池
+		closeSignal:   make(chan struct{}),              // 初始化主动关闭信号
 	}
 }
 

@@ -146,7 +146,10 @@ func (r *OfflineStore) QueryMessages(ctx context.Context, filter *spi.OfflineMes
 	// 分页游标：从 cursor 之后的消息开始读取（使用原生 GORM，因为需要子查询）
 	if filter.Cursor != "" {
 		tableName := models.OfflineMessageRecord{}.TableName()
-		gormDB = gormDB.Where("created_at > (SELECT created_at FROM "+tableName+" WHERE message_id = ? LIMIT 1)", filter.Cursor)
+		// cursor 行已被删除（客户端 ACK 后清理）时子查询返回 NULL，`created_at > NULL` 恒假 → 静默空集，drain 误判"无更多消息"提前终止，剩余离线消息滞留至过期
+		// 悬空时回退首屏：已 ACK 删除的消息不在表中，重推仅覆盖未确认消息（至少一次语义安全）
+		subquery := "(SELECT created_at FROM " + tableName + " WHERE message_id = ? LIMIT 1)"
+		gormDB = gormDB.Where("("+subquery+" IS NULL OR created_at > "+subquery+")", filter.Cursor, filter.Cursor)
 	}
 
 	gormDB = sqlbuilder.ApplyOrders(gormDB, query.Orders)

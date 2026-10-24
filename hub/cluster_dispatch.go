@@ -152,8 +152,22 @@ func (h *Hub) routeToCluster(ctx context.Context, msg *models.HubMessage, opts c
 
 	// ① 尝试 gRPC 直连
 	result := h.dispatchViaGRPC(ctx, msg, opts)
-	if len(result.rejectedNodes) > 0 && result.grpcDelivered == 0 {
-		return status.Errorf(codes.ResourceExhausted, "online target rejected delivery: %v", result.rejectedNodes)
+	if len(result.rejectedNodes) > 0 {
+		// 全拒：向上游报错，由调用方统一走失败收尾（含离线兜底）
+		if result.grpcDelivered == 0 {
+			return status.Errorf(codes.ResourceExhausted, "online target rejected delivery: %v", result.rejectedNodes)
+		}
+		// 部分拒绝：整体按成功不报错，但被拒节点上的设备既未实时收到也无补发路径，
+		// 按"拒绝≠丢弃"对目标用户转离线补发（下次上线 drain 补推；客户端按
+		// message_id 去重，其他在线设备的重复收可容忍）
+		// 仅定向 P2P 投递（checkAndRouteToNode 携带目标节点）参与：广播兜底路径
+		// （无目标节点，如 doOfflineBroadcast）上游 !isOnline 分支无条件 StoreOfflineMessage
+		// 已兜底，此处再转会双份转存；KickUser 等控制类操作无离线语义不参与
+		if opts.Operation == models.OperationTypeSendMessage && opts.TargetUserID != "" &&
+			(opts.TargetNodeID != "" || len(opts.TargetNodeIDs) > 0) {
+			h.messagingMgr.StoreOfflineOnDeliveryFailure(msg,
+				status.Errorf(codes.ResourceExhausted, "partial nodes rejected delivery: %v", result.rejectedNodes))
+		}
 	}
 	if result.grpcDelivered > 0 {
 		h.overloadMetrics.RecordClusterGRPC(result.grpcDelivered)

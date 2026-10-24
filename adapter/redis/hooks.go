@@ -63,8 +63,20 @@ func (h *hooks) Configure(_ context.Context, hub spi.StoreTarget, deps spi.Store
 		cfg = &wscconfig.RedisRepository{}
 	}
 
-	hub.SetOnlineStatusRepository(NewOnlineStore(deps.Redis, cfg.OnlineStatus))
-	hub.SetHubStatsRepository(NewHubStats(deps.Redis, cfg.Stats))
+	// nil 子节兜底为零值配置：构造函数内部以 mathx/常量处理零值字段，
+	// 但会先解引用 config（如 config.KeyPrefix）——子节为 nil 时直接 panic，
+	// 违背"repo 为 nil 时各仓库使用内置默认值"的构造承诺
+	onlineCfg := cfg.OnlineStatus
+	if onlineCfg == nil {
+		onlineCfg = &wscconfig.OnlineStatus{}
+	}
+	statsCfg := cfg.Stats
+	if statsCfg == nil {
+		statsCfg = &wscconfig.Stats{}
+	}
+
+	hub.SetOnlineStatusRepository(NewOnlineStore(deps.Redis, onlineCfg))
+	hub.SetHubStatsRepository(NewHubStats(deps.Redis, statsCfg))
 	// 群组仓储套拓扑缓存：群消息投递热路径 0 回源（参数零值走 constants 默认值，含负缓存短 TTL 分级）
 	hub.SetGroupRepository(NewGroupMemberCache(NewGroupStore(deps.Redis, groupKeyPrefix(cfg)), 0, 0, 0, 0))
 

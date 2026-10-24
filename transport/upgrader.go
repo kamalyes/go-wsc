@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -62,6 +63,10 @@ type Upgrader struct {
 	idGen       RequestIDGenerator          // 请求 ID 生成器（nil=健康检查消息 ID 留空）
 	hubCtx      context.Context             // 编排层生命周期 ctx（连接级 ctx 的父）
 	nodeID      string                      // 本节点标识（响应头/注册确认消息回显）
+
+	// hubCtx 漏配检测（漏配时连接 ctx 与 Hub 生命周期脱钩，首条连接 WARN 一次）
+	hubCtxInjected atomic.Bool
+	hubCtxWarnOnce sync.Once
 
 	upgraderOnce sync.Once
 	wsUpgrader   *websocket.Upgrader
@@ -116,9 +121,13 @@ func (u *Upgrader) WithIDGenerator(gen RequestIDGenerator) *Upgrader {
 }
 
 // WithHubContext 注入编排层生命周期 ctx（连接级 ctx 的父；默认 Background）
+//
+// 漏配时连接级 ctx 与 Hub 生命周期脱钩（SafeShutdown 取消不影响在途连接的
+// 下游操作，仅各处独立超时兜底），首条连接会打一次 WARN 提示装配缺漏
 func (u *Upgrader) WithHubContext(ctx context.Context) *Upgrader {
 	if ctx != nil {
 		u.hubCtx = ctx
+		u.hubCtxInjected.Store(true)
 	}
 	return u
 }
@@ -302,6 +311,13 @@ func (u *Upgrader) CreateClientFromRequest(r *http.Request, conn *websocket.Conn
 		// 从编排层生命周期 ctx 派生连接级 ctx（r.Context() 在 WebSocket 升级后会取消，不适合长连接）
 		// 但需要从 r.Context() 提取 trace_id 注入，保证客户端生命周期内的日志都有 trace_id
 		WithContext(func() context.Context {
+			// hubCtx 漏配检测：派生自 Background 的连接 ctx 与 Hub 生命周期
+			// 脱钩，SafeShutdown 的级联取消到不了在途连接（仅各处独立超时兜底）
+			if !u.hubCtxInjected.Load() {
+				u.hubCtxWarnOnce.Do(func() {
+					u.logger.Warn("未注入编排层生命周期 ctx（WithHubContext），连接级 ctx 派生自 Background，Hub 关停时在途连接的下游操作不被级联取消")
+				})
+			}
 			connCtx := context.WithValue(u.hubCtx, messaging.ContextKeySenderID, attrs.UserID)
 			// 从 HTTP 请求 ctx 提取 trace_id（OTel span > ctx.Value fallback），注入到连接级 ctx
 			if traceID := logger.ExtractTraceID(r.Context()); traceID != "" {

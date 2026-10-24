@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
@@ -61,6 +62,10 @@ type SSEHandler struct {
 	hubCtx    context.Context
 	nodeID    string
 
+	// hubCtx 漏配检测（漏配时连接 ctx 与 Hub 生命周期脱钩，首条连接 WARN 一次）
+	hubCtxInjected atomic.Bool
+	hubCtxWarnOnce sync.Once
+
 	wg sync.WaitGroup // 在途写循环计数（Wait 供编排层优雅关闭等待）
 }
 
@@ -91,9 +96,12 @@ func (h *SSEHandler) WithLogger(logger spi.Logger) *SSEHandler {
 }
 
 // WithHubContext 注入编排层生命周期 ctx（连接级 ctx 的父；默认 Background）
+//
+// 漏配时连接级 ctx 与 Hub 生命周期脱钩（写循环对 Hub 关停的感知少一层 Done 监听），首条连接会打一次 WARN 提示装配缺漏
 func (h *SSEHandler) WithHubContext(ctx context.Context) *SSEHandler {
 	if ctx != nil {
 		h.hubCtx = ctx
+		h.hubCtxInjected.Store(true)
 	}
 	return h
 }
@@ -128,6 +136,12 @@ func (h *SSEHandler) CreateSSEClient(r *http.Request, w http.ResponseWriter, att
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	// 构造连接级 ctx（与 Upgrader.CreateClientFromRequest 对齐：派生自编排层 ctx + 注入 trace_id）
+	// hubCtx 漏配检测：派生自 Background 的连接 ctx 与 Hub 生命周期脱钩
+	if !h.hubCtxInjected.Load() {
+		h.hubCtxWarnOnce.Do(func() {
+			h.logger.Warn("未注入编排层生命周期 ctx（WithHubContext），连接级 ctx 派生自 Background，Hub 关停时在途连接的下游操作不被级联取消")
+		})
+	}
 	connCtx := context.WithValue(h.hubCtx, messaging.ContextKeySenderID, attrs.UserID)
 	if r != nil {
 		if traceID := logger.ExtractTraceID(r.Context()); traceID != "" {

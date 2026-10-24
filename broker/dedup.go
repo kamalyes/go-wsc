@@ -92,6 +92,19 @@ func (dw *DedupWindow) Seen(key string) bool {
 	return true
 }
 
+// Unmark 移除键的已见标记（NACK 重投回滚专用）
+//
+// 消费主路径的时序：Seen 标记 → Deliver 失败 → NACK 前回滚标记，
+// 重投副本再次进入 Seen 判定为首见、重新投递——否则"先标记后投递失败"的窗口会把 At-Least-Once 的重投副本拦在去重窗外，消息永久丢失。
+// 两代都清：标记后 rollover 切代也会把键留在 prev 代
+func (dw *DedupWindow) Unmark(key string) {
+	shard := dw.shards[fnvShard(key, len(dw.shards))]
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	delete(shard.active, key)
+	delete(shard.prev, key)
+}
+
 // swapLocked 代际切换（持 dw.mu 调用）：prev 释放，active 晋升
 func (dw *DedupWindow) swapLocked() {
 	for _, shard := range dw.shards {

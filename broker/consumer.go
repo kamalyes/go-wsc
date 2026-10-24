@@ -78,14 +78,18 @@ func (c *Consumer) handle(ctx context.Context, env *spi.DeliverEnvelope) error {
 	msg := env.Message
 
 	// 等级分流去重：express 跳过，可靠/必达过本地两代窗
+	// 标记先行保留 Seen 原子首见语义（拦并发重复副本）；投递受理失败 Unmark 回滚——否则重投副本被去重窗拦截，消息永久丢失（见下方）
+	dedupKey := FormatDedupKey(env)
+	marked := false
 	if !msg.ResolveGuarantee().IsExpress() {
-		if !c.dedup.Seen(FormatDedupKey(env)) {
+		if !c.dedup.Seen(dedupKey) {
 			c.logger.DebugKV("重复投递信封已跳过",
 				"message_id", msg.MessageID,
 				"receiver", msg.Receiver,
 			)
 			return nil
 		}
+		marked = true
 	}
 
 	// 三道防线之二：路由恢复（msg 路由字段重注入 ctx，Deliver 决策树依赖 ctx 信封）
@@ -99,7 +103,12 @@ func (c *Consumer) handle(ctx context.Context, env *spi.DeliverEnvelope) error {
 	if result == nil || !result.HasError() {
 		return nil
 	}
-	// 投递受理失败：NACK 触发适配器重投（At-Least-Once 语义）
+	// 投递受理失败：回滚去重标记后 NACK 触发适配器重投（At-Least-Once 语义）
+	// 去重标记先于投递存在"标记→失败→重投被拦"窗口：重投副本 Seen 判定
+	// 为重复直接 ack，消息从未成功投递却被确认消费，必达档永久丢失
+	if marked {
+		c.dedup.Unmark(dedupKey)
+	}
 	return errors.Join(result.Errors...)
 }
 

@@ -46,8 +46,10 @@ type ClientDisconnectCallback func(ctx context.Context, client *models.Client, r
 
 // HubCallbacks 应用层回调集合（连接/心跳/离线推送/群组生命周期）
 //
-// 回调未注入（nil）时对应环节直接跳过；跨 goroutine 替换单个回调存在
-// 数据竞争，运行期替换仅限启动装配阶段完成后的确定性场景
+// 回调未注入（nil）时对应环节直接跳过。运行期热替换经 Hub.callbacks 的
+// atomic.Pointer 整体快照交换（replaceCallback）完成——Go 函数值是双字
+// （type word + data word），裸字段并发读写可撕裂出损坏的函数指针，
+// 读方（注册/心跳/群组路径）高频并发读，必须走 snapshotCallbacks 快照
 type HubCallbacks struct {
 	// 连接生命周期
 	ClientConnect    ClientConnectCallback
@@ -66,4 +68,23 @@ type HubCallbacks struct {
 	GroupDisband     func(ctx context.Context, namespace, groupID string)
 	GroupMemberJoin  func(ctx context.Context, namespace, groupID string, userIDs []string)
 	GroupMemberLeave func(ctx context.Context, namespace, groupID string, userIDs []string)
+}
+
+// snapshotCallbacks 原子取回调集合快照：调用方持快照引用执行回调，
+// 不受运行期并发替换影响（读到的永远是某个完整一致的结构版本）
+func (h *Hub) snapshotCallbacks() *HubCallbacks {
+	return h.callbacks.Load()
+}
+
+// replaceCallback 原子替换单个回调：拷贝当前快照改字段后 CAS 整体换入，
+// CAS 失败（并发替换了其他回调）重试，保证并发 Set 不同回调不互相覆盖
+func (h *Hub) replaceCallback(mutate func(*HubCallbacks)) {
+	for {
+		cur := h.snapshotCallbacks()
+		next := *cur
+		mutate(&next)
+		if h.callbacks.CompareAndSwap(cur, &next) {
+			return
+		}
+	}
 }

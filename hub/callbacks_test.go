@@ -96,3 +96,39 @@ func TestGroupCallbacksInjectionAndPorts(t *testing.T) {
 	assert.NotNil(t, joinCtx)
 	assert.NotNil(t, hub.GetGroupMemberLeaveCallback())
 }
+
+// TestCallbackHotSwapConcurrent 运行期热替换与并发读快照的数据竞争回归
+// 回归场景：Set*Callback 裸写 callbacks 字段而注册/心跳路径并发裸读——
+// Go 函数值是双字，并发读写可撕裂出损坏的函数指针（-race 必报、
+// 生产小概率崩溃）。修复后 atomic.Pointer 快照交换，读方永远拿到
+// 完整一致的结构版本
+func TestCallbackHotSwapConcurrent(t *testing.T) {
+	hub := newCallbacksTestHub()
+
+	// 并发热替换不同回调（-race 下验证写入侧原子性）
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			hub.SetHeartbeatReportCallback(func(*models.Client) {})
+			hub.SetClientConnectCallback(func(context.Context, *models.Client, *models.ConnectionRecord) error { return nil })
+			hub.SetGroupMemberJoinCallback(func(context.Context, string, string, []string) {})
+		}
+	}()
+
+	// 并发读快照（-race 下验证读侧无竞争；非 nil 回调需可安全调用）
+	for i := 0; i < 200; i++ {
+		if cb := hub.snapshotCallbacks(); cb.HeartbeatReport != nil {
+			cb.HeartbeatReport(&models.Client{ID: "c-x"})
+		}
+		_ = hub.GetGroupMemberJoinCallback()
+		_ = hub.GetHeartbeatTimeoutCallback()
+	}
+	<-done
+
+	// 替换全部落位：最终快照三个回调均非 nil
+	final := hub.snapshotCallbacks()
+	assert.NotNil(t, final.HeartbeatReport)
+	assert.NotNil(t, final.ClientConnect)
+	assert.NotNil(t, final.GroupMemberJoin)
+}

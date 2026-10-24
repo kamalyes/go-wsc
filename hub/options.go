@@ -156,7 +156,7 @@ func (h *Hub) WithWelcomeProvider(provider models.WelcomeMessageProvider) *Hub {
 
 // WithOfflineMessagePushCallback 注入离线消息推送完成回调（上游据此删除已推送消息）
 func (h *Hub) WithOfflineMessagePushCallback(cb OfflineMessagePushCallback) *Hub {
-	h.callbacks.OfflineMessagePush = cb
+	h.replaceCallback(func(c *HubCallbacks) { c.OfflineMessagePush = cb })
 	return h
 }
 
@@ -168,37 +168,37 @@ func (h *Hub) WithMessageSendCallback(cb messaging.MessageSendCallback) *Hub {
 
 // WithHeartbeatTimeoutCallback 注入心跳超时回调
 func (h *Hub) WithHeartbeatTimeoutCallback(cb HeartbeatTimeoutCallback) *Hub {
-	h.callbacks.HeartbeatTimeout = cb
+	h.replaceCallback(func(c *HubCallbacks) { c.HeartbeatTimeout = cb })
 	return h
 }
 
 // WithHeartbeatReportCallback 注入心跳上报回调
 func (h *Hub) WithHeartbeatReportCallback(cb HeartbeatReportCallback) *Hub {
-	h.callbacks.HeartbeatReport = cb
+	h.replaceCallback(func(c *HubCallbacks) { c.HeartbeatReport = cb })
 	return h
 }
 
 // WithBeforeHeartbeatCallback 注入心跳处理前回调（返回 false 跳过后续心跳处理）
 func (h *Hub) WithBeforeHeartbeatCallback(cb BeforeHeartbeatCallback) *Hub {
-	h.callbacks.BeforeHeartbeat = cb
+	h.replaceCallback(func(c *HubCallbacks) { c.BeforeHeartbeat = cb })
 	return h
 }
 
 // WithAfterHeartbeatCallback 注入心跳处理后回调
 func (h *Hub) WithAfterHeartbeatCallback(cb AfterHeartbeatCallback) *Hub {
-	h.callbacks.AfterHeartbeat = cb
+	h.replaceCallback(func(c *HubCallbacks) { c.AfterHeartbeat = cb })
 	return h
 }
 
 // WithClientConnectCallback 注入客户端连接回调（权限验证 / 会话初始化等）
 func (h *Hub) WithClientConnectCallback(cb ClientConnectCallback) *Hub {
-	h.callbacks.ClientConnect = cb
+	h.replaceCallback(func(c *HubCallbacks) { c.ClientConnect = cb })
 	return h
 }
 
 // WithClientDisconnectCallback 注入客户端断开回调（资源清理 / 在线状态更新等）
 func (h *Hub) WithClientDisconnectCallback(cb ClientDisconnectCallback) *Hub {
-	h.callbacks.ClientDisconnect = cb
+	h.replaceCallback(func(c *HubCallbacks) { c.ClientDisconnect = cb })
 	return h
 }
 
@@ -216,18 +216,18 @@ func (h *Hub) WithErrorCallback(cb messaging.ErrorCallback) *Hub {
 
 // WithGroupDisbandCallback 注入群组解散回调（DisbandGroup 成功后异步触发）
 func (h *Hub) WithGroupDisbandCallback(cb func(ctx context.Context, namespace, groupID string)) *Hub {
-	h.callbacks.GroupDisband = cb
+	h.replaceCallback(func(c *HubCallbacks) { c.GroupDisband = cb })
 	return h
 }
 
 // WithGroupMemberJoinCallback 注入群组成员加入回调（连接时自动加群成功后异步触发）
 func (h *Hub) WithGroupMemberJoinCallback(cb func(ctx context.Context, namespace, groupID string, userIDs []string)) *Hub {
-	h.callbacks.GroupMemberJoin = cb
+	h.replaceCallback(func(c *HubCallbacks) { c.GroupMemberJoin = cb })
 	return h
 }
 
 // WithGroupMemberLeaveCallback 注入群组成员离开回调（RemoveGroupMembers 成功后异步触发）
 func (h *Hub) WithGroupMemberLeaveCallback(cb func(ctx context.Context, namespace, groupID string, userIDs []string)) *Hub {
-	h.callbacks.GroupMemberLeave = cb
+	h.replaceCallback(func(c *HubCallbacks) { c.GroupMemberLeave = cb })
 	return h
 }

@@ -214,8 +214,7 @@ func (h *Hub) handleRegister(client *models.Client) {
 
 	// 调用客户端连接回调（提交到回调池，不可丢弃）
 	// 传 record 让调用方获取 connect 身份+会话生命周期做额外落盘
-	if h.callbacks.ClientConnect != nil {
-		cb := h.callbacks.ClientConnect
+	if cb := h.snapshotCallbacks().ClientConnect; cb != nil {
 		h.workerPool.SubmitCallback(ctx, func() {
 			if err := cb(ctx, client, record); err != nil {
 				h.logger.ErrorContextKV(ctx, "客户端连接回调执行失败",
@@ -250,8 +249,10 @@ func (h *Hub) handleRegister(client *models.Client) {
 			// defer 保证回放 panic 也必开闸，实时投递不会永久堆积
 			defer h.messagingMgr.EndUserReplay(client.UserID)
 			pushedIDs, failedIDs := h.messagingMgr.PushOfflineMessages(client.Context, client)
-			if len(pushedIDs) > 0 && h.callbacks.OfflineMessagePush != nil {
-				h.callbacks.OfflineMessagePush(client.UserID, pushedIDs, failedIDs)
+			if len(pushedIDs) > 0 {
+				if cb := h.snapshotCallbacks().OfflineMessagePush; cb != nil {
+					cb(client.UserID, pushedIDs, failedIDs)
+				}
 			}
 		})
 	}
@@ -318,8 +319,7 @@ func (h *Hub) handleUnregister(client *models.Client) {
 	// Phase 3: 回调与记录落库（异步，不阻塞注销主流程）
 
 	// 调用断开回调（提交到回调池，不可丢弃）
-	if h.callbacks.ClientDisconnect != nil {
-		cb := h.callbacks.ClientDisconnect
+	if cb := h.snapshotCallbacks().ClientDisconnect; cb != nil {
 		h.workerPool.SubmitCallback(ctx, func() {
 			if err := cb(ctx, client, models.DisconnectReasonClientRequest); err != nil {
 				h.logger.ErrorContextKV(ctx, "客户端断开回调执行失败",

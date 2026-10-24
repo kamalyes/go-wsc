@@ -87,9 +87,9 @@ func (h *Hub) SetOverloadPolicy(gate *overload.AdmissionGate, shaper *overload.S
 // hub 侧回调写 h.callbacks（见 callbacks.go）；消息域回调委托 messagingMgr
 // ============================================================================
 
-// SetOfflineMessagePushCallback 设置离线消息推送回调（运行期可替换）
+// SetOfflineMessagePushCallback 设置离线消息推送回调（运行期可原子替换）
 func (h *Hub) SetOfflineMessagePushCallback(cb OfflineMessagePushCallback) *Hub {
-	h.callbacks.OfflineMessagePush = cb
+	h.replaceCallback(func(c *HubCallbacks) { c.OfflineMessagePush = cb })
 	return h
 }
 
@@ -99,39 +99,39 @@ func (h *Hub) SetMessageSendCallback(cb messaging.MessageSendCallback) *Hub {
 	return h
 }
 
-// SetHeartbeatTimeoutCallback 设置心跳超时回调（运行期可替换）
+// SetHeartbeatTimeoutCallback 设置心跳超时回调（运行期可原子替换）
 func (h *Hub) SetHeartbeatTimeoutCallback(cb HeartbeatTimeoutCallback) *Hub {
-	h.callbacks.HeartbeatTimeout = cb
+	h.replaceCallback(func(c *HubCallbacks) { c.HeartbeatTimeout = cb })
 	return h
 }
 
-// SetHeartbeatReportCallback 设置心跳上报回调（运行期可替换）
+// SetHeartbeatReportCallback 设置心跳上报回调（运行期可原子替换）
 func (h *Hub) SetHeartbeatReportCallback(cb HeartbeatReportCallback) *Hub {
-	h.callbacks.HeartbeatReport = cb
+	h.replaceCallback(func(c *HubCallbacks) { c.HeartbeatReport = cb })
 	return h
 }
 
-// SetBeforeHeartbeatCallback 设置心跳处理前回调（运行期可替换）
+// SetBeforeHeartbeatCallback 设置心跳处理前回调（运行期可原子替换）
 func (h *Hub) SetBeforeHeartbeatCallback(cb BeforeHeartbeatCallback) *Hub {
-	h.callbacks.BeforeHeartbeat = cb
+	h.replaceCallback(func(c *HubCallbacks) { c.BeforeHeartbeat = cb })
 	return h
 }
 
-// SetAfterHeartbeatCallback 设置心跳处理后回调（运行期可替换）
+// SetAfterHeartbeatCallback 设置心跳处理后回调（运行期可原子替换）
 func (h *Hub) SetAfterHeartbeatCallback(cb AfterHeartbeatCallback) *Hub {
-	h.callbacks.AfterHeartbeat = cb
+	h.replaceCallback(func(c *HubCallbacks) { c.AfterHeartbeat = cb })
 	return h
 }
 
-// SetClientConnectCallback 设置客户端连接回调（运行期可替换）
+// SetClientConnectCallback 设置客户端连接回调（运行期可原子替换）
 func (h *Hub) SetClientConnectCallback(cb ClientConnectCallback) *Hub {
-	h.callbacks.ClientConnect = cb
+	h.replaceCallback(func(c *HubCallbacks) { c.ClientConnect = cb })
 	return h
 }
 
-// SetClientDisconnectCallback 设置客户端断开回调（运行期可替换）
+// SetClientDisconnectCallback 设置客户端断开回调（运行期可原子替换）
 func (h *Hub) SetClientDisconnectCallback(cb ClientDisconnectCallback) *Hub {
-	h.callbacks.ClientDisconnect = cb
+	h.replaceCallback(func(c *HubCallbacks) { c.ClientDisconnect = cb })
 	return h
 }
 
@@ -147,20 +147,20 @@ func (h *Hub) SetErrorCallback(cb messaging.ErrorCallback) *Hub {
 	return h
 }
 
-// SetGroupDisbandCallback 设置群组解散回调（运行期可替换）
+// SetGroupDisbandCallback 设置群组解散回调（运行期可原子替换）
 func (h *Hub) SetGroupDisbandCallback(cb func(ctx context.Context, namespace, groupID string)) *Hub {
-	h.callbacks.GroupDisband = cb
+	h.replaceCallback(func(c *HubCallbacks) { c.GroupDisband = cb })
 	return h
 }
 
-// SetGroupMemberJoinCallback 设置群组成员加入回调（运行期可替换）
+// SetGroupMemberJoinCallback 设置群组成员加入回调（运行期可原子替换）
 func (h *Hub) SetGroupMemberJoinCallback(cb func(ctx context.Context, namespace, groupID string, userIDs []string)) *Hub {
-	h.callbacks.GroupMemberJoin = cb
+	h.replaceCallback(func(c *HubCallbacks) { c.GroupMemberJoin = cb })
 	return h
 }
 
-// SetGroupMemberLeaveCallback 设置群组成员离开回调（运行期可替换）
+// SetGroupMemberLeaveCallback 设置群组成员离开回调（运行期可原子替换）
 func (h *Hub) SetGroupMemberLeaveCallback(cb func(ctx context.Context, namespace, groupID string, userIDs []string)) *Hub {
-	h.callbacks.GroupMemberLeave = cb
+	h.replaceCallback(func(c *HubCallbacks) { c.GroupMemberLeave = cb })
 	return h
 }

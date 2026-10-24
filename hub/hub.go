@@ -142,7 +142,9 @@ type Hub struct {
 	connectionTokenDecoder spi.ConnectionAuthenticator
 
 	// ========== 应用层回调（连接/心跳/离线推送/群组生命周期，见 callbacks.go） ==========
-	callbacks HubCallbacks
+	// atomic 指针支持运行期热替换：函数值是双字（type+data），裸字段并发读写
+	// 可撕裂出损坏的函数指针；整体快照替换保证读方拿到的永远是完整一致的结构
+	callbacks atomic.Pointer[HubCallbacks]
 
 	// ========== 生命周期 ==========
 	wg       sync.WaitGroup
@@ -241,6 +243,9 @@ func NewHub(config *wscconfig.WSC) *Hub {
 
 	// 分片注册表（替代单 mutex 的 clients/userToClients map）
 	hub.shardedRegistry = connection.NewShardedRegistry(config.EnableAgent, config.EnableObserver, registryCapacity)
+
+	// 回调集合初始空快照（atomic 指针必须先 Store 才能被 Load）
+	hub.callbacks.Store(&HubCallbacks{})
 
 	// 群组生命周期管理器（连接注册时自动加入成员组/系统组，断开时多端保护离组；
 	// GroupStore 由 SPI 装配在 NewHub 之后注入，Join* 内部运行时判空降级，构造顺序无约束）

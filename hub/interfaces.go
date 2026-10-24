@@ -325,22 +325,22 @@ func (h *Hub) EnqueueHeartbeatRenew(client *models.Client) {
 
 // GetBeforeHeartbeatCallback 心跳前置回调（nil 表示业务方未注册，调用方须跳过）
 func (h *Hub) GetBeforeHeartbeatCallback() func(client *models.Client) bool {
-	return h.callbacks.BeforeHeartbeat
+	return h.snapshotCallbacks().BeforeHeartbeat
 }
 
 // GetHeartbeatReportCallback 心跳上报回调（nil 表示业务方未注册，调用方须跳过）
 func (h *Hub) GetHeartbeatReportCallback() func(client *models.Client) {
-	return h.callbacks.HeartbeatReport
+	return h.snapshotCallbacks().HeartbeatReport
 }
 
 // GetAfterHeartbeatCallback 心跳后置回调（nil 表示业务方未注册，调用方须跳过）
 func (h *Hub) GetAfterHeartbeatCallback() func(client *models.Client) {
-	return h.callbacks.AfterHeartbeat
+	return h.snapshotCallbacks().AfterHeartbeat
 }
 
 // GetHeartbeatTimeoutCallback 心跳超时回调（nil 表示业务方未注册，调用方须跳过）
 func (h *Hub) GetHeartbeatTimeoutCallback() func(clientID string, userID string, lastHeartbeat time.Time) {
-	return h.callbacks.HeartbeatTimeout
+	return h.snapshotCallbacks().HeartbeatTimeout
 }
 
 // ============================================================================
@@ -512,17 +512,17 @@ func (h *Hub) TrySubmitCallback(task func()) bool {
 
 // GetGroupDisbandCallback 群组解散回调（nil 表示业务方未注册，调用方须跳过）
 func (h *Hub) GetGroupDisbandCallback() func(ctx context.Context, namespace, groupID string) {
-	return h.callbacks.GroupDisband
+	return h.snapshotCallbacks().GroupDisband
 }
 
 // GetGroupMemberJoinCallback 群组成员加入回调（nil 表示业务方未注册，调用方须跳过）
 func (h *Hub) GetGroupMemberJoinCallback() func(ctx context.Context, namespace, groupID string, userIDs []string) {
-	return h.callbacks.GroupMemberJoin
+	return h.snapshotCallbacks().GroupMemberJoin
 }
 
 // GetGroupMemberLeaveCallback 群组成员离开回调（nil 表示业务方未注册，调用方须跳过）
 func (h *Hub) GetGroupMemberLeaveCallback() func(ctx context.Context, namespace, groupID string, userIDs []string) {
-	return h.callbacks.GroupMemberLeave
+	return h.snapshotCallbacks().GroupMemberLeave
 }
 
 // SendConditional 条件广播：对满足条件的在线客户端各投递一份，返回投递数

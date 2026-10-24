@@ -19,6 +19,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
@@ -182,22 +183,29 @@ func (u *Upgrader) createOriginChecker() func(*http.Request) bool {
 
 // ExtractClientAttributes 从请求中提取客户端属性
 // 若启用连接 Token（Security.ConnectionToken.Enabled 且注入了鉴权器），优先从 Token 解码；
-// 解码失败时按 AllowFallback 决定是否回退明文提取，不允许回退则返回 nil（调用方拒绝连接）
+// AllowFallback=true 时仅"请求未携带 token"可回退明文提取（灰度迁移兼容），
+// 携带了 token 但验证失败（解码/解密/过期）一律拒绝；返回 nil 时调用方须拒绝连接
 func (u *Upgrader) ExtractClientAttributes(r *http.Request) *ClientAttributes {
 	// 优先尝试连接 Token 解码（若注入了鉴权器）
 	if u.auth != nil {
 		claims, err := u.auth.Authenticate(r)
 		if err != nil {
 			cfg := u.cfg.Security.ConnectionToken
-			if cfg != nil && cfg.AllowFallback {
-				// 允许回退：记录警告后继续走明文提取
-				u.logger.WarnContextKV(r.Context(), "[WebSocket] 连接 Token 解码失败，回退到明文参数",
-					"error", err, "remote_addr", r.RemoteAddr)
+			if cfg != nil && cfg.AllowFallback && errors.Is(err, ErrConnectionTokenNotFound) {
+				// 允许回退：仅限"请求未携带 token"（灰度迁移期旧客户端兼容），记录警告后走明文提取
+				u.logger.WarnContextKV(r.Context(), "[WebSocket] 连接 Token 缺失，回退到明文参数",
+					"remote_addr", r.RemoteAddr)
 				// 继续走下面的明文流程
+			} else if cfg != nil && cfg.AllowFallback {
+				// 携带了 token 但验证失败（解码/解密/过期）：即使 AllowFallback=true 也拒绝——
+				// 否则过期或被篡改的 token 反而比"不携带"获得更宽的放行，鉴权形同虚设
+				u.logger.WarnContextKV(r.Context(), "[WebSocket] 连接 Token 验证失败，拒绝连接",
+					"error", err, "remote_addr", r.RemoteAddr)
+				return nil
 			} else {
 				// 不允许回退：拒绝连接（返回 nil，调用方需检查并拒绝）
 				u.logger.WarnContextKV(r.Context(), "[WebSocket] 连接 Token 解码失败，拒绝连接",
-					"error", err, "remote_addr", r.RemoteAddr, "query", r.URL.RawQuery)
+					"error", err, "remote_addr", r.RemoteAddr)
 				return nil
 			}
 		} else {

@@ -179,7 +179,8 @@ func TestExtractClientAttributesFromToken(t *testing.T) {
 	assert.Empty(t, req.URL.Query().Get("user_id"), "身份应来自加密载荷而非明文参数")
 }
 
-// TestExtractClientAttributesTokenFallback Token 解码失败 + AllowFallback → 回退明文
+// TestExtractClientAttributesTokenFallback AllowFallback 回退语义收紧：
+// 仅"请求未携带 token"可回退明文（灰度迁移兼容）；携带了 token 但验证失败一律拒绝—— 否则过期/被篡改的 token 反而比"不携带"获得更宽的放行，鉴权形同虚设
 func TestExtractClientAttributesTokenFallback(t *testing.T) {
 	cfg := newUpgraderTestConfig()
 	tokenCfg := newTestTokenConfig("fallback-key-0123456789abcdef")
@@ -188,11 +189,24 @@ func TestExtractClientAttributesTokenFallback(t *testing.T) {
 
 	u := NewUpgrader(cfg, &fakeRegistrar{}).WithAuthenticator(NewTokenAuthenticator(tokenCfg, nil))
 
-	req := httptest.NewRequest(http.MethodGet, "/ws?token=tampered&user_id=u-plain", nil)
+	// 未携带 token → 回退明文提取
+	req := httptest.NewRequest(http.MethodGet, "/ws?user_id=u-plain", nil)
 	attrs := u.ExtractClientAttributes(req)
-
 	require.NotNil(t, attrs)
-	assert.Equal(t, "u-plain", attrs.UserID, "解码失败应回退明文提取")
+	assert.Equal(t, "u-plain", attrs.UserID, "token 缺失应回退明文提取")
+
+	// 携带篡改 token → 拒绝（验证失败不得降级明文）
+	req = httptest.NewRequest(http.MethodGet, "/ws?token=tampered&user_id=u-attacker", nil)
+	assert.Nil(t, u.ExtractClientAttributes(req), "携带 token 但验证失败应拒绝连接")
+
+	// 携带过期 token → 拒绝（同因：验证失败不得降级明文）
+	token, err := IssueConnectionToken(tokenCfg, "", &spi.ConnectionClaims{
+		UserID:    "u-expired",
+		ExpiresAt: time.Now().Add(-time.Hour).Unix(),
+	})
+	require.NoError(t, err)
+	req = httptest.NewRequest(http.MethodGet, "/ws?token="+token+"&user_id=u-attacker", nil)
+	assert.Nil(t, u.ExtractClientAttributes(req), "过期 token 应拒绝连接")
 }
 
 // TestExtractClientAttributesTokenReject Token 解码失败 + 禁止回退 → 拒绝（nil）

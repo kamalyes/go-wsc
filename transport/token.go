@@ -31,6 +31,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -44,6 +45,11 @@ import (
 
 // tokenNonceSize GCM nonce 长度（标准推荐 12 字节）
 const tokenNonceSize = 12
+
+// ErrConnectionTokenNotFound 请求未携带连接 token
+// AllowFallback 场景下唯一允许回退明文提取的错误：携带了 token 但验证不过（base64 解码/解密/过期）时不得降级明文——否则过期或被篡改的 token
+// 反而比"不携带"获得更宽的放行，鉴权形同虚设
+var ErrConnectionTokenNotFound = errors.New("connection token not found in request")
 
 // tokenCipherPool 复用 GCM 实例（aead 构造含 key schedule，避免每 token 重复派生）
 var tokenCipherPool = sync.Map{} // 密钥指纹 → cipher.AEAD
@@ -93,10 +99,11 @@ func (a *tokenAuthenticator) Authenticate(r *http.Request) (*spi.ConnectionClaim
 	}
 
 	// 1. 提取 token（所有 set 的来源应一致，以 default set 配置为准）
+	// 缺失返回 ErrConnectionTokenNotFound 哨兵（AllowFallback 场景下唯一可回退明文的错误，见注释）
 	tokenStr := extractToken(r, a.defaultSet)
 	if tokenStr == "" {
-		return nil, fmt.Errorf("connection token not found in request (source=%s, name=%s)",
-			a.defaultSet.GetTokenSource(), a.defaultSet.GetTokenParamName())
+		return nil, fmt.Errorf("%w (source=%s, name=%s)",
+			ErrConnectionTokenNotFound, a.defaultSet.GetTokenSource(), a.defaultSet.GetTokenParamName())
 	}
 
 	// 2. base64 解码

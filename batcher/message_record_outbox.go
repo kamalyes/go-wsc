@@ -137,11 +137,25 @@ func (o *MessageRecordOutbox) flush(records []*models.MessageSendRecord) {
 	if len(records) == 0 {
 		return
 	}
+
+	// 锁内快照：CreateBatch 在锁外序列化记录，而 pending 清理在落库之后——
+	// 序列化期间并发的 UpdateStatusIfPending 仍可命中 pending 并写同一 record 指针，
+	// 直接序列化原指针构成数据竞争（读序列化 vs 写状态合并）。快照值独立分配，
+	// 落库内容取 flush 入口时点；pending 清理与 sendingKeys 判定仍基于原指针
+	// （落库后的最终状态），"指针已携带终态则不注册 ACK 超时"的语义保持不变
+	snapshot := make([]*models.MessageSendRecord, len(records))
+	o.mu.Lock()
+	for i, record := range records {
+		copied := *record
+		snapshot[i] = &copied
+	}
+	o.mu.Unlock()
+
 	// 独立超时 context：Stop drain 在 Hub cancel 前后均可能触发，用 Background 避免被截断
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := o.provider.GetMessageSink().CreateBatch(ctx, records); err != nil {
+	if err := o.provider.GetMessageSink().CreateBatch(ctx, snapshot); err != nil {
 		// 失败批次同样从 pending 移除（与成功路径对称）：记录已按丢弃语义处理、不会重投，
 		// 残留会让 UpdateStatusIfPending 永远命中已死记录，且 DB 故障期间持续 flush 失败
 		// 会让 map 无界增长（每条含序列化 MessageData）

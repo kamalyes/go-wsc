@@ -157,8 +157,11 @@ func (m *MessageSendRecord) SetMessage(msg *HubMessage, payload []byte) error {
 	}
 	m.MessageData = string(payload)
 
-	// 提取关键字段用于索引和查询
+	// 提取关键字段用于索引和查询（持 HubMessage 读锁快照）
 	// 使用 msg.MessageID (业务消息ID) 和 msg.ID (Hub 内部ID)
+	// lockRead 兼容 mu 为 nil 的零值构造场景；不持锁裸读时，重试/重路由
+	// 路径复用同一消息对象并发补设属性（Set*/With* 持写锁）构成数据竞争
+	unlock := msg.lockRead()
 	m.MessageID = msg.MessageID
 	m.HubID = msg.ID
 	m.SessionID = msg.SessionID
@@ -173,6 +176,7 @@ func (m *MessageSendRecord) SetMessage(msg *HubMessage, payload []byte) error {
 		// 记录维度：一条消息归属一个 group；跨组广播通过多条记录表达
 		m.GroupID = msg.GroupIDs[0]
 	}
+	unlock()
 
 	return nil
 }

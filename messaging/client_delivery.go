@@ -118,10 +118,18 @@ func (m *Manager) SendToClient(ctx context.Context, client *models.Client, msg *
 //   - 高频级（Ephemeral）→ Coalescer latest-wins 合并（50ms 周期投递最新值）
 //   - Admit 拒绝（Delay/Offline，P2P 场景仅极端水位触发）→ 转离线补发 + 上层重试兜底
 //   - 实时路径零改动（TrySend 成功路径）
+//
+// 失败兜底按送达分级路由（与广播路径 TrySendWithFallback 同一语义）：
+//   - 高频级：丢弃计数（latest-wins 旧值过期是正确行为，转离线会让用户上线后收到一堆过期的弹幕/typing 状态消息）
+//   - 普通级：转离线补发（拒绝≠丢弃）
 func (m *Manager) SendToClientSerialized(ctx context.Context, client *models.Client, msg *models.HubMessage, preSerialized []byte) bool {
 	ok := m.TryDeliverToClient(ctx, client, msg, preSerialized)
 	if !ok && msg != nil {
-		m.StoreOfflineOnDeliveryFailure(msg, fmt.Errorf("client delivery rejected"))
+		if msg.ResolveGuarantee() == models.GuaranteeEphemeral {
+			m.host.GetOverloadMetrics().RecordEphemeralDrop()
+		} else {
+			m.StoreOfflineOnDeliveryFailure(msg, fmt.Errorf("client delivery rejected"))
+		}
 	}
 	return ok
 }

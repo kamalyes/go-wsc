@@ -96,7 +96,8 @@ type AdmissionGate struct {
 	lowStreak         atomic.Int32  // 连续低水位周期计数（降级判定用）
 	lastLevelChangeAt atomic.Int64  // 上次水位变更时间戳（UnixNano，日志/观测用）
 
-	stopCh chan struct{}
+	started atomic.Bool // 防重入标志：重复 Start 不叠加评估循环（与 Stop 语义对称）
+	stopCh   chan struct{}
 }
 
 // NewAdmissionGate 创建准入闸门（默认水位开箱即用，参数零值时用 constants 默认值）
@@ -128,6 +129,11 @@ func (g *AdmissionGate) Start() {
 	case <-g.stopCh:
 		return // 已停止，不重启（生命周期与 Hub 一致）
 	default:
+	}
+	// CAS 防重入：仅拦截"已 Stop"的旧 select 无法防"已 Start 未 Stop"的重复调用，
+	// 多个 evaluateLoop 并发评估会使 AIMD 升/降级速率失真（每周期最多 +N 级）
+	if !g.started.CompareAndSwap(false, true) {
+		return
 	}
 	go g.evaluateLoop()
 }

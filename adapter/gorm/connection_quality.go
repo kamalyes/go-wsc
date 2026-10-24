@@ -16,6 +16,7 @@ package gormadapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime/debug"
 	"strings"
@@ -566,16 +567,10 @@ func (r *ConnectionQualityStore) Close() error {
 
 // CleanupInactiveRecords 清理指定时间前不再活跃的质量记录（硬删：历史质量指标无回溯消费方）
 // 断连后心跳停止，last_active_at 停在最后一次活跃时刻，按它清理与连接记录同窗口
+// 按主键分批删除（deleteInBatches）：与 ConnectionStore 同因——无界单条 DELETE 在 大积压下必然超时回滚致 0 行删除，分批保积压收敛（见 batch_delete.go 头注）
 func (r *ConnectionQualityStore) CleanupInactiveRecords(ctx context.Context, before time.Time) (int64, error) {
-	result := r.getDB(ctx).
-		Where("last_active_at < ?", before).
-		Delete(&models.ConnectionQuality{})
-
-	if result.Error != nil {
-		return 0, result.Error
-	}
-
-	return result.RowsAffected, nil
+	return deleteInBatches(ctx, r.getDB(ctx), &models.ConnectionQuality{},
+		"last_active_at < ?", before)
 }
 
 // startCleanupScheduler 启动定时清理任务（使用 EventLoop，每天执行一次，与 ConnectionStore 同模式）
@@ -597,6 +592,7 @@ func (r *ConnectionQualityStore) startCleanupScheduler(ctx context.Context, days
 }
 
 // cleanupOldData 清理N天前的非活跃质量记录
+// 每轮限时 10 分钟：积压大到删不完时中断本轮，已提交批次保留，下轮调度从断点续删（分批语义）
 func (r *ConnectionQualityStore) cleanupOldData(ctx context.Context, daysAgo int) {
 	if daysAgo <= 0 {
 		return
@@ -604,8 +600,10 @@ func (r *ConnectionQualityStore) cleanupOldData(ctx context.Context, daysAgo int
 
 	before := time.Now().AddDate(0, 0, -daysAgo)
 
-	deleted, err := r.CleanupInactiveRecords(ctx, before)
-	if err != nil {
+	cleanupCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	deleted, err := r.CleanupInactiveRecords(cleanupCtx, before)
+	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		r.logger.Warnf("⚠️ 清理历史质量记录失败: %v", err)
 	} else if deleted > 0 {
 		r.logger.Infof("🧹 已清理 %d 天前的非活跃质量记录，删除 %d 条", daysAgo, deleted)

@@ -17,6 +17,7 @@ package gormadapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime/debug"
 	"strings"
@@ -529,16 +530,11 @@ func (r *ConnectionStore) BatchUpsert(ctx context.Context, records []*models.Con
 // ========== 清理操作 ==========
 
 // CleanupInactiveRecords 清理非活跃记录
+// 按主键分批删除（deleteInBatches）：百万级连接下断连历史积压量大，
+// 无界单条 DELETE 必然超时回滚致 0 行删除（见 batch_delete.go 头注），分批保积压收敛
 func (r *ConnectionStore) CleanupInactiveRecords(ctx context.Context, before time.Time) (int64, error) {
-	result := r.getDB(ctx).
-		Where("disconnected_at < ? AND is_active = ?", before, false).
-		Delete(&models.ConnectionRecord{})
-
-	if result.Error != nil {
-		return 0, result.Error
-	}
-
-	return result.RowsAffected, nil
+	return deleteInBatches(ctx, r.getDB(ctx), &models.ConnectionRecord{},
+		"disconnected_at < ? AND is_active = ?", before, false)
 }
 
 // startCleanupScheduler 启动定时清理任务（使用 EventLoop，每天执行一次）
@@ -564,6 +560,7 @@ func (r *ConnectionStore) startCleanupScheduler(ctx context.Context, daysAgo int
 }
 
 // cleanupOldData 清理N天前的非活跃连接记录
+// 每轮限时 10 分钟：积压大到删不完时中断本轮，已提交批次保留，下轮调度从断点续删（分批语义）
 func (r *ConnectionStore) cleanupOldData(ctx context.Context, daysAgo int) {
 	if daysAgo <= 0 {
 		return
@@ -571,8 +568,10 @@ func (r *ConnectionStore) cleanupOldData(ctx context.Context, daysAgo int) {
 
 	before := time.Now().AddDate(0, 0, -daysAgo)
 
-	deleted, err := r.CleanupInactiveRecords(ctx, before)
-	if err != nil {
+	cleanupCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	deleted, err := r.CleanupInactiveRecords(cleanupCtx, before)
+	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		r.logger.Warnf("⚠️ 清理历史连接记录失败: %v", err)
 	} else if deleted > 0 {
 		r.logger.Infof("🧹 已清理 %d 天前的非活跃连接记录，删除 %d 条", daysAgo, deleted)

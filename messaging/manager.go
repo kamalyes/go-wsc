@@ -63,6 +63,11 @@ type Manager struct {
 	// replayGate 首连离线回放门闩（回放期间暂存实时投递，回放后按序补投，
 	// 消除重连场景"新消息先于离线历史消息到达"的乱序窗口；未注入时投递直通）
 	replayGate *replayGate
+	// replayInflight 首连回放单飞标记（userID → struct{}）：
+	// 速断速连窗口同一用户可叠加多次首连触发（上线→回落→再上线），
+	// 并发回放会重复 drain 同一队列（重复投递）并提前开闸（乱序窗口重现），
+	// 重复触发直接放弃回放权，由 inflight 回放统一 drain 后按序补投
+	replayInflight sync.Map
 	// idGenerator 消息 ID 生成器（雪花 ID）
 	idGenerator models.IDGenerator
 	// controlLane 控制通道投递器（pong 等控制类消息直达，CtrlCh 满时回退数据 lane）

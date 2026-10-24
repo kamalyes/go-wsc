@@ -143,6 +143,49 @@ func TestReplayGate_ConcurrentHoldDuringReplay(t *testing.T) {
 	assert.Zero(t, g.live.Load(), "结束后计数应归零")
 }
 
+// TestTryBeginUserReplay_SingleFlight 速断速连窗口同一用户叠加首连触发时回放单飞
+func TestTryBeginUserReplay_SingleFlight(t *testing.T) {
+	m, _ := newTestManager()
+	m.WithReplayGate(NewReplayGate())
+
+	// 首个首连触发获得回放权
+	assert.True(t, m.TryBeginUserReplay("u-1"), "首个触发应获得回放权")
+	// inflight 回放未结束：速断速连的重复触发必须放弃（不重复 drain、不提前开闸）
+	assert.False(t, m.TryBeginUserReplay("u-1"), "inflight 期间的重复触发应放弃回放权")
+
+	// 回放结束：标记释放，门闩开闸
+	m.EndUserReplay("u-1")
+	assert.True(t, m.TryBeginUserReplay("u-1"), "回放结束后应可再次获得回放权")
+	m.EndUserReplay("u-1")
+
+	// 门闩计数守恒：单飞下 begin/end 严格配对，多次触发后归零
+	assert.Zero(t, m.replayGate.live.Load(), "全部回放结束后门闩计数应归零")
+
+	// 不同用户互不影响
+	assert.True(t, m.TryBeginUserReplay("u-2"))
+	assert.True(t, m.TryBeginUserReplay("u-3"))
+	m.EndUserReplay("u-2")
+	m.EndUserReplay("u-3")
+}
+
+// TestTryBeginUserReplay_ReplayGatedUntilEnd 单飞获权后门闩保持关闭直到回放结束
+func TestTryBeginUserReplay_ReplayGatedUntilEnd(t *testing.T) {
+	m, _ := newTestManager()
+	m.WithReplayGate(NewReplayGate())
+
+	require := assert.New(t)
+	require.True(m.TryBeginUserReplay("u-gated"))
+
+	held := m.replayGate.hold("u-gated", func() {})
+	require.True(held, "回放进行中实时投递应被暂存")
+
+	m.EndUserReplay("u-gated")
+	executed := false
+	held = m.replayGate.hold("u-gated", func() { executed = true })
+	require.False(held, "回放结束后应恢复直通")
+	require.True(executed)
+}
+
 func BenchmarkReplayGate_HoldGateOpen(b *testing.B) {
 	// 闸门全开（绝大多数时刻）：快路径仅一次原子读
 	g := NewReplayGate()

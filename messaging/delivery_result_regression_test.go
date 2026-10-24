@@ -134,7 +134,7 @@ func TestHeldDeliveryRefusalFallsBackOffline(t *testing.T) {
 	h.registry.AddClient(makeTestClient("c", "u"))
 	q, log := newOfflineRecordingHandler()
 	m.offlineHandler = q
-	m.BeginUserReplay("u")
+	require.True(t, m.TryBeginUserReplay("u"))
 	msg := makeGroupMessage("system")
 	msg.MessageType = models.MessageTypeNotice
 	result := m.SendToUserWithRetry(context.Background(), "u", msg)

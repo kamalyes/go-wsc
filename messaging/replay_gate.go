@@ -121,16 +121,24 @@ func (g *replayGate) end(userID string) {
 	}
 }
 
-// BeginUserReplay 标记用户进入首连离线回放（registry 首连分支在提交
-// PushOfflineMessages 任务前调用；nil-safe 未启用时直接返回）
-func (m *Manager) BeginUserReplay(userID string) {
+// TryBeginUserReplay 尝试标记用户进入首连离线回放，返回是否获得回放权
+// registry 首连分支调用：速断速连窗口同一用户可叠加多次首连触发（上线→回落→再上线）
+// 并发回放会重复 drain 同一队列（离线消息重复投递）、且首个回放的 end 会提前开闸（乱序窗口重现）；
+// inflight 回放刚 drain 过队列，重复触发放弃回放权是安全的（期间新转离线的消息由下次上线兜底）
+func (m *Manager) TryBeginUserReplay(userID string) bool {
+	if _, inflight := m.replayInflight.LoadOrStore(userID, struct{}{}); inflight {
+		return false
+	}
 	if m.replayGate != nil {
 		m.replayGate.begin(userID)
 	}
+	return true
 }
 
-// EndUserReplay 结束回放并按序补投暂存的实时投递（registry 任务闭包 defer 调用）
+// EndUserReplay 结束回放并按序补投暂存的实时投递（registry 任务闭包 defer 调用；
+// 放弃回放权的触发方不得调用，否则会误开 inflight 回放的门闩）
 func (m *Manager) EndUserReplay(userID string) {
+	m.replayInflight.Delete(userID)
 	if m.replayGate != nil {
 		m.replayGate.end(userID)
 	}

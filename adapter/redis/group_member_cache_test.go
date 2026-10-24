@@ -282,6 +282,87 @@ func TestGroupMemberCache_AppIsolation(t *testing.T) {
 	assert.Equal(t, 2, counting.backfillCount(), "跨 app 写入不应逐出默认 app 条目")
 }
 
+// staleBackfillGroupStore 回源快照门控仓储：先读快照再挂起（仅第二轮），
+// 用于确定性构造「回源快照已读、fill 未执行」窗口内发生拓扑写的竞态时序
+type staleBackfillGroupStore struct {
+	spi.GroupStore
+	backfills  int32
+	inBackfill chan struct{} // 第二轮快照读完后通知（一次）
+	release    chan struct{} // 第二轮挂起至此放行（一次）
+}
+
+func (s *staleBackfillGroupStore) GetMultiGroupMembers(ctx context.Context, appID string, groupIDs []string) (map[string][]string, error) {
+	n := atomic.AddInt32(&s.backfills, 1)
+	result, err := s.GroupStore.GetMultiGroupMembers(ctx, appID, groupIDs)
+	if err != nil {
+		return nil, err
+	}
+	if n == 2 { // 仅竞态构造轮（第二轮）挂起：此后的 Redis 写不影响本快照
+		s.inBackfill <- struct{}{}
+		<-s.release
+	}
+	return result, nil
+}
+
+// TestGroupMemberCache_BackfillGenerationGuard 回源-回填窗口的世代双检
+// 回归场景：miss 后锁外回源读到旧快照，期间本节点拓扑写（AddMembers）触发逐出——
+// 逐出时缓存条目尚不存在（miss 已摘除/未回填）落空，仅世代递增。无世代守卫时
+// fill 把旧快照重新入缓存，新入群成员最长 TTL 窗口漏收必达消息且无离线转存。
+// 修复后 fill 比对世代放弃回填，下一次读重新回源拿到新拓扑
+func TestGroupMemberCache_BackfillGenerationGuard(t *testing.T) {
+	repo, cleanup := setupTestRepo(t)
+	t.Cleanup(cleanup)
+	stale := &staleBackfillGroupStore{
+		GroupStore: repo,
+		inBackfill: make(chan struct{}),
+		release:    make(chan struct{}),
+	}
+	cache := NewGroupMemberCache(stale, time.Minute, 0, 0, 0)
+	ctx := context.Background()
+	app := constants.DefaultAppID
+
+	require.NoError(t, cache.CreateGroup(ctx, &models.Group{GroupID: "g-gen", Namespace: "tenantA", OwnerID: "o"}))
+	require.NoError(t, cache.AddMembers(ctx, app, "tenantA", "g-gen", []string{"u1"}))
+
+	// 第一轮：正常回源回填，缓存就绪
+	first, err := cache.GetMultiGroupMembers(ctx, app, []string{"g-gen"})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"u1"}, first["g-gen"])
+
+	// 手动逐出（等价一次拓扑失效）：第二轮读必然 miss
+	cache.InvalidateTopology(app, "g-gen")
+
+	// 第二轮：miss → 回源读旧快照（仅 u1）→ 挂起
+	secondDone := make(chan struct{})
+	go func() {
+		defer close(secondDone)
+		result, err := cache.GetMultiGroupMembers(ctx, app, []string{"g-gen"})
+		assert.NoError(t, err)
+		// 本轮拿到的是回源时刻的旧快照（不可避免）；断言放到主协程统一做
+		got := result["g-gen"]
+		assert.ElementsMatch(t, []string{"u1"}, got)
+	}()
+	<-stale.inBackfill // 快照已读（u1），fill 未执行
+
+	// 回源挂起期间拓扑写：新成员入群（evict 落空——条目不存在，仅世代递增）
+	require.NoError(t, cache.AddMembers(ctx, app, "tenantA", "g-gen", []string{"u2"}))
+
+	close(stale.release) // 放行：旧快照返回，fill 应被世代双检拦截
+	<-secondDone
+
+	// 第三轮：旧快照未回填（世代守卫），重新回源拿到含 u2 的新拓扑
+	third, err := cache.GetMultiGroupMembers(ctx, app, []string{"g-gen"})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"u1", "u2"}, third["g-gen"],
+		"旧快照不得回填，重新回源应拿到新成员")
+
+	// 第四轮：命中，不再回源
+	_, err = cache.GetMultiGroupMembers(ctx, app, []string{"g-gen"})
+	require.NoError(t, err)
+	assert.Equal(t, int32(3), atomic.LoadInt32(&stale.backfills),
+		"共回源 3 次（初始/竞态轮/重试轮），第四轮应命中")
+}
+
 // TestGroupMemberCache_ConcurrentAccess 并发读写冒烟：混度读写无死锁/无竞态（-race 下验证）
 func TestGroupMemberCache_ConcurrentAccess(t *testing.T) {
 	cache, _ := setupCache(t, time.Minute, 0, 0, 0)

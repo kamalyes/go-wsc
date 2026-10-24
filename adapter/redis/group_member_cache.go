@@ -53,6 +53,9 @@ type groupMemberShard struct {
 	mu    sync.Mutex
 	lru   *list.List // front=最近访问，配额超限从队尾逐出
 	items map[groupCacheKey]*list.Element
+	// gen 每群组的失效世代号：evict 时递增。有意跨 LRU 生命周期保留
+	// （不随条目逐出清除），供回源-回填窗口做世代双检——cache-aside 标准防旧数据回填
+	gen map[groupCacheKey]uint64
 }
 
 // GroupMemberCache 群组成员拓扑缓存装饰器（LRU + TTL + 大群条目预算 + 64 分片）
@@ -97,6 +100,7 @@ func NewGroupMemberCache(inner spi.GroupStore, ttl, negativeTTL time.Duration, m
 	for i := range c.shards {
 		c.shards[i].lru = list.New()
 		c.shards[i].items = make(map[groupCacheKey]*list.Element, quota)
+		c.shards[i].gen = make(map[groupCacheKey]uint64)
 	}
 	return c
 }
@@ -130,16 +134,20 @@ func (c *GroupMemberCache) GetMultiGroupMembers(ctx context.Context, appID strin
 	appID = mathx.IfEmpty(appID, constants.DefaultAppID)
 
 	// 命中收集：过期条目即时清除视作 miss，每 gid 仅持所属分片锁（全程无 IO）
+	// miss 时同步记录该群组当前失效世代（回填前双检，见 fill 注释）
 	result := make(map[string][]string, len(groupIDs))
 	misses := make([]string, 0, len(groupIDs))
+	gens := make(map[string]uint64, len(groupIDs))
 	for _, gid := range groupIDs {
 		s := &c.shards[groupShardOf(appID, gid)]
 		s.mu.Lock()
-		el, ok := s.items[groupCacheKey{appID, gid}]
+		key := groupCacheKey{appID, gid}
+		el, ok := s.items[key]
 		if ok {
 			if time.Now().After(el.Value.(*groupCacheEntry).expireAt) {
 				s.removeLocked(el)
 				misses = append(misses, gid)
+				gens[gid] = s.gen[key]
 			} else {
 				s.lru.MoveToFront(el)
 				if e := el.Value.(*groupCacheEntry); e.members != nil {
@@ -148,6 +156,7 @@ func (c *GroupMemberCache) GetMultiGroupMembers(ctx context.Context, appID strin
 			}
 		} else {
 			misses = append(misses, gid)
+			gens[gid] = s.gen[key]
 		}
 		s.mu.Unlock()
 	}
@@ -164,14 +173,14 @@ func (c *GroupMemberCache) GetMultiGroupMembers(ctx context.Context, appID strin
 	for _, gid := range misses {
 		members, ok := fresh[gid]
 		if !ok {
-			c.fill(appID, gid, nil) // 负缓存：确认无实例，挡住解散后群组的重复回源
+			c.fill(appID, gid, nil, gens[gid]) // 负缓存：确认无实例，挡住解散后群组的重复回源
 			continue
 		}
 		if len(members) > c.maxMembers {
 			result[gid] = members // 大群超预算不入缓存，原样透传
 			continue
 		}
-		c.fill(appID, gid, members)
+		c.fill(appID, gid, members, gens[gid])
 		result[gid] = members
 	}
 	return result, nil
@@ -237,12 +246,21 @@ func (c *GroupMemberCache) invalidateLocal(appID, gid string) {
 }
 
 // fill 回填一条聚合拓扑到所属分片（已存在的条目原地刷新并移到队首，配额超限从队尾逐出）
-func (c *GroupMemberCache) fill(appID, gid string, members []string) {
+//
+// gen 为回源前记录的失效世代：回源期间发生拓扑写（evict 递增世代）说明本次
+// 回源读到的是旧快照，放弃回填——否则旧拓扑驻留至 TTL 窗口，新入群成员
+// 最长 TTL 期间漏收必达消息且无离线转存（不在投递列表即彻底丢失）
+func (c *GroupMemberCache) fill(appID, gid string, members []string, gen uint64) {
 	s := &c.shards[groupShardOf(appID, gid)]
 	quota := c.maxEntries / groupCacheShards
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := groupCacheKey{appID, gid}
+	// 世代双检：世代已变说明回源期间有拓扑写（本地逐出可能因条目尚不存在而落空），
+	// 放弃回填，下次读重新回源拿新拓扑
+	if s.gen[key] != gen {
+		return
+	}
 	// 负缓存（确认无实例）独立短 TTL：压缩解散后误投窗口，同时控制无效群组的重复回源频率
 	entryTTL := mathx.IF(members == nil, c.negativeTTL, c.ttl)
 	if el, ok := s.items[key]; ok {
@@ -264,9 +282,13 @@ func (c *GroupMemberCache) evict(appID, gid string) {
 	s := &c.shards[groupShardOf(appID, gid)]
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if el, ok := s.items[groupCacheKey{appID, gid}]; ok {
+	key := groupCacheKey{appID, gid}
+	if el, ok := s.items[key]; ok {
 		s.removeLocked(el)
 	}
+	// 世代递增：条目不存在（miss 回源窗口内的逐出落空）同样计数，
+	// 让并发回源-回填在 fill 前发现世代已变而放弃旧快照
+	s.gen[key]++
 }
 
 // removeLocked 摘除 LRU 节点并同步清理索引（须持所属分片锁调用）

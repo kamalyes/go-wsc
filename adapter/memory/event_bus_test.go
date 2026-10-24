@@ -13,6 +13,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -109,6 +110,57 @@ func TestEventBus_SubscriberCount(t *testing.T) {
 	assert.Equal(t, 2, bus.SubscriberCount(spi.TopicDeliver))
 	assert.Equal(t, 1, bus.SubscriberCount(spi.TopicBroadcast))
 	assert.Equal(t, 0, bus.SubscriberCount(spi.TopicBroadcast+"-none"))
+}
+
+func TestEventBus_HandlerPanicIsolated(t *testing.T) {
+	// 毒 handler panic 按 NACK 语义处理：不打崩分发 goroutine，
+	// 也不阻断同信封 fanout 的健康订阅者（用例能跑完本身就是"进程未崩"的断言）
+	bus := NewEventBus()
+	defer func() { _ = bus.Close() }()
+
+	require.NoError(t, bus.Subscribe(context.Background(), spi.TopicBroadcast, func(_ context.Context, _ *spi.DeliverEnvelope) error {
+		panic("poison handler")
+	}))
+	healthy := make(chan struct{}, 2)
+	require.NoError(t, bus.Subscribe(context.Background(), spi.TopicBroadcast, func(_ context.Context, _ *spi.DeliverEnvelope) error {
+		healthy <- struct{}{}
+		return nil
+	}))
+
+	for i := 0; i < 2; i++ {
+		require.NoError(t, bus.Publish(context.Background(), &spi.DeliverEnvelope{
+			Intent:    spi.IntentBroadcast,
+			Publisher: "p",
+			Message:   &models.HubMessage{MessageID: fmt.Sprintf("m%d", i)},
+		}))
+	}
+
+	assert.True(t, waitCount(healthy, 2, 2*time.Second),
+		"毒 handler panic 后健康订阅者仍应收到全部信封投递")
+}
+
+func TestEventBus_HandlerPanicQueueDropsAfterCap(t *testing.T) {
+	// queue 语义：毒 handler panic 转错误进入重投链路，maxRedeliver+1 次尝试后静默丢弃
+	bus := NewEventBus()
+	defer func() { _ = bus.Close() }()
+
+	attempts := make(chan struct{}, maxRedeliver+2)
+	require.NoError(t, bus.Subscribe(context.Background(), spi.TopicDeliver, func(_ context.Context, _ *spi.DeliverEnvelope) error {
+		attempts <- struct{}{}
+		panic("poison handler")
+	}))
+
+	require.NoError(t, bus.Publish(context.Background(), &spi.DeliverEnvelope{
+		Intent:    spi.IntentDeliver,
+		Publisher: "p",
+		Message:   &models.HubMessage{MessageID: "poison", Receiver: "u1"},
+	}))
+
+	assert.True(t, waitCount(attempts, maxRedeliver+1, 2*time.Second),
+		"毒 handler 应重投至上限")
+	time.Sleep(100 * time.Millisecond)
+	assert.Equal(t, maxRedeliver+1, len(drainCount(attempts)),
+		"超限后不再重投（panic 与返回 error 的毒 handler 同语义）")
 }
 
 // waitCount / drainCount 测试辅助

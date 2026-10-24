@@ -416,6 +416,12 @@ func (h *Hub) dispatchViaGRPC(ctx context.Context, msg *models.HubMessage, opts 
 		go func(i int, addr string) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			// panic 防护：单节点投递 panic 不打崩 Hub；outcomes[i] 保持零值，
+			// 汇总 switch 走 default → PubSub 兜底，语义与节点投递异常一致
+			defer syncx.RecoverWithHandler(func(r interface{}) {
+				h.logger.ErrorContextKV(grpcCtx, "gRPC 跨节点投递 worker panic",
+					"target_addr", addr, "panic", r)
+			})
 			outcomes[i] = h.dispatchNode(grpcCtx, addr, msgData, opts)
 		}(i, addr)
 	}
@@ -851,6 +857,12 @@ func (h *Hub) grpcBroadcastGroups(ctx context.Context, addr string, opts cluster
 		go func(groupID string) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			// panic 防护：单群组广播 panic 不打崩 Hub；success 不自增，
+			// 全失败时调用方走 PubSub 兜底补齐
+			defer syncx.RecoverWithHandler(func(r interface{}) {
+				h.logger.ErrorContextKV(ctx, "gRPC 群组广播 worker panic",
+					"target_addr", addr, "group_id", groupID, "panic", r)
+			})
 			if _, err := h.grpcClientPool.BroadcastGroup(routing.NewRoute().WithAppID(opts.AppID).WithNamespace(opts.Namespace).WithGroup(groupID).Inject(ctx), addr, msgData, opts.ExcludeSender, opts.SenderID); err == nil {
 				atomic.AddInt64(&success, 1)
 			} else {

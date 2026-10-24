@@ -28,6 +28,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -477,8 +478,20 @@ func (m *Manager) deliverGlobally(ctx context.Context, msg *models.HubMessage) *
 	// 队列满分道：express 语义丢弃 / 可靠档同步直发兜底（统一见 submitClusterDispatch）
 	m.submitClusterDispatch(ctx, msg, opts)
 
-	// 本地广播（直接异步执行，不经过 EventLoop channel 串行化；编码由 handleDirectMessage 兜底）
-	go m.handleBroadcast(msg, nil)
+	// 本地广播（直接异步执行，不经过 EventLoop channel 串行化；编码由 handleBroadcast 内 Marshal 兜底）
+	// panic 防护：与全库常驻 goroutine 同标准（EventLoop/生命周期循环均设防），
+	// 裸 go 的 panic 会打崩承载百万连接的整个节点
+	syncx.Go(ctx).
+		OnPanic(func(r any) {
+			m.host.GetLogger().ErrorContextKV(ctx, "全局广播本地投递 panic",
+				"panic", r,
+				"stack", string(debug.Stack()),
+				"message_id", msg.MessageID,
+			)
+		}).
+		Exec(func() {
+			m.handleBroadcast(msg, nil)
+		})
 
 	// 全局广播为异步，LocalDelivered 不计入（与历史 Broadcast 无返回值语义一致）
 	return result
@@ -856,8 +869,15 @@ func (m *Manager) broadcastFrameToUserIDsNow(ctx context.Context, userIDs []stri
 				end = len(userIDs)
 			}
 			wg.Add(1)
+			// panic 防护：分片 worker panic 只丢本分片投递并留痕，不波及其他分片与节点
 			go func(ids []string) {
 				defer wg.Done()
+				defer syncx.RecoverWithHandler(func(r interface{}) {
+					m.host.GetLogger().ErrorContextKV(ctx, "群组广播分片扇出 panic",
+						"panic", r,
+						"message_id", msg.MessageID,
+					)
+				})
 				fanout(ids)
 			}(userIDs[i:end])
 		}

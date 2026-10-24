@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/spi"
 	"github.com/redis/go-redis/v9"
 )
@@ -225,19 +226,35 @@ func (r *NodeRegistry) refreshLoop() {
 		case <-r.stopCh:
 			return
 		case <-ticker.C:
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			// 重新注册本节点（重写 grpc 地址 + 心跳 + TTL，key 被删除后可自动恢复）
-			// 失败必须记日志：Redis 持续故障时本节点会静默从发现表消失，
-			// 其他节点 gRPC 路由全部扑空（降级 PubSub），无日志无法定位根因
-			if err := r.registerNode(ctx); err != nil && r.logger != nil {
-				r.logger.WarnKV("刷新节点注册失败", "node_id", r.localNodeID, "error", err)
-			}
-			// 刷新全量节点列表
-			if err := r.refreshNodes(ctx); err != nil && r.logger != nil {
-				r.logger.WarnKV("刷新节点列表失败", "node_id", r.localNodeID, "error", err)
-			}
-			cancel()
+			r.refreshOnce()
 		}
+	}
+}
+
+// refreshOnce 执行一轮刷新（注册本节点 + 拉取全量节点列表）
+//
+// panic 防护（单轮隔离）：refreshLoop 为常驻 goroutine，refreshNodes 会触发
+// 业务接线的 onNodeEvicted 回调，单轮裸 panic 会打崩整个节点且杀死刷新循环；
+// 此处 recover 后下一轮 tick 自愈重试，节点注册/发现不中断
+func (r *NodeRegistry) refreshOnce() {
+	defer syncx.RecoverWithHandler(func(p interface{}) {
+		if r.logger != nil {
+			r.logger.ErrorKV("节点注册刷新 panic，本轮跳过，下轮重试",
+				"node_id", r.localNodeID, "panic", p)
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// 重新注册本节点（重写 grpc 地址 + 心跳 + TTL，key 被删除后可自动恢复）
+	// 失败必须记日志：Redis 持续故障时本节点会静默从发现表消失，
+	// 其他节点 gRPC 路由全部扑空（降级 PubSub），无日志无法定位根因
+	if err := r.registerNode(ctx); err != nil && r.logger != nil {
+		r.logger.WarnKV("刷新节点注册失败", "node_id", r.localNodeID, "error", err)
+	}
+	// 刷新全量节点列表
+	if err := r.refreshNodes(ctx); err != nil && r.logger != nil {
+		r.logger.WarnKV("刷新节点列表失败", "node_id", r.localNodeID, "error", err)
 	}
 }
 

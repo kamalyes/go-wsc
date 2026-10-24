@@ -264,6 +264,16 @@ func (h *Hub) handleUnregister(client *models.Client) {
 		ctx = h.ctx
 	}
 
+	// panic 防护：注销链路跑群组存储适配器等注入实现，任一环节 panic 不打崩
+	// 节点（Phase 1 已移除注册表条目，主要清理动作已由后续 defer/时间轮兜底）
+	defer syncx.RecoverWithHandler(func(r interface{}) {
+		h.logger.ErrorContextKV(ctx, "handleUnregister panic，注销清理中止",
+			"client_id", client.ID,
+			"user_id", client.UserID,
+			"panic", r,
+		)
+	})
+
 	// Phase 1: 临界区 - 从注册表移除（shardedRegistry 分片锁）
 	removed := h.shardedRegistry.RemoveClient(client.ID, client.UserID)
 	if removed == nil {

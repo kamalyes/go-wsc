@@ -20,6 +20,7 @@ import (
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
+	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-toolbox/pkg/zipx"
 	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/routing"
@@ -134,11 +135,23 @@ func (h *HybridOfflineMessageHandler) StoreOfflineMessage(ctx context.Context, u
 
 	go func() {
 		defer wg.Done()
+		// panic 防护：存储链 panic 不打崩节点，且必须置错误值——
+		// 否则 redisErr 保持 nil 会让下方"双路皆败"判定静默吞掉存储失败
+		defer syncx.RecoverWithHandler(func(r interface{}) {
+			h.logger.ErrorContextKV(ctx, "离线消息 Redis 存储 goroutine panic",
+				"user_id", userID, "message_id", msg.MessageID, "panic", r)
+			redisErr = errorx.WrapError("redis offline storage panicked", fmt.Errorf("%v", r))
+		})
 		redisErr = h.storeToRedis(ctx, userID, msg)
 	}()
 
 	go func() {
 		defer wg.Done()
+		defer syncx.RecoverWithHandler(func(r interface{}) {
+			h.logger.ErrorContextKV(ctx, "离线消息 DB 存储 goroutine panic",
+				"user_id", userID, "message_id", msg.MessageID, "panic", r)
+			dbErr = errorx.WrapError("db offline storage panicked", fmt.Errorf("%v", r))
+		})
 		dbErr = h.storeToDatabase(ctx, msg)
 	}()
 

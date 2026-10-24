@@ -367,6 +367,12 @@ func (h *Hub) processHeartbeatRedisUpdates() {
 			go func() {
 				defer wg.Done()
 				defer func() { <-sem }()
+				// panic 防护：续期 worker 跑注入的 repo 实现，panic 不打崩节点，
+				// 本块续期跳过由下一轮 tick 重试（TTL 冗余充足）
+				defer syncx.RecoverWithHandler(func(r interface{}) {
+					h.logger.ErrorKV("心跳续期分块 worker panic",
+						"count", len(chunk), "panic", r)
+				})
 
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
@@ -730,6 +736,11 @@ func (h *Hub) batchCleanupOnShutdown(clients []*models.Client) {
 			go func() {
 				defer wg.Done()
 				defer func() { <-sem }()
+				// panic 防护：停机窗口 panic 不打崩节点，本块下线跳过由 TTL 过期兜底
+				defer syncx.RecoverWithHandler(func(r interface{}) {
+					h.logger.ErrorKV("shutdown: 批量下线 worker panic",
+						"chunk_size", len(chunk), "panic", r)
+				})
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
 				if err := h.onlineStatusRepo.BatchSetClientsOfflineWithInfo(ctx, chunk); err != nil {
@@ -769,6 +780,11 @@ func (h *Hub) batchCleanupOnShutdown(clients []*models.Client) {
 				go func() {
 					defer wg.Done()
 					defer func() { <-sem }()
+					// panic 防护：终评 worker 跑注入的 GORM 实现（业务可注册 GORM callbacks），panic 不打崩节点
+					defer syncx.RecoverWithHandler(func(r interface{}) {
+						h.logger.ErrorKV("shutdown: 质量终评 worker panic",
+							"chunk_size", len(chunk), "panic", r)
+					})
 					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 					defer cancel()
 					if err := h.connectionQualityStore.BatchFinalizeOnDisconnect(ctx, chunk); err != nil {

@@ -25,8 +25,10 @@ package memory
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 
+	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/spi"
 )
 
@@ -191,13 +193,27 @@ func (b *EventBus) dispatch(ctx context.Context, hub *topicHub, env *spi.Deliver
 // deliverWithRetry NACK 重投（maxRedeliver 上限，超限丢弃）
 func (b *EventBus) deliverWithRetry(ctx context.Context, sub *subscriber, env *spi.DeliverEnvelope) {
 	for attempt := 0; attempt <= maxRedeliver; attempt++ {
-		if err := sub.handler(ctx, env); err == nil {
+		if err := sub.invoke(ctx, env); err == nil {
 			return
 		}
 		if ctx.Err() != nil {
 			return
 		}
 	}
+}
+
+// invoke panic 安全地调用订阅 handler
+//
+// handler 为业务注入实现，panic 转为 error 返回——与返回 error 的 handler 同语义，
+// 进入既有 NACK 重投-上限丢弃链路：毒 handler 不打崩分发 goroutine，
+// 也不阻断同信封其他订阅者（fanout 逐订阅者独立投递）
+func (s *subscriber) invoke(ctx context.Context, env *spi.DeliverEnvelope) (err error) {
+	defer syncx.RecoverWithHandler(func(p interface{}) {
+		spi.NewDefaultLogger().ErrorContextKV(ctx, "事件总线分发 handler panic，按 NACK 处理",
+			"intent", env.Intent, "panic", p)
+		err = fmt.Errorf("handler panicked: %v", p)
+	})
+	return s.handler(ctx, env)
 }
 
 // topicHubOf 取或建 topic hub（双检：读路径无锁化由调用方 mu 保护，此处全走写锁）

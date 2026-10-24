@@ -79,6 +79,14 @@ func (m *Manager) setupPingHandler(client *models.Client) {
 func (m *Manager) handleClientWrite(client *models.Client) {
 	m.wg.Add(1)
 	defer m.wg.Done()
+	// panic 防护（泵级兜底）：写泵任一环节 panic 不打崩节点，关闭连接让读泵
+	// ReadMessage 立即报错退出，经其 defer Unregister 完成清理（与 handleRegister 同标准）
+	defer syncx.RecoverWithHandler(func(r interface{}) {
+		m.logWithClient(logger.ERROR, "客户端写入协程 panic，关闭连接退出", client, "panic", r)
+		if client.Conn != nil {
+			_ = client.Conn.Close()
+		}
+	})
 	defer func() {
 		// 每连接 4 条生命周期日志（读写协程启动/结束），千万连接下不可忽略——降为 DEBUG
 		m.logWithClient(logger.DEBUG, "客户端写入协程结束", client)
@@ -185,6 +193,14 @@ func (m *Manager) writeClientMessages(client *models.Client, data []byte) error 
 func (m *Manager) handleClientRead(client *models.Client) {
 	m.wg.Add(1)
 	defer m.wg.Done()
+	// panic 防护（泵级兜底）：读泵任一环节 panic 不打崩节点；defer 顺序保证
+	// Unregister/结束日志仍执行后（panic 展开按 LIFO），此处 recover 并关闭连接
+	defer syncx.RecoverWithHandler(func(r interface{}) {
+		m.logWithClient(logger.ERROR, "客户端读取协程 panic，关闭连接退出", client, "panic", r)
+		if client.Conn != nil {
+			_ = client.Conn.Close()
+		}
+	})
 	defer m.host.Unregister(client)
 	defer func() {
 		// 每连接 4 条生命周期日志（读写协程启动/结束），千万连接下不可忽略——降为 DEBUG

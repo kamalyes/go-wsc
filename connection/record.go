@@ -183,6 +183,11 @@ func (m *RecordManager) MarkDisconnectedBatch(clients []*models.Client) []*model
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
+			// panic 防护：终态 worker 跑注入的 GORM 实现（业务可注册 GORM callbacks），panic 不打崩节点
+			defer syncx.RecoverWithHandler(func(r interface{}) {
+				m.logger.ErrorContextKV(ctx, "shutdown: 断连终态 worker panic",
+					"chunk_size", len(chunk), "panic", r)
+			})
 			if err := m.store().BatchMarkDisconnected(ctx, chunk); err != nil {
 				m.logger.WarnContextKV(ctx, "shutdown: 批量标记连接断开失败",
 					"chunk_size", len(chunk),

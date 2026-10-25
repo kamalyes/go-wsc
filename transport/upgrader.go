@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-02-10 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-09-19 09:36:00
+ * @LastEditTime: 2026-10-25 09:21:07
  * @FilePath: \go-wsc\transport\upgrader.go
  * @Description: WebSocket 升级器 —— 升级配置 / 客户端属性提取 / 客户端构造 / 升级编排
  *
@@ -39,6 +39,17 @@ import (
 	"github.com/kamalyes/go-wsc/spi"
 )
 
+// DefaultMaxInboundBytes 服务端单帧入站上限默认值（1 MiB）
+//
+// gorilla 的上限判定是 readLimit > 0 才生效，未设即无上限——单个客户端声明超大
+// 载荷即可驱动服务端无界分配（内存 DoS，无需放大）。本默认值取 broker.MaxEnvelopeBytes
+// （256 KiB）的 4 倍：远高于典型 HubMessage 序列化体积（~2.5 KiB），同时挡住 GB 级帧。
+//
+// 注意不复用 cfg.MaxMessageSize：该字段与 MinRecTime/AutoReconnect/AckTimeout 同组，
+// 是客户端 SDK 专属配置（全仓仅 client/connection.go 消费），默认值 512 字节低于典型
+// 消息体积，服务端复用会导致正常消息被整体拒收。
+const DefaultMaxInboundBytes int64 = 1 << 20
+
 // ClientAttributes 客户端属性（升级前的请求元数据提取结果）
 type ClientAttributes struct {
 	ClientID  string          // 客户端ID
@@ -64,6 +75,8 @@ type Upgrader struct {
 	idGen       RequestIDGenerator          // 请求 ID 生成器（nil=健康检查消息 ID 留空）
 	hubCtx      context.Context             // 编排层生命周期 ctx（连接级 ctx 的父）
 	nodeID      string                      // 本节点标识（响应头/注册确认消息回显）
+
+	maxInboundBytes int64 // 服务端单帧入站上限（0=取 DefaultMaxInboundBytes；负值=显式不限，仅内网可信场景）
 
 	// hubCtx 漏配检测（漏配时连接 ctx 与 Hub 生命周期脱钩，首条连接 WARN 一次）
 	hubCtxInjected atomic.Bool
@@ -93,6 +106,29 @@ func NewUpgrader(cfg *wscconfig.WSC, registrar Registrar) *Upgrader {
 		),
 		hubCtx: context.Background(),
 	}
+}
+
+// WithMaxInboundBytes 设置服务端单帧入站上限
+//
+// 不注入时取 DefaultMaxInboundBytes（1 MiB）
+// 传负值表示显式放弃上限，仅限出口完全可信的内网场景——公网暴露下等价于开放内存 DoS
+func (u *Upgrader) WithMaxInboundBytes(n int64) *Upgrader {
+	u.maxInboundBytes = n
+	return u
+}
+
+// applyReadLimit 施加单帧入站上限（升级后、读泵接管前）
+//
+// 两个升级入口（正式连接与健康检查）统一走本方法，避免新增入口漏配。
+func (u *Upgrader) applyReadLimit(conn *websocket.Conn) {
+	if conn == nil || u.maxInboundBytes < 0 {
+		return
+	}
+	limit := u.maxInboundBytes
+	if limit == 0 {
+		limit = DefaultMaxInboundBytes
+	}
+	conn.SetReadLimit(limit)
 }
 
 // WithLogger 注入日志器
@@ -297,6 +333,9 @@ func parseGroupIDs(raw string) []string {
 // CreateClientFromRequest 从 HTTP 请求创建 WebSocket 客户端
 // 提取请求元数据并创建 Client 实例（链式构造，保证路由隔离/归一化与注册路径一致）
 func (u *Upgrader) CreateClientFromRequest(r *http.Request, conn *websocket.Conn, attrs *ClientAttributes) *models.Client {
+	// 单帧入站上限：须在读泵接管前施加，否则首帧即可无界分配
+	u.applyReadLimit(conn)
+
 	// 使用 metadata 提取所有请求元数据
 	requestMeta := metadata.ExtractRequestMetadata(r)
 	metaMap := requestMeta.ToMap()
@@ -499,6 +538,9 @@ func (u *Upgrader) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 	// 健康检查连接无读写泵接管：无论配置如何最终必须关闭，否则 hijack 后的
 	// FD 无人释放（客户端即便断开，本侧未 Close 仍持有句柄），长期运行耗尽句柄
 	defer conn.Close()
+
+	// 健康检查入口同样施加上限：该端点无需鉴权即可升级，不设限等于留一个免认证的内存 DoS 面
+	u.applyReadLimit(conn)
 
 	// 根据配置决定是否发送响应消息
 	if u.cfg.HealthCheck.SendResponseMessage {

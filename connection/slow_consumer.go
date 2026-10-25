@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-09-11 21:57:03
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-09-16 12:57:00
+ * @LastEditTime: 2026-10-25 09:52:33
  * @FilePath: \go-wsc\connection\slow_consumer.go
  * @Description: 慢消费者治理 —— 三级递进（记录 → 告警 → 驱逐），治理不丢消息
  *
@@ -161,6 +161,20 @@ func (s *SlowConsumerScanner) ScanOnce() {
 
 // evict 驱逐慢消费者（驱逐前保全：SendChan 残留消息按分级兜底）
 func (s *SlowConsumerScanner) evict(client *models.Client, state *slowConsumerState, ratio float64) {
+	// hook 缺失判定必须先于排空：契约为「nil 时只告警不驱逐」（见 SlowConsumerScanner.hook），
+	// 此时连接继续存活、写泵仍在消费 SendChan，排空只会凭空销毁在途消息，
+	// 且丢弃量不经 CompletePendingWrites 结算——pendingCounter 即 AdmissionGate.Backlog()，
+	// 虚高后 AIMD 单调抬升水位并永久卡在 L4 只读（overload/admission.go 对同类漂移已有警示）
+	if s.hook == nil {
+		s.logger.WarnContextKV(client.Context, "慢消费者持续积压：未注入驱逐回调，仅告警不驱逐",
+			"client_id", client.ID,
+			"user_id", client.UserID,
+			"backlog_ratio", ratio,
+			"consecutive", state.consecutive,
+		)
+		return
+	}
+
 	// 🛡️ 消息保全：排空 SendChan 残留消息（移交 ACK 超时链路兜底——sending 记录
 	// 5min 兜底扫描转离线，上线推送；残留为已序列化 []byte 无法还原分级，
 	// 故统一按 ACK 链路保全而非现场转离线）
@@ -175,6 +189,13 @@ func (s *SlowConsumerScanner) evict(client *models.Client, state *slowConsumerSt
 		}
 	}
 drained:
+	// 排空量结算回待写计数：TrySend 发布前预占 pendingWrites 与共享 pendingCounter，
+	// 仅 CompletePendingWrites / MarkClosed 结算。此处消息既未经写泵也未经关闭路径，
+	// 不显式结算即永久虚高（本函数后续驱逐虽会 MarkClosed，但结算须与实际排空量对齐）
+	if salvaged > 0 {
+		client.CompletePendingWrites(int64(salvaged))
+	}
+
 	s.logger.WarnContextKV(client.Context, "驱逐慢消费者：消息已由 ACK 链路兜底",
 		"client_id", client.ID,
 		"user_id", client.UserID,
@@ -183,9 +204,6 @@ drained:
 		"salvaged_to_ack_fallback", salvaged,
 	)
 
-	if s.hook == nil {
-		return
-	}
 	s.hook.OnSlowConsumerEvicted(client, state.consecutive, ratio)
 }
 

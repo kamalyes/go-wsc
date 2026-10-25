@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-10-01 22:58:03
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-10-01 23:06:19
+ * @LastEditTime: 2026-10-25 13:15:37
  * @FilePath: \go-wsc\connection\sharded_registry_test.go
  * @Description: 分片注册表 nsIdx 反向索引白盒单元测试（覆盖 connection/sharded_registry.go）
  *
@@ -19,6 +19,7 @@
 package connection
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -137,4 +138,60 @@ func TestNsIdx_ClearResetsIndex(t *testing.T) {
 
 	assert.Empty(t, r.GetLocalNamespaceUsers("", "ns-a"))
 	assert.Empty(t, r.GetLocalNamespaceUsers("", "ns-b"))
+}
+
+func traverseRegistry(b *testing.B, users int) *ShardedRegistry {
+	b.Helper()
+	r := NewShardedRegistry(false, false, RegistryCapacity{TotalClients: users})
+	for i := 0; i < users; i++ {
+		uid := fmt.Sprintf("u-%06d", i)
+		c := models.NewClient(fmt.Sprintf("c-%06d", i), uid, models.UserTypeCustomer)
+		r.AddClient(c)
+	}
+	return r
+}
+
+// BenchmarkTraverse_Serial 串行遍历基线
+func BenchmarkTraverse_Serial(b *testing.B) {
+	r := traverseRegistry(b, 50000)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		n := 0
+		r.ForEachClient(func(_ string, c *models.Client) bool {
+			if !c.IsClosed() {
+				n++
+			}
+			return true
+		})
+		if n == 0 {
+			b.Fatal("zero scanned")
+		}
+	}
+}
+
+// BenchmarkTraverse_Parallel 并行遍历（期望显著快于串行；若持平说明退化为串行）
+func BenchmarkTraverse_Parallel(b *testing.B) {
+	r := traverseRegistry(b, 50000)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		var n int64
+		r.ForEachClientParallel(0, func(_ string, c *models.Client) {
+			if !c.IsClosed() {
+				n++ // 故意非原子：只测遍历骨架开销，不引入计数争用
+			}
+		})
+	}
+}
+
+// BenchmarkTraverse_UserShardLen 确认 Len() 语义（用户数，决定是否过并行阈值）
+func BenchmarkTraverse_UserShardLen(b *testing.B) {
+	r := traverseRegistry(b, 50000)
+	b.Logf("userShards.Len()=%d parallelThreshold=%d 并行分支=%v",
+		r.userShards.Len(), parallelThreshold, r.userShards.Len() > parallelThreshold)
+	b.ResetTimer()
+	for b.Loop() {
+		_ = r.userShards.Len()
+	}
 }

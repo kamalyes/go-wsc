@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-10-10 21:36:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-10-10 21:36:00
+ * @LastEditTime: 2026-10-25 13:15:37
  * @FilePath: \go-wsc\messaging\broadcast_bench_test.go
  * @Description: 消息域扇出热路径基准（BroadcastFrameToUserIDs 分片并行扇出）
  *
@@ -114,5 +114,90 @@ func BenchmarkManager_DeliverToGroupReliable(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		m.deliverToGroupReliable(ctx, msg, false)
+	}
+}
+
+// benchScanRegistry 注册 n 个用户（每用户 1 条 WS 连接）
+func benchScanRegistry(b *testing.B, n int) *Manager {
+	b.Helper()
+	m, host := newTestManager()
+	host.logger = logger.NewLogger().WithLevel(logger.ERROR).WithShowCaller(false)
+	registry := host.GetShardedRegistry()
+	for i := 0; i < n; i++ {
+		registry.AddClient(makeTestClient(fmt.Sprintf("c-%06d", i), fmt.Sprintf("u-%06d", i)))
+	}
+	return m
+}
+
+func benchScanCtx() context.Context {
+	return routing.NewRoute().
+		WithAppID("").
+		WithNamespace(constants.DefaultNamespace).
+		WithGroupIDs(nil).
+		Inject(context.Background())
+}
+
+// BenchmarkBroadcastToFiltered_Scan 过滤广播全量扫描（broadcastToFilteredNow）
+//
+// condition 恒真，隔离出「扫描 + 逐连接共享原子计数」本身的成本
+func BenchmarkBroadcastToFiltered_Scan(b *testing.B) {
+	for _, n := range []int{10000, 50000} {
+		b.Run(fmt.Sprintf("conns=%d", n), func(b *testing.B) {
+			m := benchScanRegistry(b, n)
+			msg := makeGroupMessage("sender").WithGuarantee(models.GuaranteeEphemeral)
+			ctx := benchScanCtx()
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				m.BroadcastToFiltered(ctx, func(_ *models.Client) bool { return true }, msg)
+			}
+		})
+	}
+}
+
+// BenchmarkBroadcastToFiltered_ScanSmallSubset 过滤广播命中极少目标
+//
+// 暴露「无反向索引」的代价：命中 50 个目标仍需扫描全部连接，
+// 且每个被扫过的连接都付一次共享原子加
+func BenchmarkBroadcastToFiltered_ScanSmallSubset(b *testing.B) {
+	const n = 10000
+	m := benchScanRegistry(b, n)
+	msg := makeGroupMessage("sender").WithGuarantee(models.GuaranteeEphemeral)
+	ctx := benchScanCtx()
+
+	// 仅前 50 个用户命中
+	hit := make(map[string]struct{}, 50)
+	for i := 0; i < 50; i++ {
+		hit[fmt.Sprintf("u-%06d", i)] = struct{}{}
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		m.BroadcastToFiltered(ctx, func(c *models.Client) bool {
+			_, ok := hit[c.UserID]
+			return ok
+		}, msg)
+	}
+}
+
+// BenchmarkBroadcastMessage_Scan 全量广播扫描（doBroadcastMessage）
+//
+// 该路径逐连接三个共享计数器：scanned / successCount / failCount
+func BenchmarkBroadcastMessage_Scan(b *testing.B) {
+	for _, n := range []int{10000, 50000} {
+		b.Run(fmt.Sprintf("conns=%d", n), func(b *testing.B) {
+			m := benchScanRegistry(b, n)
+			msg := makeGroupMessage("sender").WithGuarantee(models.GuaranteeEphemeral)
+			msg.GroupIDs = nil
+			ctx := benchScanCtx()
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				m.HandleBroadcastMessage(ctx, msg)
+			}
+		})
 	}
 }

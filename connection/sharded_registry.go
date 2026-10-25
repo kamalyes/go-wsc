@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-12-28 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-12-28 15:02:15
+ * @LastEditTime: 2026-10-25 13:15:37
  * @FilePath: \go-wsc\connection\sharded_registry.go
  * @Description: 分片注册表（基于 go-toolbox 的 syncx.ShardedMap）
  *
@@ -911,6 +911,19 @@ func (r *ShardedRegistry) ForEachClientFiltered(msgAppID, msgNamespace string, m
 // （轻量回调下并行可能慢于串行，阈值保证小规模场景不退化）
 const parallelThreshold = 256
 
+// parallelEligible 判定是否应走并行遍历分支
+//
+// ⚠️ 必须用 r.userCount 而非 userShards.Len()：AddClient 走 WithShardLock 直接
+// 改写分片内层 map（见 AddClient 第 1 步），从不调用 ShardedMap.Store，
+// 故 ShardedMap 自身维护的 count 恒为 0，Len() 永远返回 0。
+// 此前三处 ForEach*Parallel 都以 Len() 作阈值判断，于是 0 <= 256 恒成立——
+// **所有「并行」遍历在任意连接规模下都退化为串行**，广播扇出永远单线程，
+// 加核无效（实测 5 万连接：串行 6.1ms，而退化后的"并行"路径 8.6ms，反而更慢）。
+// r.userCount 由 AddClient(+1) / RemoveClient(-1) / Clear(置 0) 正确维护，是真实用户数。
+func (r *ShardedRegistry) parallelEligible() bool {
+	return r.userCount.Load() > parallelThreshold
+}
+
 // ForEachClientParallel 并行遍历所有客户端（百万级连接优化）
 // 基于 userShards.RangeParallel 直接在 shard 级别并行遍历，零额外分配
 // fn 在 shard 读锁内执行（并发安全），回调应为非阻塞操作
@@ -919,7 +932,7 @@ func (r *ShardedRegistry) ForEachClientParallel(workerNum int, fn func(clientID 
 	if fn == nil {
 		return
 	}
-	if r.userShards.Len() <= parallelThreshold {
+	if !r.parallelEligible() {
 		r.ForEachClient(func(clientID string, client *models.Client) bool {
 			fn(clientID, client)
 			return true
@@ -940,7 +953,12 @@ func (r *ShardedRegistry) ForEachSSEClientParallel(workerNum int, fn func(userID
 	if fn == nil {
 		return
 	}
-	if r.sseShards.Len() <= parallelThreshold {
+	// SSE 分支用 sseCount（SSE 连接数），而非 userCount：
+	// sseShards 与 userShards 是独立分片组，SSE 连接数通常远小于总用户数，
+	// 用 userCount 判断会在"用户多、SSE 少"时为零星 SSE 连接拉起无谓的 goroutine。
+	// sseCount 由 AddClient/RemoveClient 的 SSE 分支维护（sseShards 同样经
+	// WithShardLock 直改内层 map，其 ShardedMap.Len() 亦恒为 0，不可用）。
+	if r.sseCount.Load() <= parallelThreshold {
 		r.ForEachSSEClient(func(userID, clientID string, client *models.Client) bool {
 			fn(userID, clientID, client)
 			return true
@@ -962,7 +980,7 @@ func (r *ShardedRegistry) ForEachClientFilteredParallel(workerNum int, msgAppID,
 	if fn == nil {
 		return
 	}
-	if r.userShards.Len() <= parallelThreshold {
+	if !r.parallelEligible() {
 		r.ForEachClientFiltered(msgAppID, msgNamespace, msgGroupIDs, func(clientID string, client *models.Client) bool {
 			fn(clientID, client)
 			return true
@@ -1255,8 +1273,11 @@ func (r *ShardedRegistry) Clear() {
 	}
 
 	// 清空反向索引
-	// 性能：用新实例替换比逐个 Delete 更快（旧 map 由 GC 回收）
-	r.clientIDToUserID = sync.Map{}
+	// 必须用 Clear() 而非 `= sync.Map{}` 整体赋值：sync.Map 内含 Mutex 与内部指针，
+	// 并发 Load（见 GetClient）进行中被整体覆写是数据竞争，可破坏内部状态。
+	// 该写法 go vet 的 copylocks 检查不到——它是复合字面量赋值，不是含锁结构体拷贝。
+	// sync.Map.Clear()（Go 1.23+）原地清空，同为 O(n) 但无竞争、无重新分配。
+	r.clientIDToUserID.Clear()
 
 	r.clientCount.Store(0)
 	r.userCount.Store(0)

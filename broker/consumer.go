@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-10-11 22:09:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-10-11 22:09:00
+ * @LastEditTime: 2026-10-25 17:02:51
  * @FilePath: \go-wsc\broker\consumer.go
  * @Description: 消息总线消费循环 - 订阅→校验→去重→路由恢复→Deliver→ack
  *
@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/kamalyes/go-wsc/models"
+	"github.com/kamalyes/go-wsc/routing"
 	"github.com/kamalyes/go-wsc/spi"
 )
 
@@ -57,10 +58,17 @@ func (c *Consumer) HandleDeliver() spi.EventHandler {
 
 // HandleBroadcast 构造广播语义（fanout）消费回调
 //
-// 两种 topic 的入口治理相同（差异在适配器的分发语义）：
-// deliver 一条消息单节点消费，broadcast 每节点各消费一份
+// 入口治理（校验/去重/路由恢复）与 deliver 完全相同，差异只在扇出责任归属：
+// deliver 一条消息单节点消费，broadcast 每节点各消费一份。
+//
+// 因此必须给 ctx 打上 fanout 来源标记：扇出已由总线完成，下游投递只做本地投递，
+// 不得再按「源节点」身份跨节点派发——否则 N 节点间产生 N×(N−1) 次跨节点调用、
+// 每连接收到 N 份重复（本地去重窗按节点维护，拦不住跨节点重复）。
+// 消费点见 messaging.Manager.submitClusterDispatch。
 func (c *Consumer) HandleBroadcast() spi.EventHandler {
-	return c.handle
+	return func(ctx context.Context, env *spi.DeliverEnvelope) error {
+		return c.handle(routing.WithFanoutSourced(ctx), env)
+	}
 }
 
 // handle 消费主路径：校验 → 去重 → 路由恢复 → Deliver → 结果判定

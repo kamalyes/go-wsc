@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-12-28 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2025-12-28 00:00:00
+ * @LastEditTime: 2026-10-25 17:02:51
  * @FilePath: \go-wsc\messaging\broadcast.go
  * @Description: Hub 统一投递入口与广播功能
  *
@@ -572,6 +572,15 @@ func (m *Manager) crossNodeGroupBroadcast(ctx context.Context, msg *models.HubMe
 //   - reliable 档：同步直发兜底（调用方承担一次 routeToCluster RTT 作天然反压）——业务 notice
 //     不因队列满丢失；降级次数进 stats（cluster_dispatch_syncs，持续增长 = 跨节点消费能力不足）
 func (m *Manager) submitClusterDispatch(ctx context.Context, msg *models.HubMessage, opts cluster.ClusterDispatchOptions) bool {
+	// 总线 fanout 来源：扇出已由总线完成（每节点各消费一份），此处再跨节点派发即重复放大——
+	// N 节点各以「源节点」身份派发给其余 N−1 个节点，产生 N×(N−1) 次跨节点调用，
+	// 每个连接收到 N 份（去重窗按节点维护，拦不住跨节点重复）。
+	// 本守卫置于唯一派发收口，覆盖 deliverGlobally / deliverToNamespace / crossNodeGroupBroadcast
+	// 三个调用点及后续新增调用点。返回 true 表示「无需派发」而非失败，调用方不进降级分支。
+	if routing.IsFanoutSourced(ctx) {
+		return true
+	}
+
 	if m.host.SubmitClusterDispatch(msg, opts) {
 		return true
 	}

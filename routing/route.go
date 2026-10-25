@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-09-22 16:06:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-09-22 16:06:00
+ * @LastEditTime: 2026-10-25 17:02:51
  * @FilePath: \go-wsc\routing\route.go
  * @Description: 路由信封构建与归一化
  *
@@ -35,6 +35,28 @@ import (
 
 // routingCtxKey 路由元数据的 context key 类型（不可导出，避免外部伪造）
 type routingCtxKey struct{}
+
+// fanoutSourcedCtxKey 「本消息来自总线 fanout 通道」标记的 context key 类型
+type fanoutSourcedCtxKey struct{}
+
+// WithFanoutSourced 标记消息来自事件总线的 fanout 通道（每节点各消费一份）
+//
+// 用途是消除跨节点重复派发：fanout 语义下每个节点都会独立消费到同一条消息，
+// 若各节点再按「源节点」身份向其余节点派发，则 N 节点产生 N×(N−1) 次跨节点调用、
+// 每个连接收到 N 份（本地去重窗是按节点的，拦不住跨节点重复）。
+// 消费侧打上本标记后，submitClusterDispatch 会跳过跨节点派发，只做本地投递。
+func WithFanoutSourced(ctx context.Context) context.Context {
+	return context.WithValue(ctx, fanoutSourcedCtxKey{}, true)
+}
+
+// IsFanoutSourced 判定消息是否来自总线 fanout 通道（扇出已由总线完成，无需再跨节点派发）
+func IsFanoutSourced(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	sourced, _ := ctx.Value(fanoutSourcedCtxKey{}).(bool)
+	return sourced
+}
 
 // RoutingContext 路由元数据（appID + namespace + groupIDs）
 // 打包存入 context，一次类型断言获取全部，避免多次 ctx.Value + interface 断言

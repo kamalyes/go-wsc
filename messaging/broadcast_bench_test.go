@@ -1,8 +1,8 @@
-﻿/*
+/*
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-10-10 21:36:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-10-25 13:15:37
+ * @LastEditTime: 2026-10-26 20:31:08
  * @FilePath: \go-wsc\messaging\broadcast_bench_test.go
  * @Description: 消息域扇出热路径基准（BroadcastFrameToUserIDs 分片并行扇出）
  *

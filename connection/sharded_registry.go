@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-12-28 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-10-25 13:15:37
+ * @LastEditTime: 2026-10-26 20:31:08
  * @FilePath: \go-wsc\connection\sharded_registry.go
  * @Description: 分片注册表（基于 go-toolbox 的 syncx.ShardedMap）
  *
@@ -129,6 +129,23 @@ type ShardedRegistry struct {
 	// 索引将 O(全部连接) 的全量扫描收敛为 O(该 ns 本地在线用户) 的定点扇出；
 	// namespace 仅在注册时设置、生命周期内不可变，索引无需迁移维护
 	nsIdx *syncx.ShardedMap[string, map[string]int]
+
+	// attrIdx 属性维度 → 本地在线用户反向索引：key = appID:dim:value，value = userID → 引用计数
+	// 覆盖 UserType / Role / ClientType / Department 四个维度（dim 为 attrDim* 判别前缀，
+	// 单表承载四维避免 4 组 64 shard 的内存开销；判别前缀互斥，不会串键）
+	//
+	// 目的：BroadcastByUserType / BroadcastToRole / BroadcastToClientType /
+	// BroadcastToDepartment 原先一律经 BroadcastToFiltered 全量扫描——命中 50 个管理员
+	// 与命中全部连接同价（实测 1 万连接下 50 命中 515µs vs 全命中 523µs，成本全在扫描）。
+	// 索引把 O(全部连接) 收敛为 O(该维度本地在线用户)，与 nsIdx 同构。
+	//
+	// ⚠️ 维护边界：仅在 AddClient 建、RemoveClient 拆，别无他处。
+	// 这四个字段按 models.Client.mu 的不变式为**构造期一次性写入、注册后只读**——
+	// 扇出热路径对它们是无锁直读，Go 的 string 是 16 字节头（指针 + 长度），
+	// 注册后并发写可被读侧观测到「新指针 + 旧长度」而越界读，整节点随进程崩溃。
+	// 故**不得**为本索引新增运行时重建/迁移 API：那等于放开注册后写入、重开该崩溃面。
+	// 确需变更这些维度时的正确做法是断开重连（重走构造期）。
+	attrIdx *syncx.ShardedMap[string, map[string]int]
 }
 
 // NewShardedRegistry 创建分片注册表
@@ -144,6 +161,7 @@ func NewShardedRegistry(agentEnabled, observerEnabled bool, capacity RegistryCap
 		clientIDToUserID: sync.Map{},
 		groupMemberIdx:   syncx.NewShardedMap[string, map[string]int](defaultShardCount),
 		nsIdx:            syncx.NewShardedMap[string, map[string]int](defaultShardCount),
+		attrIdx:          syncx.NewShardedMap[string, map[string]int](defaultShardCount),
 	}
 	if agentEnabled {
 		r.agentShards = newClientShardedMap(capacity.AgentClients)
@@ -223,6 +241,8 @@ func (r *ShardedRegistry) AddClient(client *models.Client) {
 		r.addToGroupMemberIdx(client)
 		// 命名空间本地反向索引：与群组索引同构维护（新增写入，覆盖场景引用计数不变）
 		r.addToNamespaceIdx(client)
+		// 属性本地反向索引（UserType/Role/ClientType/Department）：同构维护
+		r.addToAttrIdx(client)
 	}
 }
 
@@ -271,6 +291,8 @@ func (r *ShardedRegistry) RemoveClient(clientID, userID string) *models.Client {
 	r.removeFromGroupMemberIdx(removed)
 	// 命名空间本地反向索引：按引用计数递减，归零删除
 	r.removeFromNamespaceIdx(removed)
+	// 属性本地反向索引：按引用计数递减，归零删除（与 addToAttrIdx 严格对称）
+	r.removeFromAttrIdx(removed)
 
 	return removed
 }
@@ -537,6 +559,131 @@ func (r *ShardedRegistry) removeFromNamespaceIdx(client *models.Client) {
 			delete(data, key)
 		}
 	})
+}
+
+// 属性维度判别前缀（attrIdx 单表承载四维，前缀互斥保证不串键）
+const (
+	attrDimUserType   = "ut"
+	attrDimRole       = "ro"
+	attrDimClientType = "ct"
+	attrDimDepartment = "dp"
+)
+
+// attrIdxKey 拼接 appID:dim:value 的属性反向索引键
+func attrIdxKey(appID, dim, value string) string {
+	return appID + ":" + dim + ":" + value
+}
+
+// clientAttrs 取客户端四个属性维度的 (dim, value) 对
+//
+// 空值维度不入索引：空值桶会聚集全部未设置该维度的连接，索引退化为全量扫描的
+// 副本（还多付一次逐 userID 查锁）。查询侧对空值走全量扫描兜底，语义不丢。
+func clientAttrs(client *models.Client) [4]struct{ dim, value string } {
+	return [4]struct{ dim, value string }{
+		{attrDimUserType, string(client.UserType)},
+		{attrDimRole, string(client.Role)},
+		{attrDimClientType, string(client.ClientType)},
+		{attrDimDepartment, string(client.Department)},
+	}
+}
+
+// addToAttrIdx 将客户端写入属性反向索引（引用计数，多端登录同 userID 多连接逐一累加）
+// 由 AddClient 在真正新增连接（isNew）时调用；四个维度均为构造期写入、注册后只读，
+// 索引无需迁移维护（见 attrIdx 字段注释的不变式说明）
+func (r *ShardedRegistry) addToAttrIdx(client *models.Client) {
+	if client == nil {
+		return
+	}
+	appID := client.GetAppID()
+	for _, a := range clientAttrs(client) {
+		if a.value == "" {
+			continue
+		}
+		key := attrIdxKey(appID, a.dim, a.value)
+		r.attrIdx.WithShardLock(key, func(data map[string]map[string]int) {
+			refs := data[key]
+			if refs == nil {
+				refs = make(map[string]int)
+				data[key] = refs
+			}
+			refs[client.UserID]++
+		})
+	}
+}
+
+// removeFromAttrIdx 从属性反向索引递减引用计数，归零删除
+// 与 addToAttrIdx 严格对称：同一组 (dim, value) 逐键递减，空值维度同样跳过，
+// 否则会出现「写时跳过、删时递减」的不对称而把计数压成负值
+func (r *ShardedRegistry) removeFromAttrIdx(client *models.Client) {
+	if client == nil {
+		return
+	}
+	appID := client.GetAppID()
+	for _, a := range clientAttrs(client) {
+		if a.value == "" {
+			continue
+		}
+		key := attrIdxKey(appID, a.dim, a.value)
+		r.attrIdx.WithShardLock(key, func(data map[string]map[string]int) {
+			refs := data[key]
+			if refs == nil {
+				return
+			}
+			if refs[client.UserID] <= 1 {
+				delete(refs, client.UserID)
+			} else {
+				refs[client.UserID]--
+			}
+			if len(refs) == 0 {
+				delete(data, key)
+			}
+		})
+	}
+}
+
+// getLocalAttrUsers 返回指定 appID + 维度 + 取值下的本地在线用户 userID 列表（设备去重）
+//
+// 返回 indexed=false 表示该查询不走索引（value 为空：空值维度不入索引），
+// 调用方须回退全量扫描；indexed=true 且 users 为空表示索引内确实零命中，
+// 调用方可直接短路。二者语义不同，不可合并为「空列表」。
+func (r *ShardedRegistry) getLocalAttrUsers(appID, dim, value string) (users []string, indexed bool) {
+	if value == "" {
+		return nil, false
+	}
+	appID = constants.NormalizeAppID(appID)
+	key := attrIdxKey(appID, dim, value)
+	r.attrIdx.WithShardRLock(key, func(data map[string]map[string]int) {
+		refs := data[key]
+		if len(refs) == 0 {
+			return
+		}
+		users = make([]string, 0, len(refs))
+		for uid := range refs {
+			users = append(users, uid)
+		}
+	})
+	return users, true
+}
+
+// GetLocalUsersByUserType 返回指定用户类型的本地在线用户（设备去重）
+// indexed=false 表示未入索引（空取值），调用方须回退全量扫描
+func (r *ShardedRegistry) GetLocalUsersByUserType(appID string, userType models.UserType) ([]string, bool) {
+	return r.getLocalAttrUsers(appID, attrDimUserType, string(userType))
+}
+
+// GetLocalUsersByRole 返回指定角色的本地在线用户（设备去重）
+func (r *ShardedRegistry) GetLocalUsersByRole(appID string, role models.UserRole) ([]string, bool) {
+	return r.getLocalAttrUsers(appID, attrDimRole, string(role))
+}
+
+// GetLocalUsersByClientType 返回指定客户端类型的本地在线用户（设备去重）
+func (r *ShardedRegistry) GetLocalUsersByClientType(appID string, clientType models.ClientType) ([]string, bool) {
+	return r.getLocalAttrUsers(appID, attrDimClientType, string(clientType))
+}
+
+// GetLocalUsersByDepartment 返回指定部门的本地在线用户（设备去重）
+func (r *ShardedRegistry) GetLocalUsersByDepartment(appID string, dept models.Department) ([]string, bool) {
+	return r.getLocalAttrUsers(appID, attrDimDepartment, string(dept))
 }
 
 // GetLocalNamespaceUsers 返回指定 appID+namespace 下的本地在线用户 userID 列表（设备去重）
@@ -1257,6 +1404,7 @@ func (r *ShardedRegistry) Clear() {
 	r.sseShards.Clear()
 	r.groupMemberIdx.Clear()
 	r.nsIdx.Clear()
+	r.attrIdx.Clear()
 
 	if r.observerShards != nil {
 		r.observerShards.Clear()

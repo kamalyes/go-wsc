@@ -1,3 +1,13 @@
+/*
+ * @Author: kamalyes 501893067@qq.com
+ * @Date: 2026-10-26 02:56:00
+ * @LastEditors: kamalyes 501893067@qq.com
+ * @LastEditTime: 2026-10-26 20:31:08
+ * @FilePath: \go-wsc\models\\client_pending_test.go
+ * @Description: Client 待写计数的增减配平测试
+ *
+ * Copyright (c) 2026 by kamalyes, All Rights Reserved.
+ */
 package models
 
 import (

@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-10-11 23:02:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-10-11 23:02:00
+ * @LastEditTime: 2026-10-26 20:31:08
  * @FilePath: \go-wsc\publisher\publisher_test.go
  * @Description: 发布器与信封构建器测试
  *
@@ -36,8 +36,10 @@ func (b *captureBus) Publish(_ context.Context, env *spi.DeliverEnvelope) error 
 	return nil
 }
 
-func (b *captureBus) Subscribe(context.Context, spi.EventBusTopic, spi.EventHandler) error { return nil }
-func (b *captureBus) Close() error                                                           { return nil }
+func (b *captureBus) Subscribe(context.Context, spi.EventBusTopic, spi.EventHandler) error {
+	return nil
+}
+func (b *captureBus) Close() error { return nil }
 
 func (b *captureBus) snapshot() []*spi.DeliverEnvelope {
 	b.mu.Lock()

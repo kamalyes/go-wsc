@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-10-11 22:39:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-10-11 22:39:00
+ * @LastEditTime: 2026-10-26 20:31:08
  * @FilePath: \go-wsc\broker\envelope_test.go
  * @Description: 投递信封校验/路由恢复/去重键测试
  *
@@ -25,8 +25,8 @@ import (
 
 func newTestEnvelope() *spi.DeliverEnvelope {
 	return &spi.DeliverEnvelope{
-		Intent:      spi.IntentDeliver,
-		Publisher:   "order-service",
+		Intent:    spi.IntentDeliver,
+		Publisher: "order-service",
 		Message: &models.HubMessage{
 			MessageID: "msg-001",
 			Receiver:  "u10086",

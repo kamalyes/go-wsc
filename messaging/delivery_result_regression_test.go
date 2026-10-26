@@ -1,3 +1,13 @@
+/*
+ * @Author: kamalyes 501893067@qq.com
+ * @Date: 2026-10-26 02:56:00
+ * @LastEditors: kamalyes 501893067@qq.com
+ * @LastEditTime: 2026-10-26 20:31:08
+ * @FilePath: \go-wsc\messaging\\delivery_result_regression_test.go
+ * @Description: 投递结果回归：DeliverResult 的错误聚合与模式判定
+ *
+ * Copyright (c) 2026 by kamalyes, All Rights Reserved.
+ */
 package messaging
 
 import (

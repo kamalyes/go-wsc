@@ -1,8 +1,8 @@
-﻿/*
+/*
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-10-10 21:36:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-10-10 21:36:00
+ * @LastEditTime: 2026-10-26 20:31:08
  * @FilePath: \go-wsc\overload\coalescer_bench_test.go
  * @Description: 高频合并器热路径基准（latest-wins 入窗 Offer）
  *

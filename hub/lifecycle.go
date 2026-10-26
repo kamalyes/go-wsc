@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-12-28 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-01-30 23:55:51
+ * @LastEditTime: 2026-10-26 20:31:08
  * @FilePath: \go-wsc\hub\lifecycle.go
  * @Description: Hub 生命周期管理
  *
@@ -13,6 +13,8 @@ package hub
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"runtime/debug"
 	"sync"
 	"time"
@@ -25,6 +27,7 @@ import (
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/overload"
 	"github.com/kamalyes/go-wsc/routing"
+	"github.com/kamalyes/go-wsc/spi"
 )
 
 const (
@@ -518,6 +521,21 @@ func (h *Hub) SafeShutdown() error {
 	if !h.shutdown.CompareAndSwap(false, true) {
 		return nil // 已经在关闭中
 	}
+
+	// 刷出默认日志器缓冲：本 defer 最先注册，故按 LIFO 最后执行——
+	// 排在 workerPool.Stop / pubsub.Close 等所有后注册的清理之后，
+	// 确保它们各自的收尾日志也一并落盘。
+	//
+	// 默认日志器经 ConsoleWriter 批量写出（见 spi.NewDefaultLogger），
+	// 不刷出则丢失关停阶段的末尾日志——而这正是排障最需要的那几行。
+	// 未注入自定义日志器时 h.logger 即该单例；已注入时本调用为 no-op
+	// （默认日志器未被构造过，FlushDefaultLogger 不触发其 Once）。
+	defer func() {
+		if err := spi.FlushDefaultLogger(); err != nil {
+			// 此时日志通道本身可能已不可靠，兜底直写 stderr
+			fmt.Fprintf(os.Stderr, "刷出默认日志器失败: %v\n", err)
+		}
+	}()
 
 	// 停止 workerPool：defer 保证在 h.wg.Wait() 完成后才执行（LIFO），
 	// 此时所有 wg 管理的 goroutine 已退出，不会再向 workerPool 提交任务，

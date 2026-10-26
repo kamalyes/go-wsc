@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-09-22 16:06:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-10-25 17:02:51
+ * @LastEditTime: 2026-10-26 20:31:08
  * @FilePath: \go-wsc\routing\route.go
  * @Description: 路由信封构建与归一化
  *
@@ -29,6 +29,7 @@ package routing
 
 import (
 	"context"
+	"slices"
 
 	"github.com/kamalyes/go-wsc/constants"
 )
@@ -152,6 +153,25 @@ func (r *Route) WithGroup(groupID string) *Route {
 //   - groupIDs 保持原值（P2P 消息 nil 合法，存储层按需补 DefaultGroupID）
 func (r *Route) Inject(ctx context.Context) context.Context {
 	appID := constants.NormalizeAppID(r.appID) // appID 归一化，namespace 保持原值（兼容广播）
+
+	// 幂等短路：ctx 已载完全相同的路由时原样返回，省掉 RoutingContext 与 WithValue 两次分配。
+	//
+	// 动机是逐成员扇出：入口已注入路由，而 sendToUser 对每个收件人都调一次
+	// msg.InjectRoute（models/message.go:773），后者末尾无条件重建同一路由——
+	// 1000 成员即重建 1000 次。alloc profile 实测 Route.Inject 与 context.WithValue
+	// 合占扇出全部分配的 18.7%，而注入值逐次完全相同
+	//
+	// 语义等价：context.WithValue 不建立取消作用域、不改变 Deadline/Done/Err，
+	// 其唯一可观测效果就是该 key 的取值；取值相同时返回原 ctx 对下游不可区分
+	// 比较成本是一次 ctx.Value（RoutingFromContext 零分配）加两次字符串比较与
+	// 一次切片比较，远低于所省的两次分配
+	if cur := RoutingFromContext(ctx); cur != nil &&
+		cur.AppID == appID &&
+		cur.Namespace == r.namespace &&
+		slices.Equal(cur.GroupIDs, r.groupIDs) {
+		return ctx
+	}
+
 	return context.WithValue(ctx, routingCtxKey{}, &RoutingContext{
 		AppID:     appID,
 		Namespace: r.namespace,

@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-09-28 21:30:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-09-28 21:30:00
+ * @LastEditTime: 2026-10-26 20:31:08
  * @FilePath: \go-wsc\hub\observer_notify_test.go
  * @Description: 观察者统一投递实现测试（notifyObserverClients）
  *
@@ -25,8 +25,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/kamalyes/go-toolbox/pkg/json"
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
+	"github.com/kamalyes/go-toolbox/pkg/json"
 	"github.com/kamalyes/go-wsc/models"
 )
 

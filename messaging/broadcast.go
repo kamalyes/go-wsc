@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-12-28 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-10-25 17:02:51
+ * @LastEditTime: 2026-10-26 20:31:08
  * @FilePath: \go-wsc\messaging\broadcast.go
  * @Description: Hub 统一投递入口与广播功能
  *
@@ -639,13 +639,22 @@ func (m *Manager) batchGetGroupMembers(ctx context.Context, groupIDs []string) (
 //   - Admit 拒绝（VerdictDelay/Offline）→ 延迟队列（填谷重投），队列满走分级兜底
 //   - shaper 拒绝（洪峰整形）→ 延迟队列；必达级跳过整形（与 Admit 矩阵的"必达恒放行"一致）
 func (m *Manager) BroadcastToFiltered(ctx context.Context, condition func(*models.Client) bool, msg *models.HubMessage) int {
+	return m.broadcastToFilteredScoped(ctx, nil, condition, msg)
+}
+
+// broadcastToFilteredScoped 过滤广播的作用域化内核（准入 + 整形 + 扇出）
+//
+// users == nil 为全量扫描（BroadcastToFiltered 的原语义）；非 nil 时只遍历这些
+// userID 的连接，用于属性反向索引命中后的定点扇出。谓词与准入/整形闸门两条路径一致，
+// 延迟重投闭包同样携带 users，保证重投与首投作用域相同。
+func (m *Manager) broadcastToFilteredScoped(ctx context.Context, users []string, condition func(*models.Client) bool, msg *models.HubMessage) int {
 	// 路由信封 + trace_id 同步（与所有入口共用同一套逻辑，幂等，已有不覆盖）
 	ctx = msg.InjectRoute(ctx)
 
 	// 准入闸门：分级×水位裁决（必达级恒放行；普通/高频过载时延迟/离线路由——拒绝≠丢弃）
 	if verdict := m.host.AdmitMessage(msg, true); verdict != overload.VerdictAdmit {
 		m.host.DeferBroadcast(ctx, msg, func(c context.Context, bm *models.HubMessage) {
-			m.broadcastToFilteredNow(c, condition, bm)
+			m.broadcastToFilteredNow(c, users, condition, bm)
 		})
 		return 0 // 本轮不扇出（延迟重投；返回实时成功数 0）
 	}
@@ -656,16 +665,19 @@ func (m *Manager) BroadcastToFiltered(ctx context.Context, condition func(*model
 		!shaper.Allow() {
 		m.host.GetOverloadMetrics().RecordShaperDenied()
 		m.host.DeferBroadcast(ctx, msg, func(c context.Context, bm *models.HubMessage) {
-			m.broadcastToFilteredNow(c, condition, bm)
+			m.broadcastToFilteredNow(c, users, condition, bm)
 		})
 		return 0
 	}
 
-	return m.broadcastToFilteredNow(ctx, condition, msg)
+	return m.broadcastToFilteredNow(ctx, users, condition, msg)
 }
 
 // broadcastToFilteredNow 预序列化 + 扇出（延迟队列重投的目标函数，不重复准入）
-func (m *Manager) broadcastToFilteredNow(ctx context.Context, condition func(*models.Client) bool, msg *models.HubMessage) int {
+//
+// users == nil 走全量并行遍历；非 nil 则只遍历这些 userID 的连接（属性索引定点路径），
+// 两条路径对每个连接施加完全相同的 combinedCondition 与投递/兜底动作
+func (m *Manager) broadcastToFilteredNow(ctx context.Context, users []string, condition func(*models.Client) bool, msg *models.HubMessage) int {
 	start := time.Now()
 
 	// 预序列化 WebSocket 消息（仅一次，所有客户端复用同一份）
@@ -697,9 +709,8 @@ func (m *Manager) broadcastToFilteredNow(ctx context.Context, condition func(*mo
 		return connection.ClientMatchesEnvelope(c, msg.AppID, msg.Namespace, msg.GroupIDs) && condition(c)
 	}
 
-	// WebSocket 客户端：直接 TrySend 预序列化数据（并行遍历优化百万级广播）
-	wsStart := time.Now()
-	m.host.GetShardedRegistry().ForEachClientParallel(0, func(_ string, client *models.Client) {
+	// 逐连接投递动作：WS 与 SSE 两种形态，两条遍历路径共用，保证语义完全一致
+	deliverWS := func(client *models.Client) {
 		atomic.AddInt64(&wsScanned, 1)
 		if client.IsClosed() || client.ConnectionType == models.ConnectionTypeSSE {
 			return
@@ -714,12 +725,8 @@ func (m *Manager) broadcastToFilteredNow(ctx context.Context, condition func(*mo
 			// 成员级分级兜底（修复广播丢弃彻底丢失）：普通/必达转离线，高频语义丢弃
 			m.routeDeliveryFallback(msg, client, client.UserID, guarantee)
 		}
-	})
-	wsDuration := time.Since(wsStart)
-
-	// SSE 客户端：通过专用通道发送 msg 对象（无需序列化，并行遍历）
-	sseStart := time.Now()
-	m.host.GetShardedRegistry().ForEachSSEClientParallel(0, func(_, _ string, client *models.Client) {
+	}
+	deliverSSE := func(client *models.Client) {
 		atomic.AddInt64(&sseScanned, 1)
 		if client.IsClosed() || !combinedCondition(client) {
 			return
@@ -727,8 +734,48 @@ func (m *Manager) broadcastToFilteredNow(ctx context.Context, condition func(*mo
 		if client.TrySendSSE(msg) {
 			atomic.AddInt32(&successCount, 1)
 		}
-	})
-	sseDuration := time.Since(sseStart)
+	}
+
+	wsStart := time.Now()
+	var wsDuration, sseDuration time.Duration
+
+	if users == nil {
+		// 全量路径：WS 与 SSE 分别并行遍历各自分片组
+		m.host.GetShardedRegistry().ForEachClientParallel(0, func(_ string, client *models.Client) {
+			deliverWS(client)
+		})
+		wsDuration = time.Since(wsStart)
+
+		sseStart := time.Now()
+		m.host.GetShardedRegistry().ForEachSSEClientParallel(0, func(_, _ string, client *models.Client) {
+			deliverSSE(client)
+		})
+		sseDuration = time.Since(sseStart)
+	} else {
+		// 定点路径（属性索引命中的用户集）：遍历这些 userID 的全部连接
+		//
+		// ⚠️ 谓词仍逐连接施加，不可退化为「按 userID 整户投递」：
+		// 索引是 userID 粒度（设备去重），而 UserType/Role/ClientType/Department
+		// 是**连接**属性——同一用户 web + mobile 两条连接的 ClientType 必然不同。
+		// 若改走 BroadcastToUserIDs 的整户扇出，其 per-device 过滤
+		// （ClientMatchesEnvelope）只看 appID/namespace/groupIDs、不看这四个维度，
+		// 会把消息误投到该用户不匹配的其余设备上。
+		//
+		// SSE 连接同在主存储（AddClient 第 1 步无条件写入 userShards），
+		// 故一次遍历内按 ConnectionType 分流即可，无需二次遍历 sseShards。
+		registry := m.host.GetShardedRegistry()
+		for _, uid := range users {
+			registry.ForEachUserClient(uid, func(_ string, client *models.Client) bool {
+				if client.ConnectionType == models.ConnectionTypeSSE {
+					deliverSSE(client)
+				} else {
+					deliverWS(client)
+				}
+				return true
+			})
+		}
+		wsDuration = time.Since(wsStart)
+	}
 
 	// 消息记录状态只更新一次（同一 msgID；广播记录 receiver 为空）
 	totalSuccess := atomic.LoadInt32(&successCount)
@@ -995,32 +1042,85 @@ func (m *Manager) BroadcastToNamespace(ctx context.Context, namespace string, ms
 // 过滤类广播方法（按客户端属性过滤，与路由正交）
 // ============================================================================
 
-// BroadcastByUserType 发送消息给特定用户类型的所有客户端
+// attrBroadcastFullScanPercent 属性索引回退全量扫描的命中占比阈值（百分比）
+// 与 nsBroadcastFullScanPercent 同口径：大命中率下逐 userID 查锁的单价高于
+// 64 shard 并行批量遍历，故高占比时退回全量
+const attrBroadcastFullScanPercent = 50
+
+// broadcastByAttr 属性维度广播的统一实现（索引定点 + 自适应回退）
+//
+// lookup 返回 (命中用户, 是否走了索引)：
+//   - indexed == false（取值为空，未入索引）→ 全量扫描，语义不丢
+//   - indexed == true 且空命中 → 直接返回 0（索引与注册表在同一 AddClient/RemoveClient
+//     内事务性维护，无该取值的用户时全量扫描同样 0 投递，跳过序列化与准入开销）
+//   - 命中占比 ≥ 阈值 → 退回全量扫描
+//   - 否则 → 按命中用户集定点遍历，谓词仍逐连接施加
+//
+// 谓词在两条路径下都必须保留：索引是 userID 粒度（设备去重），而这四个维度是
+// **连接**属性，同一用户的多端连接取值可不同（ClientType 必然不同），
+// 详见 broadcastToFilteredNow 定点分支的说明
+func (m *Manager) broadcastByAttr(
+	ctx context.Context,
+	msg *models.HubMessage,
+	lookup func(registry *connection.ShardedRegistry, appID string) ([]string, bool),
+	condition func(*models.Client) bool,
+) int {
+	appID := mathx.IfEmpty(msg.AppID, routing.AppIDFromContext(ctx))
+	registry := m.host.GetShardedRegistry()
+
+	users, indexed := lookup(registry, appID)
+	if !indexed {
+		return m.broadcastToFilteredScoped(ctx, nil, condition, msg)
+	}
+	if len(users) == 0 {
+		return 0
+	}
+	// 自适应回退（与 BroadcastToNamespace 同口径：users 按设备去重、total 为连接数，
+	// 多端登录下判定偏保守即偏向全量，方向安全）
+	if total := registry.GetClientCount(); int64(len(users))*100 >= total*attrBroadcastFullScanPercent {
+		return m.broadcastToFilteredScoped(ctx, nil, condition, msg)
+	}
+	return m.broadcastToFilteredScoped(ctx, users, condition, msg)
+}
+
+// BroadcastByUserType 发送消息给特定用户类型的所有客户端（经 attrIdx 定点，自适应回退全量）
 func (m *Manager) BroadcastByUserType(ctx context.Context, userType models.UserType, msg *models.HubMessage) int {
-	return m.BroadcastToFiltered(ctx, func(c *models.Client) bool {
-		return c.UserType == userType
-	}, msg)
+	return m.broadcastByAttr(ctx, msg,
+		func(r *connection.ShardedRegistry, appID string) ([]string, bool) {
+			return r.GetLocalUsersByUserType(appID, userType)
+		},
+		func(c *models.Client) bool { return c.UserType == userType },
+	)
 }
 
-// BroadcastToRole 发送消息给特定角色的所有用户
+// BroadcastToRole 发送消息给特定角色的所有用户（经 attrIdx 定点，自适应回退全量）
 func (m *Manager) BroadcastToRole(ctx context.Context, role models.UserRole, msg *models.HubMessage) int {
-	return m.BroadcastToFiltered(ctx, func(c *models.Client) bool {
-		return c.Role == role
-	}, msg)
+	return m.broadcastByAttr(ctx, msg,
+		func(r *connection.ShardedRegistry, appID string) ([]string, bool) {
+			return r.GetLocalUsersByRole(appID, role)
+		},
+		func(c *models.Client) bool { return c.Role == role },
+	)
 }
 
-// BroadcastToClientType 发送消息给特定客户端类型
+// BroadcastToClientType 发送消息给特定客户端类型（经 attrIdx 定点，自适应回退全量）
 func (m *Manager) BroadcastToClientType(ctx context.Context, clientType models.ClientType, msg *models.HubMessage) int {
-	return m.BroadcastToFiltered(ctx, func(c *models.Client) bool {
-		return c.ClientType == clientType
-	}, msg)
+	return m.broadcastByAttr(ctx, msg,
+		func(r *connection.ShardedRegistry, appID string) ([]string, bool) {
+			return r.GetLocalUsersByClientType(appID, clientType)
+		},
+		func(c *models.Client) bool { return c.ClientType == clientType },
+	)
 }
 
-// BroadcastToDepartment 发送消息给特定部门的所有用户
+// BroadcastToDepartment 发送消息给特定部门的所有用户（经 attrIdx 定点，自适应回退全量）
 func (m *Manager) BroadcastToDepartment(ctx context.Context, department models.Department, msg *models.HubMessage) int {
-	return m.BroadcastToFiltered(ctx, func(c *models.Client) bool {
-		return c.Department == department
-	}, msg)
+	return m.broadcastByAttr(ctx, msg,
+		func(r *connection.ShardedRegistry, appID string) ([]string, bool) {
+			return r.GetLocalUsersByDepartment(appID, department)
+		},
+		func(c *models.Client) bool { return c.Department == department },
+	)
 }
 
 // ============================================================================

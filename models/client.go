@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-01-02 12:20:22
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-01-02 12:56:15
+ * @LastEditTime: 2026-10-26 13:58:33
  * @FilePath: \go-wsc\models\client.go
  * @Description:
  *
@@ -81,11 +81,23 @@ type Client struct {
 	//万分比整数（0-10000），避免浮点原子操作；BacklogRatio() 转浮点返回
 	backlogRatio atomic.Int32 `json:"-"`
 
-	// 客户端可变字段读写锁：保护 Metadata 及所有“注册后仍可能被 With*/Set* 并发写入、
-	// 且 MarshalJSON 会反射读取”的非原子字段（GroupID/Namespace/Role/ClientIP/Department/
-	// Skills/MaxTickets/NodeID/NodeIP/NodePort/ClientType/ConnectionType）
+	// 客户端可变字段读写锁：保护 Metadata 及 With*/Set* 写入的非原子字段
+	// （GroupID/Namespace/Role/ClientIP/Department/Skills/MaxTickets/NodeID/NodeIP/
+	// NodePort/ClientType/ConnectionType）
 	// MarshalJSON 在整段 json.Marshal 期间持 RLock，与所有 With*/SetMetadataValue/SetGroupID
 	// 的 Lock 互斥；原子字段（Status/VIPLevel/时间戳）另走 atomic 不经此锁，pongBytes 亦经此锁保护
+	//
+	// ⚠️ 不变式（勿按“注册后可并发写”理解本锁）：Namespace/Role/ClientType/Department
+	// 必须视为**构造期一次性写入、注册后只读**。原因是扇出热路径对它们是**无锁直读**——
+	// ClientMatchesEnvelope（connection/sharded_registry.go）与 BroadcastToRole/ByUserType/
+	// ByClientType/ByDepartment 的过滤闭包（messaging/broadcast.go）每连接每次投递都裸读，
+	// 5 万连接规模下逐 client 取 mu 不可行。Go 的 string 是 16 字节头（指针 + 长度），
+	// 并发写可被读侧观测到“新指针 + 旧长度”的撕裂组合，产生越界读——整个节点的全部连接
+	// 随进程一起崩溃。注册后若需变更这些维度，正确做法是断开重连（重走构造期），
+	// 而非原地改字段；确有运行时可变需求时须先将其改为 atomic.Pointer[string] 并收口为
+	// 访问器，不可直接放开 With* 的注册后调用。
+	// 现状核对：go-wsc 自身与 6 个下游服务均无注册后调用（仅 transport.CreateClientFromRequest
+	// 的构造期链式调用），故本不变式与现实一致，无需原子化改造。
 	mu sync.RWMutex `json:"-"`
 
 	// SSE 专用字段（仅当 ConnectionType 为 SSE 时使用）

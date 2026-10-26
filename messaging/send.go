@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-12-28 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-05-17 15:36:16
+ * @LastEditTime: 2026-10-26 11:37:50
  * @FilePath: \go-wsc\messaging\send.go
  * @Description: Hub 消息发送功能
  *
@@ -239,11 +239,20 @@ func (m *Manager) sendToUserWithRetryCore(ctx context.Context, toUserID string, 
 	// 设置默认Source为online(如果未设置)
 	msg.Source = mathx.IfEmpty(msg.Source, models.MessageSourceOnline)
 
-	// 确保消息ID存在
-	snowflakeId := m.idGenerator.GenerateRequestID()
-	msg.ID = mathx.IfNotEmpty(msg.ID, toUserID+"-"+snowflakeId)
-	// 若业务消息ID为空，则使用Hub生成的ID
-	msg.MessageID = mathx.IfNotEmpty(msg.MessageID, snowflakeId)
+	// 确保消息ID存在（按需求值：mathx.IfNotEmpty 是普通函数，实参在调用前已全部求值——
+	// 内联写法会让 ID 已存在的消息照样付出一次雪花生成 + 一次字符串拼接分配。
+	// 本函数在扇出路径按收件人逐次调用，该开销随收件人数线性放大；
+	// 同类逻辑在 dispatcher.go normalizeMessageFields 已按条件判定实现）
+	if msg.ID == "" || msg.MessageID == "" {
+		snowflakeId := m.idGenerator.GenerateRequestID()
+		if msg.ID == "" {
+			msg.ID = toUserID + "-" + snowflakeId
+		}
+		// 若业务消息ID为空，则使用Hub生成的ID
+		if msg.MessageID == "" {
+			msg.MessageID = snowflakeId
+		}
+	}
 
 	// 在线判定与路由合并为单次 Redis 往返（热路径优化，消 CheckUserOnline 的 bitmap 查询）：
 	// 本地 registry 命中 → 在线，节点列表由 sendToUser 自查（多端跨节点仍需一次查询）；

@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-09-06 09:50:55
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-10-05 10:06:18
+ * @LastEditTime: 2026-10-27 17:26:03
  * @FilePath: \go-wsc\models\message.go
  * @Description: 消息处理逻辑
  *
@@ -853,6 +853,13 @@ func (m *HubMessage) Clone() *HubMessage {
 	return &msg
 }
 
+// fanoutClone 扇出副本载体：消息体与其私有锁同体，使 CloneForFanout 只需一次堆分配
+// mu 置于 msg 之后：msg 内部 mu 字段指向本结构的 mu，二者生命周期由同一对象托管
+type fanoutClone struct {
+	msg HubMessage
+	mu  sync.RWMutex
+}
+
 // CloneForFanout 扇出克隆：标量信封字段独立可写，Data 与 GroupIDs 只读共享
 //
 // 适用场景为群组可靠投递/批量发送/离线回放/P2P 发送等逐成员扇出，仅改写 Receiver/ReceiverNode/ID/CreateAt/Source 等信封标量字段
@@ -866,9 +873,14 @@ func (m *HubMessage) CloneForFanout() *HubMessage {
 		m.mu.RLock()
 		defer m.mu.RUnlock()
 	}
-	msg := *m
-	msg.mu = &sync.RWMutex{}
-	return &msg
+	// 消息体与自有锁一次性同体分配：此前 `msg := *m` + `&sync.RWMutex{}` 是两次堆分配，
+	// 锁对象（24B）单独走一次 mallocgc 在逐成员扇出里按收件人线性放大。
+	// 同体后锁与消息同生命周期（msg 指向 holder 内部，holder 因此存活），仍是副本私有锁，
+	// 不与原对象共享（避免 Clone 后两边互相阻塞，见上述契约）
+	holder := &fanoutClone{}
+	holder.msg = *m
+	holder.msg.mu = &holder.mu
+	return &holder.msg
 }
 
 // CloneDeep 实现 syncx.Cloner 接口
@@ -905,6 +917,17 @@ func (m *HubMessage) GetMessageID() string {
 	return m.MessageID
 }
 
+// msgAlias 序列化别名：与 HubMessage 字段同构但方法集为空，避免递归调用 MarshalJSON
+// mu 为 json:"-" 不会序列化
+type msgAlias HubMessage
+
+// msgAliasPool 复用序列化别名副本
+// json.Marshal 收 any 参数：传值会把整个结构体（30+ 字段、数百字节）装箱到堆上，
+// 逐收件人扇出中按收件人线性放大，是 Marshal 路径仅次于输出缓冲的单项分配。
+// 改传池化指针后装箱零分配（接口数据字段直存指针），字节与传值严格一致
+// （非 nil 指针走 ptrEncoder 转发到同一 structEncoder，见 TestMarshalJSONBytesEqualJSONMarshal）
+var msgAliasPool = sync.Pool{New: func() any { return new(msgAlias) }}
+
 // MarshalJSON 自定义序列化：持 RLock 贯穿 json.Marshal，与所有 Set*/With* 的 Lock 互斥
 // 消除反射遍历 Data map 与并发写入导致的 "concurrent map iteration and map write" fatal
 func (m *HubMessage) MarshalJSON() ([]byte, error) {
@@ -912,11 +935,13 @@ func (m *HubMessage) MarshalJSON() ([]byte, error) {
 		m.mu.RLock()
 		defer m.mu.RUnlock()
 	}
-	// 用别名避免递归调用 MarshalJSON；mu 为 json:"-" 不会序列化
-	type msgAlias HubMessage
-	alias := msgAlias(*m)
+	alias := msgAliasPool.Get().(*msgAlias)
+	*alias = msgAlias(*m)
 	alias.mu = nil // 防御性置空，避免别名结构意外携带锁
-	return json.Marshal(alias)
+	data, err := json.Marshal(alias)
+	*alias = msgAlias{} // 归还前清零：不让池长期持有 Data map / 字符串，阻碍消息对象回收
+	msgAliasPool.Put(alias)
+	return data, err
 }
 
 // NewHubMessage 创建通用消息结构

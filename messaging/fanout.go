@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-05-17 15:36:16
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-10-27 10:26:55
+ * @LastEditTime: 2026-10-27 17:26:03
  * @FilePath: \go-wsc\messaging\fanout.go
  * @Description: 批量扇出投递 —— 有界并发执行器 / 离线广播聚合 / 节点索引批量预取
  *
@@ -17,11 +17,13 @@ package messaging
 
 import (
 	"context"
+	"runtime/debug"
 	"sync"
+	"sync/atomic"
 
 	"github.com/kamalyes/go-logger"
+	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
-	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/routing"
 )
@@ -36,9 +38,66 @@ func (m *Manager) fanoutConcurrency() int {
 	return 64
 }
 
-// newFanoutExecutor 创建有界并发的扇出执行器（所有 per-user 批量投递统一入口）
-func newFanoutExecutor[T any](items []T, concurrency int) *syncx.ParallelSliceExecutor[T, *models.SendResult] {
-	return syncx.NewParallelSliceExecutor[T, *models.SendResult](items).WithConcurrency(concurrency)
+// runFanout 有界并发扇出执行器（所有 per-user 批量投递统一入口）
+//
+// 固定 worker 池 + 原子游标取号，取代"逐条目 go func + 信号量 channel"的旧执行器：
+// N 成员扇出此前要 spawn N 个 goroutine（每个一次闭包分配 + 一次首帧栈增长），
+// 且每条目两次 channel 操作（取令牌 + 还令牌）全部争抢同一把 chan 锁——
+// 64 并发下该锁是扇出的主要 CPU 去处（runtime.lock2 → usleep 自旋）。
+// 改为 min(N, concurrency) 个常驻 worker 轮转取号后，goroutine 与闭包分配
+// 由 O(N) 降为 O(concurrency)，令牌 channel 整体消失
+//
+// 语义与旧执行器一致：同步返回（返回时全部条目已完成）、条目间无序并发、
+// 逐条目 panic 隔离（单成员投递 panic 只丢该成员并留痕，不波及其他成员与节点）
+// 结果回收由调用方按 idx 写自己的预分配切片（各 worker 写不同下标，无锁无竞争）
+func runFanout[T any](ctx context.Context, m *Manager, items []T, concurrency int, fn func(idx int, item T)) {
+	n := len(items)
+	if n == 0 {
+		return
+	}
+	if concurrency > n {
+		concurrency = n
+	}
+	// 单并发/单条目串行执行：省掉 goroutine 与 WaitGroup（在途数仍为 1，语义不变）
+	if concurrency <= 1 {
+		for idx := range items {
+			fanoutInvoke(ctx, m, items, idx, fn)
+		}
+		return
+	}
+
+	var cursor atomic.Int64
+	var wg sync.WaitGroup
+	wg.Add(concurrency)
+	for w := 0; w < concurrency; w++ {
+		go func() {
+			defer wg.Done()
+			for {
+				idx := int(cursor.Add(1)) - 1
+				if idx >= n {
+					return
+				}
+				fanoutInvoke(ctx, m, items, idx, fn)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// fanoutInvoke 执行单个扇出条目并隔离 panic
+// 拆为独立函数（而非 worker 循环内 defer）：defer 随本函数返回即生效，
+// panic 后 worker 可继续取下一号，不会连带丢掉同 worker 的剩余条目
+func fanoutInvoke[T any](ctx context.Context, m *Manager, items []T, idx int, fn func(idx int, item T)) {
+	defer func() {
+		if r := recover(); r != nil {
+			m.host.GetLogger().ErrorContextKV(ctx, "扇出条目执行 panic",
+				"index", idx,
+				"panic", r,
+				"stack", string(debug.Stack()),
+			)
+		}
+	}()
+	fn(idx, items[idx])
 }
 
 // ============================================================================
@@ -88,12 +147,10 @@ func (m *Manager) flushOfflineBroadcasts(ctx context.Context, collector *offline
 		"pending_count", len(entries),
 		"node_id", m.host.GetNodeID(),
 	)
-	newFanoutExecutor(entries, m.fanoutConcurrency()).
-		Execute(func(idx int, entry offlineBroadcastEntry) (*models.SendResult, error) {
-			// 直接走底层广播（绕过 collector 检查，避免重新收集造成死循环）
-			m.doOfflineBroadcast(ctx, entry.userID, entry.msg)
-			return nil, nil
-		})
+	runFanout(ctx, m, entries, m.fanoutConcurrency(), func(_ int, entry offlineBroadcastEntry) {
+		// 直接走底层广播（绕过 collector 检查，避免重新收集造成死循环）
+		m.doOfflineBroadcast(ctx, entry.userID, entry.msg)
+	})
 }
 
 // ============================================================================
@@ -151,7 +208,7 @@ func (m *Manager) prefetchFanoutNodes(ctx context.Context, msg *models.HubMessag
 // ============================================================================
 
 // SendToMultipleUsers 并发发送消息给多个用户
-// 使用 ParallelSliceExecutor 并行投递 + 预分配 slice + 索引写入，消除 mutex 竞争
+// 使用 runFanout 有界并发投递 + 预分配 slice + 索引写入，消除 mutex 竞争
 func (m *Manager) SendToMultipleUsers(ctx context.Context, userIDs []string, msg *models.HubMessage) map[string]error {
 	errs := make(map[string]error, len(userIDs))
 	if len(userIDs) == 0 {
@@ -165,16 +222,14 @@ func (m *Manager) SendToMultipleUsers(ctx context.Context, userIDs []string, msg
 	defer m.flushOfflineBroadcasts(ctx, collector)
 	// 批量预取本地 miss 用户的节点索引（1 次 Pipeline 替代扇出内 N 次单查）
 	presetNodes := m.prefetchFanoutNodes(ctx, msg, userIDs)
-	newFanoutExecutor(userIDs, m.fanoutConcurrency()).
-		Execute(func(idx int, userID string) (*models.SendResult, error) {
-			result := m.sendToUserWithRetry(ctx, userID, msg, presetNodes[userID])
-			if result.FinalError != nil {
-				errList[idx] = result.FinalError // 索引写入，无需锁
-			}
-			return result, nil
-		})
+	runFanout(ctx, m, userIDs, m.fanoutConcurrency(), func(idx int, userID string) {
+		result := m.sendToUserWithRetry(ctx, userID, msg, presetNodes[userID])
+		if result.FinalError != nil {
+			errList[idx] = result.FinalError // 索引写入，无需锁
+		}
+	})
 
-	// Execute 同步返回后，无竞争地转为 map
+	// runFanout 同步返回后，无竞争地转为 map
 	for i, userID := range userIDs {
 		if errList[i] != nil {
 			errs[userID] = errList[i]
@@ -229,36 +284,42 @@ func (m *Manager) SendToGroupMembers(ctx context.Context, memberIDs []string, ms
 	defer m.flushOfflineBroadcasts(ctx, collector)
 	// 批量预取本地 miss 成员的节点索引（1 次 Pipeline 替代扇出内 N 次单查）
 	presetNodes := m.prefetchFanoutNodes(ctx, msg, filteredIDs)
-	newFanoutExecutor(filteredIDs, m.fanoutConcurrency()).
-		OnComplete(func(results []*models.SendResult, errors []error) {
-			for i, sendResult := range results {
-				// 优先判失败（FinalError != nil 即为失败）
-				if sendResult.FinalError != nil {
-					result.Failed++
-					result.FailedIDs = append(result.FailedIDs, filteredIDs[i])
-					result.Errors[filteredIDs[i]] = sendResult.FinalError
-					continue
-				}
-				// 成功路径需区分在线送达 vs 离线存储
-				if sendResult.Success {
-					if sendResult.StoredOffline {
-						// 离线存储成功（用户不在线，消息入离线队列）
-						result.Offline++
-						result.OfflineIDs = append(result.OfflineIDs, filteredIDs[i])
-					} else {
-						// 在线送达成功
-						result.Success++
-					}
-				}
+	// 逐成员结果按 idx 定位写入（各 worker 写不同下标，无锁无竞争），扇出同步返回后统一汇总
+	sendResults := make([]*models.SendResult, len(filteredIDs))
+	runFanout(ctx, m, filteredIDs, m.fanoutConcurrency(), func(idx int, uid string) {
+		// sendToUserWithRetry 内部已经处理了在线/离线逻辑
+		// - 在线用户：直接发送（presetNodes 批量预取，免逐成员单查）
+		// - 离线用户：自动存储到离线队列，上线后推送
+		sendResults[idx] = m.sendToUserWithRetry(ctx, uid, msg, presetNodes[uid])
+	})
+	for i, sendResult := range sendResults {
+		// 该位为 nil 仅在成员投递 panic 被 runFanout 隔离时出现：计入失败并留痕
+		// （旧执行器此处直接解引用 nil 结果，panic 会在汇总回调里二次炸穿扇出入口）
+		if sendResult == nil {
+			result.Failed++
+			result.FailedIDs = append(result.FailedIDs, filteredIDs[i])
+			result.Errors[filteredIDs[i]] = errorx.NewError(models.ErrTypeTemporaryFailure, "fanout task panicked")
+			continue
+		}
+		// 优先判失败（FinalError != nil 即为失败）
+		if sendResult.FinalError != nil {
+			result.Failed++
+			result.FailedIDs = append(result.FailedIDs, filteredIDs[i])
+			result.Errors[filteredIDs[i]] = sendResult.FinalError
+			continue
+		}
+		// 成功路径需区分在线送达 vs 离线存储
+		if sendResult.Success {
+			if sendResult.StoredOffline {
+				// 离线存储成功（用户不在线，消息入离线队列）
+				result.Offline++
+				result.OfflineIDs = append(result.OfflineIDs, filteredIDs[i])
+			} else {
+				// 在线送达成功
+				result.Success++
 			}
-		}).
-		Execute(func(idx int, uid string) (*models.SendResult, error) {
-			// sendToUserWithRetry 内部已经处理了在线/离线逻辑
-			// - 在线用户：直接发送（presetNodes 批量预取，免逐成员单查）
-			// - 离线用户：自动存储到离线队列，上线后推送
-			sendResult := m.sendToUserWithRetry(ctx, uid, msg, presetNodes[uid])
-			return sendResult, nil
-		})
+		}
+	}
 
 	if lg := m.host.GetLogger(); lg.IsLevelEnabled(logger.DEBUG) {
 		lg.DebugContextKV(ctx, "会话消息发送完成",
@@ -297,15 +358,11 @@ func (m *Manager) SendToClientsWithRetry(ctx context.Context, clients []*models.
 		userIDs[i] = client.UserID
 	}
 	presetNodes := m.prefetchFanoutNodes(ctx, msg, userIDs)
-	newFanoutExecutor(clients, m.fanoutConcurrency()).
-		OnSuccess(func(idx int, client *models.Client, result *models.SendResult) {
-			resultsSlice[idx] = result // 各 goroutine 写不同索引，无需锁
-		}).
-		Execute(func(idx int, client *models.Client) (*models.SendResult, error) {
-			return m.sendToUserWithRetry(ctx, client.UserID, msg, presetNodes[client.UserID]), nil
-		})
+	runFanout(ctx, m, clients, m.fanoutConcurrency(), func(idx int, client *models.Client) {
+		resultsSlice[idx] = m.sendToUserWithRetry(ctx, client.UserID, msg, presetNodes[client.UserID]) // 各 worker 写不同索引，无需锁
+	})
 
-	// Execute 同步返回后，所有写入已完成，无竞争地转为 map
+	// runFanout 同步返回后，所有写入已完成，无竞争地转为 map
 	for i, client := range clients {
 		if resultsSlice[i] != nil {
 			results[client.UserID] = resultsSlice[i]

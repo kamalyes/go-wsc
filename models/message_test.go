@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-07-26 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-10-05 10:06:18
+ * @LastEditTime: 2026-10-27 17:26:03
  * @FilePath: \go-wsc\models\message_test.go
  * @Description: HubMessage 结构体测试
  *   - 字段对齐验证（无 padding）
@@ -106,6 +106,116 @@ func TestHubMessage_JSONSerializationCompatibility(t *testing.T) {
 	assert.Equal(t, msg.RequireAck, decoded.RequireAck)
 	assert.Equal(t, msg.PushType, decoded.PushType)
 	assert.Equal(t, msg.BroadcastType, decoded.BroadcastType)
+}
+
+// TestMarshalJSONBytesEqualJSONMarshal 契约钉死：MarshalJSON 直调与 json.Marshal(msg) 字节严格一致
+//
+// 投递热路径（messaging/send.go）直调 msg.MarshalJSON() 省掉 json.Marshal 外层那一圈
+// encodeState + compact 整篇复制；MarshalJSON 内部改传池化别名指针省掉整结构体装箱。
+// 两处都以"字节不变"为前提——六个下游服务消费该 JSON，任何一位之差都是线上事故，
+// 故此处逐形态对比而非只验证可解析性：
+//   - HTML 可转义字符（< > &）与 U+2028/U+2029：内层 json.Marshal 默认 escapeHTML，
+//     外层 compact 对已转义序列恒为恒等变换
+//   - 嵌套 Data（map 键序、浮点格式化、nil/bool/数组）
+//   - time.Time 字段：传指针后字段可取址，编码器由 marshalerEncoder 切到
+//     addrMarshalerEncoder，仍是同一个 time.Time.MarshalJSON，输出一致
+//   - 零值构造（mu == nil 退化无锁）与 omitempty 字段全空
+func TestMarshalJSONBytesEqualJSONMarshal(t *testing.T) {
+	ts := time.Date(2026, 3, 1, 2, 3, 4, 123456789, time.FixedZone("CST", 8*3600))
+	cases := map[string]*HubMessage{
+		"典型消息": func() *HubMessage {
+			m := NewHubMessage().SetID("u-1-9527").SetMessageType(MessageTypeText).SetContent("hello group")
+			m.Receiver = "u-1"
+			m.CreateAt = ts
+			return m
+		}(),
+		"HTML与行分隔符": func() *HubMessage {
+			m := NewHubMessage()
+			m.Content = "<script>a&b</script>  "
+			m.CreateAt = ts
+			return m
+		}(),
+		"嵌套扩展数据": func() *HubMessage {
+			m := NewHubMessage()
+			m.Data["k<>&"] = "v<>&"
+			m.Data["nested"] = map[string]interface{}{"z": 1, "a": []interface{}{1.5, "x<", nil, true}}
+			m.Data["t"] = ts
+			m.CreateAt = ts
+			return m
+		}(),
+		"零值无锁构造": {Content: "zero-value no mutex"},
+		"扩展数据为nil": func() *HubMessage {
+			m := NewHubMessage()
+			m.Data = nil
+			m.CreateAt = ts
+			return m
+		}(),
+		"路由信封齐全": func() *HubMessage {
+			m := NewHubMessage()
+			m.AppID, m.Namespace, m.GroupIDs = "app-1", "ns-1", []string{"g-1", "g-2"}
+			m.TraceID, m.SenderClient, m.ReceiverClient, m.ReceiverNode = "tr-1", "c-1", "c-2", "node-1"
+			m.RequireAck, m.DeliveryGuarantee = true, GuaranteeEphemeral
+			m.CreateAt = ts
+			return m
+		}(),
+	}
+
+	for name, msg := range cases {
+		t.Run(name, func(t *testing.T) {
+			viaMarshal, errMarshal := json.Marshal(msg)
+			require.NoError(t, errMarshal)
+			viaMethod, errMethod := msg.MarshalJSON()
+			require.NoError(t, errMethod)
+			assert.Equal(t, string(viaMarshal), string(viaMethod), "直调 MarshalJSON 必须与 json.Marshal 字节一致")
+		})
+	}
+
+	// 别名池复用不得串消息：交替序列化两条不同消息，各自字节应稳定
+	a, b := NewHubMessage().SetContent("AAA"), NewHubMessage().SetContent("BBB")
+	a.CreateAt, b.CreateAt = ts, ts
+	wantA, wantB := string(mustMarshal(t, a)), string(mustMarshal(t, b))
+	for i := 0; i < 64; i++ {
+		assert.Equal(t, wantA, string(mustMarshal(t, a)))
+		assert.Equal(t, wantB, string(mustMarshal(t, b)))
+	}
+}
+
+// mustMarshal 直调 MarshalJSON 并断言无错
+func mustMarshal(t *testing.T, m *HubMessage) []byte {
+	t.Helper()
+	data, err := m.MarshalJSON()
+	require.NoError(t, err)
+	return data
+}
+
+// TestCloneForFanoutIndependentLock 扇出副本的锁与消息体同体分配，但仍须是副本私有锁
+// （与原对象共享锁会让扇出各成员互相阻塞，见 CloneForFanout 契约）
+func TestCloneForFanoutIndependentLock(t *testing.T) {
+	original := NewHubMessage().SetID("orig")
+	clone := original.CloneForFanout()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < concurrencyIters; i++ {
+			clone.SetReceiver("clone-value")
+			_, _ = clone.MarshalJSON()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < concurrencyIters; i++ {
+			original.SetReceiver("orig-value")
+			_, _ = json.Marshal(original)
+		}
+	}()
+	wg.Wait()
+
+	assert.Equal(t, "clone-value", clone.Receiver)
+	assert.Equal(t, "orig-value", original.Receiver)
+	// Data/GroupIDs 只读共享（契约），标量字段互不影响
+	assert.Equal(t, "orig", clone.ID)
 }
 
 // TestHubMessage_JSONTagsPreserved 验证 Priority 无 omitempty（保持原行为）

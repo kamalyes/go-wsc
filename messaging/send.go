@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-12-28 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-10-27 13:51:38
+ * @LastEditTime: 2026-10-27 17:26:03
  * @FilePath: \go-wsc\messaging\send.go
  * @Description: Hub 消息发送功能
  *
@@ -223,12 +223,35 @@ func (m *Manager) sendToUserWithRetry(ctx context.Context, toUserID string, msg 
 	return m.sendToUserWithRetryCore(ctx, toUserID, msg, presetNodes)
 }
 
+// sendAttemptInlineCap 内联尝试记录容量：对齐 RetryPolicy.MaxRetries 默认值 3（即 3+1 次尝试）
+// 配置超出该值时 append 自然扩容到堆（重试路径本就带退避睡眠，额外一次扩容无足轻重）
+const sendAttemptInlineCap = 4
+
+// sendResultHolder 发送结果载体：SendResult 与其尝试记录底板同体
+// 原路径 `&SendResult{Attempts: make(...)}` 是两次堆分配，而正常扇出成员首次尝试即成功、
+// 只写入 1 条记录却按 MaxRetries+1 预留整片底板。同体后仅一次分配，
+// result.Attempts 指向 holder 内部数组（holder 随 result 存活），append 语义不变
+type sendResultHolder struct {
+	result   models.SendResult
+	attempts [sendAttemptInlineCap]models.SendAttempt
+}
+
+// newSendResult 构造发送结果（单次堆分配：结果体 + 内联尝试底板）
+// maxAttempts 超过内联容量时退回独立底板，保持原有预留语义
+func newSendResult(maxAttempts int) *models.SendResult {
+	holder := &sendResultHolder{}
+	if maxAttempts > sendAttemptInlineCap {
+		holder.result.Attempts = make([]models.SendAttempt, 0, maxAttempts)
+	} else {
+		holder.result.Attempts = holder.attempts[:0]
+	}
+	return &holder.result
+}
+
 // sendToUserWithRetryCore 发送核心体：msg 必须是调用方私有副本（已 Clone 且已 InjectRoute）
 // 本方法不再 Clone（P2P 入口 deliverP2P 复用 Deliver 已 Clone 副本以消除热路径双 Clone）
 func (m *Manager) sendToUserWithRetryCore(ctx context.Context, toUserID string, msg *models.HubMessage, presetNodes []string) *models.SendResult {
-	result := &models.SendResult{
-		Attempts: make([]models.SendAttempt, 0, m.host.GetConfig().RetryPolicy.MaxRetries+1),
-	}
+	result := newSendResult(m.host.GetConfig().RetryPolicy.MaxRetries + 1)
 
 	startTime := time.Now()
 

@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-12-28 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-10-26 20:31:08
+ * @LastEditTime: 2026-10-27 17:26:03
  * @FilePath: \go-wsc\messaging\broadcast.go
  * @Description: Hub 统一投递入口与广播功能
  *
@@ -263,36 +263,33 @@ func (m *Manager) deliverToGroupReliable(ctx context.Context, msg *models.HubMes
 	defer m.flushOfflineBroadcasts(ctx, collector)
 	// 批量预取本地 miss 成员的节点索引（1 次 Pipeline 替代扇出内 N 次单查，远端成员为主的群组单条消息 N 次往返 → 1 次）
 	presetNodes := m.prefetchFanoutNodes(ctx, msg, filteredMembers)
-	newFanoutExecutor(filteredMembers, m.fanoutConcurrency()).
-		Execute(func(idx int, uid string) (*models.SendResult, error) {
-			sendResult := m.sendToUserWithRetry(ctx, uid, msg, presetNodes[uid])
+	runFanout(ctx, m, filteredMembers, m.fanoutConcurrency(), func(_ int, uid string) {
+		sendResult := m.sendToUserWithRetry(ctx, uid, msg, presetNodes[uid])
 
-			// 原子分类，无锁开销
-			if sendResult.StoredOffline {
-				atomic.AddInt64(&offlineCount, 1)
-				if sendResult.Success {
-					atomic.AddInt64(&storedOffline, 1)
-				} else {
-					atomic.AddInt64(&failed, 1)
-				}
+		// 原子分类，无锁开销
+		if sendResult.StoredOffline {
+			atomic.AddInt64(&offlineCount, 1)
+			if sendResult.Success {
+				atomic.AddInt64(&storedOffline, 1)
 			} else {
-				atomic.AddInt64(&onlineCount, 1)
-				if sendResult.Success {
-					atomic.AddInt64(&sent, 1)
-				} else {
-					atomic.AddInt64(&failed, 1)
-				}
+				atomic.AddInt64(&failed, 1)
 			}
-
-			// 仅在有错误时加锁收集错误信息（错误是少数，锁竞争极低）
-			if sendResult.FinalError != nil {
-				errMu.Lock()
-				result.AddError(fmt.Errorf("user %s: %w", uid, sendResult.FinalError))
-				errMu.Unlock()
+		} else {
+			atomic.AddInt64(&onlineCount, 1)
+			if sendResult.Success {
+				atomic.AddInt64(&sent, 1)
+			} else {
+				atomic.AddInt64(&failed, 1)
 			}
+		}
 
-			return sendResult, nil
-		})
+		// 仅在有错误时加锁收集错误信息（错误是少数，锁竞争极低）
+		if sendResult.FinalError != nil {
+			errMu.Lock()
+			result.AddError(fmt.Errorf("user %s: %w", uid, sendResult.FinalError))
+			errMu.Unlock()
+		}
+	})
 
 	result.OnlineMembers = int(atomic.LoadInt64(&onlineCount))
 	result.OfflineMembers = int(atomic.LoadInt64(&offlineCount))

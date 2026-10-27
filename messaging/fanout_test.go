@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-10-02 10:00:09
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-10-02 10:00:09
+ * @LastEditTime: 2026-10-27 17:26:03
  * @FilePath: \go-wsc\messaging\fanout_test.go
  * @Description: 批量扇出投递测试与基准（覆盖 messaging/fanout.go）
  *
@@ -25,6 +25,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -229,6 +230,91 @@ func TestSendToClientsWithRetry_AllClientsReached(t *testing.T) {
 			t.Fatalf("客户端 %s 应收到消息", c.ID)
 		}
 	}
+}
+
+// ============================================================================
+// runFanout 有界并发执行器语义
+// ============================================================================
+
+// TestRunFanout_AllItemsExecutedOnce 验证每个条目恰好执行一次、同步返回时已全部完成
+// 并发度小于条目数时 worker 需轮转取号，不得漏号或重号
+func TestRunFanout_AllItemsExecutedOnce(t *testing.T) {
+	m, _ := newTestManager()
+	for _, concurrency := range []int{1, 3, 64, 1000} {
+		t.Run(fmt.Sprintf("concurrency=%d", concurrency), func(t *testing.T) {
+			const n = 500
+			items := make([]int, n)
+			hits := make([]int32, n)
+			for i := range items {
+				items[i] = i
+			}
+			runFanout(context.Background(), m, items, concurrency, func(idx int, item int) {
+				require.Equal(t, idx, item, "idx 必须与条目对齐")
+				atomic.AddInt32(&hits[idx], 1)
+			})
+			for i := range hits {
+				assert.Equal(t, int32(1), hits[i], "条目 %d 应恰好执行一次", i)
+			}
+		})
+	}
+}
+
+// TestRunFanout_PanicIsolatedPerItem 验证逐条目 panic 隔离：
+// 单条目 panic 不打挂 worker、不波及其他条目，其余条目照常全部完成
+// （旧执行器的 recover 粒度亦为逐条目，此语义不得退化）
+func TestRunFanout_PanicIsolatedPerItem(t *testing.T) {
+	m, _ := newTestManager()
+	const n = 200
+	items := make([]int, n)
+	for i := range items {
+		items[i] = i
+	}
+	var done int32
+	runFanout(context.Background(), m, items, 8, func(_ int, item int) {
+		if item%7 == 0 {
+			panic(fmt.Sprintf("boom-%d", item))
+		}
+		atomic.AddInt32(&done, 1)
+	})
+	expected := int32(0)
+	for i := 0; i < n; i++ {
+		if i%7 != 0 {
+			expected++
+		}
+	}
+	assert.Equal(t, expected, atomic.LoadInt32(&done), "非 panic 条目应全部完成")
+}
+
+// TestRunFanout_ConcurrencyBounded 验证在途条目数不超过并发上限
+// （数万成员群广播无界扇出会打爆 Redis 连接池并滞留消息副本，见 fanoutConcurrency 注释）
+func TestRunFanout_ConcurrencyBounded(t *testing.T) {
+	m, _ := newTestManager()
+	const (
+		n     = 300
+		limit = 5
+	)
+	items := make([]int, n)
+	var inFlight, peak int32
+	runFanout(context.Background(), m, items, limit, func(_ int, _ int) {
+		cur := atomic.AddInt32(&inFlight, 1)
+		for {
+			old := atomic.LoadInt32(&peak)
+			if cur <= old || atomic.CompareAndSwapInt32(&peak, old, cur) {
+				break
+			}
+		}
+		time.Sleep(time.Microsecond)
+		atomic.AddInt32(&inFlight, -1)
+	})
+	assert.LessOrEqual(t, atomic.LoadInt32(&peak), int32(limit), "在途条目数不得超过并发上限")
+}
+
+// TestRunFanout_EmptyItems 空列表直接返回，不得 spawn worker 也不得 panic
+func TestRunFanout_EmptyItems(t *testing.T) {
+	m, _ := newTestManager()
+	called := false
+	runFanout(context.Background(), m, []string(nil), 64, func(int, string) { called = true })
+	assert.False(t, called)
 }
 
 // ============================================================================

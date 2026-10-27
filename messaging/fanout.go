@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-05-17 15:36:16
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-05-17 15:36:16
+ * @LastEditTime: 2026-10-27 10:26:55
  * @FilePath: \go-wsc\messaging\fanout.go
  * @Description: 批量扇出投递 —— 有界并发执行器 / 离线广播聚合 / 节点索引批量预取
  *
@@ -19,6 +19,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/kamalyes/go-logger"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/models"
@@ -259,14 +260,16 @@ func (m *Manager) SendToGroupMembers(ctx context.Context, memberIDs []string, ms
 			return sendResult, nil
 		})
 
-	m.host.GetLogger().DebugContextKV(ctx, "会话消息发送完成",
-		"session_id", msg.SessionID,
-		"message_id", msg.MessageID,
-		"total", result.Total,
-		"success", result.Success,
-		"offline", result.Offline,
-		"failed", result.Failed,
-	)
+	if lg := m.host.GetLogger(); lg.IsLevelEnabled(logger.DEBUG) {
+		lg.DebugContextKV(ctx, "会话消息发送完成",
+			"session_id", msg.SessionID,
+			"message_id", msg.MessageID,
+			"total", result.Total,
+			"success", result.Success,
+			"offline", result.Offline,
+			"failed", result.Failed,
+		)
+	}
 
 	// 通知观察者（群组级别统一通知）
 	// handleBroadcast 对 GroupIDs 非空的消息跳过观察者通知，此处补齐

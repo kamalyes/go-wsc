@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-12-28 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-10-26 11:37:50
+ * @LastEditTime: 2026-10-27 10:26:55
  * @FilePath: \go-wsc\messaging\send.go
  * @Description: Hub 消息发送功能
  *
@@ -17,6 +17,7 @@ import (
 	"runtime/debug"
 	"time"
 
+	"github.com/kamalyes/go-logger"
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
 	"github.com/kamalyes/go-toolbox/pkg/json"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
@@ -139,11 +140,13 @@ func (m *Manager) sendToUser(ctx context.Context, toUserID string, msg *models.H
 	}
 	if routed && !localOnline {
 		// 用户仅在其他节点（本地无连接），消息已路由到其他节点，本地无需处理
-		m.host.GetLogger().DebugContextKV(ctx, "[投递诊断] 用户仅在其他节点，已远程投递，本地跳过",
-			"message_id", msg.MessageID,
-			"user_id", toUserID,
-			"to_nodes", routeNodes,
-		)
+		if lg := m.host.GetLogger(); lg.IsLevelEnabled(logger.DEBUG) {
+			lg.DebugContextKV(ctx, "[投递诊断] 用户仅在其他节点，已远程投递，本地跳过",
+				"message_id", msg.MessageID,
+				"user_id", toUserID,
+				"to_nodes", routeNodes,
+			)
+		}
 		return nil
 	}
 	// 用户在本节点或单机模式，正常发送
@@ -171,14 +174,16 @@ func (m *Manager) sendToUser(ctx context.Context, toUserID string, msg *models.H
 			return errorx.NewError(models.ErrTypeTemporaryFailure, "no client accepted delivery")
 		}
 	}
-	m.host.GetLogger().DebugContextKV(ctx, "[投递诊断] 本地投递已发起（含多端跨节点双投递场景）",
-		"message_id", msg.MessageID,
-		"from", msg.Sender,
-		"to", msg.Receiver,
-		"routed_remote", routed,
-		"to_nodes", routeNodes,
-		"type", msg.MessageType,
-	)
+	if lg := m.host.GetLogger(); lg.IsLevelEnabled(logger.DEBUG) {
+		lg.DebugContextKV(ctx, "[投递诊断] 本地投递已发起（含多端跨节点双投递场景）",
+			"message_id", msg.MessageID,
+			"from", msg.Sender,
+			"to", msg.Receiver,
+			"routed_remote", routed,
+			"to_nodes", routeNodes,
+			"type", msg.MessageType,
+		)
+	}
 	return nil
 }
 
@@ -279,12 +284,14 @@ func (m *Manager) sendToUserWithRetryCore(ctx context.Context, toUserID string, 
 
 	// 逐消息成功路径日志走 DEBUG（千万连接规模下逐消息 INFO 是吞吐反模式）
 	// 异常路径——离线存储失败/投递 0 客户端/终态失败——保持 INFO/WARN 生产可见
-	m.host.GetLogger().DebugContextKV(ctx, "[投递诊断] 用户在线检查",
-		"user_id", toUserID,
-		"message_id", msg.MessageID,
-		"is_online", isOnline,
-		"node_id", m.host.GetNodeID(),
-	)
+	if lg := m.host.GetLogger(); lg.IsLevelEnabled(logger.DEBUG) {
+		lg.DebugContextKV(ctx, "[投递诊断] 用户在线检查",
+			"user_id", toUserID,
+			"message_id", msg.MessageID,
+			"is_online", isOnline,
+			"node_id", m.host.GetNodeID(),
+		)
+	}
 	if !isOnline {
 		// 用户不在本节点且 Redis 全局索引未查到
 		// 先通过 pubsub 广播到其他节点：防止 Redis 索引短暂不可用（心跳 batch 延迟/channel 满）
@@ -364,20 +371,23 @@ func (m *Manager) sendToUserWithRetryCore(ctx context.Context, toUserID string, 
 
 	// 终态汇总：与入口"[投递诊断] 用户在线检查"首尾呼应，一眼判断消息是否发出/卡在哪一步
 	// 成功终态走 DEBUG（逐消息 INFO 是吞吐反模式）；失败终态走 ERROR 已在上方单独记录
-	finalErrMsg := ""
-	if result.FinalError != nil {
-		finalErrMsg = result.FinalError.Error()
+	if lg := m.host.GetLogger(); lg.IsLevelEnabled(logger.DEBUG) {
+		// finalErrMsg 一并置于门内：result.FinalError.Error() 亦分配字符串，且只服务这条日志
+		finalErrMsg := ""
+		if result.FinalError != nil {
+			finalErrMsg = result.FinalError.Error()
+		}
+		lg.DebugContextKV(ctx, "[投递诊断] P2P 发送终态",
+			"message_id", msg.MessageID,
+			"user_id", toUserID,
+			"success", result.Success,
+			"attempts", len(result.Attempts),
+			"stored_offline", result.StoredOffline,
+			"total_retries", result.TotalRetries,
+			"duration_ms", result.TotalDuration.Milliseconds(),
+			"final_error", finalErrMsg,
+		)
 	}
-	m.host.GetLogger().DebugContextKV(ctx, "[投递诊断] P2P 发送终态",
-		"message_id", msg.MessageID,
-		"user_id", toUserID,
-		"success", result.Success,
-		"attempts", len(result.Attempts),
-		"stored_offline", result.StoredOffline,
-		"total_retries", result.TotalRetries,
-		"duration_ms", result.TotalDuration.Milliseconds(),
-		"final_error", finalErrMsg,
-	)
 
 	// 调用消息发送完成回调
 	m.invokeMessageSendCallback(msg, result)

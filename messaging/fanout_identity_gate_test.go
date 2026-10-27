@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-10-22 00:16:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-10-26 20:31:08
+ * @LastEditTime: 2026-10-27 10:26:55
  * @FilePath: \go-wsc\messaging\fanout_identity_gate_test.go
  * @Description: 扇出路径的逐收件人身份门与 Debug 门控等价性门
  *
@@ -37,7 +37,7 @@ import (
 	"testing"
 	"time"
 
-	logger "github.com/kamalyes/go-logger"
+	"github.com/kamalyes/go-logger"
 	"github.com/kamalyes/go-wsc/constants"
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/routing"

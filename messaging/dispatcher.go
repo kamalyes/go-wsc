@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-07-06 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-10-26 09:38:02
+ * @LastEditTime: 2026-10-27 10:26:55
  * @FilePath: \go-wsc\messaging\dispatcher.go
  * @Description: 消息分发器 —— 客户端读写泵 + 上行消息分发 + 广播扇出
  *   - 客户端读写循环（handleClientRead/handleClientWrite）
@@ -610,12 +610,14 @@ func (m *Manager) handleDirectMessage(ctx context.Context, msg *models.HubMessag
 		if m.host.GetStatsRepo() != nil {
 			m.msgSentCount.Add(1)
 		}
-		m.host.GetLogger().DebugContextKV(ctx, "[投递诊断] 本地直连投递完成",
-			"message_id", msg.MessageID,
-			"receiver", msg.Receiver,
-			"delivered_clients", sent,
-			"receiver_client", msg.ReceiverClient,
-		)
+		if lg := m.host.GetLogger(); lg.IsLevelEnabled(logger.DEBUG) {
+			lg.DebugContextKV(ctx, "[投递诊断] 本地直连投递完成",
+				"message_id", msg.MessageID,
+				"receiver", msg.Receiver,
+				"delivered_clients", sent,
+				"receiver_client", msg.ReceiverClient,
+			)
+		}
 	} else {
 		m.host.GetLogger().WarnContextKV(ctx, "[投递诊断] 本地直连投递 0 客户端（无匹配连接或全部拒绝）",
 			"message_id", msg.MessageID,

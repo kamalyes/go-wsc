@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2026-05-17 15:36:16
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-05-17 15:36:16
+ * @LastEditTime: 2026-10-27 10:26:55
  * @FilePath: \go-wsc\messaging\client_delivery.go
  * @Description: 客户端直投与高级发送入口 —— 预序列化投递核心 / 分级投递接线 / 多端同步
  *
@@ -21,6 +21,7 @@ import (
 	"runtime/debug"
 	"time"
 
+	"github.com/kamalyes/go-logger"
 	"github.com/kamalyes/go-toolbox/pkg/json"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
@@ -196,13 +197,15 @@ func (m *Manager) sendToClientCore(ctx context.Context, client *models.Client, m
 		if client.TrySendSSE(msg) {
 			client.SetLastSeen(time.Now())
 			// 逐消息成功路径走 DEBUG（千万连接规模下逐消息 INFO 是吞吐反模式）
-			m.host.GetLogger().DebugContextKV(ctx, "消息已投递到本地客户端",
-				"message_id", msgID,
-				"user_id", client.UserID,
-				"client_id", client.ID,
-				"connection_type", "sse",
-				"node_id", m.host.GetNodeID(),
-			)
+			if lg := m.host.GetLogger(); lg.IsLevelEnabled(logger.DEBUG) {
+				lg.DebugContextKV(ctx, "消息已投递到本地客户端",
+					"message_id", msgID,
+					"user_id", client.UserID,
+					"client_id", client.ID,
+					"connection_type", "sse",
+					"node_id", m.host.GetNodeID(),
+				)
+			}
 			// SSE消息成功发送，更新为成功状态
 			if reportStatus {
 				m.updateMessageStatusAsync(ctx, msgID, receiver, models.MessageSendStatusSuccess, "", "")
@@ -249,12 +252,14 @@ func (m *Manager) sendToClientCore(ctx context.Context, client *models.Client, m
 		// 链路闭环日志：与跨 Pod 路径（distributed.go "[跨Pod] 消息已投递到本地客户端"）统一，
 		// trace_id 可从 NotifySend 入口一路串到本节点最终投递（ctx 由 msg.ContextFrom 恢复携带 trace）
 		// 逐消息成功路径走 DEBUG（千万连接规模下逐消息 INFO 是吞吐反模式）
-		m.host.GetLogger().DebugContextKV(ctx, "消息已投递到本地客户端",
-			"message_id", msgID,
-			"user_id", client.UserID,
-			"client_id", client.ID,
-			"node_id", m.host.GetNodeID(),
-		)
+		if lg := m.host.GetLogger(); lg.IsLevelEnabled(logger.DEBUG) {
+			lg.DebugContextKV(ctx, "消息已投递到本地客户端",
+				"message_id", msgID,
+				"user_id", client.UserID,
+				"client_id", client.ID,
+				"node_id", m.host.GetNodeID(),
+			)
+		}
 
 		// 更新接收者的消息统计和字节统计
 		m.host.TrackReceiverMessageStats(client.ID, client.UserType, len(data))

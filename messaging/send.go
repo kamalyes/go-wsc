@@ -2,7 +2,7 @@
  * @Author: kamalyes 501893067@qq.com
  * @Date: 2025-12-28 00:00:00
  * @LastEditors: kamalyes 501893067@qq.com
- * @LastEditTime: 2026-10-27 10:26:55
+ * @LastEditTime: 2026-10-27 13:51:38
  * @FilePath: \go-wsc\messaging\send.go
  * @Description: Hub 消息发送功能
  *
@@ -19,7 +19,6 @@ import (
 
 	"github.com/kamalyes/go-logger"
 	"github.com/kamalyes/go-toolbox/pkg/errorx"
-	"github.com/kamalyes/go-toolbox/pkg/json"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/retry"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
@@ -112,7 +111,12 @@ func (m *Manager) sendToUser(ctx context.Context, toUserID string, msg *models.H
 	// 🔀 单次序列化复用：落库记录与本地投递共享同一份编码字节
 	// 原路径逐成员两次 json.Marshal（落库 SetMessage 与 handleDirectMessage 各一次），是逐成员可靠扇出的最大单项分配热点
 	// express 档不落库，但投递复用同一份
-	data, _ := json.Marshal(msg)
+	// 直调 MarshalJSON 而非 json.Marshal(msg)：*HubMessage 实现 json.Marshaler，
+	// 经 json.Marshal 会多套一层 encodeState——内层 MarshalJSON 已产出完整字节，
+	// 外层再 compact 整篇扫描一次并 append 出第二份缓冲（整条消息多一次分配 + 多一次全文拷贝）。
+	// 内层 json.Marshal 默认 escapeHTML，compact 对已转义的 </  恒为恒等变换，
+	// 故直调与 json.Marshal(msg) 字节严格一致（见 models.TestMarshalJSONBytesEqualJSONMarshal）
+	data, _ := msg.MarshalJSON()
 	if !msg.ResolveGuarantee().IsExpress() {
 		m.recordMessageToDatabase(msg, nil, data)
 	}

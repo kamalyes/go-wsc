@@ -10,7 +10,7 @@ require (
 	github.com/kamalyes/go-cachex v0.5.0
 	github.com/kamalyes/go-config v0.24.0
 	github.com/kamalyes/go-logger v0.8.0
-	github.com/kamalyes/go-pbmo v0.2.0
+	github.com/kamalyes/go-pbmo v0.2.1
 	github.com/kamalyes/go-sqlbuilder v0.8.0
 	github.com/kamalyes/go-toolbox v0.18.1
 	github.com/redis/go-redis/v9 v9.22.0

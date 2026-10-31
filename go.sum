@@ -17,9 +17,8 @@ github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XL
 github.com/cloudwego/base64x v0.1.6 h1:t11wG9AECkCDk5fMSoxmufanudBtJ+/HemLstXDLI2M=
 github.com/cloudwego/base64x v0.1.6/go.mod h1:OFcloc187FXDaYHvrNIjxSe8ncn0OOM8gEHfghB2IPU=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
-github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1VwoXQT9A3Wy9MM3WgvqSxFWenqJduM=
-github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/dgraph-io/ristretto/v2 v2.4.2 h1:x0cvjmUKxt764Yxdk2nr94we1AvPPAMh1rh5TQ+Jo80=
 github.com/dgraph-io/ristretto/v2 v2.4.2/go.mod h1:0KsrXtXvnv0EqnzyowllbVJB8yBonswa2lTCK2gGo9E=
 github.com/dgryski/go-farm v0.0.0-20240924180020-3414d57e47da h1:aIftn67I1fkbMa512G+w+Pxci9hJPB8oMnkcP3iZF38=
@@ -59,8 +58,8 @@ github.com/json-iterator/go v1.1.12 h1:PV8peI4a0ysnczrg+LtxykD8LfKY9ML6u2jnxaEnr
 github.com/json-iterator/go v1.1.12/go.mod h1:e30LSqwooZae/UwlEbR2852Gd8hjQvJoHmT4TnhNGBo=
 github.com/kamalyes/go-argus v0.5.0 h1:gW04oPbISdJilb42rDEjJi9FAPv0hFbfOQHJ/EDTHRY=
 github.com/kamalyes/go-argus v0.5.0/go.mod h1:dG5ttCh6wVn1u5qq4NEvoFtibgQ5Bj3PT8rw7HKX8c0=
-github.com/kamalyes/go-cachex v0.4.1 h1:GzcBTiBIgDf6q0cpaxgoSeUnYopHLDyfDOZGvxYq810=
-github.com/kamalyes/go-cachex v0.4.1/go.mod h1:l/GISUaEqIo54dBBqIfOKFuE6Dn2Z2BvFRGZCR2kxDE=
+github.com/kamalyes/go-cachex v0.5.0 h1:32cxdklSSNFNDnQQ3P0zpQIeJmj1XfruB7GJiJQVgQk=
+github.com/kamalyes/go-cachex v0.5.0/go.mod h1:m4s7wNMR44NSB45mfyb4xSYX/fO2TKzOs0ZGtbVr9BQ=
 github.com/kamalyes/go-config v0.24.0 h1:fv2XNRMemCHuXB/XNuIYpg2rt2AWhAnqGiWOPBdmSgI=
 github.com/kamalyes/go-config v0.24.0/go.mod h1:9TI5zCNU4bnCThKl21PX5fi5oe+pr/ntEDRRL1PZVo8=
 github.com/kamalyes/go-logger v0.8.0 h1:0RnMc3K39UfZWh6Fs5O2UkzQ8Lp6Ip/oQRxofSJ2p8s=

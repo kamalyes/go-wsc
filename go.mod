@@ -3,7 +3,7 @@ module github.com/kamalyes/go-wsc
 go 1.25.0
 
 require (
-	github.com/alicebob/miniredis/v2 v2.35.0
+	github.com/alicebob/miniredis/v2 v2.40.0
 	github.com/gorilla/websocket v1.4.2
 	github.com/jpillora/backoff v1.0.0
 	github.com/kamalyes/go-argus v0.5.0

@@ -392,7 +392,7 @@ func (h *Hub) handleDistributedSendMessage(ctx context.Context, distMsg *models.
 	)
 
 	// 序列化消息为字节（预序列化一次，多设备复用）
-	msgData, err := json.Marshal(distMsg.Message)
+	msgData, err := distMsg.Message.MarshalJSON()
 	if err != nil {
 		return fmt.Errorf("marshal message failed: %w", err)
 	}

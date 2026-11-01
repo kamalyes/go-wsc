@@ -578,7 +578,7 @@ func (m *Manager) handleDirectMessage(ctx context.Context, msg *models.HubMessag
 	// 预序列化一次（接收者多设备复用，消除循环内重复 Marshal）
 	// data 为 nil 时兜底序列化（异步广播等无预序列化上下文的调用方）
 	if data == nil {
-		data, _ = json.Marshal(msg)
+		data, _ = msg.MarshalJSON()
 	}
 
 	sent := 0
@@ -682,7 +682,7 @@ func (m *Manager) doBroadcastMessage(ctx context.Context, msg *models.HubMessage
 	}
 
 	// 预序列化消息（仅一次，所有客户端复用）
-	data, err := json.Marshal(msg)
+	data, err := msg.MarshalJSON()
 	if err != nil {
 		m.host.GetLogger().ErrorContextKV(ctx, "广播消息序列化失败", "error", err)
 		return

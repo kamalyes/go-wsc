@@ -26,7 +26,6 @@ package connection
 
 import (
 	"github.com/gorilla/websocket"
-	"github.com/kamalyes/go-toolbox/pkg/json"
 	"github.com/kamalyes/go-wsc/models"
 	"github.com/kamalyes/go-wsc/spi"
 )
@@ -116,7 +115,7 @@ func (l *ControlLane) SendControlMessage(client *models.Client, msg *models.HubM
 		return false
 	}
 
-	data, err := json.Marshal(msg)
+	data, err := msg.MarshalJSON()
 	if err != nil {
 		l.logger.ErrorContextKV(client.Context, "控制消息序列化失败",
 			"client_id", client.ID,

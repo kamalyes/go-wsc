@@ -30,7 +30,6 @@ import (
 	"time"
 
 	"github.com/kamalyes/go-logger"
-	"github.com/kamalyes/go-toolbox/pkg/json"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/netx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
@@ -149,7 +148,7 @@ func (s *GRPCServer) SendToUser(ctx context.Context, req *wscpb.SendToUserReques
 	}
 
 	// 预序列化一次消息（所有客户端复用，消除逐客户端 json.Marshal 开销）
-	preSerialized, err := json.Marshal(msg)
+	preSerialized, err := msg.MarshalJSON()
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "消息序列化失败: %v", err)
 	}

@@ -31,7 +31,6 @@ import (
 
 	wscconfig "github.com/kamalyes/go-config/pkg/wsc"
 	"github.com/kamalyes/go-logger"
-	"github.com/kamalyes/go-toolbox/pkg/json"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-wsc/messaging"
 	"github.com/kamalyes/go-wsc/models"
@@ -358,7 +357,7 @@ func (h *SSEHandler) WriteLoop(client *models.Client, r *http.Request) {
 // writeSSEEvent 写一条消息事件（data: <json>\n\n）
 // 为防 JSON 含嵌入换行，按 bytes.Split 逐行加 data: 前缀（SSE 协议要求）
 func (h *SSEHandler) writeSSEEvent(client *models.Client, msg *models.HubMessage) error {
-	data, err := json.Marshal(msg)
+	data, err := msg.MarshalJSON()
 	if err != nil {
 		// 单条消息序列化失败不应杀连接，记 WARN 后跳过
 		h.logger.WarnContextKV(msg.ContextFrom(h.hubCtx), "SSE消息序列化失败",

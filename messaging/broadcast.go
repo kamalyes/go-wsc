@@ -33,7 +33,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/kamalyes/go-toolbox/pkg/json"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/cluster"
@@ -521,7 +520,7 @@ func (m *Manager) OfferAggregatable(ctx context.Context, msg *models.HubMessage,
 	}
 
 	// 编码前置一次（数组拼装零重编码；失败直通单发）
-	payload, err := json.Marshal(msg)
+	payload, err := msg.MarshalJSON()
 	if err != nil {
 		m.host.GetLogger().ErrorContextKV(ctx, "可聚合消息序列化失败，直通单发",
 			"message_id", msg.MessageID, "error", err)
@@ -678,7 +677,7 @@ func (m *Manager) broadcastToFilteredNow(ctx context.Context, users []string, co
 	start := time.Now()
 
 	// 预序列化 WebSocket 消息（仅一次，所有客户端复用同一份）
-	data, err := json.Marshal(msg)
+	data, err := msg.MarshalJSON()
 	if err != nil {
 		m.host.GetLogger().ErrorContextKV(ctx, "分组广播消息序列化失败", "error", err)
 		return 0
@@ -871,7 +870,7 @@ func (m *Manager) broadcastFrameToUserIDsNow(ctx context.Context, userIDs []stri
 	// 预序列化 WebSocket 消息（仅一次；引擎由 go-toolbox/pkg/json 构建标签决定）
 	data := frame
 	if len(data) == 0 {
-		encoded, err := json.Marshal(msg)
+		encoded, err := msg.MarshalJSON()
 		if err != nil {
 			m.host.GetLogger().ErrorContextKV(ctx, "群组广播消息序列化失败", "error", err)
 			return 0

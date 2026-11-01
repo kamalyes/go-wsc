@@ -149,7 +149,7 @@ func (m *MessageSendRecord) SetMessage(msg *HubMessage, payload []byte) error {
 
 	// 序列化 HubMessage（调用方未预序列化时兜底）
 	if payload == nil {
-		data, err := json.Marshal(msg)
+		data, err := msg.MarshalJSON()
 		if err != nil {
 			return err
 		}

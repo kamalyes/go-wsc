@@ -901,7 +901,7 @@ func (m *HubMessage) ObserverCopy() (*HubMessage, []byte, error) {
 	observerMsg.WithMetadata("observer_mode", "true")
 	observerMsg.WithMetadata("original_sender", observerMsg.Sender)
 	observerMsg.WithMetadata("original_receiver", observerMsg.Receiver)
-	data, err := json.Marshal(observerMsg)
+	data, err := observerMsg.MarshalJSON()
 	if err != nil {
 		return nil, nil, err
 	}

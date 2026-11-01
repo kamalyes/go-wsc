@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/kamalyes/go-logger"
-	"github.com/kamalyes/go-toolbox/pkg/json"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/connection"
@@ -93,7 +92,7 @@ func (m *Manager) SendToAllClientsInMap(ctx context.Context, clientMap map[strin
 
 	// 预序列化一次（WebSocket 客户端共用；SSE 走 TrySendSSE(msg) 不用 []byte）
 	// 序列化失败时 preSerialized=nil，由 SendToClientSerialized 内部兜底
-	preSerialized, _ := json.Marshal(msg)
+	preSerialized, _ := msg.MarshalJSON()
 
 	// 遍历复制后的列表发送消息
 	for _, client := range clients {
@@ -228,7 +227,7 @@ func (m *Manager) sendToClientCore(ctx context.Context, client *models.Client, m
 		data = preSerialized
 	} else {
 		var err error
-		data, err = json.Marshal(msg)
+		data, err = msg.MarshalJSON()
 		if err != nil {
 			m.host.GetLogger().ErrorContextKV(ctx, "消息序列化失败", "error", err)
 			if reportStatus {
@@ -316,7 +315,7 @@ func (m *Manager) syncToSenderDevices(ctx context.Context, msg *models.HubMessag
 	// （多端同步场景发送方与接收方共用一套序列化结果，msg 未被修改，字节等价）
 	if data == nil {
 		var err error
-		data, err = json.Marshal(msg)
+		data, err = msg.MarshalJSON()
 		if err != nil {
 			m.host.GetLogger().ErrorContextKV(ctx, "多端同步消息序列化失败", "error", err, "message_id", msg.MessageID)
 			return

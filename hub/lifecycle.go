@@ -19,7 +19,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kamalyes/go-toolbox/pkg/json"
 	"github.com/kamalyes/go-toolbox/pkg/mathx"
 	"github.com/kamalyes/go-toolbox/pkg/syncx"
 	"github.com/kamalyes/go-wsc/connection"
@@ -865,7 +864,7 @@ func (h *Hub) deliverCoalesced(msg *models.HubMessage) {
 		return
 	}
 
-	data, err := json.Marshal(msg)
+	data, err := msg.MarshalJSON()
 	if err != nil {
 		h.logger.ErrorContextKV(h.ctx, "高频合并消息序列化失败",
 			"message_id", msg.MessageID,

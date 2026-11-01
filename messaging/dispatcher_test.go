@@ -34,6 +34,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/kamalyes/go-logger"
 	"github.com/kamalyes/go-wsc/models"
 )
 
@@ -468,7 +469,21 @@ func TestStartClientPumpsWaitGroupPairing(t *testing.T) {
 // 客户端 SendChan 由消费协程常驻排空（生产 WS 写协程恒消费），
 // 稳态测量两级解析的每消息成本差异
 func BenchmarkInboundParse(b *testing.B) {
-	m, _ := newTestManager()
+	m, host := newTestManager()
+
+	// 必须注入 INFO 级日志器，同包其他基准都注了而这个漏了
+	//
+	// 默认日志器往 stdout 写 JSON：实测一次 7.4 秒的运行写出 5,055,397 行，
+	// 84% 的 CPU 是 syscall 与调度，测出来的根本不是解析耗时
+	// 而且这个基准的 drain 协程只排空 SendChan、没人消费 CtrlCh，于是双 lane 必满，
+	// 每次都走「心跳 pong 双 lane 均满」那条 DEBUG 日志分支
+	//
+	// [EN] An Info-level logger has to be injected, as every sibling benchmark in this package
+	// does. The default logger writes JSON to stdout, five million lines in one 7.4 second run,
+	// where most of the CPU is syscalls and scheduling rather than parsing. This benchmark's
+	// drain goroutine only empties SendChan and nothing consumes CtrlCh, so both lanes stay
+	// full and every iteration takes the debug-logging branch
+	host.logger = logger.NewLogger().WithLevel(logger.INFO).WithShowCaller(false)
 
 	client := makeTestClient("c-bench-in", "u-bench-in")
 	go func() {

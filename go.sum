@@ -56,8 +56,8 @@ github.com/jpillora/backoff v1.0.0 h1:uvFg412JmmHBHw7iwprIxkPMI+sGQ4kzOWsMeHnm2E
 github.com/jpillora/backoff v1.0.0/go.mod h1:J/6gKK9jxlEcS3zixgDgUAsiuZ7yrSoa/FX5e0EB2j4=
 github.com/json-iterator/go v1.1.12 h1:PV8peI4a0ysnczrg+LtxykD8LfKY9ML6u2jnxaEnrnM=
 github.com/json-iterator/go v1.1.12/go.mod h1:e30LSqwooZae/UwlEbR2852Gd8hjQvJoHmT4TnhNGBo=
-github.com/kamalyes/go-argus v0.5.0 h1:gW04oPbISdJilb42rDEjJi9FAPv0hFbfOQHJ/EDTHRY=
-github.com/kamalyes/go-argus v0.5.0/go.mod h1:dG5ttCh6wVn1u5qq4NEvoFtibgQ5Bj3PT8rw7HKX8c0=
+github.com/kamalyes/go-argus v0.5.1 h1:BwPmT5nuN12Z3GbpRvTXg8C1kupJyXurDTssuSIfUa4=
+github.com/kamalyes/go-argus v0.5.1/go.mod h1:dG5ttCh6wVn1u5qq4NEvoFtibgQ5Bj3PT8rw7HKX8c0=
 github.com/kamalyes/go-cachex v0.5.0 h1:32cxdklSSNFNDnQQ3P0zpQIeJmj1XfruB7GJiJQVgQk=
 github.com/kamalyes/go-cachex v0.5.0/go.mod h1:m4s7wNMR44NSB45mfyb4xSYX/fO2TKzOs0ZGtbVr9BQ=
 github.com/kamalyes/go-config v0.24.0 h1:fv2XNRMemCHuXB/XNuIYpg2rt2AWhAnqGiWOPBdmSgI=

@@ -766,6 +766,34 @@ func (m *Manager) doBroadcastMessage(ctx context.Context, msg *models.HubMessage
 
 // logWithClient 带客户端字段的 KV 日志（连接级 trace 优先，宿主 ctx 兜底）
 func (m *Manager) logWithClient(level logger.LogLevel, msg string, client *models.Client, extraFields ...interface{}) {
+	log := m.host.GetLogger()
+
+	// 级别判定必须在装字段之前
+	//
+	// 原先是先造 8 元素的 []interface{}、把 client.UserType 这个命名 string 类型装箱、
+	// 再 append 一次，全部做完才进 switch 按级别分发 —— 于是生产的 Info 级下，
+	// 22 个调用点里那 8 个 DEBUG 的字段照样逐个分配出来再被丢掉
+	// 其中 frame_writer 的两处在每个客户端的每批出站帧上触发，
+	// dispatcher 的「心跳 pong 双 lane 均满」在饱和时每心跳触发
+	// 实测 profile 里这个函数占入站路径全部分配对象的 30.47%
+	//
+	// spi.Logger 就是 logger.ILogger，本来就有 IsLevelEnabled，不需要动接口
+	//
+	// 注意这里救不回调用方那一侧：extraFields 的变参切片在调用点就已经分配了，
+	// 要清零得逐个调用点加 if 包起来，那是另一笔更大的改动
+	//
+	// [EN] The level test has to come before the fields are assembled. The previous order
+	// built an eight-element slice, boxed a named string type and appended once, and only then
+	// switched on the level, so at Info level in production the eight DEBUG call sites paid
+	// for every field and threw it away. Two of them fire for every batch of outbound frames
+	// per client. A profile attributes 30.47% of all allocations on the inbound path here.
+	// spi.Logger is logger.ILogger, which already carries IsLevelEnabled, so no interface
+	// changes. This cannot reclaim the caller's side: the variadic slice for extraFields is
+	// allocated at the call site, and clearing that means wrapping each call site in an if
+	if !log.IsLevelEnabled(level) {
+		return
+	}
+
 	fields := []interface{}{
 		"client_id", client.ID,
 		"user_id", client.UserID,
@@ -780,7 +808,6 @@ func (m *Manager) logWithClient(level logger.LogLevel, msg string, client *model
 		ctx = m.host.Context()
 	}
 
-	log := m.host.GetLogger()
 	switch level {
 	case logger.INFO:
 		log.InfoContextKV(ctx, msg, fields...)

@@ -1,83 +1,32 @@
+name: Test
+
+# 实际流程全在 kamalyes/deploy-pipeline 的 go-library-test.yml 里，所有 Go 库共用一份
+# 改那一份就等于改所有库
+#
+# 这里**不配矩阵**：共用流水线从本仓库 go.mod 的 go 指令算出地板，上限取 Go 官方当前
+# 发布的最新两个小版本，于是 Go 发新版之后矩阵自己跟上
+# 低于地板的版本会被工具链切换静默顶上去，流水线的 Verify Toolchain Honesty 闸门会判红
+#
+# [EN] The pipeline lives in go-library-test.yml in kamalyes/deploy-pipeline, shared by every
+# Go library here. The matrix is not configured: its floor comes from this module's go
+# directive and its ceiling from the two most recent Go releases
+
 on:
   push:
     branches:
       - master
-    paths:
-      - "**"
-      - "!docs/**"
-      - "!**.md"
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
   pull_request:
-    paths:
-      - "**"
-      - "!docs/**"
-      - "!**.md"
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
 
-name: Test
 jobs:
-  Build:
-    strategy:
-      matrix:
-        go-version: [1.21.x, 1.22.x, 1.23.x, 1.24.x, 1.25.x]
-      fail-fast: false
-    runs-on: ubuntu-latest
-    timeout-minutes: 300
-    steps:
-      - name: Fetch Repository
-        uses: actions/checkout@v5
-
-      - name: Install Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ matrix.go-version }}
-          cache: true
-
-      - name: Cache Go modules
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-${{ matrix.go-version }}-
-            ${{ runner.os }}-go-
-
-      - name: Install gotestsum
-        run: go install gotest.tools/gotestsum@latest
-        continue-on-error: true
-
-      - name: Download dependencies
-        run: go mod download
-        continue-on-error: true
-
-      - name: Test (with coverage)
-        env:
-          TEST_MYSQL_DSN: root:${{ env.MYSQL_ROOT_PASSWORD }}@tcp(localhost:3306)/${{ env.MYSQL_DATABASE }}?charset=utf8mb4&parseTime=True&loc=Local&timeout=60s&readTimeout=60s&writeTimeout=60s
-        run: gotestsum -f testname -- ./... -race -count=1 -timeout=120m -coverprofile=coverage.txt -covermode=atomic -shuffle=on
-        timeout-minutes: 160
-        continue-on-error: true # 即使测试失败也继续
-
-      - name: Check coverage file exists
-        id: check_coverage
-        if: matrix.go-version == '1.22.x'
-        run: |
-          if [ -f coverage.txt ]; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-            echo "✅ Coverage file exists"
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-            echo "⚠️ Coverage file not found"
-          fi
-        shell: bash
-        continue-on-error: true
-
-      - name: Upload coverage reports to Codecov
-        if: always() && steps.check_coverage.outputs.exists == 'true'
-        uses: codecov/codecov-action@v4.5.0
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          file: ./coverage.txt
-          flags: unittests
-          slug: kamalyes/go-wsc
-          fail_ci_if_error: false # 上传失败不影响 CI
-        continue-on-error: true # 上传失败也不影响整个流程
+  test:
+    uses: kamalyes/deploy-pipeline/.github/workflows/go-library-test.yml@master
+    secrets:
+      # 显式映射而非 secrets: inherit —— inherit 跨账号调用时拿不到值
+      # [EN] Mapped explicitly rather than with secrets: inherit, which yields nothing across accounts
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}

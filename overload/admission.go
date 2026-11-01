@@ -97,7 +97,7 @@ type AdmissionGate struct {
 	lastLevelChangeAt atomic.Int64  // 上次水位变更时间戳（UnixNano，日志/观测用）
 
 	started atomic.Bool // 防重入标志：重复 Start 不叠加评估循环（与 Stop 语义对称）
-	stopCh   chan struct{}
+	stopCh  chan struct{}
 }
 
 // NewAdmissionGate 创建准入闸门（默认水位开箱即用，参数零值时用 constants 默认值）

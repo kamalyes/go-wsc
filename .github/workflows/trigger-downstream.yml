@@ -1,63 +1,61 @@
 name: Trigger Downstream
 
+# 实际流程全在 kamalyes/deploy-pipeline 的 go-trigger-downstream.yml 里，三十来个 Go 库共用一份
+#
+# 一次发版通常要同步多个下游，清单不再硬编码在这里，而是从仓库变量读：
+#   单个变量   vars.GOLIB_DOWNSTREAM_REPOS
+#   分节总表   vars.GOLIB_CONFIG 的 downstream_repos
+#   全局总表   vars.PIPELINE_CONFIG 的 golib.downstream_repos
+# 优先级是总表高于单个变量，想让某个仓库偏离总表就用分节变量
+#
+# 清单只放**一级**下游，也就是 go.mod 里直接 require 本模块的仓库；带 // indirect 的
+# 传递依赖不算，它们会由自己的直接上游在各自那一跳通知到
+#
+# 原先清单写死在各自的 strategy.matrix 里，手维护必然脱节 —— 实测有基础库真实一级下游
+# 十来个却只通知到其中一个。共用流水线还带一道漂移检测：真实依赖图里有谁不在清单上，
+# 会在 job summary 里点出来
+#
+# [EN] One release usually has to reach several downstreams, so the list now comes from
+# repository variables rather than a hard-coded matrix, which had drifted so far that one base
+# library notified a single one of its dozen-odd direct dependents. The list holds first-level
+# dependents only: a transitive one is reached by its own direct upstream at that hop
+
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "要通知的版本，留空则用当前 tag 名"
+        required: false
+        type: string
+      only_repos:
+        description: "只通知这几个下游，逗号或空白分隔，可填多个（例 go-wsc go-rpc-gateway）；留空则通知清单里的全部"
+        required: false
+        type: string
+      create_tag:
+        description: "下游升完依赖后是否自动打 tag，从而把联动继续往下传"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   actions: write
   contents: read
 
 jobs:
-  changes:
-    runs-on: ubuntu-latest
-    outputs:
-      should-dispatch: ${{ steps.filter.outputs.should-dispatch }}
-    steps:
-      - name: Fetch Repository
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      - name: Check changed files
-        id: filter
-        shell: bash
-        run: |
-          current_tag="${GITHUB_REF_NAME}"
-          previous_tag="$(git tag --sort=-v:refname | grep -v "^${current_tag}$" | head -n 1 || true)"
-
-          if [ -z "${previous_tag}" ]; then
-            echo "should-dispatch=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          changed_files="$(git diff --name-only "${previous_tag}..${current_tag}")"
-          if [ -z "${changed_files}" ]; then
-            echo "should-dispatch=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if echo "${changed_files}" | grep -Ev '(^docs/|\.md$)' >/dev/null; then
-            echo "should-dispatch=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "should-dispatch=false" >> "$GITHUB_OUTPUT"
-          fi
-
-  dispatch:
-    needs: changes
-    if: needs.changes.outputs.should-dispatch == 'true'
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        repo:
-          - kamalyes/go-rpc-gateway
-    steps:
-      - name: Dispatch to ${{ matrix.repo }}
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.GH_GPA_TOKEN }}
-          repository: ${{ matrix.repo }}
-          event-type: upstream-updated
-          client-payload: >-
-            {"module":"github.com/kamalyes/go-wsc","version":"${{ github.ref_name }}","sha":"${{ github.sha }}","commit_message":"📦 deps: 同步上游依赖 ${{ github.ref_name }}\n\n- 📦 更新 github.com/kamalyes/go-wsc 到 ${{ github.ref_name }} (go.mod, go.sum)\n- 🔄 自动联动下游版本标签 (bump-upstream.yml)\n\nsync upstream ${{ github.ref_name }}"}
+  trigger:
+    uses: kamalyes/deploy-pipeline/.github/workflows/go-trigger-downstream.yml@master
+    with:
+      version: ${{ inputs.version }}
+      only-repos: ${{ inputs.only_repos }}
+      create-tag: ${{ inputs.create_tag == true }}
+    secrets:
+      # 跨仓库 dispatch 用不了 GITHUB_TOKEN，它只对本仓库有效，所以这里必须有 App 或 PAT
+      # [EN] GITHUB_TOKEN is scoped to its own repository and cannot dispatch across
+      # repositories, so an App token or a PAT is required
+      APP_ID: ${{ secrets.APP_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+      GH_GPA_TOKEN: ${{ secrets.GH_GPA_TOKEN }}
+      PIPELINE_SECRETS: ${{ secrets.PIPELINE_SECRETS }}

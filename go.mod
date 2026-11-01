@@ -12,7 +12,7 @@ require (
 	github.com/kamalyes/go-logger v0.8.0
 	github.com/kamalyes/go-pbmo v0.3.1
 	github.com/kamalyes/go-sqlbuilder v0.8.0
-	github.com/kamalyes/go-toolbox v0.19.0
+	github.com/kamalyes/go-toolbox v0.19.1
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/stretchr/testify v1.12.1
 	google.golang.org/grpc v1.83.1

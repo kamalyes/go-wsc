@@ -48,8 +48,8 @@ github.com/kamalyes/go-pbmo v0.3.1 h1:YnAxOzPmJPaKHT6rJI+mGpCJxw+BZjNcafAhvw/3OJ
 github.com/kamalyes/go-pbmo v0.3.1/go.mod h1:6iRFAWjymWZTGQUNbS+Qxxpz4otXOvbBupoOquUsdJA=
 github.com/kamalyes/go-sqlbuilder v0.9.0 h1:9gnA+tHpGuayqVwX0m2bBJUPB2Tm9Eb/v2YNqaWMpdY=
 github.com/kamalyes/go-sqlbuilder v0.9.0/go.mod h1:zQUqzyemTztdYHAVcBpHVwQ9MdIqLkperk30ijWIcXc=
-github.com/kamalyes/go-toolbox v0.19.3 h1:rjjkgt6NfVbdiEWJK+86h+fF2Tayi/EV86A2tA5Ceyw=
-github.com/kamalyes/go-toolbox v0.19.3/go.mod h1:aWbifGn+KHbQXHuAHCfv3vsYZXXya+Z7fnf/daMD7w4=
+github.com/kamalyes/go-toolbox v0.19.4 h1:Tg4yOn1zfarjhFzxov7PsSmn/xY6zSEXHyUrHwOfd64=
+github.com/kamalyes/go-toolbox v0.19.4/go.mod h1:aWbifGn+KHbQXHuAHCfv3vsYZXXya+Z7fnf/daMD7w4=
 github.com/kamalyes/go-toolbox/pkg/protox v0.19.3 h1:pPxeJxqbOVyMCWlI1bo806FFye2N+MX2mklIDaTWudw=
 github.com/kamalyes/go-toolbox/pkg/protox v0.19.3/go.mod h1:M2eKc00vhxR7+Kmd0BKsXuhgEgU/9gUxe0F0Qbahs3E=
 github.com/klauspost/cpuid/v2 v2.4.0 h1:S6Hrbc7+ywsr0r+RLapfGBHfyefhCTwEh3A0tV913Dw=
